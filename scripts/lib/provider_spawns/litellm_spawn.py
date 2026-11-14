@@ -726,6 +726,41 @@ def spawn_litellm_agentic(
         stdout_b, _stderr_b = proc.communicate()
         timed_out = True
 
+    text = stdout_b.decode("utf-8", "replace") if stdout_b else ""
+    completion_parts, token_usage, error, events_written, ew_failures = _parse_agentic_events(
+        text, event_writer, dispatch_id, terminal_id, sub_provider, lane,
+    )
+
+    try:
+        proc.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+    rc = proc.returncode if proc.returncode is not None else 1
+    if error and rc == 0:
+        rc = 1
+
+    return LiteLLMSpawnResult(
+        returncode=rc,
+        completion_text="".join(completion_parts),
+        events_written=events_written,
+        session_id=None,
+        timed_out=timed_out,
+        stopped_early=False,
+        event_writer_failures=ew_failures,
+        error=error,
+        token_usage=token_usage,
+    )
+
+
+def _parse_agentic_events(
+    text: str, event_writer: Optional[Callable[..., None]], dispatch_id: str, terminal_id: str,
+    sub_provider: Optional[str], lane: Optional[str],
+) -> tuple:
+    """Parse the agentic runner's stdout lines and forward each event to ``event_writer``.
+
+    Returns ``(completion_parts, token_usage, error, events_written, ew_failures)``.
+    """
     completion_parts: list = []
     token_usage: Optional[Dict[str, Any]] = None
     error: Optional[str] = None
@@ -744,7 +779,6 @@ def spawn_litellm_agentic(
             provider_meta={"lane": lane} if lane is not None else {},
         )
 
-    text = stdout_b.decode("utf-8", "replace") if stdout_b else ""
     for line in text.splitlines():
         line = line.strip()
         if not line:
@@ -785,24 +819,4 @@ def spawn_litellm_agentic(
                     dispatch_id, _exc,
                 )
                 ew_failures += 1
-
-    try:
-        proc.wait(timeout=10)
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        proc.wait()
-    rc = proc.returncode if proc.returncode is not None else 1
-    if error and rc == 0:
-        rc = 1
-
-    return LiteLLMSpawnResult(
-        returncode=rc,
-        completion_text="".join(completion_parts),
-        events_written=events_written,
-        session_id=None,
-        timed_out=timed_out,
-        stopped_early=False,
-        event_writer_failures=ew_failures,
-        error=error,
-        token_usage=token_usage,
-    )
+    return completion_parts, token_usage, error, events_written, ew_failures
