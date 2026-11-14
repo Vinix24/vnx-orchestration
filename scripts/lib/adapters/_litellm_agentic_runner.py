@@ -362,23 +362,9 @@ def main() -> int:
 
     for turn in range(max_turns):
         turns = turn + 1
-        resp = None
-        for attempt in range(_MAX_API_RETRIES + 1):
-            try:
-                resp = litellm.completion(
-                    model=model, messages=messages, tools=_TOOLS, tool_choice="auto",
-                    max_tokens=max_tokens, api_key=api_key,
-                )
-                break
-            except Exception as exc:  # noqa: BLE001 — surface/retry any completion failure
-                err_type, code = _classify_error(str(exc))
-                if not _is_retryable(str(exc)) or attempt >= _MAX_API_RETRIES:
-                    _emit({"error_type": err_type, "message": str(exc)})
-                    return code
-                delay = _RETRY_BASE_DELAY * (2 ** attempt)
-                _emit({"event_type": "retry", "attempt": attempt + 1,
-                       "delay_s": round(delay, 1), "message": str(exc)[:200]})
-                time.sleep(delay)
+        resp, code = _complete_with_retries(litellm, model, messages, max_tokens, api_key)
+        if code is not None:
+            return code
 
         _accumulate_usage(getattr(resp, "usage", None), totals)
         choice = resp.choices[0]
@@ -434,6 +420,29 @@ def main() -> int:
     _emit({"event_type": "usage_complete", "usage": totals})
     _emit({"event_type": "complete", "turns": turns, "stop_reason": stop_reason})
     return _EXIT_OK
+
+
+def _complete_with_retries(litellm: Any, model: str, messages: list, max_tokens: int,
+                           api_key: Optional[str]) -> tuple[Any, Optional[int]]:
+    """One completion() with backoff on transient errors: (response, None) or (None, exit code)."""
+    resp = None
+    for attempt in range(_MAX_API_RETRIES + 1):
+        try:
+            resp = litellm.completion(
+                model=model, messages=messages, tools=_TOOLS, tool_choice="auto",
+                max_tokens=max_tokens, api_key=api_key,
+            )
+            break
+        except Exception as exc:  # noqa: BLE001 — surface/retry any completion failure
+            err_type, code = _classify_error(str(exc))
+            if not _is_retryable(str(exc)) or attempt >= _MAX_API_RETRIES:
+                _emit({"error_type": err_type, "message": str(exc)})
+                return None, code
+            delay = _RETRY_BASE_DELAY * (2 ** attempt)
+            _emit({"event_type": "retry", "attempt": attempt + 1,
+                   "delay_s": round(delay, 1), "message": str(exc)[:200]})
+            time.sleep(delay)
+    return resp, None
 
 
 def run() -> int:
