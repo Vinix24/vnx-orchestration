@@ -283,6 +283,60 @@ def _atomic_write_json(path: Path, payload: Dict[str, Any]) -> None:
         raise
 
 
+class ObligationPrConflict(ValueError):
+    """A second, different PR was registered for a dispatch (OI-1563).
+
+    Operator decision 2026-11-14: one dispatch is one PR. A follow-up round on
+    the same PR keeps its own dispatch id (``<id>-r2``); a split into a second
+    PR takes a new dispatch id (``<id>-c``).
+    """
+
+
+def _pr_identity(pr_number: Any, pr_id: Any) -> Tuple[Optional[int], Optional[str]]:
+    """``(number, label)`` a registration names; either side None when absent."""
+    number = pr_number if type(pr_number) is int and pr_number > 0 else None  # bool is no PR
+    if number is None:
+        number = pr_number_from_pr_id(pr_id if isinstance(pr_id, str) else None)
+    label = normalise_pr_id(pr_id) if isinstance(pr_id, str) else ""
+    return number, (label or None)
+
+
+def _refuse_second_pr(
+    path: Path, dispatch_id: str, pr_number: Optional[int], pr_id: Optional[str],
+) -> None:
+    """Raise :class:`ObligationPrConflict` when ``path`` names another PR.
+
+    Only positive evidence on BOTH sides decides a conflict: a retry that
+    names no PR stays idempotent. An existing record nobody can read cannot
+    prove it is the same PR, so a registration that names one is refused
+    (ValueError) rather than silently accepted.
+    """
+    new_number, new_label = _pr_identity(pr_number, pr_id)
+    if new_number is None and new_label is None:
+        return
+    try:
+        existing = json.loads(path.read_text(encoding="utf-8"))
+        old_number, old_label = _pr_identity(existing.get("pr_number"), existing.get("pr_id"))
+    except (OSError, ValueError, AttributeError) as exc:  # AttributeError: not a JSON object
+        raise ValueError(
+            f"obligation for dispatch={dispatch_id} is unreadable ({exc}); cannot "
+            f"prove PR {new_number or new_label} is the PR it was registered for"
+        ) from exc
+    # Numbers decide when both sides have one ("#101" and "PR-101" are one PR);
+    # labels (PR-HYG-1) decide only when a number is missing on either side.
+    if old_number is not None and new_number is not None:
+        differs = old_number != new_number
+    else:
+        differs = old_label is not None and new_label is not None and old_label != new_label
+    if differs:
+        raise ObligationPrConflict(
+            f"dispatch={dispatch_id} already has an obligation on PR "
+            f"{old_number or old_label}; refusing PR {new_number or new_label}: one "
+            f"dispatch is one PR. A follow-up round on the same PR is <id>-r2; a "
+            f"split into a second PR takes a new dispatch id (e.g. {dispatch_id}-c)"
+        )
+
+
 def register_obligation(
     state_dir: Path,
     *,
@@ -297,11 +351,14 @@ def register_obligation(
     """Register the review-gate obligation for a door-accepted dispatch.
 
     Returns the obligation path, or None when the registration was skipped
-    (empty gate/dispatch_id, or an OS error — this function NEVER raises;
-    obligation bookkeeping must never block the door).
+    (empty gate/dispatch_id, or an OS error on the write — logged, not raised).
 
-    Idempotent: an existing obligation for the same dispatch_id is left
-    untouched, so a retry never resets a fulfilled obligation to pending.
+    Idempotent: an existing obligation for the same dispatch_id and the same
+    PR is left untouched, so a retry never resets a fulfilled obligation to
+    pending. Raises :class:`ObligationPrConflict` (OI-1563) when the existing
+    obligation names a DIFFERENT PR — one dispatch is one PR — and ValueError
+    when the existing record is unreadable while this call names a PR. The
+    door turns either into a blocking verdict.
 
     ``pr_id`` (the internal PR-N/PR-LABEL) is the stable join key the merge
     gate uses to find a PR's declared gate: ``pr_number`` is only derivable
@@ -332,10 +389,11 @@ def register_obligation(
     dispatch_id = (dispatch_id or "").strip()
     if not gate or not dispatch_id:
         return None
+    path = obligation_path(state_dir, dispatch_id)
+    if path.exists():
+        _refuse_second_pr(path, dispatch_id, pr_number, pr_id)
+        return path
     try:
-        path = obligation_path(state_dir, dispatch_id)
-        if path.exists():
-            return path
         record: Dict[str, Any] = {
             "schema_version": 1,
             "kind": "review_gate_obligation",
@@ -446,15 +504,17 @@ def register_no_gate_obligation(
     scanner groups every no-gate dispatch under one countable key instead of a
     new key per dispatch.
 
-    Never raises; idempotent like :func:`register_obligation`.
+    Idempotent like :func:`register_obligation`, and refuses a second PR the
+    same way (:class:`ObligationPrConflict`).
     """
     dispatch_id = (dispatch_id or "").strip()
     if not dispatch_id:
         return None
+    path = obligation_path(state_dir, dispatch_id)
+    if path.exists():
+        _refuse_second_pr(path, dispatch_id, pr_number, pr_id)
+        return path
     try:
-        path = obligation_path(state_dir, dispatch_id)
-        if path.exists():
-            return path
         now = _utc_now_iso()
         record: Dict[str, Any] = {
             "schema_version": 1,
