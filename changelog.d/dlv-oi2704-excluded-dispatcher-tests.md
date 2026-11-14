@@ -1,0 +1,1 @@
+- The seven dispatcher test files that were CI-excluded for OI-1227 now check the current dispatcher code; their lines leave `scripts/ci/test_exclusions.txt` in a closing PR (OI-2704).
