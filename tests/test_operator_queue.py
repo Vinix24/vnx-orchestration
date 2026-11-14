@@ -41,7 +41,7 @@ def _ledger(d):
 def test_same_question_twice_is_one_opened(tmp_path):
     assert _open(tmp_path) is not None
     assert _open(tmp_path) is None
-    assert _ledger(tmp_path).count("opened") == 1
+    assert _ledger(tmp_path).count('"kind": "opened"') == 1
 
 
 def test_close_one_point_leaves_the_other_open(tmp_path):
