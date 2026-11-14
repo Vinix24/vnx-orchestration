@@ -156,7 +156,7 @@ constraints:
       another version is a deliberate operator change to this model value.
       `provider: zai` is the wave7_models.yaml registry identity: the enforcer
       resolves every provider string that routes to it (zai, litellm:zai,
-      glm-harness) to that key, so the allowlist cannot be sidestepped by
+      glm-harness, and the bare glm, OI-1798) to that key, so the allowlist cannot be sidestepped by
       presenting a different provider string for the same models (OI-1217).
     enforcement: code_raise
     audit_severity: blocking
