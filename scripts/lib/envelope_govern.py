@@ -40,6 +40,7 @@ from skill_application import skill_receipt_fields
 from envelope_govern_support import (
     _archive_dispatch_events,
     _clear_dispatch_events,
+    _name_transient_api_error,
     _publish_phantom_verdict,
     _receipt_exists_for_dispatch,
     _resolve_fix_forward_diff,
@@ -295,8 +296,15 @@ def _log_govern_outcome(
     effective_status: str,
     report_path: Optional[Path],
     receipt_path: Optional[Path],
+    contract_warnings: Optional[List[Dict[str, Any]]] = None,
 ) -> None:
     """Log the one closing status line of a GOVERN pass.
+
+    OI-2796: first names a transient API error (``transient_api_error: <line>``)
+    on an empty ``adapter_result.error`` when no valid report stands, so the
+    ERROR line below and the lane exit carry it instead of "(no error
+    captured)". After the receipt on purpose: failure classification still
+    reads the same inputs. The status is never changed.
 
     Three-way, exactly as ``_govern`` did inline: a failed/timeout/empty-
     completion receipt logs an ERROR (dispatch_cli returns only an integer exit
@@ -304,6 +312,7 @@ def _log_govern_outcome(
     error surfaces — printed in full), a contract override logs a WARNING, and
     a clean success logs an INFO.
     """
+    _name_transient_api_error(adapter_result, report_path, contract_warnings)
     if adapter_result.status != "success":
         # Fail-loud: a failure/timeout/empty-completion receipt must never be silent.
         # dispatch_cli returns only an integer exit code for the provider lane, so this
@@ -869,6 +878,6 @@ def _govern(
     finally:
         _clear_archived_event_stream(spec, _events_archive_ok)
 
-    _log_govern_outcome(spec, adapter_result, _effective_status, report_path, receipt_path)
+    _log_govern_outcome(spec, adapter_result, _effective_status, report_path, receipt_path, _contract_warnings)
     _run_phantom_guard(spec, adapter_result, phantom_diff, base_ref)
     return report_path, receipt_path

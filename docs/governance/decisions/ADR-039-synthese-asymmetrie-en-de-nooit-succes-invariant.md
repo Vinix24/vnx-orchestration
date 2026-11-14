@@ -45,6 +45,10 @@ Dit is een derde aanname-fout in dezelfde keten als golf-2's eigen twee (sectie 
 5. `envelope_govern._govern()`'s idempotentie-skip persisteert een contract-invalid-downgrade ook wanneer er al een receipt bestaat, in plaats van hem stilzwijgend te laten vallen.
 6. `_govern_error_fallback` (het interne-fout-pad) blijft ONGEWIJZIGD — bewust: dat pad stampt al `"failed"` (nooit `"done"`/`"success"`) via `ensure_receipt`'s eigen fallback-afleiding, draagt geen gemeten aandeel in de 9,1-punts-inflatie, en is een zeldzaam defensief pad. De hard-invariant hield daar al.
 
+### Aanvulling 14-11: een transiente API-fout krijgt een reden, geen nieuwe status (OI-2796)
+
+Een bouwer die sterft op een transiente API-fout (de CLI-regel `API Error: 403 Attention Required! | Cloudflare`, of `API Error: 500`/`502`/`503`/`529`) zonder rapport houdt de status die hij al kreeg: `contract_invalid` bij een succes-claim, de adapterstatus anders. Zonder rapport is er geen bewijs, en dat verandert niet doordat de oorzaak bekend is. Alleen het lege `error`-veld wordt gevuld: `envelope_govern_support._name_transient_api_error` zet er `transient_api_error: <de regel>` in (maximaal 200 tekens, sleutels geredigeerd), zodat de ERROR-regel en de lane-uitgang de oorzaak noemen in plaats van `(no error captured)` en de T0 het transcript niet hoeft te lezen. Een `error` dat al een reden draagt wordt nooit overschreven, een geldig rapport laat alles ongemoeid, en de lane probeert niet zelf opnieuw: die regel ligt bij de T0.
+
 ## Consequenties
 
 - **Positief.** Het claude-tmux-lane contractpercentage meet voortaan hetzelfde als elke andere lane: "heeft de worker afgeleverd", niet "heeft governance het opgelapt". Een toekomstige golf-3-meting kan claude-tmux en claude-envelope zonder correctie naast elkaar leggen.
