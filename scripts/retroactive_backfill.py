@@ -353,7 +353,6 @@ def backfill_dispatch_experiments(dry_run: bool = False) -> int:
 
     inserted = 0
     skipped_existing = 0
-    skipped_no_data = 0
 
     now_iso = datetime.now(timezone.utc).isoformat()
 
@@ -366,71 +365,7 @@ def backfill_dispatch_experiments(dry_run: bool = False) -> int:
             skipped_existing += 1
             continue
 
-        instruction_chars = row["instruction_char_count"] or 0
-        pattern_count = row["pattern_count"] or 0
-        role = row["role"] or "unknown"
-        terminal = row["terminal"] or "unknown"
-        cognition = _infer_cognition(row["cognition"], None)
-        # Model is not stored in dispatch_metadata, default to sonnet
-        model = "sonnet"
-
-        # Instruction text is not in dispatch_metadata directly, so we use
-        # instruction_char_count for context item estimation
-        context_items = pattern_count  # pattern_count = intelligence items injected
-        file_count = 0  # no instruction text to parse
-
-        # Outcome from dispatch_metadata
-        outcome_status = row["outcome_status"] or ""
-        success_statuses = {"success", "done", "completed"}
-        failure_statuses = {"failure", "fail", "failed", "blocked", "error"}
-        success: Optional[bool] = None
-        if outcome_status.lower() in success_statuses:
-            success = True
-        elif outcome_status.lower() in failure_statuses:
-            success = False
-        # For ambiguous statuses, leave success as None if no_confirmation or null
-
-        # No_confirmation = dispatch was acknowledged but no clear pass/fail
-        # We count these as None (unknown outcome)
-        if outcome_status == "no_confirmation":
-            success = None
-
-        cqs = row["cqs"]
-
-        # Archive summary for timing + file/test/commit data
-        arch_summary: Optional[ArchiveSummary] = None
-        if dispatch_id in archive_index:
-            arch_summary = _parse_archive(archive_index[dispatch_id])
-
-        # Also check receipt for additional outcome data
-        receipt = receipts.get(dispatch_id)
-        if receipt and success is None:
-            rec_status = receipt.get("status", "")
-            if rec_status in success_statuses:
-                success = True
-            elif rec_status in failure_statuses:
-                success = False
-
-        if receipt and cqs is None:
-            rec_cqs = receipt.get("cqs")
-            if isinstance(rec_cqs, dict):
-                cqs = rec_cqs.get("cqs")
-            elif isinstance(rec_cqs, (int, float)):
-                cqs = float(rec_cqs)
-
-        completion_minutes = _compute_completion_minutes(
-            row["dispatched_at"], row["completed_at"], arch_summary
-        )
-
-        test_count = arch_summary.test_count if arch_summary else 0
-        committed = arch_summary.committed if arch_summary else False
-        lines_changed = arch_summary.lines_changed if arch_summary else 0
-        if arch_summary:
-            file_count = arch_summary.unique_files
-
-        # Dispatch timestamp from DB
-        ts = row["dispatched_at"] or now_iso
-
+        params = _experiment_params(row, receipts, archive_index, now_iso)
         tracker_conn.execute(
             """
             INSERT INTO dispatch_experiments (
@@ -441,17 +376,7 @@ def backfill_dispatch_experiments(dry_run: bool = False) -> int:
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(dispatch_id) DO NOTHING
             """,
-            (
-                dispatch_id, ts,
-                instruction_chars, context_items, 0,
-                role, cognition, model, terminal, file_count,
-                (1 if success else (0 if success is False else None)),
-                cqs,
-                completion_minutes,
-                test_count,
-                (1 if committed else 0),
-                lines_changed,
-            ),
+            params,
         )
         inserted += 1
 
@@ -461,6 +386,104 @@ def backfill_dispatch_experiments(dry_run: bool = False) -> int:
     print(f"[step1] Inserted {inserted} dispatch experiments "
           f"(skipped existing: {skipped_existing})")
     return inserted
+
+
+def _experiment_outcome(outcome_status: str) -> Optional[bool]:
+    """Map a dispatch_metadata outcome_status to True / False / None (unknown)."""
+    success_statuses = {"success", "done", "completed"}
+    failure_statuses = {"failure", "fail", "failed", "blocked", "error"}
+    success: Optional[bool] = None
+    if outcome_status.lower() in success_statuses:
+        success = True
+    elif outcome_status.lower() in failure_statuses:
+        success = False
+    # No_confirmation = dispatch was acknowledged but no clear pass/fail
+    # We count these as None (unknown outcome)
+    if outcome_status == "no_confirmation":
+        success = None
+    return success
+
+
+def _experiment_receipt_fallback(
+    receipt: Optional[dict], success: Optional[bool], cqs
+) -> tuple:
+    """Fill a missing outcome / cqs from the dispatch's task_complete receipt."""
+    success_statuses = {"success", "done", "completed"}
+    failure_statuses = {"failure", "fail", "failed", "blocked", "error"}
+    if receipt and success is None:
+        rec_status = receipt.get("status", "")
+        if rec_status in success_statuses:
+            success = True
+        elif rec_status in failure_statuses:
+            success = False
+
+    if receipt and cqs is None:
+        rec_cqs = receipt.get("cqs")
+        if isinstance(rec_cqs, dict):
+            cqs = rec_cqs.get("cqs")
+        elif isinstance(rec_cqs, (int, float)):
+            cqs = float(rec_cqs)
+    return success, cqs
+
+
+def _experiment_params(
+    row: sqlite3.Row,
+    receipts: dict[str, dict],
+    archive_index: dict[str, Path],
+    now_iso: str,
+) -> tuple:
+    """Build the dispatch_experiments INSERT parameters for one metadata row."""
+    dispatch_id = row["dispatch_id"]
+    instruction_chars = row["instruction_char_count"] or 0
+    pattern_count = row["pattern_count"] or 0
+    role = row["role"] or "unknown"
+    terminal = row["terminal"] or "unknown"
+    cognition = _infer_cognition(row["cognition"], None)
+    # Model is not stored in dispatch_metadata, default to sonnet
+    model = "sonnet"
+
+    # Instruction text is not in dispatch_metadata directly, so we use
+    # instruction_char_count for context item estimation
+    context_items = pattern_count  # pattern_count = intelligence items injected
+    file_count = 0  # no instruction text to parse
+
+    success = _experiment_outcome(row["outcome_status"] or "")
+    cqs = row["cqs"]
+
+    # Archive summary for timing + file/test/commit data
+    arch_summary: Optional[ArchiveSummary] = None
+    if dispatch_id in archive_index:
+        arch_summary = _parse_archive(archive_index[dispatch_id])
+
+    # Also check receipt for additional outcome data
+    success, cqs = _experiment_receipt_fallback(
+        receipts.get(dispatch_id), success, cqs
+    )
+
+    completion_minutes = _compute_completion_minutes(
+        row["dispatched_at"], row["completed_at"], arch_summary
+    )
+
+    test_count = arch_summary.test_count if arch_summary else 0
+    committed = arch_summary.committed if arch_summary else False
+    lines_changed = arch_summary.lines_changed if arch_summary else 0
+    if arch_summary:
+        file_count = arch_summary.unique_files
+
+    # Dispatch timestamp from DB
+    ts = row["dispatched_at"] or now_iso
+
+    return (
+        dispatch_id, ts,
+        instruction_chars, context_items, 0,
+        role, cognition, model, terminal, file_count,
+        (1 if success else (0 if success is False else None)),
+        cqs,
+        completion_minutes,
+        test_count,
+        (1 if committed else 0),
+        lines_changed,
+    )
 
 
 # ---------------------------------------------------------------------------
