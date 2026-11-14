@@ -4412,24 +4412,13 @@ def run_dispatch(
 
         # Merge the door route reason into the plan so it's visible in dry-run
         # output and carried on the ExecutionPlan.
-        if door_route_reason:
-            plan = dataclasses.replace(
-                plan,
-                route_reason=f"{door_route_reason};{plan.route_reason}",
-            )
-
         # OI-1158: loud isolation-guarantee warning for lanes the door cannot
         # structurally verify (currently: claude_headless). Merged onto
         # plan.warnings — the same mechanism door_route_reason and the D4
         # model-tier warnings already use — so it surfaces in dry-run output
         # via _print_plan AND is available below for the real-execution print
         # and the route-decision receipt field. None for every other lane.
-        headless_isolation_warning = _headless_isolation_guard(plan)
-        if headless_isolation_warning:
-            plan = dataclasses.replace(
-                plan,
-                warnings=plan.warnings + (headless_isolation_warning,),
-            )
+        plan, headless_isolation_warning = _merge_plan_warnings(plan, door_route_reason)
 
         # OI-1248: lane reachability is established HERE — right after the plan
         # is final and BEFORE the door commits to firing (permit, dispatch row,
@@ -4454,20 +4443,7 @@ def run_dispatch(
         # permit / instruction_sha256 TOCTOU below is untouched. Never blocks the
         # door (best-effort, never raises).
         if not dry_run:
-            try:
-                from scout_prepass import maybe_run_scout
-                maybe_run_scout(
-                    dispatch_id=plan.dispatch_id,
-                    instruction_text=vspec.instruction_text,
-                    dispatch_paths=[dp.path for dp in vspec.spec.dispatch_paths],
-                    state_dir=state_dir,
-                    task_class=getattr(vspec.spec, "task_class", None),
-                    lane=plan.lane,
-                )
-            except Exception as exc:  # vnx-silent-except: scout pre-pass is best-effort; door must never block on it
-                _record_bookkeeping_failure(
-                    "scout_prepass", plan.dispatch_id, exc, state_dir=state_dir,
-                )
+            _run_scout_prepass(plan, vspec, state_dir=state_dir)
 
             # The dispatch is irrevocably accepted here (validated, plan
             # compiled): create its dispatches tracker row BEFORE the lane
@@ -4499,44 +4475,23 @@ def run_dispatch(
             # persist it onto the dispatch tracker row so D2 can propagate it to
             # track.pr_ref on merge; then the plan scope may move up (P1).
             # Best-effort — never blocks the door.
-            if vspec.spec.track_id:
-                os.environ["VNX_CURRENT_TRACK_ID"] = vspec.spec.track_id
-                _door_track_bookkeeping(vspec.spec, state_dir=state_dir)
-
             # Chain-link (dispatch-20260802-model-ssot-en-ketenlink): export the
             # resolved fields so the worker (and any worker-authored
             # receipt) inherits them — the receipt writers read these env vars as
             # a fallback when the caller did not pass explicit values. Only set
             # when present, so unrelated dispatches keep a clean env.
-            if plan.parent_dispatch:
-                os.environ["VNX_PARENT_DISPATCH"] = plan.parent_dispatch
-            if plan.task_class:
-                os.environ["VNX_TASK_CLASS"] = plan.task_class
-            if plan.tier_from:
-                os.environ["VNX_TIER_FROM"] = plan.tier_from
-            if plan.tier_to:
-                os.environ["VNX_TIER_TO"] = plan.tier_to
             # OI-1137: the work-ref / pr-id are exported so the phantom-guard can
             # weigh the pushed branch diff for a fix-forward dispatch (its own worktree reads
             # empty). Same fallback pattern as VNX_PARENT_DISPATCH above.
-            if plan.work_ref:
-                os.environ["VNX_WORK_REF"] = plan.work_ref
-            if plan.pr_id:
-                os.environ["VNX_PR_ID"] = plan.pr_id
             # The resolved model is exported too, so governance corrective
             # receipts (phantom_guard / pr_enforcement) can record the model the
             # dispatch ran without threading a parameter through every call site.
-            os.environ["VNX_CURRENT_MODEL"] = plan.model
             # Attribution fix: export the dispatch's real provider and terminal
             # on the same fallback contract, so a corrective rejection receipt
             # (phantom_guard / pr_enforcement) is attributable even when a call
             # site does not thread them explicitly. A lane that passes the
             # values explicitly always wins.
-            _provider_value = getattr(plan.provider, "value", plan.provider)
-            if _provider_value:
-                os.environ["VNX_CURRENT_PROVIDER"] = str(_provider_value)
-            if plan.target_id:
-                os.environ["VNX_CURRENT_TERMINAL"] = str(plan.target_id)
+            _export_worker_env(plan, vspec.spec, state_dir=state_dir)
 
         permit = issue_permit(plan)
         try:
@@ -4576,72 +4531,11 @@ def run_dispatch(
         if handover is None:
             return 1
 
-        with serialize_lane(plan.serialization_class, dispatch_id=vspec.spec.dispatch_id):
-            if plan.lane == "provider":
-                result = run_envelope_plan(
-                    plan, permit, state_dir=state_dir, data_dir=data_dir,
-                    role=vspec.spec.role, handover=handover, base_sha=start_base_sha,
-                )
-                if result.status != "success":
-                    # Fail-loud: the door must never swallow a provider-lane failure into a
-                    # bare exit code — the caller (bin/vnx dispatch) prints nothing else.
-                    print(
-                        f"[dispatch_cli] provider lane {result.status}: "
-                        f"{result.error or '(no error captured)'}",
-                        file=sys.stderr,
-                    )
-                    # The escalation ladder: classify the failure and stage a
-                    # human-promoted followup when the table says climb (OI-1221,
-                    # wired dispatch 20260816-p6-escalate-tier-ds).
-                    _maybe_stage_escalation(
-                        plan, result, vspec=vspec, state_dir=state_dir, data_dir=data_dir
-                    )
-                _owner_finish(
-                    vspec.spec.dispatch_id, attempt_id, state_dir=state_dir,
-                    success=(result.status == "success"),
-                    failure_reason=(
-                        None if result.status == "success"
-                        else (result.error or f"provider lane status={result.status}")
-                    ),
-                )
-                return result.returncode
-            elif plan.lane == "claude_headless":
-                # OI-1158: the door never printed anything about isolation on a
-                # real (non-dry-run) fire — _print_plan's warnings loop only
-                # runs under --dry-run. Surface the same warning here, loud, so
-                # a live headless dispatch is never silent about the gap.
-                if headless_isolation_warning:
-                    logger.warning("[dispatch_cli] %s", headless_isolation_warning)
-                    print(
-                        f"[dispatch_cli] [WARN] {headless_isolation_warning}",
-                        file=sys.stderr,
-                    )
-                rc = _execute_claude_headless(
-                    plan,
-                    permit,
-                    state_dir=state_dir,
-                    data_dir=data_dir,
-                    role=vspec.spec.role, handover=handover, base_sha=start_base_sha,
-                )
-                _owner_finish(
-                    vspec.spec.dispatch_id, attempt_id, state_dir=state_dir,
-                    success=(rc == 0),
-                    failure_reason=None if rc == 0 else "claude_headless lane returned non-zero",
-                )
-                return rc
-            else:
-                raise _InvariantViolation(
-                    f"closed set violated — unknown lane: {plan.lane!r}"
-                )
+        return _run_lane(plan, permit, vspec, state_dir=state_dir, data_dir=data_dir, handover=handover,
+                         base_sha=start_base_sha, attempt_id=attempt_id, headless_isolation_warning=headless_isolation_warning)
 
     except _InvariantViolation as exc:
-        _finalize_door_exit(handover, state_dir=state_dir, reason=dispatch_exit.REASON_PRE_SPAWN_ERROR)
-        logger.error(
-            "[dispatch_cli] INVARIANT VIOLATION dispatch=%s: %s",
-            getattr(getattr(vspec, "spec", None), "dispatch_id", "?"), exc,
-        )
-        print(f"[dispatch_cli] REJECT [invariant-violation]: {exc}", file=sys.stderr)
-        return 1
+        return _invariant_violation_exit(vspec, handover, exc, state_dir=state_dir)
     except LockWaitTimeout as exc:
         # Point 5 (golf 1A): serialize_lane's own lock-wait timeout — no free
         # claude-lane slot within VNX_CLAUDE_LOCK_TIMEOUT_SECONDS (default
@@ -4651,24 +4545,162 @@ def run_dispatch(
         # state machine point 3 wired in, instead of folding it into the
         # bare REJECT [runtime-error] path below (which never touched the
         # door-owned row's state at all).
-        dispatch_id = getattr(getattr(vspec, "spec", None), "dispatch_id", None)
-        # ADR-045 §1: the slot never opened, so this exit is a failed end line
-        # with the plan's own reason — before the door-owned row is closed out.
-        _finalize_door_exit(handover, state_dir=state_dir, reason=dispatch_exit.REASON_SLOT_TIMEOUT)
-        if dispatch_id:
-            _owner_finish(
-                dispatch_id, attempt_id, state_dir=state_dir,
-                success=False, failure_reason=f"lock-wait timeout: {exc}",
-            )
-        logger.error(
-            "[dispatch_cli] LOCK-WAIT TIMEOUT dispatch=%s: %s", dispatch_id, exc,
-        )
-        print(f"[dispatch_cli] REJECT [lock-wait-timeout]: {exc}", file=sys.stderr)
-        return 1
+        return _lock_wait_timeout_exit(vspec, handover, attempt_id, exc, state_dir=state_dir)
     except Exception as exc:
         _finalize_door_exit(handover, state_dir=state_dir, reason=dispatch_exit.REASON_DOOR_ERROR)
         print(f"[dispatch_cli] REJECT [runtime-error]: {exc}", file=sys.stderr)
         return 1
+
+
+def _invariant_violation_exit(vspec, handover, exc: Exception, *, state_dir: Path) -> int:
+    """``run_dispatch``'s exit on a door invariant violation: finalize, log, REJECT, 1 (R29b)."""
+    _finalize_door_exit(handover, state_dir=state_dir, reason=dispatch_exit.REASON_PRE_SPAWN_ERROR)
+    logger.error(
+        "[dispatch_cli] INVARIANT VIOLATION dispatch=%s: %s",
+        getattr(getattr(vspec, "spec", None), "dispatch_id", "?"), exc,
+    )
+    print(f"[dispatch_cli] REJECT [invariant-violation]: {exc}", file=sys.stderr)
+    return 1
+
+
+def _lock_wait_timeout_exit(vspec, handover, attempt_id, exc: Exception, *, state_dir: Path) -> int:
+    """``run_dispatch``'s exit on its own lane-slot lock-wait timeout (R29b)."""
+    dispatch_id = getattr(getattr(vspec, "spec", None), "dispatch_id", None)
+    # ADR-045 §1: the slot never opened, so this exit is a failed end line
+    # with the plan's own reason — before the door-owned row is closed out.
+    _finalize_door_exit(handover, state_dir=state_dir, reason=dispatch_exit.REASON_SLOT_TIMEOUT)
+    if dispatch_id:
+        _owner_finish(
+            dispatch_id, attempt_id, state_dir=state_dir,
+            success=False, failure_reason=f"lock-wait timeout: {exc}",
+        )
+    logger.error(
+        "[dispatch_cli] LOCK-WAIT TIMEOUT dispatch=%s: %s", dispatch_id, exc,
+    )
+    print(f"[dispatch_cli] REJECT [lock-wait-timeout]: {exc}", file=sys.stderr)
+    return 1
+
+
+def _merge_plan_warnings(plan: ExecutionPlan, door_route_reason) -> "tuple[ExecutionPlan, Optional[str]]":
+    """Carry the door route reason and the headless isolation warning onto the plan (R29b)."""
+    if door_route_reason:
+        plan = dataclasses.replace(
+            plan,
+            route_reason=f"{door_route_reason};{plan.route_reason}",
+        )
+
+    headless_isolation_warning = _headless_isolation_guard(plan)
+    if headless_isolation_warning:
+        plan = dataclasses.replace(
+            plan,
+            warnings=plan.warnings + (headless_isolation_warning,),
+        )
+    return plan, headless_isolation_warning
+
+
+def _run_scout_prepass(plan: ExecutionPlan, vspec, *, state_dir: Path) -> None:
+    """Best-effort scout pre-pass of a real fire; a failure is recorded, never raised (R29b)."""
+    try:
+        from scout_prepass import maybe_run_scout
+        maybe_run_scout(
+            dispatch_id=plan.dispatch_id,
+            instruction_text=vspec.instruction_text,
+            dispatch_paths=[dp.path for dp in vspec.spec.dispatch_paths],
+            state_dir=state_dir,
+            task_class=getattr(vspec.spec, "task_class", None),
+            lane=plan.lane,
+        )
+    except Exception as exc:  # vnx-silent-except: scout pre-pass is best-effort; door must never block on it
+        _record_bookkeeping_failure(
+            "scout_prepass", plan.dispatch_id, exc, state_dir=state_dir,
+        )
+
+
+def _export_worker_env(plan: ExecutionPlan, spec, *, state_dir: Path) -> None:
+    """Export the track, chain-link and attribution fields a real fire hands its worker (R29b)."""
+    if spec.track_id:
+        os.environ["VNX_CURRENT_TRACK_ID"] = spec.track_id
+        _door_track_bookkeeping(spec, state_dir=state_dir)
+    if plan.parent_dispatch:
+        os.environ["VNX_PARENT_DISPATCH"] = plan.parent_dispatch
+    if plan.task_class:
+        os.environ["VNX_TASK_CLASS"] = plan.task_class
+    if plan.tier_from:
+        os.environ["VNX_TIER_FROM"] = plan.tier_from
+    if plan.tier_to:
+        os.environ["VNX_TIER_TO"] = plan.tier_to
+    if plan.work_ref:
+        os.environ["VNX_WORK_REF"] = plan.work_ref
+    if plan.pr_id:
+        os.environ["VNX_PR_ID"] = plan.pr_id
+    os.environ["VNX_CURRENT_MODEL"] = plan.model
+    _provider_value = getattr(plan.provider, "value", plan.provider)
+    if _provider_value:
+        os.environ["VNX_CURRENT_PROVIDER"] = str(_provider_value)
+    if plan.target_id:
+        os.environ["VNX_CURRENT_TERMINAL"] = str(plan.target_id)
+
+
+def _run_lane(plan: ExecutionPlan, permit, vspec, *, state_dir: Path, data_dir: Path, handover,
+              base_sha, attempt_id, headless_isolation_warning) -> int:
+    """Run the plan's lane inside its serialization slot and close out the door-owned row (R29b)."""
+    with serialize_lane(plan.serialization_class, dispatch_id=vspec.spec.dispatch_id):
+        if plan.lane == "provider":
+            result = run_envelope_plan(
+                plan, permit, state_dir=state_dir, data_dir=data_dir,
+                role=vspec.spec.role, handover=handover, base_sha=base_sha,
+            )
+            if result.status != "success":
+                # Fail-loud: the door must never swallow a provider-lane failure into a
+                # bare exit code — the caller (bin/vnx dispatch) prints nothing else.
+                print(
+                    f"[dispatch_cli] provider lane {result.status}: "
+                    f"{result.error or '(no error captured)'}",
+                    file=sys.stderr,
+                )
+                # The escalation ladder: classify the failure and stage a
+                # human-promoted followup when the table says climb (OI-1221,
+                # wired dispatch 20260816-p6-escalate-tier-ds).
+                _maybe_stage_escalation(
+                    plan, result, vspec=vspec, state_dir=state_dir, data_dir=data_dir
+                )
+            _owner_finish(
+                vspec.spec.dispatch_id, attempt_id, state_dir=state_dir,
+                success=(result.status == "success"),
+                failure_reason=(
+                    None if result.status == "success"
+                    else (result.error or f"provider lane status={result.status}")
+                ),
+            )
+            return result.returncode
+        elif plan.lane == "claude_headless":
+            # OI-1158: the door never printed anything about isolation on a
+            # real (non-dry-run) fire — _print_plan's warnings loop only
+            # runs under --dry-run. Surface the same warning here, loud, so
+            # a live headless dispatch is never silent about the gap.
+            if headless_isolation_warning:
+                logger.warning("[dispatch_cli] %s", headless_isolation_warning)
+                print(
+                    f"[dispatch_cli] [WARN] {headless_isolation_warning}",
+                    file=sys.stderr,
+                )
+            rc = _execute_claude_headless(
+                plan,
+                permit,
+                state_dir=state_dir,
+                data_dir=data_dir,
+                role=vspec.spec.role, handover=handover, base_sha=base_sha,
+            )
+            _owner_finish(
+                vspec.spec.dispatch_id, attempt_id, state_dir=state_dir,
+                success=(rc == 0),
+                failure_reason=None if rc == 0 else "claude_headless lane returned non-zero",
+            )
+            return rc
+        else:
+            raise _InvariantViolation(
+                f"closed set violated — unknown lane: {plan.lane!r}"
+            )
 
 
 # ---------------------------------------------------------------------------
