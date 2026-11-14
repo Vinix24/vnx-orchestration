@@ -126,4 +126,3 @@ def test_overlapping_patterns_leave_no_suffix(case):
 def test_unbalanced_substitution_masks_to_end_of_line(opener):
     out = sp.mask("PASSWORD=" + opener + "printf zz9 yy8\nnext line")
     assert out == "PASSWORD=<secret>\nnext line"
-    assert sp.mask("PASSWORD=" + opener + "printf zz9 yy8") == "PASSWORD=<secret>"

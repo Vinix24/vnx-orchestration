@@ -3,7 +3,7 @@ in the repo; add a pattern here with a test, never in a second list. ``find`` re
 pattern names, never values; ``mask`` turns every match into ``<secret>``.
 
 ``shell_value_end`` is the one public reader of a shell value (bash grammar); every place
-that recognises a value, here or in a caller, goes through it or ``SHELL_VALUE``."""
+that recognises a value, here or in a caller, goes through it."""
 
 from __future__ import annotations
 
@@ -31,7 +31,6 @@ _SEGMENT_SRC = (
 )
 _SEGMENT = re.compile(_SEGMENT_SRC)
 _QUOTED = re.compile(r"'[^']*'|\"(?:\\[\s\S]|[^\"\\])*\"")
-
 
 def _line_end(text: str, i: int) -> int:
     n = text.find("\n", i)
