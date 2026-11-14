@@ -2722,6 +2722,9 @@ main() {
     pr-ready)
       "$VNX_PYTHON" "$VNX_HOME/scripts/pr_ready.py" "$@"
       ;;
+    slot)
+      PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" exec "$VNX_PYTHON" "$VNX_HOME/scripts/slot_cli.py" "$@"
+      ;;
     providers)
       PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" exec "$VNX_PYTHON" "$VNX_HOME/scripts/providers_cli.py" "$@"
       ;;
