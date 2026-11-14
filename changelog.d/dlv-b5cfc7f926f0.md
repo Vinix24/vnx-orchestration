@@ -1,0 +1,1 @@
+- New package `packages/besluitenregister/`: the core of the decisions register (ADR-077): schema `besluit/1` with validation, the identity model (`besluit_id`, `event_id`, `herkomst`), a reader that counts torn and invalid lines without writing, an append-only writer under `flock` with tail quarantine, deduplication and secret refusal, and a checked copy of the secret patterns.
