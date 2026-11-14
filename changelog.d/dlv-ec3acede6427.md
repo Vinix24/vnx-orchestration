@@ -1,0 +1,1 @@
+- Permission-event ledger and the shared secret_patterns module: schema, normalisation, masking, append-only writer and coverage (permissieblokkades-leren L1).
