@@ -1,0 +1,1 @@
+- ADR-077 fixes the decision register per context: `besluiten.ndjson` next to the daily-log, schema `besluit/1` with a stable `besluit_id`, a transition table, the torn-tail rule, confidentiality per export audience and a checked copy of the secret patterns (besluitenregister B0).
