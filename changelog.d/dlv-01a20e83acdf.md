@@ -1,0 +1,1 @@
+- The tree mode of `wiring_gate` counts by rule version 4: own-file use, Python in `bin/vnx` and `*.sh`, two proven registration decorators and a tracked skip file with reasons count as wired, and `scripts/benchmark/field-tests/` is excluded by default (`--exclude-prefix` adds more). The PR mode is unchanged (golf-schoon-naar-2-0 W0c).

@@ -1,0 +1,11 @@
+# Tracked skips for the tree mode of scripts/lib/wiring_gate.py (rule version 4).
+# Every entry needs a non-empty name, file and reason; one without a reason is refused (exit 2).
+- name: score_codegen
+  file: scripts/benchmarks/run_lane_bench.py
+  reason: "string dispatch via globals() at scripts/benchmarks/run_lane_bench.py:133 (task quality_fn)"
+- name: score_review
+  file: scripts/benchmarks/run_lane_bench.py
+  reason: "string dispatch via globals() at scripts/benchmarks/run_lane_bench.py:133 (task quality_fn)"
+- name: score_docs
+  file: scripts/benchmarks/run_lane_bench.py
+  reason: "string dispatch via globals() at scripts/benchmarks/run_lane_bench.py:133 (task quality_fn)"
