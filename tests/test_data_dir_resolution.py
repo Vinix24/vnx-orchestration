@@ -5,7 +5,8 @@ keystone fallback) — two defects of one class: a resolver landing on the
 read-only pinned version store ``~/.vnx-system/versions/<v>/.vnx-data``.
 
 The shared resolver:
-  1. honors a set ``VNX_DATA_DIR`` directly (no ``VNX_DATA_DIR_EXPLICIT`` required);
+  1. honors ``VNX_DATA_DIR`` only with ``VNX_DATA_DIR_EXPLICIT=1``, the rule
+     receipts use (OI-1276 reversed the OI-1179 env-first step);
   2. refuses — with a ``DataDirResolutionError`` naming the chain — any result
      under ``~/.vnx-system/versions/`` (or resolving through
      ``~/.vnx-system/current`` into it);
@@ -51,15 +52,15 @@ def _clean_data_env(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv(key, raising=False)
 
 
-# ── env-first: a set VNX_DATA_DIR is honored directly ────────────────────────
+# ── VNX_DATA_DIR counts with VNX_DATA_DIR_EXPLICIT=1, as for receipts ─────────
 
 
-def test_vnx_data_dir_honored_without_explicit_flag(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """A set VNX_DATA_DIR is honored WITHOUT VNX_DATA_DIR_EXPLICIT=1 (OI-1179)."""
+def test_vnx_data_dir_honored_with_explicit_flag(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """VNX_DATA_DIR + VNX_DATA_DIR_EXPLICIT=1 is honored (OI-1276: the bare form no longer is)."""
     data_dir = tmp_path / "operator" / ".vnx-data"
     data_dir.mkdir(parents=True)
     monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
-    monkeypatch.delenv("VNX_DATA_DIR_EXPLICIT", raising=False)
+    monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
     monkeypatch.delenv("VNX_PROJECT_ID", raising=False)
 
     result = resolve_data_dir_fail_loud()
@@ -75,6 +76,7 @@ def test_vnx_data_dir_under_version_store_refuses(monkeypatch: pytest.MonkeyPatc
     home = _fake_home(tmp_path, monkeypatch)
     version_data = home / ".vnx-system" / "versions" / "v1.4.7" / ".vnx-data"
     monkeypatch.setenv("VNX_DATA_DIR", str(version_data))
+    monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")  # OI-1276: a bare one is ignored
     monkeypatch.delenv("VNX_PROJECT_ID", raising=False)
 
     with pytest.raises(DataDirResolutionError) as excinfo:
@@ -87,8 +89,10 @@ def test_vnx_data_dir_under_version_store_refuses(monkeypatch: pytest.MonkeyPatc
 def test_vnx_project_id_branch_never_lands_under_version_store(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """VNX_PROJECT_ID resolves ~/.vnx-data/<id>, never the version store."""
+    """VNX_PROJECT_ID resolves an existing ~/.vnx-data/<id>, never the version store."""
     home = _fake_home(tmp_path, monkeypatch)
+    (home / ".vnx-data" / "my-project").mkdir(parents=True)  # OI-1276: resolve_paths' existing-central step
+    monkeypatch.delenv("VNX_DATA_HOME", raising=False)
     monkeypatch.delenv("VNX_DATA_DIR", raising=False)
     monkeypatch.delenv("VNX_DATA_DIR_EXPLICIT", raising=False)
     monkeypatch.setenv("VNX_PROJECT_ID", "my-project")
@@ -144,6 +148,7 @@ def test_headless_default_data_dir_refuses_version_store(
     home = _fake_home(tmp_path, monkeypatch)
     version_data = home / ".vnx-system" / "versions" / "v1.4.7" / ".vnx-data"
     monkeypatch.setenv("VNX_DATA_DIR", str(version_data))
+    monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")  # OI-1276: a bare one is ignored
     monkeypatch.delenv("VNX_PROJECT_ID", raising=False)
 
     from headless_dispatch_daemon import _default_data_dir
@@ -155,10 +160,11 @@ def test_headless_default_data_dir_refuses_version_store(
 def test_headless_default_data_dir_honors_vnx_data_dir(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """headless_dispatch_daemon._default_data_dir honors a set VNX_DATA_DIR."""
+    """headless_dispatch_daemon._default_data_dir honors an explicit VNX_DATA_DIR."""
     data_dir = tmp_path / "daemon" / ".vnx-data"
     data_dir.mkdir(parents=True)
     monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
+    monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")  # OI-1276: a bare one is ignored
     monkeypatch.delenv("VNX_PROJECT_ID", raising=False)
 
     from headless_dispatch_daemon import _default_data_dir

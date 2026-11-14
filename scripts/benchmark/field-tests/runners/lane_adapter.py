@@ -94,6 +94,7 @@ def _claude_subprocess_headless(
         **os.environ,
         "VNX_STATE_DIR": ".vnx-data/state",
         "VNX_DATA_DIR": ".vnx-data",
+        "VNX_DATA_DIR_EXPLICIT": "1",  # OI-1276: events follow the bench store too
         "VNX_DISPATCH_DIR": ".vnx-data/dispatches",
         "VNX_WORKER_SCOPED": "0",
         "VNX_BENCH_EQUAL_CONTEXT": "1",
@@ -151,6 +152,7 @@ def _provider_dispatch(
         **os.environ,
         "VNX_STATE_DIR": ".vnx-data/state",
         "VNX_DATA_DIR": ".vnx-data",
+        "VNX_DATA_DIR_EXPLICIT": "1",  # OI-1276: events follow the bench store too
         "VNX_DISPATCH_DIR": ".vnx-data/dispatches",
         "VNX_BENCH_EQUAL_CONTEXT": "1",
         "VNX_ISOLATED_WORKTREE": "1",

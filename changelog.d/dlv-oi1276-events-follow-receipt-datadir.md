@@ -1,0 +1,1 @@
+- Events now resolve their data dir with the same rule as receipts (`vnx_paths.resolve_paths`): a bare `VNX_DATA_DIR` without `VNX_DATA_DIR_EXPLICIT=1` is ignored with one stderr line instead of splitting events from receipts; worktree and bench overrides now set the flag (OI-1276).
