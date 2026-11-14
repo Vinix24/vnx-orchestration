@@ -761,78 +761,78 @@ def run_dream_cycle(
                 patterns, cycle_id, project_id, _data_root, restricted_rows_dropped, provider)
         if skipped is not None:
             return skipped
-        total_input = sum(len(v) for v in patterns.values())
 
         consolidation, timed_out = _run_consolidation(
             patterns, cycle_id, project_id, provider, timeout, _data_root)
         if timed_out is not None:
             return timed_out
 
-        review_path = _write_pending_review(
-            _data_root, cycle_id, project_id, total_input,
-            restricted_rows_dropped, probe_health, consolidation, proposal_only,
-        )
+        return _complete_cycle(
+            conn, consolidation, patterns, cycle_id, project_id, provider, probe_health,
+            restricted_rows_dropped, proposal_only, dry_run, _data_root)
+    finally:
+        conn.close()
 
-        merged_count = len(consolidation.get("merged", []))
-        dropped_count = len(consolidation.get("dropped", []))
-        archived_count = len(consolidation.get("archived", []))
-        flagged_count = len(consolidation.get("flagged", []))
 
-        _emit_dream_event(
-            {
-                "event_type": "dream_cycle_completed",
-                "cycle_id": cycle_id,
-                "project_id": project_id,
-                "provider": provider,
-                "probe_health": probe_health,
-                "input_count": total_input,
-                "restricted_rows_dropped": restricted_rows_dropped,
-                "merged_count": merged_count,
-                "dropped_count": dropped_count,
-                "archived_count": archived_count,
-                "flagged_count": flagged_count,
-                "review_path": str(review_path),
-            },
-            _data_root,
-        )
+def _insert_dream_cycle(
+    conn: sqlite3.Connection, cycle_id: str, project_id: str, provider: str, total_input: int,
+    counts: tuple[int, int, int, int], review_path: Path,
+) -> None:
+    """Insert the completed ``dream_cycles`` row; ``counts`` = merged, dropped, archived, flagged."""
+    conn.execute(
+        """
+        INSERT INTO dream_cycles
+            (cycle_id, project_id, completed_at, status, provider,
+             insights_input, merged_count, dropped_count, archived_count,
+             flagged_count, report_path)
+        VALUES (?, ?, ?, 'completed', ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (cycle_id, project_id, _utc_timestamp(), provider, total_input, *counts, str(review_path)),
+    )
+    conn.commit()
 
-        if not dry_run:
-            conn.execute(
-                """
-                INSERT INTO dream_cycles
-                    (cycle_id, project_id, completed_at, status, provider,
-                     insights_input, merged_count, dropped_count, archived_count,
-                     flagged_count, report_path)
-                VALUES (?, ?, ?, 'completed', ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    cycle_id,
-                    project_id,
-                    _utc_timestamp(),
-                    provider,
-                    total_input,
-                    merged_count,
-                    dropped_count,
-                    archived_count,
-                    flagged_count,
-                    str(review_path),
-                ),
-            )
-            conn.commit()
 
-        return {
+def _complete_cycle(
+    conn: sqlite3.Connection, consolidation: dict[str, Any], patterns: dict[str, list[dict]],
+    cycle_id: str, project_id: str, provider: str, probe_health: str,
+    restricted_rows_dropped: dict[str, int], proposal_only: bool, dry_run: bool, data_root: Path,
+) -> dict[str, Any]:
+    """Write the review, emit ``dream_cycle_completed`` (before the DB write), book the row, return the result."""
+    total_input = sum(len(v) for v in patterns.values())
+    review_path = _write_pending_review(
+        data_root, cycle_id, project_id, total_input,
+        restricted_rows_dropped, probe_health, consolidation, proposal_only,
+    )
+    counts = {
+        name: len(consolidation.get(key, []))
+        for name, key in (("merged_count", "merged"), ("dropped_count", "dropped"),
+                          ("archived_count", "archived"), ("flagged_count", "flagged"))
+    }
+    _emit_dream_event(
+        {
+            "event_type": "dream_cycle_completed",
             "cycle_id": cycle_id,
+            "project_id": project_id,
+            "provider": provider,
             "probe_health": probe_health,
             "input_count": total_input,
             "restricted_rows_dropped": restricted_rows_dropped,
-            "merged_count": merged_count,
-            "dropped_count": dropped_count,
-            "archived_count": archived_count,
-            "flagged_count": flagged_count,
+            **counts,
             "review_path": str(review_path),
-        }
-    finally:
-        conn.close()
+        },
+        data_root,
+    )
+    if not dry_run:
+        _insert_dream_cycle(
+            conn, cycle_id, project_id, provider, total_input, tuple(counts.values()), review_path)
+    return {
+        "cycle_id": cycle_id,
+        "probe_health": probe_health,
+        "input_count": total_input,
+        "restricted_rows_dropped": restricted_rows_dropped,
+        **counts,
+        "review_path": str(review_path),
+    }
 
 
 def main() -> None:

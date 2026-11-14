@@ -47,6 +47,45 @@ from orphan_sweep import DEFAULT_MAX_ORPHANS, sweep  # noqa: E402
 
 
 def main(argv: "list[str] | None" = None) -> int:
+    parser = _build_parser()
+    args = parser.parse_args(argv)
+
+    logging.basicConfig(
+        level=logging.INFO if args.verbose else logging.WARNING,
+        format="%(levelname)s %(name)s %(message)s",
+        stream=sys.stderr,
+    )
+
+    if args.max_orphans < 1:
+        parser.error("--max-orphans must be >= 1")
+
+    repo_root = _optional_path(args.repo_root)
+    # Neither flag defaults eagerly here: an explicit --data-dir/--state-dir
+    # always wins, but omitting BOTH must reach sweep() as None so it resolves
+    # the register/receipts/active-manifest store via the fabric's canonical
+    # central-store resolver (scripts/lib/orphan_sweep.py::_resolve_central_paths)
+    # instead of this CLI's own (formerly repo-relative) guess.
+    data_dir = _optional_path(args.data_dir)
+    state_dir = _optional_path(args.state_dir)
+    account_data_root = _optional_path(args.account_data_root)
+
+    result = sweep(
+        repo_root=repo_root,
+        data_dir=data_dir,
+        state_dir=state_dir,
+        project_id=args.project_id,
+        current_dispatch_id=args.current_dispatch,
+        max_orphans=args.max_orphans,
+        dry_run=args.dry_run,
+        account_data_root=account_data_root,
+    )
+
+    _emit_result(result, args)
+
+    return 1 if result.errors else 0
+
+
+def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="orphan_sweep",
         description=(
@@ -113,40 +152,14 @@ def main(argv: "list[str] | None" = None) -> int:
         action="store_true",
         help="Enable INFO logging to stderr.",
     )
-    args = parser.parse_args(argv)
+    return parser
 
-    logging.basicConfig(
-        level=logging.INFO if args.verbose else logging.WARNING,
-        format="%(levelname)s %(name)s %(message)s",
-        stream=sys.stderr,
-    )
 
-    if args.max_orphans < 1:
-        parser.error("--max-orphans must be >= 1")
+def _optional_path(value: "str | None") -> "Path | None":
+    return Path(value).expanduser() if value else None
 
-    repo_root = Path(args.repo_root).expanduser() if args.repo_root else None
-    # Neither flag defaults eagerly here: an explicit --data-dir/--state-dir
-    # always wins, but omitting BOTH must reach sweep() as None so it resolves
-    # the register/receipts/active-manifest store via the fabric's canonical
-    # central-store resolver (scripts/lib/orphan_sweep.py::_resolve_central_paths)
-    # instead of this CLI's own (formerly repo-relative) guess.
-    data_dir = Path(args.data_dir).expanduser() if args.data_dir else None
-    state_dir = Path(args.state_dir).expanduser() if args.state_dir else None
-    account_data_root = (
-        Path(args.account_data_root).expanduser() if args.account_data_root else None
-    )
 
-    result = sweep(
-        repo_root=repo_root,
-        data_dir=data_dir,
-        state_dir=state_dir,
-        project_id=args.project_id,
-        current_dispatch_id=args.current_dispatch,
-        max_orphans=args.max_orphans,
-        dry_run=args.dry_run,
-        account_data_root=account_data_root,
-    )
-
+def _emit_result(result, args: argparse.Namespace) -> None:
     if args.json:
         json.dump(result.to_dict(), sys.stdout, separators=(",", ":"))
         sys.stdout.write("\n")
@@ -160,8 +173,6 @@ def main(argv: "list[str] | None" = None) -> int:
             + (f" (CAPPED at {args.max_orphans})" if result.active_capped else "")
             + (f"; {len(result.errors)} error(s)" if result.errors else "")
         )
-
-    return 1 if result.errors else 0
 
 
 if __name__ == "__main__":
