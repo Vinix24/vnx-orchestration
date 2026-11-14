@@ -182,7 +182,43 @@ def verify_dispatch_provenance(
     # Layer 1: Registry check
     link = get_provenance_link(conn, dispatch_id)
     registry_link = link.to_dict() if link else None
+    _check_registry_layer(link, dispatch_id, findings, advisories)
 
+    # Layer 2: Receipt check
+    receipts = find_receipts_by_dispatch(receipts_path, dispatch_id)
+    receipt_count = len(receipts)
+    _check_receipt_layer(receipts, dispatch_id, findings, advisories)
+
+    # Layer 3: Git check
+    commits = find_commits_by_dispatch(dispatch_id, repo_root)
+    commit_count = len(commits)
+    _check_git_layer(commits, receipts, dispatch_id, findings, advisories)
+
+    # Layer 4: Cross-layer consistency
+    _check_cross_layer(link, receipts, commits, dispatch_id, findings)
+
+    # Determine verdict
+    chain_status, verdict = _determine_verdict(findings, link, receipt_count, commit_count)
+
+    return VerificationResult(
+        dispatch_id=dispatch_id,
+        verdict=verdict,
+        chain_status=chain_status,
+        findings=findings,
+        advisories=advisories,
+        registry_link=registry_link,
+        receipt_count=receipt_count,
+        commit_count=commit_count,
+    )
+
+
+def _check_registry_layer(
+    link: Optional[ProvenanceLink],
+    dispatch_id: str,
+    findings: List[VerificationFinding],
+    advisories: List[Advisory],
+) -> None:
+    """Layer 1: a dispatch missing from the registry gets a finding and an advisory."""
     if not link:
         findings.append(VerificationFinding(
             finding_type=GAP_MISSING_DISPATCH_ID,
@@ -200,10 +236,14 @@ def verify_dispatch_provenance(
             recommendation=f"Register provenance link for dispatch {dispatch_id}",
         ))
 
-    # Layer 2: Receipt check
-    receipts = find_receipts_by_dispatch(receipts_path, dispatch_id)
-    receipt_count = len(receipts)
 
+def _check_receipt_layer(
+    receipts: List[Dict[str, Any]],
+    dispatch_id: str,
+    findings: List[VerificationFinding],
+    advisories: List[Advisory],
+) -> None:
+    """Layer 2: no receipts, or the provenance gaps of each receipt."""
     if not receipts:
         findings.append(VerificationFinding(
             finding_type=GAP_MISSING_RECEIPT,
@@ -234,10 +274,15 @@ def verify_dispatch_provenance(
                     recommendation="Receipt missing trace_token — enrich for full traceability",
                 ))
 
-    # Layer 3: Git check
-    commits = find_commits_by_dispatch(dispatch_id, repo_root)
-    commit_count = len(commits)
 
+def _check_git_layer(
+    commits: List[str],
+    receipts: List[Dict[str, Any]],
+    dispatch_id: str,
+    findings: List[VerificationFinding],
+    advisories: List[Advisory],
+) -> None:
+    """Layer 3: receipts without any commit carrying the trace token."""
     if not commits and receipts:
         findings.append(VerificationFinding(
             finding_type=GAP_MISSING_TRACE_TOKEN,
@@ -255,7 +300,15 @@ def verify_dispatch_provenance(
             recommendation="Add Dispatch-ID trace token to commit messages for this dispatch",
         ))
 
-    # Layer 4: Cross-layer consistency
+
+def _check_cross_layer(
+    link: Optional[ProvenanceLink],
+    receipts: List[Dict[str, Any]],
+    commits: List[str],
+    dispatch_id: str,
+    findings: List[VerificationFinding],
+) -> None:
+    """Layer 4: registry receipt_id and commit_sha must match the real data."""
     if link and receipts:
         if link.receipt_id:
             # resolve_receipt_id mirrors the same fallback the registry write
@@ -293,20 +346,6 @@ def verify_dispatch_provenance(
                 ),
                 layer="registry",
             ))
-
-    # Determine verdict
-    chain_status, verdict = _determine_verdict(findings, link, receipt_count, commit_count)
-
-    return VerificationResult(
-        dispatch_id=dispatch_id,
-        verdict=verdict,
-        chain_status=chain_status,
-        findings=findings,
-        advisories=advisories,
-        registry_link=registry_link,
-        receipt_count=receipt_count,
-        commit_count=commit_count,
-    )
 
 
 def _determine_verdict(
