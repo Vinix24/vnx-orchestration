@@ -467,8 +467,8 @@ class T0IntelligenceGatherer:
             usage_log = self._usage_log_path()
             refuse_real_central_store_write_under_test_runner(usage_log)
             usage_log.parent.mkdir(parents=True, exist_ok=True)
-            with open(usage_log, "a", encoding="utf-8") as fh:
-                fh.write(json.dumps(event, separators=(",", ":")) + "\n")
+            from qi_learning_approval import append_usage_event
+            append_usage_event(usage_log.parent, event)
         except OSError:
             pass
 
