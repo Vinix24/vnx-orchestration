@@ -749,84 +749,9 @@ class PRQueueManager:
             changes = []
 
             for field, new_value in patches.items():
-
-                # === INSTRUCTION BODY: replace entirely ===
-                if field == 'instruction':
-                    match = re.search(
-                        r'(Instruction:\n)(.+?)(\n\nDependencies:|\n\n\[\[DONE\]\])',
-                        content, re.DOTALL
-                    )
-                    if match:
-                        old_body = match.group(2).strip()
-                        content = content[:match.start(2)] + new_value + '\n' + content[match.end(2):]
-                        changes.append(f"instruction: replaced ({len(old_body)} → {len(new_value)} chars)")
-                    else:
-                        print(f"⚠️  Could not locate Instruction body in dispatch")
-
-                # === INSTRUCTION BODY: append ===
-                elif field == 'append-instruction':
-                    match = re.search(
-                        r'(Instruction:\n.+?)(\n\nDependencies:|\n\n\[\[DONE\]\])',
-                        content, re.DOTALL
-                    )
-                    if match:
-                        insert_pos = match.end(1)
-                        content = content[:insert_pos] + '\n\n' + new_value + content[insert_pos:]
-                        changes.append(f"instruction: appended {len(new_value)} chars")
-                    else:
-                        print(f"⚠️  Could not locate Instruction body in dispatch")
-
-                # === INSTRUCTION BODY: prepend ===
-                elif field == 'prepend-instruction':
-                    match = re.search(r'Instruction:\n', content)
-                    if match:
-                        insert_pos = match.end()
-                        content = content[:insert_pos] + new_value + '\n\n' + content[insert_pos:]
-                        changes.append(f"instruction: prepended {len(new_value)} chars")
-                    else:
-                        print(f"⚠️  Could not locate Instruction header in dispatch")
-
-                # === INSTRUCTION FROM FILE ===
-                elif field == 'instruction-file':
-                    file_path = Path(new_value)
-                    if not file_path.is_absolute():
-                        file_path = self.project_root / new_value
-                    if not file_path.exists():
-                        print(f"❌ Instruction file not found: {new_value}")
-                        continue
-                    file_content = file_path.read_text().strip()
-                    match = re.search(
-                        r'(Instruction:\n)(.+?)(\n\nDependencies:|\n\n\[\[DONE\]\])',
-                        content, re.DOTALL
-                    )
-                    if match:
-                        content = content[:match.start(2)] + file_content + '\n' + content[match.end(2):]
-                        changes.append(f"instruction: replaced from file {file_path.name} ({len(file_content)} chars)")
-                    else:
-                        print(f"⚠️  Could not locate Instruction body in dispatch")
-
-                # === HEADER FIELDS (any Manager Block field) ===
-                else:
-                    field_capitalized = field.replace('-', ' ').title().replace(' ', '-')
-                    pattern = f"{field_capitalized}: (.+)"
-                    match = re.search(pattern, content)
-                    if match:
-                        old_value = match.group(1)
-                        content = content.replace(
-                            f"{field_capitalized}: {old_value}",
-                            f"{field_capitalized}: {new_value}",
-                            1  # only first occurrence
-                        )
-                        changes.append(f"{field}: {old_value} → {new_value}")
-                    else:
-                        # Field not found - insert it before Dispatch-ID line
-                        insert_match = re.search(r'(Dispatch-ID:)', content)
-                        if insert_match:
-                            insert_line = f"{field_capitalized}: {new_value}\n"
-                            content = content[:insert_match.start()] + insert_line + content[insert_match.start():]
-                            changes.append(f"{field}: (added) {new_value}")
-                        else:
-                            print(f"⚠️  Field '{field}' not found and could not insert")
+                content, change = self._patch_apply_field(content, field, new_value)
+                if change is not None:
+                    changes.append(change)
 
             if not changes:
                 print("❌ No changes applied")
@@ -859,6 +784,91 @@ class PRQueueManager:
             import traceback
             traceback.print_exc()
             return False
+
+    def _patch_apply_field(self, content: str, field: str, new_value: str):
+        """Apply one patch field to the dispatch text; returns (content, change|None)."""
+        import re
+
+        change = None
+        # === INSTRUCTION BODY: replace entirely ===
+        if field == 'instruction':
+            match = re.search(
+                r'(Instruction:\n)(.+?)(\n\nDependencies:|\n\n\[\[DONE\]\])',
+                content, re.DOTALL
+            )
+            if match:
+                old_body = match.group(2).strip()
+                content = content[:match.start(2)] + new_value + '\n' + content[match.end(2):]
+                change = (f"instruction: replaced ({len(old_body)} → {len(new_value)} chars)")
+            else:
+                print(f"⚠️  Could not locate Instruction body in dispatch")
+
+        # === INSTRUCTION BODY: append ===
+        elif field == 'append-instruction':
+            match = re.search(
+                r'(Instruction:\n.+?)(\n\nDependencies:|\n\n\[\[DONE\]\])',
+                content, re.DOTALL
+            )
+            if match:
+                insert_pos = match.end(1)
+                content = content[:insert_pos] + '\n\n' + new_value + content[insert_pos:]
+                change = (f"instruction: appended {len(new_value)} chars")
+            else:
+                print(f"⚠️  Could not locate Instruction body in dispatch")
+
+        # === INSTRUCTION BODY: prepend ===
+        elif field == 'prepend-instruction':
+            match = re.search(r'Instruction:\n', content)
+            if match:
+                insert_pos = match.end()
+                content = content[:insert_pos] + new_value + '\n\n' + content[insert_pos:]
+                change = (f"instruction: prepended {len(new_value)} chars")
+            else:
+                print(f"⚠️  Could not locate Instruction header in dispatch")
+
+        # === INSTRUCTION FROM FILE ===
+        elif field == 'instruction-file':
+            file_path = Path(new_value)
+            if not file_path.is_absolute():
+                file_path = self.project_root / new_value
+            if not file_path.exists():
+                print(f"❌ Instruction file not found: {new_value}")
+                return content, None
+            file_content = file_path.read_text().strip()
+            match = re.search(
+                r'(Instruction:\n)(.+?)(\n\nDependencies:|\n\n\[\[DONE\]\])',
+                content, re.DOTALL
+            )
+            if match:
+                content = content[:match.start(2)] + file_content + '\n' + content[match.end(2):]
+                change = (f"instruction: replaced from file {file_path.name} ({len(file_content)} chars)")
+            else:
+                print(f"⚠️  Could not locate Instruction body in dispatch")
+
+        # === HEADER FIELDS (any Manager Block field) ===
+        else:
+            field_capitalized = field.replace('-', ' ').title().replace(' ', '-')
+            pattern = f"{field_capitalized}: (.+)"
+            match = re.search(pattern, content)
+            if match:
+                old_value = match.group(1)
+                content = content.replace(
+                    f"{field_capitalized}: {old_value}",
+                    f"{field_capitalized}: {new_value}",
+                    1  # only first occurrence
+                )
+                change = (f"{field}: {old_value} → {new_value}")
+            else:
+                # Field not found - insert it before Dispatch-ID line
+                insert_match = re.search(r'(Dispatch-ID:)', content)
+                if insert_match:
+                    insert_line = f"{field_capitalized}: {new_value}\n"
+                    content = content[:insert_match.start()] + insert_line + content[insert_match.start():]
+                    change = (f"{field}: (added) {new_value}")
+                else:
+                    print(f"⚠️  Field '{field}' not found and could not insert")
+
+        return content, change
 
     def reject_dispatch(self, dispatch_id: str, reason: Optional[str] = None, defer_pr: Optional[str] = None) -> bool:
         """

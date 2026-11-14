@@ -1221,40 +1221,10 @@ def cmd_objective_link_pr(args: argparse.Namespace) -> int:
     touched_prs = sorted({int(ref.lstrip("#")) for ref in (added + already)})
 
     if new_ref == (existing or ""):
-        # pr_ref itself is unchanged, but the delivery marking is still an
-        # explicit operator assertion — write/upgrade it regardless.
-        conn = _db_conn(state_dir)
-        try:
-            delivery_written = _write_pr_delivery(
-                conn, project_id, track_id, touched_prs, delivery_kind, set_by="operator"
-            )
-            conn.commit()
-        finally:
-            conn.close()
-        payload = {
-            "track_id": track_id,
-            "project_id": project_id,
-            "pr_ref": new_ref,
-            "added": added,
-            "already_present": already,
-            "delivery": delivery_kind,
-            "delivery_written": delivery_written,
-            "action": "noop_no_change",
-            "applied": False,
-        }
-        if not delivery_written:
-            payload["error"] = _DELIVERY_TABLE_MISSING_MSG
-        if args.json:
-            print(json.dumps(payload, indent=2, default=str))
-        else:
-            print(f"\nvnx objective link-pr — {track_id} (project '{project_id}')")
-            print(f"  pr_ref: {new_ref}")
-            if delivery_written:
-                print(f"  delivery ({delivery_kind}) recorded for: {', '.join(f'#{n}' for n in touched_prs)}")
-            else:
-                print(f"  ERROR: {_DELIVERY_TABLE_MISSING_MSG}", file=sys.stderr)
-            print(f"  all provided PR refs already present; no pr_ref change made.\n")
-        return 0
+        return _link_pr_noop(
+            args, state_dir, project_id, track_id, new_ref, added, already,
+            touched_prs, delivery_kind,
+        )
 
     # ADR-007: write is scoped to (track_id, project_id).
     conn = _db_conn(state_dir)
@@ -1293,6 +1263,57 @@ def cmd_objective_link_pr(args: argparse.Namespace) -> int:
     }
     if not delivery_written:
         payload["error"] = _DELIVERY_TABLE_MISSING_MSG
+    _link_pr_print_linked(
+        args, payload, track_id, project_id, new_ref, added, already,
+        delivery_written, delivery_kind, touched_prs,
+    )
+    return 0
+
+
+def _link_pr_noop(
+    args, state_dir, project_id, track_id, new_ref, added, already,
+    touched_prs, delivery_kind,
+) -> int:
+    # pr_ref itself is unchanged, but the delivery marking is still an
+    # explicit operator assertion — write/upgrade it regardless.
+    conn = _db_conn(state_dir)
+    try:
+        delivery_written = _write_pr_delivery(
+            conn, project_id, track_id, touched_prs, delivery_kind, set_by="operator"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    payload = {
+        "track_id": track_id,
+        "project_id": project_id,
+        "pr_ref": new_ref,
+        "added": added,
+        "already_present": already,
+        "delivery": delivery_kind,
+        "delivery_written": delivery_written,
+        "action": "noop_no_change",
+        "applied": False,
+    }
+    if not delivery_written:
+        payload["error"] = _DELIVERY_TABLE_MISSING_MSG
+    if args.json:
+        print(json.dumps(payload, indent=2, default=str))
+    else:
+        print(f"\nvnx objective link-pr — {track_id} (project '{project_id}')")
+        print(f"  pr_ref: {new_ref}")
+        if delivery_written:
+            print(f"  delivery ({delivery_kind}) recorded for: {', '.join(f'#{n}' for n in touched_prs)}")
+        else:
+            print(f"  ERROR: {_DELIVERY_TABLE_MISSING_MSG}", file=sys.stderr)
+        print(f"  all provided PR refs already present; no pr_ref change made.\n")
+    return 0
+
+
+def _link_pr_print_linked(
+    args, payload, track_id, project_id, new_ref, added, already,
+    delivery_written, delivery_kind, touched_prs,
+) -> None:
     if args.json:
         print(json.dumps(payload, indent=2, default=str))
     else:
@@ -1307,7 +1328,6 @@ def cmd_objective_link_pr(args: argparse.Namespace) -> int:
         else:
             print(f"  ERROR: {_DELIVERY_TABLE_MISSING_MSG}", file=sys.stderr)
         print()
-    return 0
 
 
 def cmd_objective_unlink_pr(args: argparse.Namespace) -> int:
@@ -6983,6 +7003,24 @@ def _build_parser() -> argparse.ArgumentParser:
 
     _add_objective_list_parser(obj_sub, _common)
 
+    _add_objective_show_sync_drift_parsers(obj_sub, _common)
+    _add_objective_reconcile_parser(obj_sub, _common)
+
+    _add_objective_write_parsers(obj_sub, _common)
+
+    _add_objective_hint_and_review_parsers(obj_sub, _common)
+
+    _add_planning_parsers(sub, obj_sub, _common)
+
+    # ------------------------------------------------------------------
+    # plan-gate subcommand (PM plan-first gate)
+    # ------------------------------------------------------------------
+    _add_plan_gate_parsers(sub, _common)
+
+    return parser
+
+
+def _add_objective_show_sync_drift_parsers(obj_sub, _common) -> None:
     p_show = obj_sub.add_parser("show", help="show one objective")
     _common(p_show)
     p_show.add_argument("track_id")
@@ -7010,6 +7048,8 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p_drift.set_defaults(func=cmd_objective_drift)
 
+
+def _add_objective_reconcile_parser(obj_sub, _common) -> None:
     p_reconcile = obj_sub.add_parser(
         "reconcile",
         help="batch git-grounded auto-close: verify PR merge state via gh and close done tracks",
@@ -7037,8 +7077,8 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p_reconcile.set_defaults(func=cmd_objective_reconcile)
 
-    _add_objective_write_parsers(obj_sub, _common)
 
+def _add_objective_hint_and_review_parsers(obj_sub, _common) -> None:
     p_lane_hint = obj_sub.add_parser(
         "set-lane-hint",
         help="set the descriptive dispatch lane_hint (governed|direct|unset) on a track",
@@ -7079,15 +7119,6 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     _common(p_rec_streak)
     p_rec_streak.set_defaults(func=cmd_objective_reconcile_streak)
-
-    _add_planning_parsers(sub, obj_sub, _common)
-
-    # ------------------------------------------------------------------
-    # plan-gate subcommand (PM plan-first gate)
-    # ------------------------------------------------------------------
-    _add_plan_gate_parsers(sub, _common)
-
-    return parser
 
 
 def main(argv: Optional[list[str]] = None) -> int:
