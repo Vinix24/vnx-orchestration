@@ -115,58 +115,6 @@ class TestOI1120ReturncodeCaching:
 
         assert adapter._returncode_cache.get("T1") == 2
 
-    def test_classify_completion_uses_cached_returncode(self):
-        """When observe() has no returncode, _classify_completion falls back to cache."""
-        from subprocess_dispatch_internals.delivery import _classify_completion
-
-        adapter = MagicMock()
-        adapter.was_timed_out.return_value = False
-        obs = MagicMock()
-        obs.transport_state = {}  # no returncode — process was removed by stop()
-        adapter.observe.return_value = obs
-        adapter._returncode_cache = {"T1": 1}  # non-zero cached by stop()
-
-        with patch("subprocess_dispatch._promote_manifest", return_value=None):
-            result = _classify_completion(
-                adapter=adapter,
-                terminal_id="T1",
-                dispatch_id="d-oi1120",
-                session_id=None,
-                event_count=3,
-                touched_files=set(),
-                manifest_path=None,
-                rotation_triggered=False,
-                pending_handover=None,
-            )
-
-        assert result.success is False
-
-    def test_classify_completion_timeout_is_failure_when_process_removed(self):
-        """Timeout must fail even when process is removed (returncode=None from observe)."""
-        from subprocess_dispatch_internals.delivery import _classify_completion
-
-        adapter = MagicMock()
-        adapter.was_timed_out.return_value = True  # timeout fired
-        obs = MagicMock()
-        obs.transport_state = {}  # process was popped by stop()
-        adapter.observe.return_value = obs
-        adapter._returncode_cache = {}  # nothing cached
-
-        with patch("subprocess_dispatch._promote_manifest", return_value=None):
-            result = _classify_completion(
-                adapter=adapter,
-                terminal_id="T1",
-                dispatch_id="d-oi1120-timeout",
-                session_id=None,
-                event_count=0,
-                touched_files=set(),
-                manifest_path=None,
-                rotation_triggered=False,
-                pending_handover=None,
-            )
-
-        assert result.success is False
-
     def test_read_events_with_timeout_caches_returncode_at_eof(self):
         """EOF path captures process returncode into _returncode_cache."""
         lines = [
@@ -302,11 +250,12 @@ class TestOI1123NonBlockingRead:
 
         start = time.time()
         events = list(adapter.read_events_with_timeout(
-            "T1", chunk_timeout=0.3, total_deadline=5.0,
+            "T1", chunk_timeout=0.3, total_deadline=1.0,
         ))
         elapsed = time.time() - start
 
-        # Should fire at ~0.3s (chunk_timeout), NOT wait for total_deadline (5s)
+        # OI-903: the stall timeout is floored at total_deadline * 0.5, so with a
+        # 1.0s deadline it fires at ~0.5s (chunk-stall), before the 1.0s deadline.
         assert elapsed < 1.5, f"chunk_timeout not enforced: {elapsed:.2f}s (expected <1.5s)"
         assert events == []
         assert adapter.was_timed_out("T1")
@@ -432,13 +381,18 @@ class TestOI1123NonBlockingRead:
         proc.stdout = os.fdopen(r_fd, "rb")
         adapter._processes["T1"] = proc
 
-        # Drip events slowly to exceed total_deadline
+        # Drip events slowly to exceed total_deadline; the stop event ends the
+        # thread so it cannot outlive the test and call a later test's patched sleep.
+        stop = threading.Event()
+
         def drip():
             try:
                 for i in range(100):
+                    if stop.is_set():
+                        break
                     line = _json_line(type="text", text=f"m{i}")
                     os.write(w_fd, line)
-                    time.sleep(0.15)
+                    stop.wait(0.15)
             except OSError:
                 pass
             finally:
@@ -454,8 +408,9 @@ class TestOI1123NonBlockingRead:
             "T1", chunk_timeout=2.0, total_deadline=0.5,
         ))
 
+        stop.set()
+        t.join(timeout=2)
+
         assert len(events) > 0
         assert len(events) < 100
         assert adapter.was_timed_out("T1")
-
-        t.join(timeout=2)

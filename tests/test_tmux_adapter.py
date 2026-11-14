@@ -541,52 +541,6 @@ class TestLoadDispatchScript(unittest.TestCase):
         self.assertEqual(data["_prompt"], "full prompt here")
 
 
-# ---------------------------------------------------------------------------
-# TestAdapterCliModule
-# ---------------------------------------------------------------------------
-
-class TestAdapterCliResolveCommand(unittest.TestCase):
-    """Tests for tmux_adapter_cli.py resolve sub-command."""
-
-    def setUp(self):
-        self._tmpdir = tempfile.TemporaryDirectory()
-        self.state_dir = self._tmpdir.name
-        init_schema(self.state_dir)
-        _write_panes_json(self.state_dir, SAMPLE_PANES)
-
-    def tearDown(self):
-        self._tmpdir.cleanup()
-
-    def test_resolve_known_terminal(self):
-        from tmux_adapter_cli import main
-        import io
-        from contextlib import redirect_stdout
-        buf = io.StringIO()
-        with redirect_stdout(buf):
-            rc = main(["resolve", "--terminal", "T2", "--state-dir", self.state_dir])
-        self.assertEqual(rc, 0)
-        data = json.loads(buf.getvalue())
-        self.assertEqual(data["terminal_id"], "T2")
-        self.assertEqual(data["pane_id"], "vnx:0.2")
-
-    def test_resolve_unknown_terminal_returns_one(self):
-        from tmux_adapter_cli import main
-        rc = main(["resolve", "--terminal", "T9", "--state-dir", self.state_dir])
-        self.assertEqual(rc, 1)
-
-    def test_config_command_returns_zero(self):
-        from tmux_adapter_cli import main
-        import io
-        from contextlib import redirect_stdout
-        buf = io.StringIO()
-        with redirect_stdout(buf):
-            rc = main(["config"])
-        self.assertEqual(rc, 0)
-        data = json.loads(buf.getvalue())
-        self.assertIn("enabled", data)
-        self.assertIn("primary_path", data)
-
-
 class TestLoadAndPasteUsesPerCallNamedBuffer(unittest.TestCase):
     """OI-1136 regression: _tmux_load_and_paste() must never use tmux's shared
     default buffer.

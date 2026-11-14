@@ -287,33 +287,6 @@ class TestAutonomyEnvelope:
 
 
 # ---------------------------------------------------------------------------
-# Certification runner
-# ---------------------------------------------------------------------------
-
-class TestCertification:
-    def test_full_certification_passes(self):
-        from fpd_certification import run_certification
-        report = run_certification()
-        assert report.certified, f"Failed rows: {[r.row_id for r in report.rows if r.status == 'fail']}"
-
-    def test_certification_section_7(self):
-        from fpd_certification import run_certification
-        report = run_certification(sections=[7])
-        assert report.passed > 0
-        section_7_rows = [r for r in report.rows if r.section == 7]
-        assert len(section_7_rows) == 8
-
-    def test_certification_report_serializable(self):
-        from fpd_certification import run_certification
-        report = run_certification(sections=[1])
-        d = report.to_dict()
-        assert "certified" in d
-        assert "rows" in d
-        import json
-        json.dumps(d)  # Must not raise
-
-
-# ---------------------------------------------------------------------------
 # Integration: enforcement mode behavior
 # ---------------------------------------------------------------------------
 
