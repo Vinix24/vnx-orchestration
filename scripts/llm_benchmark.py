@@ -1504,24 +1504,10 @@ def generate_markdown_report(
     results: Dict[str, Dict], all_models: List[str], config: BenchmarkConfig,
 ) -> str:
     """Generate the full markdown comparison report."""
-    lines = _report_header_lines(results, all_models, config)
-    lines.extend(_report_summary_lines(results, all_models))
-    lines.extend(_report_speed_lines(results, all_models))
-    lines.extend(_report_per_task_lines(results, all_models))
-    lines.extend(_report_recommendation_lines(results))
-    lines.extend(["", "---", ""])
-    lines.append("*Quality scores are null (reserved for manual 1-5 review).*")
-
-    return "\n".join(lines)
-
-
-def _report_header_lines(
-    results: Dict[str, Dict], all_models: List[str], config: BenchmarkConfig,
-) -> List[str]:
-    """Title block with run id, models, mode and counts."""
     ts = datetime.now().strftime("%Y-%m-%d %H:%M")
     task_count = len(set(r["task_id"] for r in results.values()))
-    return [
+
+    lines = [
         f"# LLM Benchmark Report -- {ts}",
         "",
         f"**Run ID**: {config.run_id}",
@@ -1534,15 +1520,13 @@ def _report_header_lines(
         "",
     ]
 
-
-def _report_summary_lines(results: Dict[str, Dict], all_models: List[str]) -> List[str]:
-    """Summary table, one row per model that has results."""
-    lines = [
+    # -- Summary table --
+    lines.extend([
         "## Summary",
         "",
         "| Model | Success | Avg Speed (tok/s) | Format OK | Completeness | Avg Time |",
         "|-------|---------|-------------------|-----------|--------------|----------|",
-    ]
+    ])
 
     for model in all_models:
         mr = [r for r in results.values() if r["model"] == model]
@@ -1560,12 +1544,9 @@ def _report_summary_lines(results: Dict[str, Dict], all_models: List[str]) -> Li
         )
 
     lines.extend(["", "---", ""])
-    return lines
 
-
-def _report_speed_lines(results: Dict[str, Dict], all_models: List[str]) -> List[str]:
-    """ASCII speed comparison chart."""
-    lines = ["## Speed Comparison (tokens/second)", ""]
+    # -- Speed comparison chart (ASCII) --
+    lines.extend(["## Speed Comparison (tokens/second)", ""])
 
     # Collect average tps per model
     model_avg_tps: Dict[str, float] = {}
@@ -1587,12 +1568,9 @@ def _report_speed_lines(results: Dict[str, Dict], all_models: List[str]) -> List
         lines.append(f"  {model:<{name_width}} |{bar}| {tps:.1f} tok/s")
     lines.append("```")
     lines.extend(["", "---", ""])
-    return lines
 
-
-def _report_per_task_lines(results: Dict[str, Dict], all_models: List[str]) -> List[str]:
-    """Per-task detail sections, in first-seen task order."""
-    lines = ["## Per-Task Results", ""]
+    # -- Per-task detailed results --
+    lines.extend(["## Per-Task Results", ""])
 
     task_ids_seen: List[str] = []
     for r in results.values():
@@ -1612,88 +1590,75 @@ def _report_per_task_lines(results: Dict[str, Dict], all_models: List[str]) -> L
             "| Metric | " + " | ".join(all_models) + " |",
             "|--------|" + "|".join("------" for _ in all_models) + "|",
         ])
-        lines.extend(_report_task_metric_rows(task_results, all_models))
+
+        # Duration row
+        vals = []
+        for m in all_models:
+            r = task_results.get(m)
+            if r and r["success"]:
+                vals.append(f"{r['duration_seconds']:.1f}s")
+            elif r:
+                vals.append("FAIL")
+            else:
+                vals.append("-")
+        lines.append("| Duration | " + " | ".join(vals) + " |")
+
+        # Tokens/sec row
+        vals = []
+        for m in all_models:
+            r = task_results.get(m)
+            tps = r["tokens_per_second"] if r and r["success"] else 0
+            vals.append(f"{tps:.1f}" if tps > 0 else "-")
+        lines.append("| Tokens/sec | " + " | ".join(vals) + " |")
+
+        # Format compliant row
+        vals = []
+        for m in all_models:
+            r = task_results.get(m)
+            vals.append("Yes" if r and r["format_compliant"] else "No")
+        lines.append("| Format OK | " + " | ".join(vals) + " |")
+
+        # Completeness row
+        vals = []
+        for m in all_models:
+            r = task_results.get(m)
+            c = r["completeness_score"] if r else 0
+            vals.append(f"{c:.0%}")
+        lines.append("| Completeness | " + " | ".join(vals) + " |")
+
+        # Fields missing row
+        vals = []
+        for m in all_models:
+            r = task_results.get(m)
+            missing = r.get("fields_missing", []) if r else []
+            vals.append(", ".join(missing) if missing else "none")
+        lines.append("| Missing fields | " + " | ".join(vals) + " |")
+
         lines.append("")
-        lines.extend(_report_output_previews(task_results, all_models))
+
+        # Output previews in collapsible sections
+        for m in all_models:
+            r = task_results.get(m)
+            if r and r["success"]:
+                preview = r["output"][:600].replace("\n", "\n> ")
+                lines.extend([
+                    f"<details><summary>{m} output (preview)</summary>",
+                    "",
+                    f"> {preview}",
+                    "",
+                    "</details>",
+                    "",
+                ])
+
         lines.extend(["---", ""])
-    return lines
 
-
-def _report_task_metric_rows(task_results: Dict[str, Dict], all_models: List[str]) -> List[str]:
-    """The five metric rows of one task table."""
-    rows: List[str] = []
-
-    # Duration row
-    vals = []
-    for m in all_models:
-        r = task_results.get(m)
-        if r and r["success"]:
-            vals.append(f"{r['duration_seconds']:.1f}s")
-        elif r:
-            vals.append("FAIL")
-        else:
-            vals.append("-")
-    rows.append("| Duration | " + " | ".join(vals) + " |")
-
-    # Tokens/sec row
-    vals = []
-    for m in all_models:
-        r = task_results.get(m)
-        tps = r["tokens_per_second"] if r and r["success"] else 0
-        vals.append(f"{tps:.1f}" if tps > 0 else "-")
-    rows.append("| Tokens/sec | " + " | ".join(vals) + " |")
-
-    # Format compliant row
-    vals = []
-    for m in all_models:
-        r = task_results.get(m)
-        vals.append("Yes" if r and r["format_compliant"] else "No")
-    rows.append("| Format OK | " + " | ".join(vals) + " |")
-
-    # Completeness row
-    vals = []
-    for m in all_models:
-        r = task_results.get(m)
-        c = r["completeness_score"] if r else 0
-        vals.append(f"{c:.0%}")
-    rows.append("| Completeness | " + " | ".join(vals) + " |")
-
-    # Fields missing row
-    vals = []
-    for m in all_models:
-        r = task_results.get(m)
-        missing = r.get("fields_missing", []) if r else []
-        vals.append(", ".join(missing) if missing else "none")
-    rows.append("| Missing fields | " + " | ".join(vals) + " |")
-    return rows
-
-
-def _report_output_previews(task_results: Dict[str, Dict], all_models: List[str]) -> List[str]:
-    """Collapsible output previews for the successful runs of one task."""
-    lines: List[str] = []
-    for m in all_models:
-        r = task_results.get(m)
-        if r and r["success"]:
-            preview = r["output"][:600].replace("\n", "\n> ")
-            lines.extend([
-                f"<details><summary>{m} output (preview)</summary>",
-                "",
-                f"> {preview}",
-                "",
-                "</details>",
-                "",
-            ])
-    return lines
-
-
-def _report_recommendation_lines(results: Dict[str, Dict]) -> List[str]:
-    """Recommendation table: best composite-scoring model per category."""
-    lines = [
+    # -- Recommendations per category --
+    lines.extend([
         "## Recommendations per Category",
         "",
         "| Category | Recommended Model | Score | Reasoning |",
         "|----------|------------------|-------|-----------|",
-    ]
+    ])
 
     categories = list(dict.fromkeys(r["category"] for r in results.values()))
     for cat in categories:
@@ -1733,7 +1698,11 @@ def _report_recommendation_lines(results: Dict[str, Dict]) -> List[str]:
             f"composite {best_avg:.2f}/1.5"
         )
         lines.append(f"| {cat} | **{best_model}** | {best_avg:.2f} | {reason} |")
-    return lines
+
+    lines.extend(["", "---", ""])
+    lines.append("*Quality scores are null (reserved for manual 1-5 review).*")
+
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
