@@ -29,6 +29,8 @@ class _Profile:
 def seam(tmp_path, monkeypatch):
     monkeypatch.setenv("VNX_DATA_DIR", str(tmp_path))
     monkeypatch.delenv("VNX_ENFORCE_WORKER_PERMISSIONS", raising=False)
+    # The live lane exports the digest; the seam must not inherit it from the shell.
+    monkeypatch.delenv(DIGEST_ENV, raising=False)
     calls = {}
 
     def fake_popen(cmd, **kwargs):
