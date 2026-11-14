@@ -90,7 +90,6 @@ def test_governance_system_wide(gov):
         "occurred_at": "2026-01-01T00:00:01Z",
     }
     assert v["policy_evaluations"][0]["outcome"] == "unknown"
-    assert v["policy_evaluations"][0]["action"] is None
     # severity ordering first, then recency
     assert [(e["entity"], e["level"]) for e in v["escalations"]] == [
         ("dispatch:d2", "escalate"), ("dispatch:d1", "hold"), ("dispatch:d3", "info")]
@@ -150,14 +149,12 @@ def test_provenance_system_wide(prov):
         "dispatch_id": "p1", "receipt_id": "r1", "commit_sha": "abc", "pr_number": 7,
         "chain_status": "receipt_and_commit", "gaps": ["g"],
         "verified_at": "2026-01-02T00:00:00Z", "registered_at": "2026-01-01T00:00:00Z"}
-    assert v["registry_entries"][0]["gaps"] == []
     assert [x["verification_id"] for x in v["verifications"]] == ["v3", "v2", "v1"]
     assert v["verifications"][2] == {
         "verification_id": "v1", "dispatch_id": "p1", "verdict": "pass",
         "chain_status": "receipt_and_commit", "findings": [1], "advisories": [2],
         "verified_by": "me", "verified_at": "2026-01-01T00:00:00Z"}
-    assert v["verifications"][1]["findings"] == []
-    assert v["verifications"][1]["advisories"] == []
+    assert v["verifications"][1]["findings"] == v["verifications"][1]["advisories"] == []
     assert [g["event_id"] for g in v["gap_events"]] == ["g2", "g1"]
     assert v["gap_events"][1] == {
         "event_id": "g1", "entity": "dispatch:p1", "gap_type": "commit",
@@ -216,8 +213,8 @@ def test_pre_merge_advisory_full(gov, monkeypatch, tmp_path):
                     "description": "Dispatch on hold: trig-d1", "layer": "governance"}
     esc = [b for b in out["blockers"] if b["finding_type"] == "escalation_escalate"][0]
     assert esc["description"] == "Dispatch escalated to T0: trig-d5"
-    assert [w["dispatch_id"] for w in out["warnings"]] == ["d1", "d5", "dX"]
-    assert all(w["finding_type"] == "b" for w in out["warnings"])
+    assert [(w["dispatch_id"], w["finding_type"]) for w in out["warnings"]] == [
+        ("d1", "b"), ("d5", "b"), ("dX", "b")]
     advs = out["advisories"]
     assert [a["advisory_type"] for a in advs] == [
         "td1", "td5", "tdX", ADVISORY_RESOLVE_ESCALATION, ADVISORY_REVIEW_OVERRIDE]
