@@ -19,7 +19,7 @@
 #            error, so the python invocation is hardened with `|| true`.
 #
 # Registration: .claude/settings.json, PreToolUse, matcher
-#       Write|Edit|MultiEdit|Bash, timeout 5 (seconds).
+#       Write|Edit|MultiEdit|NotebookEdit|Bash, timeout 5 (seconds).
 #
 # Gate: VNX_ENFORCE_WORKER_PERMISSIONS (default OFF). Unset/0 → no-op, every
 #       tool call is allowed exactly as if this hook were not registered, in
