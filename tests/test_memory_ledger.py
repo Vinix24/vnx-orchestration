@@ -62,12 +62,37 @@ def test_bind_refuses_client_root_in_both_encodings(env, tmp_path):
     boundary = SimpleNamespace(configured=True, client_roots=(root,), personal_roots=(),
                                client_project_ids=frozenset({"client-p"}))
     for name in (str(root).replace("/", "-") + "-acme", str(root).replace("/", "-") + "-x_y"):
-        folder = env.mem.parent.parent / name
-        folder.mkdir()
-        (folder / "n.md").write_text("n")
-        with pytest.raises(ml.BindRefused):
-            ml.bind(env.state, str(folder), "proj", boundary=boundary)
-        ml.bind(env.state, str(folder), "client-p", boundary=boundary)
+        for rel in ("", "memory", "memory/sub"):
+            folder = env.mem.parent.parent / name / rel
+            folder.mkdir(parents=True, exist_ok=True)
+            (folder / "n.md").write_text("n")
+            with pytest.raises(ml.BindRefused):
+                ml.bind(env.state, str(folder), "proj", boundary=boundary)
+            ml.bind(env.state, str(folder), "client-p", boundary=boundary)
+
+
+def test_bind_refuses_personal_root_memory_subfolders(env, tmp_path):
+    root = tmp_path / "Private" / "me.x"
+    boundary = SimpleNamespace(configured=True, client_roots=(), personal_roots=(root,),
+                               client_project_ids=frozenset())
+    encs = (str(root).replace("/", "-"), __import__("re").sub(r"[/._]", "-", str(root)))
+    for name in (encs[0], encs[1] + "-notes"):
+        for rel in ("memory", "memory/sub"):
+            folder = env.mem.parent.parent / name / rel
+            folder.mkdir(parents=True)
+            (folder / "n.md").write_text("n")
+            with pytest.raises(ml.BindRefused):
+                ml.bind(env.state, str(folder), "proj", boundary=boundary)
+
+
+def test_bind_sibling_with_same_prefix_is_not_refused(env, tmp_path):
+    root = tmp_path / "Business" / "clients"
+    boundary = SimpleNamespace(configured=True, client_roots=(root,), personal_roots=(),
+                               client_project_ids=frozenset())
+    sibling = env.mem.parent.parent / (str(root).replace("/", "-") + "archive") / "memory"
+    sibling.mkdir(parents=True)
+    (sibling / "n.md").write_text("n")
+    ml.bind(env.state, str(sibling), "proj", boundary=boundary)
 
 
 def test_bind_refuses_folder_of_another_project(env):

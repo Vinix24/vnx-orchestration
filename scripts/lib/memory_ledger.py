@@ -69,9 +69,17 @@ def _boundary_refusal(resolved: Path, project_id: str, boundary: Any) -> Optiona
         return None
     if project_id in boundary.client_project_ids:
         return None
+    try:
+        relative = resolved.relative_to(projects_root())
+    except ValueError:
+        return "folder is outside ~/.claude/projects/"
+    if not relative.parts:
+        return "folder is the projects root"
+    project_dir = relative.parts[0]  # the encoded project the folder belongs to, at any depth
     for root in tuple(boundary.client_roots) + tuple(boundary.personal_roots):
-        if any(resolved.name.startswith(enc) for enc in _encodings(root)):
-            return "folder lies under a client or personal root"
+        for enc in _encodings(root):
+            if project_dir == enc or project_dir.startswith(enc + "-"):
+                return "folder lies under a client or personal root"
     return None
 
 
