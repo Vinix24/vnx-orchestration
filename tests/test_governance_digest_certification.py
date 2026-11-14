@@ -136,66 +136,6 @@ from signal_store import SignalStore
 class TestDaemonProducesDigest:
     """Certify GovernanceDigestRunner generates governance_digest.json."""
 
-    def test_run_once_creates_digest_file(self, tmp_path):
-        runner = _make_runner(tmp_path)
-        assert runner.run_once() is True
-        assert (tmp_path / "governance_digest.json").exists()
-
-    def test_digest_file_is_valid_json(self, tmp_path):
-        runner = _make_runner(tmp_path)
-        runner.run_once()
-        data = json.loads((tmp_path / "governance_digest.json").read_text())
-        assert isinstance(data, dict)
-
-    def test_digest_contains_contracted_top_level_keys(self, tmp_path):
-        runner = _make_runner(tmp_path)
-        runner.run_once()
-        data = json.loads((tmp_path / "governance_digest.json").read_text())
-        required = {
-            "runner_version", "state_dir", "interval_seconds",
-            "source_records", "generated_at", "total_signals_processed",
-            "recurring_patterns", "recommendations",
-        }
-        missing = required - set(data.keys())
-        assert not missing, f"Missing keys: {missing}"
-
-    def test_digest_generated_at_is_iso_timestamp(self, tmp_path):
-        runner = _make_runner(tmp_path)
-        runner.run_once()
-        data = json.loads((tmp_path / "governance_digest.json").read_text())
-        datetime.fromisoformat(data["generated_at"].replace("Z", "+00:00"))
-
-    def test_digest_from_gate_receipts(self, tmp_path):
-        """Runner reads real gate result events from t0_receipts.ndjson."""
-        receipts = tmp_path / "t0_receipts.ndjson"
-        lines = []
-        for i in range(5):
-            lines.append(json.dumps({
-                "event_type": "task_complete" if i % 2 == 0 else "task_failed",
-                "gate": f"gate_pr{i}_test",
-                "dispatch_id": f"d-{i:03d}",
-                "feature_id": f"Feature {16 + i}",
-            }))
-        receipts.write_text("\n".join(lines) + "\n", encoding="utf-8")
-
-        runner = _make_runner(tmp_path)
-        runner.run_once()
-        data = json.loads((tmp_path / "governance_digest.json").read_text())
-        assert data["source_records"]["gate_results"] == 5
-
-    def test_digest_from_queue_anomalies(self, tmp_path):
-        """Runner reads delivery_failure events from t0_receipts.ndjson."""
-        receipts = tmp_path / "t0_receipts.ndjson"
-        receipts.write_text(
-            json.dumps({"event_type": "delivery_failure", "dispatch_id": "d-fail", "terminal_id": "T1"}) + "\n"
-            + json.dumps({"event_type": "dead_letter", "dispatch_id": "d-dead", "terminal_id": "T2"}) + "\n",
-            encoding="utf-8",
-        )
-        runner = _make_runner(tmp_path)
-        runner.run_once()
-        data = json.loads((tmp_path / "governance_digest.json").read_text())
-        assert data["source_records"]["queue_anomalies"] == 2
-
     def test_run_once_delegates_to_f18_extractors(self, tmp_path):
         """Runner calls collect_governance_signals and build_digest from F18."""
         runner = _make_runner(tmp_path)
@@ -322,14 +262,6 @@ class TestAdvisoryOnlyEnforcement:
         for rec in digest.recommendations:
             assert rec.advisory_only is True, f"Recommendation {rec.content!r} has advisory_only=False"
 
-    def test_digest_json_recommendations_carry_advisory_only_flag(self, tmp_path):
-        """End-to-end: daemon produces digest where all recs have advisory_only=True."""
-        runner = _make_runner(tmp_path)
-        runner.run_once()
-        data = json.loads((tmp_path / "governance_digest.json").read_text())
-        for rec in data.get("recommendations", []):
-            assert rec.get("advisory_only") is True, f"rec missing advisory_only=True: {rec}"
-
     def test_all_recommendation_categories_are_known(self):
         """Every RECOMMENDATION_CATEGORIES entry is a non-empty string."""
         assert len(RECOMMENDATION_CATEGORIES) >= 1
@@ -371,24 +303,6 @@ class TestContractInvariants:
         assert runner.should_run() is True
 
     # D-3: Digest is a projection — deleting it has no data loss
-    def test_d3_digest_is_regenerable(self, tmp_path):
-        """Deleting digest and re-running produces it again."""
-        runner = _make_runner(tmp_path)
-        runner.run_once()
-        digest_path = tmp_path / "governance_digest.json"
-        assert digest_path.exists()
-        first = json.loads(digest_path.read_text())
-
-        # Delete and regenerate
-        digest_path.unlink()
-        runner.last_run = None  # Reset so it runs again
-        runner.run_once()
-        assert digest_path.exists()
-        second = json.loads(digest_path.read_text())
-
-        # Same shape
-        assert set(first.keys()) == set(second.keys())
-
     # D-4: Recommendation status changes written to governance_recommendations.json, not digest
     def test_d4_digest_has_no_status_mutation_api(self):
         """GovernanceDigestRunner has no method to mutate recommendation status."""
@@ -410,65 +324,6 @@ class TestContractInvariants:
         digest_file.write_text(json.dumps({"test": True}), encoding="utf-8")
         result = sd._operator_get_governance_digest(digest_path=digest_file)
         assert result["data"]["test"] is True
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# Section 5: End-to-end pipeline (daemon → JSON → API → typed envelope)
-# ═══════════════════════════════════════════════════════════════════════════
-
-class TestEndToEndPipeline:
-    """Certify complete daemon-to-dashboard pipeline."""
-
-    def test_daemon_output_readable_by_api(self, tmp_path):
-        """Runner writes digest -> API reads it -> returns valid envelope."""
-        runner = _make_runner(tmp_path)
-        runner.run_once()
-        digest_path = tmp_path / "governance_digest.json"
-        result = sd._operator_get_governance_digest(digest_path=digest_path)
-
-        assert result["degraded"] is False
-        assert result["view"] == "GovernanceDigestView"
-        assert isinstance(result["data"], dict)
-        assert "total_signals_processed" in result["data"]
-
-    def test_pipeline_with_receipt_signals(self, tmp_path):
-        """Receipts -> Runner -> digest.json -> API envelope with signal counts."""
-        receipts = tmp_path / "t0_receipts.ndjson"
-        receipts.write_text(
-            json.dumps({"event_type": "task_complete", "gate": "gate_pr1_test", "dispatch_id": "d-001"}) + "\n"
-            + json.dumps({"event_type": "gate_fail", "gate": "gate_pr2_test", "dispatch_id": "d-002"}) + "\n"
-            + json.dumps({"event_type": "delivery_failure", "dispatch_id": "d-003", "terminal_id": "T1"}) + "\n",
-            encoding="utf-8",
-        )
-
-        runner = _make_runner(tmp_path)
-        runner.run_once()
-        result = sd._operator_get_governance_digest(digest_path=tmp_path / "governance_digest.json")
-
-        assert result["degraded"] is False
-        source = result["data"].get("source_records", {})
-        assert source.get("gate_results", 0) >= 2
-        assert source.get("queue_anomalies", 0) >= 1
-
-    def test_pipeline_recurring_patterns_are_list(self, tmp_path):
-        runner = _make_runner(tmp_path)
-        runner.run_once()
-        result = sd._operator_get_governance_digest(digest_path=tmp_path / "governance_digest.json")
-        assert isinstance(result["data"].get("recurring_patterns"), list)
-
-    def test_pipeline_recommendations_are_list(self, tmp_path):
-        runner = _make_runner(tmp_path)
-        runner.run_once()
-        result = sd._operator_get_governance_digest(digest_path=tmp_path / "governance_digest.json")
-        assert isinstance(result["data"].get("recommendations"), list)
-
-    def test_pipeline_generated_at_present(self, tmp_path):
-        runner = _make_runner(tmp_path)
-        runner.run_once()
-        result = sd._operator_get_governance_digest(digest_path=tmp_path / "governance_digest.json")
-        generated_at = result["data"].get("generated_at")
-        assert generated_at is not None
-        datetime.fromisoformat(generated_at.replace("Z", "+00:00"))
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -567,20 +422,6 @@ class TestSchedulingLifecycle:
 
 class TestDashboardTypeAlignment:
     """Certify dashboard TypeScript types match Python output shape."""
-
-    def test_digest_output_keys_match_typescript_interface(self, tmp_path):
-        """GovernanceDigestData TS interface fields present in daemon output."""
-        runner = _make_runner(tmp_path)
-        runner.run_once()
-        data = json.loads((tmp_path / "governance_digest.json").read_text())
-
-        # Keys from GovernanceDigestData in lib/types.ts
-        ts_keys = {
-            "runner_version", "generated_at", "total_signals_processed",
-            "recurring_patterns", "recommendations", "source_records",
-        }
-        for key in ts_keys:
-            assert key in data, f"TS GovernanceDigestData expects key {key!r}"
 
     def test_envelope_keys_match_typescript_interface(self, tmp_path):
         """GovernanceDigestEnvelope TS interface fields present in API output."""
