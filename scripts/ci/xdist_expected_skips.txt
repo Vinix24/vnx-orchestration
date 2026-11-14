@@ -78,3 +78,9 @@ tests/test_oi1452_canonical_failure_reason.py::test_kimi_real_pr1677_record_and_
 tests/test_report_to_receipt_converter.py::TestFailClosedBranchNotOnOrigin::test_existing_branch_passes_check  # OI-2518: the precondition `git ls-remote --heads origin dispatch/*` timed out after 10 s under xdist — the listing is only the positive control, so the test skips instead of failing; a skip is not a pass
 tests/test_report_to_receipt_converter_staleness.py::TestConverterBeaconFreshnessLiveStore::test_converter_beacon_is_fresh_on_the_live_store  # no live VNX store resolvable — no store with a booked receipt (state/t0_receipts.ndjson) was found, so the tripwire has nothing to measure (CI runner / fresh machine)
 tests/test_workflow_validation.py::test_repo_workflows_pass_validation  # actionlint not installed
+
+# OI-2589 (dispatch dlv-oi2589-excluded-closing-1): tests/integration/test_gemini_streaming_gated.py
+# leaves test_exclusions.txt, so Profile A runs it again. Its two live tests carry a
+# host-conditional skipif (no gemini binary on the runner).
+tests/integration/test_gemini_streaming_gated.py::TestGeminiLiveStreaming::test_stream_events_yields_events  # gemini binary not installed
+tests/integration/test_gemini_streaming_gated.py::TestGeminiLiveStreaming::test_all_real_events_have_tier_1  # gemini binary not installed

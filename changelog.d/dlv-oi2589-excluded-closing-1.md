@@ -1,0 +1,1 @@
+- CI: 36 test files whose fixes are on main leave `scripts/ci/test_exclusions.txt` and Profile A runs them again; their two host-conditional gemini skips join `xdist_expected_skips.txt` (OI-2589).
