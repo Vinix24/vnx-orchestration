@@ -1,17 +1,9 @@
 """CLI van het besluitenregister (ADR-077): ``python3 -m besluitenregister <sub> --context <LOGDIR> ...``.
 
-Subcommando's: add, list, show, vervang, trek-in, herzien, bevestig, check, render, export. Alleen de standaardbibliotheek;
-schrijven gaat via ``schrijver.Register``, lezen via ``lezer.lees``. ``--context`` is een bestaande map; ``--slug`` is de
-contextslug (``klant:renewance``) en volgt uit de eerste regel als het register al regels heeft.
-
-Exitcodes:
-  0  ok
-  1  check of lezen niet schoon: check met een fout, export met een ongeldige regel, show van een onbekend id
-  2  gebruik: onbekende of ontbrekende vlag, export zonder geldig --voor, een map die niet bestaat, geen slug
-  3  geweigerd door de kern: geheim (de patroonnaam, nooit de waarde), herkomstbotsing, overgang, schema, combinatie
-
-``render`` schrijft BESLUITEN.md altijd voor publiek intern en hangt niet af van de dag: de stand ``te_herzien`` tonen
-alleen ``list`` en ``show`` (met ``--nu``); BESLUITEN.md toont de geldende ``herzien_op``.
+Subcommando's: add, list, show, vervang, trek-in, herzien, bevestig, check, render, export; stdlib.
+Exitcodes: 0 ok; 1 check of lezen niet schoon (check-fout, export met een ongeldige regel, show van een onbekend id);
+2 gebruik (vlag, export zonder geldig --voor, map bestaat niet, geen slug); 3 geweigerd door de kern (geheim: de
+patroonnaam, nooit de waarde). ``render`` is intern en dagonafhankelijk; ``te_herzien`` alleen in list/show (--nu).
 """
 import argparse, os, re, sys, tempfile
 from datetime import datetime, timezone
@@ -23,8 +15,7 @@ from .schrijver import Geweigerd, Register, stand
 MD, NDJSON = "BESLUITEN.md", "besluiten.ndjson"
 _VOOR = re.compile(r"intern|publiek|klant:[a-z0-9][a-z0-9._-]*")
 
-class Gebruik(Exception):
-    """Exit 2."""
+class Gebruik(Exception): pass  # exit 2
 
 def _voor(w):
     if not _VOOR.fullmatch(w):
@@ -46,7 +37,7 @@ def zichtbaar(voor, vertrouwelijkheid, context):
         vertrouwelijkheid == "klant" and context is not None and context.startswith("klant:") and voor == context)
 
 def _besluiten(regels):
-    """besluit_id -> vastgelegd (de eerste), geschiedenis, stand, door en de geldende herzien_op, in bestandsvolgorde."""
+    """besluit_id -> vastgelegd (de eerste), geschiedenis, stand, door en geldende herzien_op; bestandsvolgorde."""
     uit = {}
     for x in regels:
         if x["event"] == "vastgelegd" and x["besluit_id"] not in uit:
@@ -77,21 +68,15 @@ def _blok(b, zien, nu=None):
               f"- besloten op {v['besloten_op']} door {v['besloten_door']}",
               f"- reikwijdte: {v['reikwijdte']} · vertrouwelijkheid: {v['vertrouwelijkheid']}",
               f"- herzien op: {b['herzien_op'] or 'geen'}", f"- bron: {_bron(v['bron'])}"]
-    if v.get("vervangt") in zien:
-        regels.append(f"- vervangt: {v['vervangt']}")
-    regels += [f"- terugweg: {v['terugweg']}", f"- links: {', '.join(v['links']) or 'geen'}",
+    regels += [f"- vervangt: {v.get('vervangt')}"] * (v.get("vervangt") in zien) + [
+               f"- terugweg: {v['terugweg']}", f"- links: {', '.join(v['links']) or 'geen'}",
                f"- tags: {', '.join(v['tags']) or 'geen'}", "", v["besluit"], "", f"Waarom: {v['waarom']}"]
     regels += [f"- alternatief {a['optie']}: {a['waarom_niet']}" for a in v["alternatieven"]]
-    for x in b["hist"]:
-        e = x["event"]
-        if e == "vastgelegd":
-            continue
-        if e == "vervangen":
-            tekst = (f"door {x['door']}, " if x["door"] in zien else "") + x["reden"]
-        elif e == "ingetrokken":
-            tekst = f"{x['reden']}, {_bron(x['bron'])}"
-        else:
-            tekst = (x["waarom"] if e == "herzien" else _bron(x["bron"])) + f", herzien op {x['herzien_op'] or 'geen'}"
+    for x in (x for x in b["hist"] if x["event"] != "vastgelegd"):  # per soort de verplichte velden (schema)
+        e, bron = x["event"], _bron(x["bron"]) if "bron" in x else ""
+        tekst = {"vervangen": lambda: (f"door {x['door']}, " if x["door"] in zien else "") + x["reden"],
+                 "ingetrokken": lambda: f"{x['reden']}, {bron}"}.get(
+            e, lambda: f"{x.get('waarom', bron)}, herzien op {x['herzien_op'] or 'geen'}")()
         regels.append(f"- {x['besloten_op']} {e}: {tekst}")
     return regels
 
@@ -121,15 +106,13 @@ def controle(uit, logdir):
     bekend = set(ids)
     for bid in sorted({i for i in ids if ids.count(i) > 1}):
         fout("besluit_id op meer dan één vastgelegd", bid)
-    for x in regels:
-        for veld in ("betreft", "vervangt", "door"):
-            if x.get(veld) is not None and x[veld] not in bekend:
-                fout(f"onbekend {veld}", x[veld])
+    for veld, waarde in ((veld, x.get(veld)) for x in regels for veld in ("betreft", "vervangt", "door")):
+        if waarde is not None and waarde not in bekend:
+            fout(f"onbekend {veld}", waarde)
     opvolg = {x["besluit_id"]: x.get("vervangt") for x in regels if x["event"] == "vastgelegd"}
     for start in sorted(opvolg):
-        gezien, cur = set(), opvolg[start]
-        while cur in opvolg and cur not in gezien and cur != start:
-            gezien.add(cur)
+        cur, stappen = opvolg[start], len(opvolg)
+        while cur in opvolg and cur != start and (stappen := stappen - 1) > 0:
             cur = opvolg[cur]
         if cur == start:
             fout("cirkel in vervangt", start)
@@ -171,9 +154,8 @@ def _levenscyclus(regels, bekend, fout):
             fout("vervangen zonder nieuwe vastgelegd", b)
         elif e == "ingetrokken":
             s[b] = "ingetrokken"
-    for b, st in s.items():
-        if st == "vervangen open":
-            fout("open vervanging (draai vervang opnieuw)", f"{b} door {door[b]}")
+    for b in (b for b, st in s.items() if st == "vervangen open"):
+        fout("open vervanging (draai vervang opnieuw)", f"{b} door {door[b]}")
 
 def _schrijf_atomair(pad, tekst):
     fd, tmp = tempfile.mkstemp(dir=pad.parent, prefix=f".{pad.name}.", suffix=".tmp")
@@ -225,12 +207,8 @@ def _uitvoeren(a):
         if a.sub == "show" and a.id not in alle:
             print(f"onbekend besluit: {a.id}", file=sys.stderr)
             return 1
-        for bid, b in alle.items():
-            if a.sub == "list":
-                print(f"{bid}  {_stand(b, nu)}  {b['v']['besloten_op']}  {b['v']['titel']}")
-            elif bid == a.id:
-                print("\n".join(_blok(b, set(alle), nu)))
-        print(_tellingen(uit))
+        print(*([f"{bid}  {_stand(b, nu)}  {b['v']['besloten_op']}  {b['v']['titel']}" for bid, b in alle.items()]
+                if a.sub == "list" else _blok(alle[a.id], set(alle), nu)), _tellingen(uit), sep="\n")
         return 0
     if a.sub == "render":
         _schrijf_atomair(logdir / MD, document(uit, "intern"))
@@ -238,62 +216,47 @@ def _uitvoeren(a):
         return 0
     if a.sub == "check":
         fouten, waarschuwingen = controle(uit, logdir)
-        print(_tellingen(uit))
-        for w in waarschuwingen:
-            print(f"waarschuwing: {w}")
-        for soort, wat in fouten.items():
-            print(f"fout: {soort}: {', '.join(wat)}")
-        print("check: fout" if fouten else "check: ok")
+        print("\n".join([_tellingen(uit), *(f"waarschuwing: {w}" for w in waarschuwingen),
+                         *(f"fout: {soort}: {', '.join(wat)}" for soort, wat in fouten.items()),
+                         f"check: {'fout' if fouten else 'ok'}"]))
         return 1 if fouten else 0
     if uit.ongeldig:  # export: een ongeldige regel kan een intrekking zijn (ADR-077 § 4)
         print(f"export geweigerd: ongeldige regel(s) {', '.join(str(n) for n, _ in uit.ongeldig)}", file=sys.stderr)
         return 1
     tekst = document(uit, a.voor, a.van, a.tot, a.reikwijdte)
-    if a.uit:
-        _schrijf_atomair(Path(a.uit), tekst)
-    else:
-        sys.stdout.write(tekst)
+    _schrijf_atomair(Path(a.uit), tekst) if a.uit else sys.stdout.write(tekst)
     return 0
 
 def _parser():
     p = argparse.ArgumentParser(prog="besluitenregister", description="Besluitenregister per context (ADR-077).")
-    ctx = argparse.ArgumentParser(add_help=False)
-    ctx.add_argument("--context", required=True, help="de contextmap <LOGDIR>, moet bestaan")
-    mut = argparse.ArgumentParser(add_help=False, parents=[ctx])
-    mut.add_argument("--slug", help="contextslug; standaard die van de eerste regel")
-    mut.add_argument("--besloten-op", required=True)
-    mut.add_argument("--vastgelegd-door", required=True, help="operator, t0, skill:<naam> of agent:<naam>")
-    bron = argparse.ArgumentParser(add_help=False)
-    bron.add_argument("--bron-soort", required=True)
-    bron.add_argument("--bron-ref", required=True)
-    bron.add_argument("--citaat", default="")
-    nieuw = argparse.ArgumentParser(add_help=False, parents=[mut, bron])
-    for veld in ("titel", "besluit", "waarom", "besloten-door", "reikwijdte", "vertrouwelijkheid", "terugweg"):
-        nieuw.add_argument(f"--{veld}", required=True)
+    ouders = {}
+    def ouder(naam, *verplicht, basis=()):
+        o = ouders[naam] = argparse.ArgumentParser(add_help=False, parents=[ouders[x] for x in basis])
+        for veld in verplicht:
+            o.add_argument(f"--{veld}", required=True)
+        return o
+    ouder("ctx", "context")
+    ouder("mut", "besloten-op", "vastgelegd-door", basis=("ctx",)).add_argument("--slug")
+    ouder("bron", "bron-soort", "bron-ref").add_argument("--citaat", default="")
+    nieuw = ouder("nieuw", "titel", "besluit", "waarom", "besloten-door", "reikwijdte", "vertrouwelijkheid",
+                  "terugweg", basis=("mut", "bron"))
+    for veld in ("link", "tag"):
+        nieuw.add_argument(f"--{veld}", action="append", default=[])
     nieuw.add_argument("--alternatief", nargs=2, action="append", default=[], metavar=("OPTIE", "WAAROM_NIET"))
-    nieuw.add_argument("--link", action="append", default=[])
-    nieuw.add_argument("--tag", action="append", default=[])
     nieuw.add_argument("--herzien-op", type=_dag_of_geen)
     sub = p.add_subparsers(dest="sub", required=True)
-    sub.add_parser("add", parents=[nieuw])
-    sub.add_parser("vervang", parents=[nieuw]).add_argument("--reden", required=True)
-    sub.add_parser("trek-in", parents=[mut, bron]).add_argument("--reden", required=True)
-    sub.add_parser("herzien", parents=[mut]).add_argument("--waarom", required=True)
-    sub.add_parser("bevestig", parents=[mut, bron])
-    for naam in ("list", "show"):
-        sub.add_parser(naam, parents=[ctx]).add_argument("--nu", type=_dag, help="UTC-datum, standaard vandaag")
-    sub.add_parser("check", parents=[ctx])
-    sub.add_parser("render", parents=[ctx])
-    exp = sub.add_parser("export", parents=[ctx])
-    exp.add_argument("--voor", required=True, type=_voor, help="intern, publiek of klant:<slug>")
-    exp.add_argument("--uit")
-    exp.add_argument("--van", type=_dag)
-    exp.add_argument("--tot", type=_dag)
-    exp.add_argument("--reikwijdte", choices=("context", "vloot", "klant"))
+    sp = {naam: sub.add_parser(naam, parents=[ouders[x] for x in basis]) for naam, basis in {
+        "add": ("nieuw",), "vervang": ("nieuw",), "trek-in": ("mut", "bron"), "herzien": ("mut",),
+        "bevestig": ("mut", "bron"), "list": ("ctx",), "show": ("ctx",), "check": ("ctx",), "render": ("ctx",),
+        "export": ("ctx",)}.items()}
     for naam in ("vervang", "trek-in", "herzien", "bevestig", "show"):
-        sub.choices[naam].add_argument("id", metavar="BESLUIT_ID")
-    for naam in ("herzien", "bevestig"):
-        sub.choices[naam].add_argument("--herzien-op", required=True, type=_dag_of_geen, help="JJJJ-MM-DD of geen")
+        sp[naam].add_argument("id", metavar="BESLUIT_ID")
+    dag, geen, rw = {"type": _dag}, {"type": _dag_of_geen}, {"choices": ("context", "vloot", "klant")}  # "?": optioneel
+    for naam, vlag, kw in (("vervang", "reden", {}), ("trek-in", "reden", {}), ("herzien", "waarom", {}),
+                           ("herzien", "herzien-op", geen), ("bevestig", "herzien-op", geen), ("list", "?nu", dag),
+                           ("export", "voor", {"type": _voor}), ("show", "?nu", dag), ("export", "?uit", {}),
+                           ("export", "?van", dag), ("export", "?tot", dag), ("export", "?reikwijdte", rw)):
+        sp[naam].add_argument(f"--{vlag.lstrip('?')}", required=not vlag.startswith("?"), **kw)
     return p
 
 def main(argv=None):
