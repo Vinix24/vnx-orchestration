@@ -268,7 +268,7 @@ sys.path.insert(0, str(SCRIPT_DIR))
 ENGINE_ROOT = SCRIPT_DIR.parent
 
 from vnx_paths import ensure_env, project_id_from_state_dir
-from main_window import read_admission_config, read_window, admit as admit_main
+from main_window import active_store, read_admission_config, read_window, admit as admit_main
 from governance_receipts import dispatch_identity_fields, emit_governance_receipt, utc_now_iso
 import forge_gate_publisher
 from forge_gate_publisher import CONCLUSION_FAILURE, DOOR_CHECK_NAME, REVOKE_FAILED, REVOKED, ForgeCheckRunError
@@ -3142,8 +3142,8 @@ def _read_main_admission() -> Dict[str, Any]:
     (``project_id_from_state_dir``). A state dir that names no project holds no
     ``project_config`` row for one, so the registry's env and default are the whole answer.
     """
-    state_dir = Path(ensure_env()["VNX_STATE_DIR"])
-    max_n, max_age, invalid = read_admission_config(project_id_from_state_dir(state_dir) or None, state_dir)
+    state_dir, project_id = active_store()
+    max_n, max_age, invalid = read_admission_config(project_id, state_dir)
     if max_n is None and not invalid:
         return dict(MAIN_ADMISSION_OFF)
     window = read_window(_target_root(), state_dir=state_dir, max_age_min=max_age)

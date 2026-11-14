@@ -594,6 +594,15 @@ def _positive_int(raw: Any) -> Optional[int]:
     return value if value > 0 else None
 
 
+def active_store() -> Tuple[Path, Optional[str]]:
+    """``(state_dir, project_id)`` of the active project: the central store the merge door reads
+    (``ensure_env``) and the project that state dir belongs to (``None`` when it names none)."""
+    from vnx_paths import ensure_env, project_id_from_state_dir
+
+    state_dir = Path(ensure_env()["VNX_STATE_DIR"])
+    return state_dir, (project_id_from_state_dir(state_dir) or None)
+
+
 def read_admission_config(
     project_id: Optional[str], state_dir: Optional[Path]
 ) -> Tuple[Optional[int], int, Tuple[str, ...]]:

@@ -1,0 +1,1 @@
+- `vnx main-window status` reads the central state store the merge door reads, so its mode and limit match the door (OI-2814).
