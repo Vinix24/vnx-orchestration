@@ -580,23 +580,9 @@ def apply_to_live(db_path: Path, roadmap_path: Path, project_id: str) -> None:
     pr_map = load_roadmap_pr_map(roadmap_path)
 
     # 1. Diagnose live (read-only) + capture invariants for the sanity assertion.
-    conn = sqlite3.connect(str(db_path), timeout=30.0)
-    conn.execute("PRAGMA query_only = ON")
-    try:
-        live_diag = diagnose(conn, pr_map, project_id, label="live (before)")
-        disp_before = _rowcount(conn, "dispatches")
-        track_before = _rowcount(conn, "tracks")
-        # Snapshot every dispatch that already carries a non-null track — must be preserved.
-        non_null_tracks_before = {
-            r[0]: r[1]
-            for r in conn.execute(
-                "SELECT dispatch_id, track FROM dispatches "
-                "WHERE track IS NOT NULL AND project_id = ?",
-                (project_id,),
-            ).fetchall()
-        }
-    finally:
-        conn.close()
+    live_diag, disp_before, track_before, non_null_tracks_before = _apply_snapshot_live(
+        db_path, pr_map, project_id
+    )
 
     print_diagnosis(live_diag)
 
@@ -625,52 +611,9 @@ def apply_to_live(db_path: Path, roadmap_path: Path, project_id: str) -> None:
                 print(f"    - {e}", file=sys.stderr)
             sys.exit(1)
 
-        # Sanity assertions BEFORE commit (inside the transaction so we can roll back).
-        disp_after = _rowcount(conn, "dispatches")
-        track_after = _rowcount(conn, "tracks")
-
-        # Re-read the same dispatches and assert each kept its original non-null track.
-        preserved = True
-        for dispatch_id, original_track in non_null_tracks_before.items():
-            row = conn.execute(
-                "SELECT track FROM dispatches WHERE dispatch_id = ? AND project_id = ?",
-                (dispatch_id, project_id),
-            ).fetchone()
-            if row is None or row[0] != original_track:
-                preserved = False
-                break
-        rowcounts_ok = disp_before == disp_after and track_before == track_after
-
-        if not preserved:
-            conn.rollback()
-            print(
-                "\n  [FATAL] A dispatch lost or changed its existing non-null track. "
-                "Transaction rolled back. Live DB NOT modified.",
-                file=sys.stderr,
-            )
-            sys.exit(1)
-        if not rowcounts_ok:
-            conn.rollback()
-            print(
-                f"\n  [FATAL] Rowcount changed (dispatches {disp_before}->{disp_after}, "
-                f"tracks {track_before}->{track_after}). Backfill is additive to "
-                f"coordination_events only. Rolled back.",
-                file=sys.stderr,
-            )
-            sys.exit(1)
-
-        integrity = _integrity_check(conn)
-        integrity_ok = integrity == ["ok"]
-        if not integrity_ok:
-            conn.rollback()
-            print(
-                f"\n  [FATAL] integrity_check failed pre-commit. Rolled back. "
-                f"Backup at: {backup_path}",
-                file=sys.stderr,
-            )
-            for line in integrity:
-                print(f"    {line}", file=sys.stderr)
-            sys.exit(1)
+        disp_after, track_after = _apply_assert_pre_commit(
+            conn, project_id, non_null_tracks_before, disp_before, track_before, backup_path
+        )
 
         conn.commit()
     except Exception:
@@ -700,6 +643,95 @@ def apply_to_live(db_path: Path, roadmap_path: Path, project_id: str) -> None:
         print(f"    [WARNING] reconcile skipped: {e}")
 
     # 5. Append-only audit event.
+    _apply_append_audit(db_path, project_id, report, backup_path)
+
+    print(f"\n  Backfill complete. Backup: {backup_path}")
+
+
+def _apply_snapshot_live(db_path: Path, pr_map: dict[str, dict[str, Any]], project_id: str):
+    """Read-only diagnosis of the live DB plus the invariants the sanity assertion needs."""
+    conn = sqlite3.connect(str(db_path), timeout=30.0)
+    conn.execute("PRAGMA query_only = ON")
+    try:
+        live_diag = diagnose(conn, pr_map, project_id, label="live (before)")
+        disp_before = _rowcount(conn, "dispatches")
+        track_before = _rowcount(conn, "tracks")
+        # Snapshot every dispatch that already carries a non-null track — must be preserved.
+        non_null_tracks_before = {
+            r[0]: r[1]
+            for r in conn.execute(
+                "SELECT dispatch_id, track FROM dispatches "
+                "WHERE track IS NOT NULL AND project_id = ?",
+                (project_id,),
+            ).fetchall()
+        }
+    finally:
+        conn.close()
+    return live_diag, disp_before, track_before, non_null_tracks_before
+
+
+def _apply_assert_pre_commit(
+    conn: sqlite3.Connection,
+    project_id: str,
+    non_null_tracks_before: dict,
+    disp_before: int,
+    track_before: int,
+    backup_path: Path,
+) -> tuple[int, int]:
+    """Sanity assertions BEFORE commit (inside the transaction so we can roll back).
+
+    On a failed assertion: roll back, print the reason on stderr, sys.exit(1).
+    """
+    disp_after = _rowcount(conn, "dispatches")
+    track_after = _rowcount(conn, "tracks")
+
+    # Re-read the same dispatches and assert each kept its original non-null track.
+    preserved = True
+    for dispatch_id, original_track in non_null_tracks_before.items():
+        row = conn.execute(
+            "SELECT track FROM dispatches WHERE dispatch_id = ? AND project_id = ?",
+            (dispatch_id, project_id),
+        ).fetchone()
+        if row is None or row[0] != original_track:
+            preserved = False
+            break
+    rowcounts_ok = disp_before == disp_after and track_before == track_after
+
+    if not preserved:
+        conn.rollback()
+        print(
+            "\n  [FATAL] A dispatch lost or changed its existing non-null track. "
+            "Transaction rolled back. Live DB NOT modified.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if not rowcounts_ok:
+        conn.rollback()
+        print(
+            f"\n  [FATAL] Rowcount changed (dispatches {disp_before}->{disp_after}, "
+            f"tracks {track_before}->{track_after}). Backfill is additive to "
+            f"coordination_events only. Rolled back.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    integrity = _integrity_check(conn)
+    integrity_ok = integrity == ["ok"]
+    if not integrity_ok:
+        conn.rollback()
+        print(
+            f"\n  [FATAL] integrity_check failed pre-commit. Rolled back. "
+            f"Backup at: {backup_path}",
+            file=sys.stderr,
+        )
+        for line in integrity:
+            print(f"    {line}", file=sys.stderr)
+        sys.exit(1)
+    return disp_after, track_after
+
+
+def _apply_append_audit(db_path: Path, project_id: str, report: dict, backup_path: Path) -> None:
+    """Append-only audit event; a write failure is a stderr warning, not a failure."""
     audit_path = db_path.parent / "backfill_linkage_audit.ndjson"
     audit_record = json.dumps(
         {
@@ -718,8 +750,6 @@ def apply_to_live(db_path: Path, roadmap_path: Path, project_id: str) -> None:
             f.write(audit_record + "\n")
     except OSError as e:
         print(f"  [WARNING] Failed to write audit record: {e}", file=sys.stderr)
-
-    print(f"\n  Backfill complete. Backup: {backup_path}")
 
 
 # ---------------------------------------------------------------------------
