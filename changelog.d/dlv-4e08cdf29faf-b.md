@@ -1,0 +1,1 @@
+- Two benchmark `verify` functions (tasks 04 and 05) split into private helpers, each under 100 executable lines, behaviour unchanged (golf schoon R02b).

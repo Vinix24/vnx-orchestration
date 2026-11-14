@@ -81,36 +81,7 @@ def verify(workdir: Path, task_meta: dict) -> dict[str, Any]:
 
         checks: list[tuple[str, bool, str]] = []
 
-        try:
-            mig_proc = subprocess.run(
-                ["sqlite3", "documents.db"],
-                input=(tmp_dir / "migrations" / "001_add_document_scores.sql").read_text(),
-                cwd=tmp_dir, capture_output=True, text=True, timeout=30, check=False,
-            )
-            mig_ok = mig_proc.returncode == 0
-            checks.append((
-                "migration applies cleanly",
-                mig_ok,
-                f"rc={mig_proc.returncode} stderr={mig_proc.stderr[-200:]}",
-            ))
-        except Exception as exc:
-            checks.append(("migration applies cleanly", False, str(exc)))
-            mig_ok = False
-
-        if mig_ok:
-            try:
-                mig2 = subprocess.run(
-                    ["sqlite3", "documents.db"],
-                    input=(tmp_dir / "migrations" / "001_add_document_scores.sql").read_text(),
-                    cwd=tmp_dir, capture_output=True, text=True, timeout=30, check=False,
-                )
-                checks.append((
-                    "migration idempotent",
-                    mig2.returncode == 0,
-                    f"rc={mig2.returncode}",
-                ))
-            except Exception as exc:
-                checks.append(("migration idempotent", False, str(exc)))
+        checks.extend(_migration_checks(tmp_dir))
 
         pytest_proc = subprocess.run(
             [sys.executable, "-m", "pytest", "tests/test_scorer.py", "-v", "--tb=short", "-q"],
@@ -127,30 +98,7 @@ def verify(workdir: Path, task_meta: dict) -> dict[str, Any]:
             f"passed={pytest_pass} failed={pytest_fail}",
         ))
 
-        try:
-            cli_proc = subprocess.run(
-                [sys.executable, "cli.py", "--db", "documents.db", "--project-id", "default"],
-                cwd=tmp_dir, capture_output=True, text=True, timeout=60, check=False,
-            )
-            cli_ok = cli_proc.returncode == 0
-            cli_json_ok = False
-            if cli_ok:
-                try:
-                    out = json.loads(cli_proc.stdout.strip().splitlines()[-1])
-                    cli_json_ok = (
-                        isinstance(out.get("scored"), int)
-                        and isinstance(out.get("skipped"), int)
-                        and out["scored"] + out["skipped"] == 50
-                    )
-                except (json.JSONDecodeError, KeyError, IndexError):
-                    cli_json_ok = False
-            checks.append((
-                "CLI exits 0 and prints valid {scored, skipped} json totaling 50",
-                cli_ok and cli_json_ok,
-                f"rc={cli_proc.returncode} stdout-tail={cli_proc.stdout[-200:]}",
-            ))
-        except Exception as exc:
-            checks.append(("CLI smoke", False, str(exc)))
+        checks.append(_cli_check(tmp_dir))
 
     pass_count = sum(1 for _, ok, _ in checks if ok)
     expected = 4
@@ -167,6 +115,69 @@ def verify(workdir: Path, task_meta: dict) -> dict[str, Any]:
             "checks": [{"name": n, "ok": ok, "note": note} for n, ok, note in checks],
         },
     }
+
+
+
+def _migration_checks(tmp_dir: Path) -> list[tuple[str, bool, str]]:
+    checks: list[tuple[str, bool, str]] = []
+    try:
+        mig_proc = subprocess.run(
+            ["sqlite3", "documents.db"],
+            input=(tmp_dir / "migrations" / "001_add_document_scores.sql").read_text(),
+            cwd=tmp_dir, capture_output=True, text=True, timeout=30, check=False,
+        )
+        mig_ok = mig_proc.returncode == 0
+        checks.append((
+            "migration applies cleanly",
+            mig_ok,
+            f"rc={mig_proc.returncode} stderr={mig_proc.stderr[-200:]}",
+        ))
+    except Exception as exc:
+        checks.append(("migration applies cleanly", False, str(exc)))
+        mig_ok = False
+
+    if mig_ok:
+        try:
+            mig2 = subprocess.run(
+                ["sqlite3", "documents.db"],
+                input=(tmp_dir / "migrations" / "001_add_document_scores.sql").read_text(),
+                cwd=tmp_dir, capture_output=True, text=True, timeout=30, check=False,
+            )
+            checks.append((
+                "migration idempotent",
+                mig2.returncode == 0,
+                f"rc={mig2.returncode}",
+            ))
+        except Exception as exc:
+            checks.append(("migration idempotent", False, str(exc)))
+    return checks
+
+
+def _cli_check(tmp_dir: Path) -> tuple[str, bool, str]:
+    try:
+        cli_proc = subprocess.run(
+            [sys.executable, "cli.py", "--db", "documents.db", "--project-id", "default"],
+            cwd=tmp_dir, capture_output=True, text=True, timeout=60, check=False,
+        )
+        cli_ok = cli_proc.returncode == 0
+        cli_json_ok = False
+        if cli_ok:
+            try:
+                out = json.loads(cli_proc.stdout.strip().splitlines()[-1])
+                cli_json_ok = (
+                    isinstance(out.get("scored"), int)
+                    and isinstance(out.get("skipped"), int)
+                    and out["scored"] + out["skipped"] == 50
+                )
+            except (json.JSONDecodeError, KeyError, IndexError):
+                cli_json_ok = False
+        return (
+            "CLI exits 0 and prints valid {scored, skipped} json totaling 50",
+            cli_ok and cli_json_ok,
+            f"rc={cli_proc.returncode} stdout-tail={cli_proc.stdout[-200:]}",
+        )
+    except Exception as exc:
+        return ("CLI smoke", False, str(exc))
 
 
 if __name__ == "__main__":
