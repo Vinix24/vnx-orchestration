@@ -64,6 +64,7 @@ EXACT_CASES = {
     "unbalanced_backtick": ("PASSWORD=`printf zz9 yy8\nnext line", "PASSWORD=<secret>\nnext line"),
     "subst_dq_spans_lines": ('PASSWORD=$(echo "a\nzz9\nnext', "PASSWORD=<secret>"),
     "backtick_line_continuation": ("PASSWORD=`x \\\nzz9` run", "PASSWORD=<secret> run"),
+    "token_in_bare_arg": ("curl -u sk-test0123456789abcdef/private-suffix run", "curl -u <secret> run"),
     "loose_sha_stays": ("git show " + SHA, "git show " + SHA),
     "sha_after_equals": ("--sha=" + SHA, "--sha=<secret>"),
     "sha_as_header": ("X-Thing: " + SHA, "X-Thing: <secret>"),
@@ -102,7 +103,7 @@ TOKENS = {
 CONTEXTS = {
     "bare_name": "REF={v} run", "flag": "--flag={v} run", "sq": "--flag='{v}' run", "dq": '--flag="{v}" run',
     "dq_subst": 'REF="$(printf "%s" "{v}")" run', "dq_backtick": 'REF="`printf "%s" {v}`" run',
-    "unbalanced_subst": "REF=$(printf {v}\n run",
+    "unbalanced_subst": "REF=$(printf {v}\n run", "bare_arg": "curl -u {v} run", "flag_space": "--ref {v} run",
 }
 
 

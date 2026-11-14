@@ -136,8 +136,11 @@ PATTERNS: List[SecretPattern] = [
 _VALUE_AFTER_PREFIX = {"secret_assignment", "long_value"}
 _WHOLE = [p for p in PATTERNS if p.name in _VALUE_AFTER_PREFIX]
 _FRAGMENTS = [p for p in PATTERNS if p.name not in _VALUE_AFTER_PREFIX]
-# Phase 1, last: an '=' value that holds a token fragment goes as a whole.
-_FRAGMENT_VALUE = SecretPattern("fragment_value", re.compile(r"(=)(?!<secret>)(?=\S)"), r"\1" + SECRET)
+# Phase 1, last: a shell word (after '=', or at a word start that is no NAME=/--flag=
+# prefix, so the name stays) holding an in-word fragment goes whole; the three that run
+# past a word stay phase 2, so a bare "Authorization:" cannot hide the value after it.
+_IN_WORD = [p for p in _FRAGMENTS if p.name not in {"bearer", "authorization_header", "pem_block"}]
+_FRAGMENT_VALUE = SecretPattern("fragment_value", re.compile(r"(=|(?<!\S)(?![\w-]+=))(?!<secret>)(?=\S)"), r"\1" + SECRET)
 
 
 def find(text: str) -> List[str]:
@@ -153,7 +156,7 @@ def mask(text: str) -> str:
         raise TypeError("mask() needs str")
     for p in _WHOLE:
         text = _mask_one(p, text, True)
-    text = _mask_one(_FRAGMENT_VALUE, text, True, lambda v: any(p.regex.search(v) for p in _FRAGMENTS))
+    text = _mask_one(_FRAGMENT_VALUE, text, True, lambda v: any(p.regex.search(v) for p in _IN_WORD))
     for p in _FRAGMENTS:
         text = _mask_one(p, text, False)
     return text
