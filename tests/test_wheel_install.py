@@ -17,6 +17,8 @@ from pathlib import Path
 
 import pytest
 
+from wheel_build_lock import wheel_build_lock
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SMOKE_SCRIPT = REPO_ROOT / "scripts" / "test_wheel_install.sh"
 
@@ -47,13 +49,14 @@ def test_wheel_install_smoke():
     if not _build_toolchain_available():
         pytest.skip("build toolchain (build/setuptools/wheel) not installed")
 
-    result = subprocess.run(
-        ["bash", str(SMOKE_SCRIPT)],
-        capture_output=True,
-        text=True,
-        timeout=600,
-        env={**_smoke_env(), "SMOKE_PYTHON": sys.executable},
-    )
+    with wheel_build_lock():
+        result = subprocess.run(
+            ["bash", str(SMOKE_SCRIPT)],
+            capture_output=True,
+            text=True,
+            timeout=600,
+            env={**_smoke_env(), "SMOKE_PYTHON": sys.executable},
+        )
 
     if result.returncode == PREFLIGHT_EXIT:
         pytest.skip(f"smoke preflight failed (env-specific):\n{result.stdout}\n{result.stderr}")
