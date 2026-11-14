@@ -21,6 +21,7 @@ sys.path.insert(0, str(VNX_ROOT / "scripts"))
 
 import forge_check_run as fcr  # noqa: E402
 import forge_gate_publisher as fgp  # noqa: E402
+import pr_merge  # noqa: E402
 
 SHA = "a" * 40
 APP_ID = 4869217
@@ -127,7 +128,7 @@ def _evidence(**over: Any) -> Dict[str, Any]:
     ev: Dict[str, Any] = {
         "schema": 1, "source": "pr_merge._run_door", "pr_number": 7, "head_sha": SHA,
         "preflight_gates": [{"gate": g, "verdict": "GO"} for g in GATES],
-        "door_version": "x", "integrity": {"paths": 8, "sha256": "0"},
+        "door_version": "x", "integrity": {"paths": len(pr_merge._DOOR_INTEGRITY_PATHS), "sha256": "0"},
     }
     ev.update(over)
     return ev
@@ -147,8 +148,6 @@ def test_valid_evidence_passes() -> None:
 
 
 def test_default_expected_gates_are_preflight_order_without_door() -> None:
-    import pr_merge
-
     assert fgp.door_evidence_gates() == [n for n in pr_merge.PREFLIGHT_ORDER if n != "door"]
 
 

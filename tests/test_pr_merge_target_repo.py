@@ -870,6 +870,17 @@ class TestVnxHomeIsTheRunningDoor:
 # The door proves itself against the fabric, never against the consumer
 # ---------------------------------------------------------------------------
 
+def test_door_integrity_paths_cover_forge_files_and_exist() -> None:
+    """OI-2667: the forge publisher and check-run files decide whether a permit is published."""
+    paths = pr_merge._DOOR_INTEGRITY_PATHS
+    assert "scripts/lib/forge_gate_publisher.py" in paths
+    assert "scripts/lib/forge_check_run.py" in paths
+    assert len(set(paths)) == len(paths)
+    root = Path(pr_merge.__file__).resolve().parent.parent
+    for path in paths:
+        assert (root / path).is_file(), path
+
+
 def _door_files(install: Path) -> Dict[str, str]:
     """Write every door file into ``install`` and return ``{path: git blob hash}``."""
     hashes: Dict[str, str] = {}
