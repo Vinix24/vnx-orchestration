@@ -341,26 +341,7 @@ def materialize_views(
     plan: dict = {"view_db": str(view_db_path), "projects": []}
 
     if dry_run:
-        for proj in projects:
-            attached: list[dict] = []
-            for db_name in SOURCE_DBS:
-                src = proj.state_dir / db_name
-                attached.append({"db": db_name, "path": str(src), "exists": src.is_file()})
-            plan["projects"].append(
-                {
-                    "name": proj.name,
-                    "project_id": proj.project_id,
-                    "attached": attached,
-                }
-            )
-            print(
-                f"DRY-RUN: would attach project={proj.project_id} "
-                f"path={proj.path} ({sum(1 for a in attached if a['exists'])}/"
-                f"{len(SOURCE_DBS)} dbs present)",
-                file=sys.stderr,
-            )
-        plan["dry_run"] = True
-        return plan
+        return _plan_dry_run(plan, projects)
 
     view_db_path.parent.mkdir(parents=True, exist_ok=True)
     if view_db_path.exists():
@@ -372,85 +353,7 @@ def materialize_views(
         # Create per-table aggregates by attaching every project for one source DB,
         # collecting the union of columns, then copying.
         for source_db, table, has_pid in UNIFIED_TABLES:
-            per_project_cols: dict[str, list[str]] = {}
-            attached_aliases: list[tuple[str, ProjectEntry]] = []
-            for idx, proj in enumerate(projects):
-                src_path = proj.state_dir / source_db
-                if not src_path.is_file():
-                    continue
-                alias = f"src_{idx}"
-                try:
-                    attach_readonly(con, alias, src_path)
-                except sqlite3.Error as exc:
-                    LOG.warning("attach failed project=%s db=%s err=%s", proj.project_id, source_db, exc)
-                    continue
-                attached_aliases.append((alias, proj))
-                if _table_exists(con, alias, table):
-                    per_project_cols[alias] = _column_names(con, alias, table)
-
-            if not per_project_cols:
-                for alias, _ in attached_aliases:
-                    con.execute(f"DETACH DATABASE {alias}")
-                continue
-
-            union_cols: list[str] = []
-            for cols in per_project_cols.values():
-                for c in cols:
-                    if c not in union_cols:
-                        union_cols.append(c)
-            if has_pid and "project_id" not in union_cols:
-                union_cols.append("project_id")
-
-            _create_unified_table(con, table, union_cols)
-
-            row_total = 0
-            per_proj: dict = {}
-            for alias, proj in attached_aliases:
-                if alias not in per_project_cols:
-                    continue
-                source_cols = per_project_cols[alias]
-                # Build a column list that matches `union_cols`; missing cols get NULL.
-                select_parts: list[str] = []
-                for c in union_cols:
-                    if c in source_cols:
-                        select_parts.append(f'"{c}"')
-                    elif c == "project_id":
-                        select_parts.append(f"'{proj.project_id}'")
-                    else:
-                        select_parts.append("NULL")
-                select_sql = (
-                    f"SELECT {', '.join(select_parts)} FROM {alias}.{table}"
-                )
-                rows = con.execute(select_sql).fetchall()
-                if has_pid:
-                    pid_idx = union_cols.index("project_id")
-                    rows = [
-                        tuple(
-                            proj.project_id if i == pid_idx and v in (None, "") else v
-                            for i, v in enumerate(r)
-                        )
-                        for r in rows
-                    ]
-                if rows:
-                    placeholders = ", ".join("?" for _ in union_cols)
-                    quoted = ", ".join(f'"{c}"' for c in union_cols)
-                    con.executemany(
-                        f"INSERT INTO {table}_unified ({quoted}) VALUES ({placeholders})",
-                        rows,
-                    )
-                row_total += len(rows)
-                per_proj[proj.project_id] = len(rows)
-
-            # Commit & close any implicit txn before DETACH; otherwise SQLite
-            # rejects the DETACH because the attached DB is still locked.
-            con.commit()
-            for alias, _ in attached_aliases:
-                con.execute(f"DETACH DATABASE {alias}")
-
-            plan["projects"].append(
-                {"table": f"{table}_unified", "rows": row_total, "per_project": per_proj}
-            )
-            LOG.info("materialized %s_unified rows=%d", table, row_total)
+            _materialize_table(con, plan, projects, source_db, table, has_pid)
 
         # Materialize pool_state_unified from per-project runtime_coordination.db.
         pool_rows = build_pool_state_unified(con, projects)
@@ -468,6 +371,146 @@ def materialize_views(
 
     plan["dry_run"] = False
     return plan
+
+
+def _plan_dry_run(plan: dict, projects: list[ProjectEntry]) -> dict:
+    for proj in projects:
+        attached: list[dict] = []
+        for db_name in SOURCE_DBS:
+            src = proj.state_dir / db_name
+            attached.append({"db": db_name, "path": str(src), "exists": src.is_file()})
+        plan["projects"].append(
+            {
+                "name": proj.name,
+                "project_id": proj.project_id,
+                "attached": attached,
+            }
+        )
+        print(
+            f"DRY-RUN: would attach project={proj.project_id} "
+            f"path={proj.path} ({sum(1 for a in attached if a['exists'])}/"
+            f"{len(SOURCE_DBS)} dbs present)",
+            file=sys.stderr,
+        )
+    plan["dry_run"] = True
+    return plan
+
+
+def _attach_sources(
+    con: sqlite3.Connection,
+    projects: list[ProjectEntry],
+    source_db: str,
+    table: str,
+) -> tuple[dict[str, list[str]], list[tuple[str, ProjectEntry]]]:
+    per_project_cols: dict[str, list[str]] = {}
+    attached_aliases: list[tuple[str, ProjectEntry]] = []
+    for idx, proj in enumerate(projects):
+        src_path = proj.state_dir / source_db
+        if not src_path.is_file():
+            continue
+        alias = f"src_{idx}"
+        try:
+            attach_readonly(con, alias, src_path)
+        except sqlite3.Error as exc:
+            LOG.warning("attach failed project=%s db=%s err=%s", proj.project_id, source_db, exc)
+            continue
+        attached_aliases.append((alias, proj))
+        if _table_exists(con, alias, table):
+            per_project_cols[alias] = _column_names(con, alias, table)
+    return per_project_cols, attached_aliases
+
+
+def _union_columns(per_project_cols: dict[str, list[str]], has_pid: bool) -> list[str]:
+    union_cols: list[str] = []
+    for cols in per_project_cols.values():
+        for c in cols:
+            if c not in union_cols:
+                union_cols.append(c)
+    if has_pid and "project_id" not in union_cols:
+        union_cols.append("project_id")
+    return union_cols
+
+
+def _copy_project_rows(
+    con: sqlite3.Connection,
+    table: str,
+    alias: str,
+    proj: ProjectEntry,
+    source_cols: list[str],
+    union_cols: list[str],
+    has_pid: bool,
+) -> int:
+    # Build a column list that matches `union_cols`; missing cols get NULL.
+    select_parts: list[str] = []
+    for c in union_cols:
+        if c in source_cols:
+            select_parts.append(f'"{c}"')
+        elif c == "project_id":
+            select_parts.append(f"'{proj.project_id}'")
+        else:
+            select_parts.append("NULL")
+    select_sql = (
+        f"SELECT {', '.join(select_parts)} FROM {alias}.{table}"
+    )
+    rows = con.execute(select_sql).fetchall()
+    if has_pid:
+        pid_idx = union_cols.index("project_id")
+        rows = [
+            tuple(
+                proj.project_id if i == pid_idx and v in (None, "") else v
+                for i, v in enumerate(r)
+            )
+            for r in rows
+        ]
+    if rows:
+        placeholders = ", ".join("?" for _ in union_cols)
+        quoted = ", ".join(f'"{c}"' for c in union_cols)
+        con.executemany(
+            f"INSERT INTO {table}_unified ({quoted}) VALUES ({placeholders})",
+            rows,
+        )
+    return len(rows)
+
+
+def _materialize_table(
+    con: sqlite3.Connection,
+    plan: dict,
+    projects: list[ProjectEntry],
+    source_db: str,
+    table: str,
+    has_pid: bool,
+) -> None:
+    per_project_cols, attached_aliases = _attach_sources(con, projects, source_db, table)
+
+    if not per_project_cols:
+        for alias, _ in attached_aliases:
+            con.execute(f"DETACH DATABASE {alias}")
+        return
+
+    union_cols = _union_columns(per_project_cols, has_pid)
+    _create_unified_table(con, table, union_cols)
+
+    row_total = 0
+    per_proj: dict = {}
+    for alias, proj in attached_aliases:
+        if alias not in per_project_cols:
+            continue
+        n = _copy_project_rows(
+            con, table, alias, proj, per_project_cols[alias], union_cols, has_pid,
+        )
+        row_total += n
+        per_proj[proj.project_id] = n
+
+    # Commit & close any implicit txn before DETACH; otherwise SQLite
+    # rejects the DETACH because the attached DB is still locked.
+    con.commit()
+    for alias, _ in attached_aliases:
+        con.execute(f"DETACH DATABASE {alias}")
+
+    plan["projects"].append(
+        {"table": f"{table}_unified", "rows": row_total, "per_project": per_proj}
+    )
+    LOG.info("materialized %s_unified rows=%d", table, row_total)
 
 
 def _default_view_db_path() -> Path:
