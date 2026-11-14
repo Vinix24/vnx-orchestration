@@ -1135,7 +1135,6 @@ def test_escaped_quote_default_does_not_corrupt_split(tmp_path: Path) -> None:
 # R7.1 — every function in migrate_future_system.py is ≤70 lines (gate counter)
 # --------------------------------------------------------------------------- #
 
-@pytest.mark.skip(reason="OI-2589: real defect, see report")
 def test_all_functions_within_70_lines_gate_counter() -> None:
     from function_size_gate import _scan_python_functions
 
