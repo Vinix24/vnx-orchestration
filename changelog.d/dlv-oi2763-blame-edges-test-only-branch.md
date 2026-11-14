@@ -1,0 +1,1 @@
+- `run_blame_edges` loses its test-only `rc_conn is None` branch and the attribution job test now runs against a real runtime store (OI-2763).
