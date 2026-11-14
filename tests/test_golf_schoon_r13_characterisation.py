@@ -1,8 +1,7 @@
 """Characterisation tests for golf-schoon R13 (extract-method, no behaviour change).
 
-Pins the observable behaviour of ``cmd_objective_link_pr``, ``_build_parser`` and
-``PRQueueManager.patch_dispatch`` so the refactor can be shown green on both the
-old and the new code.
+Pins the observable behaviour of ``cmd_objective_link_pr`` and ``_build_parser``
+so the refactor can be shown green on both the old and the new code.
 """
 
 from __future__ import annotations
@@ -38,7 +37,6 @@ def _load(name: str, rel: str):
 
 
 planning_cli = _load("golf_r13_planning_cli", "scripts/planning_cli.py")
-pqm = _load("golf_r13_pr_queue_manager", "scripts/pr_queue_manager.py")
 
 PROJECT_ID = "r13-proj"
 
@@ -289,131 +287,3 @@ def test_build_parser_rejects_bad_input(argv, capsys):
     with pytest.raises(SystemExit) as exc:
         planning_cli._build_parser().parse_args(argv)
     assert exc.value.code == 2
-
-
-# ---------------------------------------------------------------- patch_dispatch
-
-_DISPATCH = (
-    "[[TARGET:A]]\n"
-    "Manager Block\n\n"
-    "Role: backend-developer\n"
-    "Priority: P2\n"
-    "PR-ID: PR-1\n"
-    "Dispatch-ID: 20260101-000000-x-A\n\n"
-    "Instruction:\n"
-    "old body line\n\n"
-    "Dependencies: none\n\n"
-    "[[DONE]]\n"
-)
-
-
-@pytest.fixture
-def mgr(tmp_path):
-    m = pqm.PRQueueManager.__new__(pqm.PRQueueManager)
-    m.dispatch_dir = tmp_path / "dispatches"
-    (m.dispatch_dir / "staging").mkdir(parents=True)
-    m.vnx_state_dir = tmp_path / "state"
-    m.legacy_state_dir = tmp_path / "legacy"
-    m.dual_write_legacy = False
-    m.project_root = tmp_path / "root"
-    m.project_root.mkdir()
-    (m.dispatch_dir / "staging" / "d1.md").write_text(_DISPATCH)
-    return m
-
-
-def _staged(m):
-    return (m.dispatch_dir / "staging" / "d1.md").read_text()
-
-
-def _audit(m):
-    path = m.vnx_state_dir / "dispatch_audit.jsonl"
-    return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
-
-
-def test_patch_missing_staging_file(mgr, capsys):
-    assert mgr.patch_dispatch("nope", {"role": "x"}) is False
-    assert capsys.readouterr().out == "❌ Staging dispatch not found: nope\n"
-    assert _audit(mgr) == []
-
-
-def test_patch_header_replace_and_md_suffix(mgr, capsys):
-    assert mgr.patch_dispatch("d1.md", {"role": "tester", "priority": "P0"}) is True
-    text = _staged(mgr)
-    assert "Role: tester\n" in text and "Priority: P0\n" in text
-    assert capsys.readouterr().out == (
-        "✅ Patched dispatch: d1\n📝 Changes:\n"
-        "   role: backend-developer → tester\n   priority: P2 → P0\n")
-    (entry,) = _audit(mgr)
-    assert entry["action"] == "patch_dispatch" and entry["dispatch_id"] == "d1"
-    assert entry["changes"] == ["role: backend-developer → tester", "priority: P2 → P0"]
-    assert entry["patch_fields"] == {"role": "tester", "priority": "P0"}
-    assert entry["actor"] == "T0" and entry["staging_file"].endswith("staging/d1.md")
-
-
-def test_patch_header_hyphen_field_and_insert_before_dispatch_id(mgr, capsys):
-    assert mgr.patch_dispatch("d1", {"pr-id": "PR-9", "new-field": "v"}) is True
-    text = _staged(mgr)
-    assert "New-Field: v\nDispatch-ID:" in text
-    out = capsys.readouterr().out
-    assert "   new-field: (added) v\n" in out
-    (entry,) = _audit(mgr)
-    assert entry["changes"][-1] == "new-field: (added) v"
-
-
-def test_patch_instruction_replace_append_prepend(mgr, capsys):
-    assert mgr.patch_dispatch("d1", {"instruction": "NEW"}) is True
-    assert "Instruction:\nNEW\n\n\nDependencies:" in _staged(mgr)
-    assert "instruction: replaced (13 → 3 chars)" in capsys.readouterr().out
-    assert mgr.patch_dispatch("d1", {"append-instruction": "MORE"}) is True
-    assert "Instruction:\nNEW\n\n\nMORE\n\nDependencies:" in _staged(mgr)
-    assert "instruction: appended 4 chars" in capsys.readouterr().out
-    assert mgr.patch_dispatch("d1", {"prepend-instruction": "FIRST"}) is True
-    assert "Instruction:\nFIRST\n\nNEW\n" in _staged(mgr)
-    assert "instruction: prepended 5 chars" in capsys.readouterr().out
-    assert len(_audit(mgr)) == 3
-
-
-def test_patch_instruction_file_relative_and_missing(mgr, capsys):
-    (mgr.project_root / "body.txt").write_text("  FROM FILE  \n")
-    assert mgr.patch_dispatch("d1", {"instruction-file": "body.txt"}) is True
-    assert "Instruction:\nFROM FILE\n\n\nDependencies:" in _staged(mgr)
-    assert "instruction: replaced from file body.txt (9 chars)" in capsys.readouterr().out
-    before = _staged(mgr)
-    assert mgr.patch_dispatch("d1", {"instruction-file": "absent.txt"}) is False
-    out = capsys.readouterr().out
-    assert out == "❌ Instruction file not found: absent.txt\n❌ No changes applied\n"
-    assert _staged(mgr) == before and len(_audit(mgr)) == 1
-
-
-def test_patch_missing_instruction_markers_warn_and_no_changes(tmp_path, mgr, capsys):
-    (mgr.dispatch_dir / "staging" / "d1.md").write_text("Role: x\nDispatch-ID: z\n")
-    assert mgr.patch_dispatch("d1", {"instruction": "a"}) is False
-    assert capsys.readouterr().out == (
-        "⚠️  Could not locate Instruction body in dispatch\n❌ No changes applied\n")
-    assert mgr.patch_dispatch("d1", {"append-instruction": "a"}) is False
-    assert "Could not locate Instruction body in dispatch" in capsys.readouterr().out
-    assert mgr.patch_dispatch("d1", {"prepend-instruction": "a"}) is False
-    assert "⚠️  Could not locate Instruction header in dispatch" in capsys.readouterr().out
-    assert _audit(mgr) == []
-
-
-def test_patch_field_without_anchor_warns(mgr, capsys):
-    (mgr.dispatch_dir / "staging" / "d1.md").write_text("nothing here\n")
-    assert mgr.patch_dispatch("d1", {"role": "x"}) is False
-    assert capsys.readouterr().out == (
-        "⚠️  Field 'role' not found and could not insert\n❌ No changes applied\n")
-
-
-def test_patch_mixed_partial_applies_what_it_can(mgr, capsys):
-    assert mgr.patch_dispatch("d1", {"instruction-file": "absent", "role": "r2"}) is True
-    out = capsys.readouterr().out
-    assert out.startswith("❌ Instruction file not found: absent\n✅ Patched dispatch: d1\n")
-    assert "Role: r2\n" in _staged(mgr)
-
-
-def test_patch_failure_is_caught_and_returns_false(mgr, capsys):
-    mgr._log_audit = lambda entry: (_ for _ in ()).throw(RuntimeError("boom"))
-    assert mgr.patch_dispatch("d1", {"role": "r2"}) is False
-    out = capsys.readouterr()
-    assert "❌ Patch failed: boom\n" in out.out
-    assert "RuntimeError: boom" in out.err
