@@ -14,8 +14,11 @@ from pathlib import Path
 from typing import Any, Callable, Optional, Tuple
 
 import atomic_io
+from project_root import resolve_central_data_dir
 
 SOURCES_FILE, SOURCES_SCHEMA = "memory_sources.json", "memory_sources/1"
+REGISTRY_FILE, REGISTRY_SCHEMA = "memory_bindings.json", "memory_bindings/1"
+PERSISTED = ("appended", "duplicate")  # the AppendResult statuses that mean the receipt is on disk
 INDEX_NOTE = "MEMORY.md"
 
 
@@ -83,8 +86,31 @@ def _boundary_refusal(resolved: Path, project_id: str, boundary: Any) -> Optiona
     return None
 
 
-def _other_project_binds(state_dir: Path, resolved: Path, project_id: str) -> bool:
-    for other in sorted(Path(state_dir).parent.parent.glob("*/state/" + SOURCES_FILE)):
+def registry_path() -> Path:
+    return resolve_central_data_dir(REGISTRY_FILE)  # ~/.vnx-data/memory_bindings.json
+
+
+def _load_registry() -> dict:
+    """The folder -> project_id map every bind records, read fail-closed."""
+    path = registry_path()
+    if not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        raise BindRefused("binding registry unreadable or corrupt")
+    bindings = data.get("bindings") if isinstance(data, dict) else None
+    if not isinstance(bindings, dict) or data.get("schema") != REGISTRY_SCHEMA:
+        raise BindRefused("binding registry invalid")
+    return bindings
+
+
+def _other_project_binds(state_dir: Path, resolved: Path, project_id: str, registry: dict) -> bool:
+    if registry.get(str(resolved), project_id) != project_id:
+        return True
+    stores = set(registry_path().parent.glob("*/state/" + SOURCES_FILE))  # every central store
+    stores.add(Path(state_dir) / SOURCES_FILE)  # the caller's own store, repo-local or central
+    for other in sorted(stores):
         data, _ = load_sources(other.parent)
         if data and data["project_id"] != project_id and str(resolved) in data["memory_dirs"]:
             return True
@@ -93,7 +119,13 @@ def _other_project_binds(state_dir: Path, resolved: Path, project_id: str) -> bo
 
 def bind(state_dir: Path, directory: str, project_id: str, *, boundary: Any = None,
          emit: Optional[Callable[..., Any]] = None) -> dict:
-    """Add one folder to the binding (ADR-078 §4). Raises BindRefused."""
+    """Add one folder to the binding (ADR-078 §4). Raises BindRefused.
+
+    The state_mutation receipt is persisted before the binding is written
+    (ADR-005); the uniqueness check and both writes share one registry lock.
+    """
+    if emit is None:
+        raise BindRefused("no state_mutation emitter; a binding needs a receipt (ADR-005)")
     try:
         resolved = Path(directory).expanduser().resolve()
     except (OSError, RuntimeError, ValueError):
@@ -105,17 +137,27 @@ def bind(state_dir: Path, directory: str, project_id: str, *, boundary: Any = No
     reason = _boundary_refusal(resolved, project_id, boundary)
     if reason:
         raise BindRefused(reason)
-    if _other_project_binds(state_dir, resolved, project_id):
-        raise BindRefused("folder is already bound to another project")
-    target = Path(state_dir) / SOURCES_FILE
+    target, registry_file = Path(state_dir) / SOURCES_FILE, registry_path()
     Path(state_dir).mkdir(parents=True, exist_ok=True)
-    with atomic_io.slot_lock(target):
-        old, _ = load_sources(state_dir)
-        old_dirs = list(old["memory_dirs"]) if old and old["project_id"] == project_id else []
-        new_dirs = old_dirs + ([str(resolved)] if str(resolved) not in old_dirs else [])
-        doc = {"schema": SOURCES_SCHEMA, "project_id": project_id, "memory_dirs": new_dirs,
-               "bound_at": _now()}
-        atomic_io.atomic_write_json(target, doc)
-    if emit is not None:
-        emit(str(target), trigger="memory_bind old=%s new=%s" % (json.dumps(old_dirs), json.dumps(new_dirs)))
+    registry_file.parent.mkdir(parents=True, exist_ok=True)
+    with atomic_io.slot_lock(registry_file):
+        registry = _load_registry()
+        if _other_project_binds(state_dir, resolved, project_id, registry):
+            raise BindRefused("folder is already bound to another project")
+        with atomic_io.slot_lock(target):
+            old, _ = load_sources(state_dir)
+            old_dirs = list(old["memory_dirs"]) if old and old["project_id"] == project_id else []
+            new_dirs = old_dirs + ([str(resolved)] if str(resolved) not in old_dirs else [])
+            doc = {"schema": SOURCES_SCHEMA, "project_id": project_id, "memory_dirs": new_dirs,
+                   "bound_at": _now()}
+            try:
+                result = emit(str(target), trigger="memory_bind old=%s new=%s"
+                              % (json.dumps(old_dirs), json.dumps(new_dirs)))
+            except Exception as exc:  # any emitter failure is a missing receipt: refuse, write nothing
+                raise BindRefused("state_mutation receipt not persisted; binding unchanged") from exc
+            if getattr(result, "status", None) not in PERSISTED:
+                raise BindRefused("state_mutation receipt not persisted; binding unchanged")
+            atomic_io.atomic_write_json(target, doc)
+        registry[str(resolved)] = project_id
+        atomic_io.atomic_write_json(registry_file, {"schema": REGISTRY_SCHEMA, "bindings": registry})
     return doc
