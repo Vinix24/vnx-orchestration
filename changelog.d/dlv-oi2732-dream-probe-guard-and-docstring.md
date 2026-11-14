@@ -1,0 +1,1 @@
+- The dream liveness probe refuses a test-run write into the real central store, and its docstring names the beacon path it writes (OI-2732).
