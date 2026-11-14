@@ -1854,7 +1854,18 @@ class T0IntelligenceGatherer:
         tags = []
         desc_lower = description.lower()
 
-        # Phase detection with specific contexts
+        self._tags_phase(desc_lower, tags)
+        self._tags_component(desc_lower, tags)
+        self._tags_feature(desc_lower, tags)
+        self._tags_issue(desc_lower, tags)
+        self._tags_domain(desc_lower, tags)
+        self._tags_severity(desc_lower, tags)
+
+        return list(set(tags))  # Remove duplicates
+
+    @staticmethod
+    def _tags_phase(desc_lower: str, tags: List[str]) -> None:
+        """Phase detection with specific contexts."""
         if any(word in desc_lower for word in ['design', 'plan', 'architect']):
             tags.append('design-phase')
             if 'system' in desc_lower:
@@ -1885,7 +1896,9 @@ class T0IntelligenceGatherer:
             if 'rollback' in desc_lower:
                 tags.append('production-rollback')
 
-        # Component detection with specific subsystems
+    @staticmethod
+    def _tags_component(desc_lower: str, tags: List[str]) -> None:
+        """Component detection with specific subsystems."""
         if any(word in desc_lower for word in ['crawler', 'scrape', 'web', 'crawl4ai']):
             tags.append('crawler-component')
             if 'vnx' in desc_lower:
@@ -1909,7 +1922,9 @@ class T0IntelligenceGatherer:
             if 'sse' in desc_lower or 'server-sent' in desc_lower:
                 tags.append('sse-pipeline')
 
-        # Specific feature tags
+    @staticmethod
+    def _tags_feature(desc_lower: str, tags: List[str]) -> None:
+        """Specific feature tags."""
         if 'sse' in desc_lower or 'streaming' in desc_lower:
             tags.append('sse-streaming')
             if 'pipeline' in desc_lower:
@@ -1931,7 +1946,9 @@ class T0IntelligenceGatherer:
             if 'dutch' in desc_lower or 'kvk' in desc_lower or 'btw' in desc_lower:
                 tags.append('dutch-compliance')
 
-        # Issue detection with specific contexts
+    @staticmethod
+    def _tags_issue(desc_lower: str, tags: List[str]) -> None:
+        """Issue detection with specific contexts."""
         if any(word in desc_lower for word in ['validation', 'invalid', 'schema', 'validate']):
             tags.append('validation')
             if 'error' in desc_lower:
@@ -1964,7 +1981,9 @@ class T0IntelligenceGatherer:
             if 'deadlock' in desc_lower:
                 tags.append('deadlock')
 
-        # Technical debt and refactoring
+    @staticmethod
+    def _tags_domain(desc_lower: str, tags: List[str]) -> None:
+        """Refactoring, security and Dutch market tags."""
         if any(word in desc_lower for word in ['refactor', 'cleanup', 'technical debt', 'improve']):
             tags.append('refactoring')
             if 'technical debt' in desc_lower:
@@ -1988,7 +2007,9 @@ class T0IntelligenceGatherer:
             if 'decimal' in desc_lower or 'format' in desc_lower:
                 tags.append('dutch-formatting')
 
-        # Severity detection (keep at the end for priority)
+    @staticmethod
+    def _tags_severity(desc_lower: str, tags: List[str]) -> None:
+        """Severity detection (keep at the end for priority)."""
         if any(word in desc_lower for word in ['critical', 'blocker', 'urgent', 'emergency']):
             tags.append('critical-severity')
         elif any(word in desc_lower for word in ['high', 'important', 'major']):
@@ -1997,8 +2018,6 @@ class T0IntelligenceGatherer:
             tags.append('medium-priority')
         else:
             tags.append('normal-priority')
-
-        return list(set(tags))  # Remove duplicates
 
     def analyze_tags_for_task(
         self,
