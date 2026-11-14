@@ -116,14 +116,8 @@ class TestStateDirGuard:
 # ---------------------------------------------------------------------------
 
 class TestEventsDirGuard:
-    def test_vnx_data_dir_honored_without_explicit_flag(self, monkeypatch, tmp_path):
-        """OI-1179: VNX_DATA_DIR set is honored WITHOUT VNX_DATA_DIR_EXPLICIT=1.
-
-        The old two-flag trap ignored a set VNX_DATA_DIR unless
-        VNX_DATA_DIR_EXPLICIT=1 was ALSO set, silently falling back to the
-        canonical resolver and (in a central install) landing on the read-only
-        pinned version store. A set VNX_DATA_DIR must be respected directly.
-        """
+    def test_bare_vnx_data_dir_not_honored(self, monkeypatch, tmp_path):
+        """OI-1276 (changed from OI-1179): a bare VNX_DATA_DIR is ignored, as for receipts (#225)."""
         data_dir = str(tmp_path / "operator_data")
         monkeypatch.setenv("VNX_DATA_DIR", data_dir)
         monkeypatch.delenv("VNX_DATA_DIR_EXPLICIT", raising=False)
@@ -131,7 +125,7 @@ class TestEventsDirGuard:
 
         result = _events_dir()
 
-        assert result == Path(data_dir).expanduser().resolve() / "events"
+        assert result != Path(data_dir).expanduser().resolve() / "events"
 
     def test_with_explicit_flag_honors_vnx_data_dir(self, monkeypatch, tmp_path):
         """VNX_DATA_DIR + VNX_DATA_DIR_EXPLICIT=1 resolves to that dir/events."""
@@ -151,7 +145,9 @@ class TestEventsDirGuard:
 
         result = _events_dir()
 
-        assert result == Path.home() / ".vnx-data" / "vnx-dev" / "events"
+        # OI-1276: VNX_PROJECT_ID acts through resolve_paths, the receipts' answer.
+        from vnx_paths import resolve_paths
+        assert result == Path(resolve_paths()["VNX_DATA_DIR"]) / "events"
 
     def test_no_project_id_fallback_to_repo_relative(self, monkeypatch):
         """Without VNX_PROJECT_ID or env, falls back to the canonical resolver's data dir (OI-1179)."""
