@@ -20,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import atomic_io
 from project_root import resolve_central_data_dir
 from secret_patterns import mask, shell_value_end
+from vnx_ids import PROJECT_ID_RE
 
 SCHEMA = "permission_event/1"
 COVERAGE_SCHEMA = "permission_coverage/1"
@@ -53,7 +54,6 @@ _RULES = (  # (pattern, replacement): rule 2, ids, then rule 3, paths, then rule
 _NUMBER = re.compile(r"(?<![\w./<-])\d+(?![\w./>-])")
 _HEREDOC = re.compile(r"(?<!<)<<(?!<).*", re.DOTALL)  # a here-string (<<<) is no heredoc
 
-
 def _strip_lead(text: str) -> str:
     """Drop leading ``cd <path> &&`` and ``NAME=value`` words (values read by ``shell_value_end``)."""
     while True:
@@ -72,7 +72,6 @@ def _strip_lead(text: str) -> str:
                 text = text[gap.end():]
                 continue
         return text
-
 
 def normalise(command: str) -> str:
     """ADR-075 decision 4: mask, then the five rules in order. Idempotent."""
@@ -127,8 +126,16 @@ def build_event(
         "dispatch_id": _safe_text(dispatch_id or "", normalised=False),
     }
 
-def _state_dir(project_id: str, state_dir: Optional[Path]) -> Path:
-    return Path(state_dir) if state_dir is not None else resolve_central_data_dir(project_id) / "state"
+def _state_dir(project_id: Any, state_dir: Optional[Path]) -> Path:
+    """The single gate before any mkdir, open or lock: a fleet project_id, and a central dir under the central root."""
+    if not isinstance(project_id, str) or not PROJECT_ID_RE.fullmatch(project_id):
+        raise ValueError(f"project_id {project_id!r} is not a fleet project id")
+    if state_dir is not None:
+        return Path(state_dir)
+    root, central = (Path.home() / ".vnx-data").resolve(), resolve_central_data_dir(project_id).resolve()
+    if central.parent != root:
+        raise ValueError(f"project_id {project_id!r} resolves to {central}, outside the central store {root}")
+    return central / "state"
 
 @contextmanager
 def _locked(state: Path) -> Iterator[None]:
@@ -174,7 +181,6 @@ def _scan(path: Path) -> tuple:
             bad += 1
     return ids, bad
 
-
 def _append_all(path: Path, payload: bytes) -> None:
     """Append ``payload`` completely (caller holds the lock): a torn tail gets a newline first, a short
     write loops on, a write of 0 or an error raises and restores the old length."""
@@ -197,7 +203,6 @@ def _append_all(path: Path, payload: bytes) -> None:
     finally:
         os.close(fd)
 
-
 def _load_coverage(path: Path) -> tuple:
     """Existing projection; a missing file starts empty, any other failure is logged and raised."""
     try:
@@ -211,19 +216,17 @@ def _load_coverage(path: Path) -> tuple:
         print(f"permission_events: cannot use {path.name} ({type(exc).__name__}), not overwriting it", file=sys.stderr)
         raise
 
-
 def _store_coverage(path: Path, project_id: str, sources: Dict[str, Any], unparseable: int) -> None:
     doc = {"schema": COVERAGE_SCHEMA, "project_id": project_id, "sources": sources, "unparseable_lines": unparseable}
     atomic_io.atomic_write_text(path, json.dumps(doc, sort_keys=True))  # read-modify-write under _locked
-
 
 def write_events(
     events: Iterable[Dict[str, Any]], project_id: str, state_dir: Optional[Path] = None,
 ) -> int:
     """Append new events under the lock; returns lines written. A bad event writes nothing, a known
     event_id is skipped, unparseable ledger lines are counted in the coverage record (no content)."""
-    clean = [_validate(e, project_id) for e in events]
     state = _state_dir(project_id, state_dir)
+    clean = [_validate(e, project_id) for e in events]
     path = state / "permission_events.ndjson"
     cov_path = state / "permission_coverage.json"
     with _locked(state):
