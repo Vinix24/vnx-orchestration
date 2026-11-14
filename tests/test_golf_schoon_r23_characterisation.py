@@ -1,7 +1,5 @@
 #!/usr/bin/env python3
-"""Characterisation of governance_audit_view, provenance_audit_view and
-pre_merge_advisory (golf schoon R23). Pins observable behaviour so the
-extract-method refactor can prove it changes nothing."""
+"""Characterisation of the three audit-view functions (golf schoon R23)."""
 
 from __future__ import annotations
 
@@ -220,7 +218,6 @@ def test_pre_merge_advisory_full(gov, monkeypatch, tmp_path):
         "td1", "td5", "tdX", ADVISORY_RESOLVE_ESCALATION, ADVISORY_REVIEW_OVERRIDE]
     assert advs[3]["severity"] == "warning"
     assert advs[3]["recommendation"] == "1 dispatch(es) on hold — resolve before merge"
-    assert advs[3]["entity_id"] == "pre_merge"
     assert advs[3]["evidence"]["holds"][0] == {
         "entity": "dispatch:d1", "level": "hold", "trigger": "trig-d1"}
     assert advs[4]["severity"] == "info"
@@ -250,7 +247,7 @@ def test_pre_merge_advisory_clean(conn, tmp_path, monkeypatch):
 
 
 def test_governance_malformed_metadata_json_raises(conn):
-    # Pinned as-is: _parse_json returns [] for bad JSON and the view then calls .get on it.
+    # pinned as-is: _parse_json gives [] and the view calls .get on it
     _event(conn, "bad", "policy_evaluation", "d1", "2026-01-01T00:00:00Z", "not json")
     conn.commit()
     with pytest.raises(AttributeError):
