@@ -11,6 +11,7 @@ pre-initialized coordination DB.
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import subprocess
 import sys
@@ -81,21 +82,38 @@ def _init_project(tmp_path: Path) -> Path:
     """)
     conn.commit()
 
-    sql = (_MIGRATIONS / "0022_track_layer.sql").read_text(encoding="utf-8")
-    schema_migration.apply_script_if_below(conn, 22, sql)
-    conn.commit()
+    for version, filename in [(22, "0022_track_layer.sql"), (24, "0024_tracks_tenant_scoping.sql")]:
+        sql = (_MIGRATIONS / filename).read_text(encoding="utf-8")
+        schema_migration.apply_script_if_below(conn, version, sql)
+        conn.commit()
     conn.close()
     return project_dir
 
 
 def _run_vnx(args: list[str], project_dir: Path) -> tuple[int, str, str]:
-    """Run `vnx <args>` against project_dir, return (rc, stdout, stderr)."""
-    cmd = [sys.executable, "-m", "vnx_cli.main"] + args + ["--project-dir", str(project_dir)]
+    """Run `vnx <args>` against project_dir, return (rc, stdout, stderr).
+
+    Track commands take the tenant explicitly (ADR-007: ``--project-id`` is
+    required on every write), so the helper always passes the fixture tenant.
+    """
+    cmd = (
+        [sys.executable, "-m", "vnx_cli.main"] + args
+        + ["--project-id", "vnx-dev", "--project-dir", str(project_dir)]
+    )
+    # With --project-id the store comes from the data-root chain, not from
+    # --project-dir; pin it to the fixture's own .vnx-data so the run never
+    # reaches ~/.vnx-data.
+    env = {
+        **os.environ,
+        "VNX_DATA_DIR": str(project_dir / ".vnx-data"),
+        "VNX_DATA_DIR_EXPLICIT": "1",
+    }
     result = subprocess.run(
         cmd,
         capture_output=True,
         text=True,
         cwd=str(_PROJECT_ROOT),
+        env=env,
     )
     return result.returncode, result.stdout, result.stderr
 

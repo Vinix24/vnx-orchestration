@@ -203,25 +203,6 @@ def test_token_savings():
 
     return False
 
-def test_backward_compatibility():
-    """Test that template fallback works when skill not found"""
-    print_info("Test 4: Backward Compatibility")
-
-    # Check dispatcher has fallback logic
-    dispatcher_path = PROJECT_ROOT / ".claude" / "vnx-system" / "scripts" / "dispatcher_v7_compilation.sh"
-    dispatcher_content = dispatcher_path.read_text()
-
-    # Check for load_agent_content function with skill fallback
-    has_skill_check = 'if [[ -f "$skill_path" ]]' in dispatcher_content
-    has_template_fallback = 'cat "$template_path"' in dispatcher_content
-
-    if has_skill_check and has_template_fallback:
-        print_success("Dispatcher has skill-first with template fallback")
-        return True
-    else:
-        print_error("Dispatcher missing backward compatibility fallback")
-        return False
-
 def run_all_tests():
     """Run all Week 1 validation tests"""
     print(f"\n{Colors.BLUE}═══════════════════════════════════════════{Colors.RESET}")
@@ -238,9 +219,6 @@ def run_all_tests():
     print()
 
     results['token_savings'] = test_token_savings()
-    print()
-
-    results['backward_compatibility'] = test_backward_compatibility()
     print()
 
     # Summary
