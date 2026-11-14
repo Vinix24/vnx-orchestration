@@ -228,8 +228,8 @@ class TestHeadlessBehavior:
         assert result.terminals == {}
 
     def test_shutdown_is_safe(self, headless_adapter: HeadlessAdapter) -> None:
-        headless_adapter.shutdown(graceful=True)
-        headless_adapter.shutdown(graceful=False)
+        headless_adapter.shutdown(True)
+        headless_adapter.shutdown(False)
 
     def test_validate_required_on_headless(self, headless_adapter: HeadlessAdapter) -> None:
         missing = validate_required_capabilities(headless_adapter)

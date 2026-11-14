@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -37,14 +38,29 @@ import build_t0_state as bts  # noqa: E402
 
 class TestRunsClean:
     def test_build_t0_state_runs_clean_on_main(self, tmp_path: Path) -> None:
-        """Script exits 0 and produces valid schema_version:2.2 JSON."""
+        """Script does not fail the build and produces valid schema_version:2.2 JSON."""
         out = tmp_path / "t0_state_smoke.json"
+        data_dir = tmp_path / "data"
+        env = {
+            k: v for k, v in os.environ.items()
+            if k not in ("VNX_CANONICAL_ROOT", "VNX_PROJECT_ID", "VNX_DISPATCH_PATHS")
+        }
+        # Own state only: nothing under the real ~/.vnx-data may be read or written.
+        env.update({
+            "HOME": str(tmp_path),
+            "VNX_DATA_DIR": str(data_dir),
+            "VNX_STATE_DIR": str(data_dir / "state"),
+            "VNX_DISPATCH_DIR": str(data_dir / "dispatches"),
+            "VNX_DATA_DIR_GUARD": "off",
+        })
         result = subprocess.run(
             [sys.executable, str(_SCRIPTS_DIR / "build_t0_state.py"), "--output", str(out)],
             capture_output=True,
             text=True,
+            env=env,
         )
-        assert result.returncode == 0, (
+        # rc 1 = health degraded (an empty state has no beacons yet); rc 2 = the build failed.
+        assert result.returncode in (bts._EXIT_OK, bts._EXIT_HEALTH_DEGRADED), (
             f"build_t0_state.py exited {result.returncode}\n"
             f"stderr: {result.stderr[:500]}"
         )

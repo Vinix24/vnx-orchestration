@@ -21,6 +21,7 @@ failure mode; see tests/test_dispatch_envelope_annotations_resolve.py).
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
@@ -32,6 +33,53 @@ from envelope_types import _AdapterResult
 # ---------------------------------------------------------------------------
 # PR-3: ProviderAdapter + plan-based provider execution
 # ---------------------------------------------------------------------------
+
+
+# OI-1803: the claude CLI behind the glm/deepseek harness prints a provider refusal as an
+# "API Error: <status> <body>" line (the 20-09 ff-intel-3b response is the fixture); the
+# streamed deltas are joined without a newline, so repeated refusals share one line.
+_API_ERROR_START = r"(?:Failed to authenticate\.\s*)?API Error: \d{3}\b"
+_API_ERROR_START_RE = re.compile(_API_ERROR_START)
+_API_ERROR_LINE = re.compile(rf"^{_API_ERROR_START}")
+
+
+def _split_api_errors(line: str) -> list:
+    """Cut a line at each full "[prefix] API Error: <status>" start, never between a prefix and
+    its "API Error" (finditer takes the prefix as part of the leftmost match)."""
+    cuts = [m.start() for m in _API_ERROR_START_RE.finditer(line)]
+    if not cuts or cuts[0] != 0:
+        cuts.insert(0, 0)
+    return [line[a:b] for a, b in zip(cuts, cuts[1:] + [len(line)])]
+
+
+def _blocking_refusal_class(completion_text: str) -> Optional[str]:
+    """The blocking failure class (credit_exhausted / auth_rejected) when the completion is
+    nothing but API refusals, else None.
+
+    Refusal-only means every non-empty segment (a line, cut again at each "API Error: <status>"
+    marker) has that shape and classify_failure_safe books it as a provider-lane blocking
+    class; one line of prose or code anywhere makes it a real answer, whatever its length.
+    """
+    from failure_classification import classify_failure_safe  # noqa: PLC0415
+    from provider_dispatch import _PROVIDER_LANE_COOLDOWN_FAILURE_CLASSES  # noqa: PLC0415
+
+    segments = [
+        seg.strip()
+        for line in (completion_text or "").splitlines()
+        for seg in _split_api_errors(line)
+        if seg.strip()
+    ]
+    if not segments:
+        return None
+    first = None
+    for seg in segments:
+        if not _API_ERROR_LINE.match(seg):
+            return None
+        klass = classify_failure_safe(status="failure", completion_text=seg).get("failure_class")
+        if klass not in _PROVIDER_LANE_COOLDOWN_FAILURE_CLASSES:
+            return None
+        first = first or klass
+    return first
 
 
 def _fail_loud_on_empty_success(
@@ -65,6 +113,17 @@ def _fail_loud_on_empty_success(
                 f"provider={provider_str} returned an empty completion with "
                 f"returncode={returncode} — refusing to report a silent empty "
                 f"success (raw spawn result: {raw_result!r})"
+            ),
+        )
+    refusal = _blocking_refusal_class(completion_text) if status == "success" else None
+    if refusal is not None:
+        # OI-1803: rc 0 with only the API's refusal as the "answer" is a failed run.
+        return (
+            "failure",
+            returncode or 1,
+            (
+                f"provider={provider_str} got only a {refusal} refusal from the API and "
+                f"produced no assistant output: {(completion_text or '').strip()[:300]}"
             ),
         )
     if status != "success" and not (completion_text or "").strip():

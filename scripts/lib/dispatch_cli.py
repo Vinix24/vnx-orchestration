@@ -16,8 +16,10 @@ import dataclasses
 import json
 import logging
 import os
+import stat as _stat
 import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, Mapping, Optional, Set
@@ -60,6 +62,7 @@ from dispatch_serialization import LockWaitTimeout, force_release, serialize_lan
 import dispatch_exit  # noqa: E402
 import dispatch_start  # noqa: E402
 from worker_permissions import (  # noqa: E402
+    _registry_role_names,
     resolve_worker_profile,
     role_grants_write,
     worker_permission_enforcement_enabled,
@@ -1485,7 +1488,54 @@ def _recover_for_refire(conn, row: dict, refire_reason: Optional[str]) -> None:
     )
 
 
+_CLAIM_LOCK_ATTEMPTS = 4
+_CLAIM_LOCK_BACKOFF = (0.25, 0.5, 1.0)
+_CLAIM_SLEEP = time.sleep  # injectable: tests swap it so they do not wait
+
+
+def _is_lock_error(exc: Exception) -> bool:
+    """True only for a sqlite ``OperationalError`` that says the DB is locked or busy."""
+    import sqlite3 as _sqlite3
+    if not isinstance(exc, _sqlite3.OperationalError):
+        return False
+    msg = str(exc).lower()
+    return "database is locked" in msg or "database is busy" in msg
+
+
 def _persist_dispatch_row(
+    spec: DispatchSpec,
+    *,
+    state_dir: Path,
+    worker_claude_override_reason: Optional[str] = None,
+    refire_reason: Optional[str] = None,
+) -> Optional[str]:
+    """Run ``_persist_dispatch_row_once``, retrying a locked claim (OI-2754).
+
+    A ``database is locked``/``database is busy`` at the claim (a concurrent fire wave)
+    retries the whole register-and-claim unit from scratch, at most
+    ``_CLAIM_LOCK_ATTEMPTS`` times with ``_CLAIM_LOCK_BACKOFF`` sleeps; the one
+    ``door_bookkeeping_failed`` fact after the last failure names the attempt count.
+    """
+    for attempt in range(1, _CLAIM_LOCK_ATTEMPTS + 1):
+        try:
+            return _persist_dispatch_row_once(
+                spec, state_dir=state_dir, refire_reason=refire_reason,
+                worker_claude_override_reason=worker_claude_override_reason,
+            )
+        except Exception as exc:  # vnx-silent-except: a lock error is retried, then recorded as one fact; anything else is re-raised
+            if not _is_lock_error(exc):
+                raise
+            if attempt < _CLAIM_LOCK_ATTEMPTS:
+                _CLAIM_SLEEP(_CLAIM_LOCK_BACKOFF[attempt - 1])
+                continue
+            _record_bookkeeping_failure(
+                "_persist_dispatch_row", spec.dispatch_id,
+                type(exc)(f"{exc} (after {attempt} attempts)"), state_dir=state_dir,
+            )
+    return None
+
+
+def _persist_dispatch_row_once(
     spec: DispatchSpec,
     *,
     state_dir: Path,
@@ -1556,6 +1606,9 @@ def _persist_dispatch_row(
     durable ``door_bookkeeping_failed`` fact via _record_bookkeeping_failure,
     and returns None — tracker bookkeeping must never block the door.
 
+    One register-and-claim unit; a locked/busy DB is re-raised for the retrying
+    ``_persist_dispatch_row`` (OI-2754), every other failure is recorded here.
+
     Returns the new dispatch_attempts row's attempt_id on success, else None.
     """
     try:
@@ -1606,6 +1659,8 @@ def _persist_dispatch_row(
             conn.commit()
             return attempt_row["attempt_id"]
     except Exception as exc:  # vnx-silent-except: dispatch-row persistence is best-effort; door must never block on a tracker-row write failure
+        if _is_lock_error(exc):
+            raise
         _record_bookkeeping_failure(
             "_persist_dispatch_row", spec.dispatch_id, exc, state_dir=state_dir,
         )
@@ -1962,15 +2017,15 @@ def _discover_valid_roles(agents_dir: Path) -> frozenset[str]:
     file the worker loads as its profile. Missing or unreadable registry → EMPTY
     set, so compile_plan's OI-921 membership check rejects every role (fail-closed):
     an undiscoverable registry must never silently accept an arbitrary role string.
+    Unreadable is decided by an explicit stat, never by ``is_dir``/``is_file``,
+    because those hide the error from Python 3.14 on.
     """
     try:
-        if not agents_dir.is_dir():
+        if not _stat.S_ISDIR(os.stat(agents_dir).st_mode):
             return frozenset()
-        return frozenset(
-            entry.name
-            for entry in agents_dir.iterdir()
-            if entry.is_dir() and (entry / "CLAUDE.md").is_file()
-        )
+        return _registry_role_names(agents_dir)
+    except (FileNotFoundError, NotADirectoryError):
+        return frozenset()
     except OSError:
         return frozenset()
 
@@ -3636,6 +3691,56 @@ def _runtime_end_state(dispatch_id: str, *, state_dir: Path) -> Optional[str]:
     return state if state in _REFIRE_RUNTIME_END_STATES else None
 
 
+def _has_start_refusal_receipt(dispatch_id: str, *, state_dir: Path) -> bool:
+    """True when the receipt ledger carries a refused-start receipt for dispatch_id."""
+    path = state_dir / _RECEIPTS_FILENAME_REFIRE
+    target = f'"dispatch_id":"{dispatch_id}"'
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                if target not in line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if rec.get("dispatch_id") == dispatch_id and _is_start_refusal(rec):
+                    return True
+    except OSError:
+        return False
+    return False
+
+
+def _attempt_started(dispatch_id: str, *, state_dir: Path) -> bool:
+    """True when a claim was booked for dispatch_id; True too when that cannot be read (fail closed)."""
+    import sqlite3 as _sqlite3
+    try:
+        conn = _sqlite3.connect(str(_tracks_db_path(state_dir)), timeout=10.0)
+        try:
+            counted = conn.execute(
+                "SELECT COALESCE(MAX(attempt_count), 0) FROM dispatches WHERE dispatch_id = ?",
+                (dispatch_id,),
+            ).fetchone()[0]
+            rows = conn.execute(
+                "SELECT COUNT(*) FROM dispatch_attempts WHERE dispatch_id = ?", (dispatch_id,),
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        return counted > 0 or rows > 0
+    except (_sqlite3.Error, TypeError):
+        return True
+
+
+def _only_start_refusal(dispatch_id: str, *, state_dir: Path) -> bool:
+    """True when the only evidence of a fire is a refused start: no run receipt, a
+    start-refusal receipt, and no attempt booked (OI-2754). Anything unreadable is False."""
+    return (
+        _find_terminal_receipt_status(dispatch_id, state_dir=state_dir) is None
+        and _has_start_refusal_receipt(dispatch_id, state_dir=state_dir)
+        and not _attempt_started(dispatch_id, state_dir=state_dir)
+    )
+
+
 def _refire_guard_verdict(
     dispatch_id: str, *, state_dir: Path, refire_reason: Optional[str],
 ) -> Optional[str]:
@@ -3643,7 +3748,9 @@ def _refire_guard_verdict(
     and no explicit --refire reason was supplied. None means clear to fire.
 
     Evidence, checked in order (cheapest/most-conclusive first): a terminal
-    receipt, a route decision, a runtime end-state. Any one hit blocks.
+    receipt, a route decision, a runtime end-state. Any one hit blocks, except a
+    route decision whose only terminal evidence is a refused start with no attempt
+    booked (OI-2754): that start never ran, so a plain refire may go.
     """
     if refire_reason and refire_reason.strip():
         return None
@@ -3655,7 +3762,8 @@ def _refire_guard_verdict(
             f"(status={receipt_status!r})"
         )
 
-    if _route_decision_exists(dispatch_id, state_dir=state_dir):
+    if (_route_decision_exists(dispatch_id, state_dir=state_dir)
+            and not _only_start_refusal(dispatch_id, state_dir=state_dir)):
         return (
             f"dispatch_id={dispatch_id!r} already carries a route decision "
             f"(the door already fired it for real at least once)"

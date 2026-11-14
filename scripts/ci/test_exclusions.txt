@@ -178,7 +178,6 @@ tests/test_semantics_cleanup.py  # OI-1227: red solo — ValueError: substring n
 tests/test_session_ids_staleness.py  # OI-1227: red solo — read_events_with_timeout does not refresh session_id (1 failed, 5 passed)
 tests/test_status_vocab_drift.py  # ADR-053 (tsk-5): NOT red — this whole file already runs as its own blocking Profile A step "Run status vocabulary drift guard unit tests" (.github/workflows/vnx-ci.yml:310) on every PR; the parallel-phase copy cost ~8 s and proved nothing extra. tests/test_ci_gates_still_exist.py fails if that step (or its command) disappears.
 tests/test_strategy_roadmap.py  # OI-1227: red solo — roadmap file not found (RoadmapValidationError) (1 failed, 33 passed)
-tests/test_strategy_roadmap_real_file.py  # OI-1227: red solo — committed roadmap not found (RoadmapValidationError) (1 failed)
 tests/test_subprocess_cheap_lane.py  # OI-1227: red solo — cheap-lane routes to kimi, expected None (5 failed, 30 passed)
 tests/test_subprocess_dispatch_identity.py  # OI-1227: red solo — delivered env leaks ANTHROPIC_AUTH_TOKEN (1 failed, 5 passed)
 tests/test_subprocess_health.py  # OI-1227: red solo — deliver-with-recovery file not found (3 failed, 13 passed)

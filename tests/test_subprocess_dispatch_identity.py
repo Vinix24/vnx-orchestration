@@ -74,12 +74,37 @@ def test_deliver_with_extra_env_merges_into_popen_env(adapter):
             assert env[host_key] == os.environ[host_key]
 
 
-def test_deliver_without_extra_env_inherits_default(adapter):
+def test_deliver_without_extra_env_builds_child_env(adapter):
     captured: dict = {}
     with patch("subprocess_adapter.subprocess.Popen", side_effect=_fake_popen(captured)):
         adapter.deliver("T1", "d-002", instruction="x", model="sonnet")
-    # Default behaviour: env not explicitly set on Popen, child inherits parent.
-    assert "env" not in captured["kwargs"]
+    # Current contract: a dispatch id makes the adapter build the child env (_child_env),
+    # which keeps the host PATH/HOME and stamps the dispatch id.
+    env = captured["kwargs"].get("env")
+    assert env is not None, "dispatch_id should produce an env= kwarg"
+    for host_key in ("PATH", "HOME"):
+        if host_key in os.environ:
+            assert env[host_key] == os.environ[host_key]
+    assert env["VNX_CURRENT_DISPATCH_ID"] == "d-002"
+
+
+def test_deliver_with_default_scrub_patterns_drops_credentials(adapter, monkeypatch):
+    from env_scrub_patterns import DEFAULT_SCRUB_KEY_PATTERNS
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-parent")
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "tok-test-parent")
+    captured: dict = {}
+    with patch("subprocess_adapter.subprocess.Popen", side_effect=_fake_popen(captured)):
+        adapter.deliver(
+            "T1", "d-002b", instruction="x", model="sonnet",
+            scrub_env_keys=DEFAULT_SCRUB_KEY_PATTERNS,
+        )
+    env = captured["kwargs"]["env"]
+    assert "ANTHROPIC_API_KEY" not in env
+    assert "ANTHROPIC_AUTH_TOKEN" not in env
+    for host_key in ("PATH", "HOME"):
+        if host_key in os.environ:
+            assert env[host_key] == os.environ[host_key]
 
 
 def test_deliver_drops_none_values_from_extra_env(adapter):

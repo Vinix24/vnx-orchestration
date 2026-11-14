@@ -49,7 +49,7 @@ from pattern_upsert import upsert_antipattern, upsert_success_pattern
 from prevention_rule_store import (QUEUE_FILENAME, QueueUnreadable, approved_decision, load_queue, mark_ingested,
                                    proposal_hash, queue_rules, reconcile, record_deactivation, rule_id)
 from project_scope import TenantUnresolved, resolve_stamp_project_id
-from qi_learning_approval import LearningApprovalRefused, claim_approval, load_approval, preview
+from qi_learning_approval import LearningApprovalRefused, append_usage_event, claim_approval, load_approval, preview
 from receipt_outcome import is_foreign_project
 from receipt_schema import DISPATCH_STARTED_EVENT_TYPE
 
@@ -621,8 +621,7 @@ class LearningLoop:
                 "new_confidence": round(new_confidence, 6),
             }
             refuse_real_central_store_write_under_test_runner(usage_log)
-            with open(usage_log, "a", encoding="utf-8") as fh:
-                fh.write(json.dumps(event, separators=(",", ":")) + "\n")
+            append_usage_event(state_dir, event)
         except OSError:
             pass
 
@@ -2010,14 +2009,7 @@ def _emit_archival_decision_event(
         "reason": reason,
         "db_applied": db_applied,
     }
-    line = json.dumps(event, separators=(",", ":")) + "\n"
-    with open(usage_log, "a", encoding="utf-8") as fh:
-        fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
-        try:
-            fh.write(line)
-            fh.flush()
-        finally:
-            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+    append_usage_event(state_dir, event)
 
 
 def _validate_disposition_inputs(

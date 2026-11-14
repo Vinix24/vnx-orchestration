@@ -235,3 +235,11 @@ def test_cli_stops_with_exit_2_and_names_the_reason(tmp_path, monkeypatch, capsy
     monkeypatch.setattr(cli, "resolve_central_data_dir", lambda pid: tmp_path)
     assert cli.main(["--persist", "--project-id", PID, "--json"]) == cli.EXIT_STOPPED
     assert "quality_intelligence.db" in json.loads(capsys.readouterr().out)["stopped"]
+
+
+def test_a_missing_runtime_connection_stops_the_run_and_never_raises(tmp_path):
+    qi = sqlite3.connect(":memory:")
+    summary = rbe.run_blame_edges(tmp_path, None, qi, PID, watermark_path=tmp_path / "wm.json",
+                                  since="a" * 40, git=lambda repo, args: "")
+    assert "no runtime_coordination connection" in summary["stopped"]
+    assert not (tmp_path / "wm.json").exists()

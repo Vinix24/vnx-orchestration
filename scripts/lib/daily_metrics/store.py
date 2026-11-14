@@ -32,6 +32,10 @@ class AlreadyFinal(Exception):
     """Raised when a `final` day file would be replaced or rewritten."""
 
 
+class NoBaseFile(Exception):
+    """Raised when a revision is written for a day that has no ``<day>.json``."""
+
+
 def default_store_dir(project_id: str) -> Path:
     """Decision 12/13: under the central data dir, never under the cwd."""
     return resolve_central_data_dir(project_id) / "state" / "daily_metrics" / project_id
@@ -160,11 +164,14 @@ class DayStore:
         return highest + 1
 
     def write_revision(self, day: str, doc: Mapping[str, Any], reason: str) -> Path:
+        """Write ``<day>.r<N>.json``; the day needs its base file (``list_days`` lists base files only)."""
         self._validate_day(day)
         if not (reason or "").strip():
             raise ValueError("a revision requires a non-empty reason")
         status = doc.get("status") if isinstance(doc.get("status"), str) else "incomplete"
         with self._day_lock(day):
+            if not (self.root / f"{day}.json").exists():
+                raise NoBaseFile(f"{day}: a revision needs the base file {day}.json")
             revision = self._next_revision(day)
             while True:
                 path = self.root / f"{day}.r{revision}.json"

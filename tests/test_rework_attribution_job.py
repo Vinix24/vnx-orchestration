@@ -131,14 +131,19 @@ def test_a_missed_night_is_caught_up_from_the_watermark(tmp_path, monkeypatch):
         chain = main_line["commits"]
         return "\n".join(chain[chain.index(start) + 1:])
 
-    monkeypatch.setattr(blame, "_load_registry", lambda rc_conn: ({}, {}))
+    rc = sqlite3.connect(tmp_path / "rc.db")
+    rc.executescript(
+        "CREATE TABLE provenance_registry (dispatch_id TEXT PRIMARY KEY, commit_sha TEXT, pr_number INTEGER,"
+        " registered_at TEXT NOT NULL DEFAULT '2026-01-01');"
+        "CREATE TABLE dispatches (dispatch_id TEXT PRIMARY KEY, metadata_json TEXT);"
+    )
     monkeypatch.setattr(blame, "_process_commit", lambda repo, sha, *rest: processed.append(sha))
 
     def fake(script, args):
         if script == "rework_report.py":
             return 0, ""
         since = args[args.index("--since") + 1] if "--since" in args else None
-        summary = blame.run_blame_edges(tmp_path, None, sqlite3.connect(":memory:"), PID,
+        summary = blame.run_blame_edges(tmp_path, rc, sqlite3.connect(":memory:"), PID,
                                         watermark_path=state / blame.WATERMARK_FILE, since=since, git=fake_git)
         return (2 if summary.get("stopped") else 0), json.dumps(summary)
 

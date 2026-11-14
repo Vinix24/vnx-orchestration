@@ -1,0 +1,1 @@
+- Role discovery reads an unreadable role directory as "cannot verify" on Python 3.14 and later, the same as on 3.12 and 3.13, by deciding it with an explicit stat instead of is_dir/is_file (OI-2685).

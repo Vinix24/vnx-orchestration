@@ -21,7 +21,7 @@ import json
 import sqlite3
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, FrozenSet, List, Optional, Tuple
 
 from atomic_io import atomic_write_text
 from pattern_reattribution import (
@@ -41,6 +41,22 @@ JUNCTION_TABLES: Tuple[str, ...] = (
 )
 # Columns that never take part in identity (besluit 14).
 IDENTITY_EXCLUDED = ("id", "project_id")
+
+# Columns a writer under scripts/ updates in place on an existing row, per reattr table (OI-2786).
+# Only ``stable_key`` skips them; ``content_key`` (plan, apply, undo) still hashes them.
+MUTABLE_COLUMNS: Dict[str, FrozenSet[str]] = {
+    # confidence_score: lib/intelligence_persist.py:246, lib/confidence_reconcile.py:172
+    # usage_count: lib/intelligence_persist.py:432, lib/pattern_dedup.py:359
+    # last_used: lib/subprocess_dispatch_internals/pattern_confidence.py:203
+    # source_dispatch_ids, source_receipts: lib/pattern_dedup.py:360, lib/pattern_upsert.py:279
+    # tags: lib/vnx_tagger.py:292; content_hash: lib/pattern_dedup.py:183; pattern_category: lib/pattern_dedup.py:227
+    "success_patterns": frozenset({
+        "confidence_score", "usage_count", "last_used", "source_dispatch_ids", "source_receipts",
+        "tags", "content_hash", "pattern_category",
+    }),
+    # occurrence_count, last_seen, source_dispatch_ids: lib/pattern_upsert.py:279; tags: lib/vnx_tagger.py:292
+    "antipatterns": frozenset({"occurrence_count", "last_seen", "source_dispatch_ids", "tags"}),
+}
 
 # Journal states (besluit 17): ``copied`` carries the destination id as ``dest_id``.
 JOURNAL_STATES: Tuple[str, ...] = ("planned", "copied", "verified", "source_removed", "done")
@@ -69,6 +85,13 @@ def _json_default(value: Any) -> Any:
 def content_key(row: Dict[str, Any]) -> str:
     """sha256 hex over every column except ``id`` and ``project_id``."""
     body = {k: v for k, v in row.items() if k not in IDENTITY_EXCLUDED}
+    return hashlib.sha256(canonical_json(body).encode("utf-8")).hexdigest()
+
+
+def stable_key(table: str, row: Dict[str, Any]) -> str:
+    """``content_key`` without the table's ``MUTABLE_COLUMNS``: a row keeps it through decay and usage updates."""
+    skip = MUTABLE_COLUMNS.get(table, frozenset())
+    body = {k: v for k, v in row.items() if k not in IDENTITY_EXCLUDED and k not in skip}
     return hashlib.sha256(canonical_json(body).encode("utf-8")).hexdigest()
 
 

@@ -1,0 +1,1 @@
+- pyproject.toml declares its license as the SPDX expression `MIT` with `license-files`, drops the deprecated license classifier, and requires setuptools 77 or newer (OI-2776).

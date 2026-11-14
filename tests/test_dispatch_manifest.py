@@ -259,7 +259,12 @@ def test_auto_commit_message_contains_dispatch_id(tmp_path):
 
     with patch("subprocess_dispatch.subprocess.run", side_effect=fake_run):
         with patch.object(sd, "_resolve_agent_cwd", return_value=None):
-            result = sd._auto_commit_changes(dispatch_id, "T1", gate="f58-pr1")
+            with patch.object(sd, "_get_dirty_files", return_value={"scripts/lib/foo.py"}):
+                result = sd._auto_commit_changes(
+                    dispatch_id, "T1", gate="f58-pr1",
+                    pre_dispatch_dirty=set(),
+                    dispatch_touched_files={"scripts/lib/foo.py"},
+                )
 
     assert result is True
     assert f"Dispatch-ID: {dispatch_id}" in fake_run._captured_msg
