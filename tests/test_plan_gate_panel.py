@@ -24,6 +24,8 @@ for p in (str(_LIB), str(_SCRIPTS)):
     if p not in sys.path:
         sys.path.insert(0, p)
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from fixtures.dispatches_schema_fixture import ensure_dispatches_columns  # noqa: E402
 import schema_migration  # noqa: E402
 import tracks  # noqa: E402
 import track_reconciler  # noqa: E402
@@ -748,6 +750,11 @@ def _bootstrap(tmp_path: Path) -> Path:
         (30, "0030_track_oi_resolved_at.sql"),
         (33, "0033_track_decision_ref.sql"),
     ]:
+        if version == 27:
+            # the 0027 deliverable view reads dispatches.output_ref, which the hand-made
+            # table lacks (same order as tests/test_planning_cli.py::_build_db)
+            ensure_dispatches_columns(conn)
+            conn.commit()
         sql = (_MIGRATIONS / filename).read_text(encoding="utf-8")
         schema_migration.apply_script_if_below(conn, version, sql)
         conn.commit()
@@ -779,14 +786,16 @@ def test_seed_then_resolve_unblocks(tmp_path):
     assert planning_cli._seed_plan_blocker(state_dir, "feat-r", "p1") is True
     assert _derived(state_dir, "feat-r", "p1") == "blocked"
     # plan gate passed -> resolve -> reconciler clears the block
-    assert planning_cli._resolve_plan_blocker(state_dir, "feat-r", "p1") is True
+    assert planning_cli._resolve_plan_blocker(
+        state_dir, "feat-r", "p1", reason="plan gate passed", resolver="test") is True
     assert _derived(state_dir, "feat-r", "p1") != "blocked"
 
 
 def test_resolve_when_no_blocker_returns_false(tmp_path):
     state_dir = _bootstrap(tmp_path)
     tracks.create_track(state_dir, "feat-n", "p1", "t", "shipped", phase="queued")
-    assert planning_cli._resolve_plan_blocker(state_dir, "feat-n", "p1") is False
+    assert planning_cli._resolve_plan_blocker(
+        state_dir, "feat-n", "p1", reason="plan gate passed", resolver="test") is False
 
 
 def test_seed_is_tenant_scoped(tmp_path):
@@ -850,7 +859,8 @@ def test_reseed_after_resolve_reblocks(tmp_path):
     tracks.create_track(state_dir, "feat-rs", "p1", "t", "shipped", phase="queued")
     assert planning_cli._seed_plan_blocker(state_dir, "feat-rs", "p1") is True
     assert _derived(state_dir, "feat-rs", "p1") == "blocked"
-    assert planning_cli._resolve_plan_blocker(state_dir, "feat-rs", "p1") is True
+    assert planning_cli._resolve_plan_blocker(
+        state_dir, "feat-rs", "p1", reason="plan gate passed", resolver="test") is True
     assert _derived(state_dir, "feat-rs", "p1") != "blocked"
     # mid-flight plan change: re-seeding must re-block the previously-passed track
     assert planning_cli._seed_plan_blocker(state_dir, "feat-rs", "p1") is True
