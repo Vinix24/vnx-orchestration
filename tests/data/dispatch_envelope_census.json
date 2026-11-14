@@ -1338,6 +1338,13 @@
       "symbol": "ProviderAdapter"
     },
     {
+      "file": "tests/test_golf_schoon_r34_characterisation.py",
+      "line": 23,
+      "mechanism": "direct-call",
+      "module_target": "envelope_adapters_provider",
+      "symbol": "ProviderAdapter"
+    },
+    {
       "file": "tests/test_govern_wrapper_never_success.py",
       "line": 44,
       "mechanism": "direct-call",
