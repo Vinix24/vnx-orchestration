@@ -72,6 +72,17 @@ _RAW_CLAUDE_PATTERNS = [
     re.compile(r"""\[[^\]]*?["']claude["'][^\]]*?["'](?:-p|--print)["']"""),
     # Shell: `claude` followed by a -p/--print flag anywhere later on the same command line.
     re.compile(r"\bclaude\b[^\n]*?\s(?:-p|--print)\b"),
+    # OI-2660: a shell spawn through a variable binary (`"$CLAUDE_BIN" -p ...`, `exec "${CLAUDE_CLI}"
+    # --print`) has no literal word `claude`, so the pattern above misses it. The variable name must
+    # contain CLAUDE and must sit in COMMAND position (line start, or after `;` `&` `|` `` ` `` `$(`,
+    # `exec `, `timeout <arg> `): a variable that is only an ARGUMENT (`mkdir -p "$CLAUDE_CONFIG_DIR/x"`,
+    # `cp -p "$CLAUDE_MD" dst`) is not the binary being run and must not match.
+    re.compile(
+        r"""(?:^|[;&|`]|\$\()[ \t]*(?:exec[ \t]+|timeout[ \t]+\S+[ \t]+)?["']?"""
+        r"""\$(?:\{[A-Za-z0-9_]*CLAUDE[A-Za-z0-9_]*\}|[A-Za-z0-9_]*CLAUDE[A-Za-z0-9_]*)"""
+        r"""[^\n]*?[ \t](?:-p|--print)\b""",
+        re.MULTILINE,
+    ),
     # Split binary/args construction: a CLI-config dict `"binary": "claude"` whose argv is assembled
     # elsewhere (headless_adapter builds `cmd = [binary] + args` with args carrying --print). A literal
     # argv/shell regex can't see the assembled command, so match the config idiom directly (codex G5-6).
@@ -104,6 +115,10 @@ _HELP_LITERAL_RE = re.compile(
 # this set that spawns `claude -p` is a NEW receipt-bypass side door and fails the gate until
 # audited here (or routed via a governed lane).
 KNOWN_RAW_CLAUDE_CALLERS = frozenset({
+    # read-only measurement probe (OI-2660: found through its `"$CLAUDE_BIN" -p` variable binary):
+    # measures whether `claude -p` without --bare still authenticates on the own account. Only the
+    # operator or T0 runs it; delivers no work and no receipt-obligated output (see its header).
+    "scripts/probe_claude_cli.sh",
     # read-only measurement probe: spawns claude -p to measure the mcp__ tool surface of a SCOPED
     # session. That surface is only observable from inside a session; `claude mcp list` reads the
     # stored config and demonstrably ignores the scoping flags, so it measures configuration, not
