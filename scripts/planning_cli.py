@@ -3103,6 +3103,12 @@ def cmd_deliverable_list(args: argparse.Namespace) -> int:
         r["routing_floor"] = meta.get("routing_floor")
 
     if args.json:
+        grants: dict[str, Any] = {}  # one grant lookup per track per call
+        for r in records:
+            if r.get("derived_status") == "proposed":
+                r["promote_grant"] = _promote_grant_view(
+                    state_dir, project_id, r.get("track"), r.get("output_kind"), grants,
+                )
         print(json.dumps(records, indent=2, default=str))
         return 0
 
@@ -3372,6 +3378,32 @@ def _promotion_refusal(
     if grant != plan_gate_enforcement.PromotionGrant.VERIFIED:
         return f"plan-gate grant for track {track_id!r} is {grant.value}, not verified", {}
     return None, {"grant": {"track_id": track_id, "project_id": project_id, "state": grant.value}}
+
+
+def _promote_grant_view(
+    state_dir: Path, project_id: str, track_id: Optional[str], kind: Optional[str],
+    grants: dict[str, Any],
+) -> dict[str, Any]:
+    """Read-only view of who may promote a proposed row: the conditions ``_promotion_refusal`` applies to a T0.
+
+    ``t0_can_promote`` is true only for a kind outside ``OPERATOR_ONLY_OUTPUT_KINDS``
+    on an opted-in track whose grant reads VERIFIED. ``grants`` caches the grant per track.
+    A row without a track (or the ``-`` placeholder) is never opted in.
+    """
+    if not track_id or track_id == "-":
+        return {"track_opt_in": False, "grant": "absent", "t0_can_promote": False}
+    opt_in = bool(tracks_lib.track_autonomous_promotion_eligible(state_dir, track_id, project_id))
+    if track_id not in grants:
+        grants[track_id] = _promotion_grant(project_id, track_id)
+    grant = grants[track_id]
+    verified = grant == plan_gate_enforcement.PromotionGrant.VERIFIED
+    return {
+        "track_opt_in": opt_in,
+        "grant": grant.value,
+        "t0_can_promote": bool(
+            kind not in tracks_lib.OPERATOR_ONLY_OUTPUT_KINDS and opt_in and verified
+        ),
+    }
 
 
 def _promotion_grant(project_id: str, track_id: str) -> "plan_gate_enforcement.PromotionGrant":
