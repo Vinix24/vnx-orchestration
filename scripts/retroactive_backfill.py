@@ -388,16 +388,14 @@ def backfill_dispatch_experiments(dry_run: bool = False) -> int:
     return inserted
 
 
-_EXPERIMENT_SUCCESS_STATUSES = {"success", "done", "completed"}
-_EXPERIMENT_FAILURE_STATUSES = {"failure", "fail", "failed", "blocked", "error"}
-
-
 def _experiment_outcome(outcome_status: str) -> Optional[bool]:
     """Map a dispatch_metadata outcome_status to True / False / None (unknown)."""
+    success_statuses = {"success", "done", "completed"}
+    failure_statuses = {"failure", "fail", "failed", "blocked", "error"}
     success: Optional[bool] = None
-    if outcome_status.lower() in _EXPERIMENT_SUCCESS_STATUSES:
+    if outcome_status.lower() in success_statuses:
         success = True
-    elif outcome_status.lower() in _EXPERIMENT_FAILURE_STATUSES:
+    elif outcome_status.lower() in failure_statuses:
         success = False
     # No_confirmation = dispatch was acknowledged but no clear pass/fail
     # We count these as None (unknown outcome)
@@ -410,11 +408,13 @@ def _experiment_receipt_fallback(
     receipt: Optional[dict], success: Optional[bool], cqs
 ) -> tuple:
     """Fill a missing outcome / cqs from the dispatch's task_complete receipt."""
+    success_statuses = {"success", "done", "completed"}
+    failure_statuses = {"failure", "fail", "failed", "blocked", "error"}
     if receipt and success is None:
         rec_status = receipt.get("status", "")
-        if rec_status in _EXPERIMENT_SUCCESS_STATUSES:
+        if rec_status in success_statuses:
             success = True
-        elif rec_status in _EXPERIMENT_FAILURE_STATUSES:
+        elif rec_status in failure_statuses:
             success = False
 
     if receipt and cqs is None:

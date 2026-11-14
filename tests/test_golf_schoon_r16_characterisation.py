@@ -170,3 +170,12 @@ def test_backfill_uses_archive_summary(qi, tmp_path, monkeypatch):
     assert seen == [tmp_path / "x.ndjson"]
     assert (row["test_count"], row["committed"], row["lines_changed"],
             row["file_count"]) == (9, 1, 42, 5)
+
+
+@pytest.mark.parametrize("status", ["complete", "ok"])
+def test_complete_and_ok_are_unknown_not_success(status):
+    # event_outcome_semantics treats these as success; here they stay unknown.
+    # Switching to the shared vocabulary must show up as a behaviour change.
+    assert rb._experiment_outcome(status) is None
+    success, _ = rb._experiment_receipt_fallback({"status": status}, None, None)
+    assert success is None
