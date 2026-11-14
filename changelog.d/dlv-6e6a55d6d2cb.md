@@ -1,1 +1,2 @@
 - ADR-077 fixes the decision register per context: `besluiten.ndjson` next to the daily-log, schema `besluit/1` with a stable `besluit_id`, a transition table, the torn-tail rule, confidentiality per export audience and a checked copy of the secret patterns (besluitenregister B0).
+- ADR-077 round 2: the newline is the commit marker, a writer moves an unterminated tail to `besluiten.ndjson.afgescheurd` and truncates before it appends (crash-safe on offset plus sha256), and the one closing `vervangen` record is the explicit exception after a terminal decision.

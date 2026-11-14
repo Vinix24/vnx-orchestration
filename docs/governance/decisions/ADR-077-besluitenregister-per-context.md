@@ -23,6 +23,7 @@ Elke context (dev-project, klant, content-kanaal, onderzoek, personal) heeft al 
 |---|---|
 | `<LOGDIR>/besluiten.ndjson` | de bron, append-only, één regel per gebeurtenis |
 | `<LOGDIR>/besluiten.ndjson.lock` | het slotbestand voor de schrijver (`fcntl.flock`, exclusief) |
+| `<LOGDIR>/besluiten.ndjson.afgescheurd` | het quarantainebestand voor een afgescheurde staart (besluit 4), append-only |
 | `<LOGDIR>/BESLUITEN.md` | leesbare weergave, altijd gegenereerd door `render`, nooit met de hand bewerkt |
 
 Eén bestand hoort bij precies één context. Het pakket krijgt `<LOGDIR>` als argument (`--context`) en lost zelf geen pad op; het kent geen VNX-paden en geen `~/.vnx-data`. Elke regel draagt `context`; de schrijver weigert een regel waarvan `context` afwijkt van de `context` van de eerste geldige regel in het bestand. De map is privé (`daily-log/` staat in `.gitignore`), er is geen centrale tabel en niets gaat naar Supabase. Komt er ooit een centrale tabel, dan geldt ADR-007: een composite sleutel over `context` plus `event_id`.
@@ -81,7 +82,7 @@ Een onbekend veld, een ontbrekend verplicht veld of een waarde buiten een geslot
 
 ### 3. Levenscyclus: vier afgeleide standen en een overgangstabel
 
-De stand van een besluit volgt uit de geldige regels met dat `betreft`, in bestandsvolgorde (niet op `besloten_op`), en een expliciet meegegeven `nu` (UTC-datum). Er zijn vier standen: `geldig`, `vervangen` (met `door`), `ingetrokken` (met `reden`) en `te_herzien`.
+De stand van een besluit volgt uit de geldige regels met dat `betreft` en de `vastgelegd`-regels met `vervangt` gelijk aan dat id, in bestandsvolgorde (niet op `besloten_op`), en een expliciet meegegeven `nu` (UTC-datum). Er zijn vier standen: `geldig`, `vervangen` (met `door`), `ingetrokken` (met `reden`) en `te_herzien`.
 
 | Van | Gebeurtenis of tijd | Naar | Regel |
 |---|---|---|---|
@@ -89,23 +90,34 @@ De stand van een besluit volgt uit de geldige regels met dat `betreft`, in besta
 | `geldig` | `nu` ≥ geldende `herzien_op` | `te_herzien` | geen regel, alleen afgeleid |
 | `geldig`, `te_herzien` | `herzien` | `geldig` | de geldende `herzien_op` wordt de nieuwe waarde van de regel |
 | `geldig`, `te_herzien` | `bevestigd` | `geldig` | idem; de bevestiging telt mee in de geschiedenis |
-| `geldig`, `te_herzien` | `vervangen` | `vervangen` | eindstand |
+| `geldig`, `te_herzien` | `vastgelegd` van een nieuw besluit met `vervangt: <dit id>` | `vervangen` (open) | eindstand; `door` is het nieuwe id; de vervanging is open tot de afsluitende regel |
+| `vervangen` (open) | `vervangen` met `betreft: <dit id>` en `door` gelijk aan het id van die `vastgelegd` | `vervangen` (afgesloten) | de enige gebeurtenis die na een eindstand mag komen, precies één keer |
+| `geldig`, `te_herzien` | `vervangen` zonder eerdere `vastgelegd` met `vervangt: <dit id>` | geweigerd | een vervanging begint altijd met de nieuwe `vastgelegd` |
 | `geldig`, `te_herzien` | `ingetrokken` | `ingetrokken` | eindstand |
-| `vervangen`, `ingetrokken` | elke gebeurtenis | geweigerd | de schrijver weigert met exit 3, `check` meldt een bestaande regel als fout |
+| `vervangen`, `ingetrokken` | elke andere gebeurtenis: een tweede `vervangen`, een `vervangen` met een andere `door`, een `vastgelegd` met `vervangt: <dit id>`, `herzien`, `bevestigd`, `ingetrokken` | geweigerd | de schrijver weigert met exit 3, `check` meldt een bestaande regel als fout |
 
 **`herzien_op`.** De geldende `herzien_op` is de waarde van de laatste regel die het veld draagt (`vastgelegd`, `herzien` of `bevestigd`); `null` betekent: geen herziening gepland. Een besluit is `te_herzien` vanaf de dag van de geldende `herzien_op` zelf, zolang er geen latere `herzien` of `bevestigd` is. `herzien` is de geplande herziening (er is gekeken, het besluit blijft); `bevestigd` is een bevestiging uit een bron, gepland of niet. Wie de inhoud wil wijzigen, vervangt het besluit.
 
-**Vervangen.** `vervang` schrijft twee regels in één `write` onder het slot: eerst de nieuwe `vastgelegd` met `vervangt: <oud>`, dan `vervangen` met `betreft: <oud>` en `door: <nieuw>`. Het oude besluit staat op `vervangen` zodra een van beide regels geldig in het bestand staat. `check` eist beide; ontbreekt de tweede (afgescheurd), dan herstelt dezelfde `vervang`-aanroep het: de `vastgelegd` ontdubbelt op `herkomst`, de `vervangen` wordt geschreven. Een keten van `vervangt` mag geen cirkel bevatten en een besluit kan maar één keer vervangen worden.
+**Vervangen.** `vervang` schrijft twee regels in één `write` onder het slot: eerst de nieuwe `vastgelegd` met `vervangt: <oud>`, dan de afsluitende `vervangen` met `betreft: <oud>` en `door: <nieuw>`. Het oude besluit staat op `vervangen` (open) zodra de nieuwe `vastgelegd` geldig in het bestand staat, en op `vervangen` (afgesloten) na de afsluitende regel; dat is de enige uitzondering op "geen gebeurtenis na een eindstand". Ontbreekt de afsluitende regel na een crash (de staart is afgescheurd en bij de volgende schrijfactie in quarantaine gezet, besluit 4), dan herstelt dezelfde `vervang`-aanroep het: de `vastgelegd` ontdubbelt op `herkomst` en wordt niet opnieuw geschreven, en alleen de afsluitende `vervangen` wordt toegevoegd. Dezelfde afsluitende regel nog eens schrijven geeft hetzelfde `event_id` en schrijft niets; een tweede `vervangen` met een andere inhoud wordt geweigerd. Een keten van `vervangt` mag geen cirkel bevatten en een besluit kan maar één keer vervangen worden.
 
-**Controle (`check`).** Exit 0 alleen als: elke regel geldig is; elk `besluit_id` op precies één `vastgelegd` staat; elke `betreft`, `vervangt` en `door` naar een bestaand `besluit_id` wijst; er geen cirkel en geen gebeurtenis na een eindstand is; elke vervanging beide regels heeft; en `BESLUITEN.md` byte voor byte gelijk is aan wat `render` zou schrijven.
+**Controle (`check`).** Exit 0 alleen als: elke regel geldig is; elk `besluit_id` op precies één `vastgelegd` staat; elke `betreft`, `vervangt` en `door` naar een bestaand `besluit_id` wijst; er geen cirkel is en na een eindstand geen gebeurtenis staat behalve precies één afsluitende `vervangen` volgens de tabel; elke vervanging afgesloten is (een open vervanging is een fout met de melding dat `vervang` opnieuw moet draaien); en `BESLUITEN.md` byte voor byte gelijk is aan wat `render` zou schrijven.
 
 ### 4. Een afgescheurde staart
 
-De schrijver schrijft een regel plus `\n` in één `write` met `O_APPEND`, gevolgd door `fsync`, onder het slot, en meldt pas daarna succes. Een regel die niet compleet op schijf staat, is dus een schrijfactie die nooit succes heeft gemeld.
+**De regel.** Een regel is vastgelegd als en alleen als hij eindigt op `\n`: de newline is de commitmarkering. De schrijver schrijft een regel plus `\n` in één `write` met `O_APPEND`, gevolgd door `fsync`, onder het slot, en meldt pas daarna succes. Een laatste stuk zonder `\n` is dus een schrijfactie die nooit succes heeft gemeld, en het telt nooit als gebeurtenis, wat de inhoud ook is, ook als het geldige JSON is.
 
-**De lezer** leest het bestand als bytes en splitst op `\n`. Een stuk dat geen geldige JSON is (een strikt voorvoegsel van een JSON-object is nooit geldige JSON), telt hij als `afgescheurd` met het regelnummer en slaat hij over. Hij crasht niet, herschrijft niets en kort niets in. Een stuk dat wel JSON is maar het schema schendt, telt hij als `ongeldig` met het regelnummer. Een laatste stuk zonder `\n` telt altijd als `afgescheurd`, ook als het toevallig geldige JSON is, omdat de schrijver het nooit als geslaagd heeft gemeld. Beide tellingen staan in de uitvoer van `list`, `check` en `render`; nul gelezen regels is geen leeg register maar `0 regels`, met de tellingen erbij.
+**De lezer** leest het bestand als bytes en splitst op `\n`. Een laatste stuk zonder `\n` telt hij als `afgescheurd` (met de byte-offset) en hij slaat het over. Een afgesloten regel die geen geldige JSON is of het schema schendt, telt hij als `ongeldig` met het regelnummer: die kan niet uit een afgescheurde schrijfactie komen. De lezer crasht niet en schrijft, herschrijft of kort niets in. Beide tellingen staan in de uitvoer van `list`, `check` en `render`; nul gelezen regels is geen leeg register maar `0 regels`, met de tellingen erbij.
 
-**De schrijver** leest onder het slot de laatste byte. Is het bestand niet leeg en is die byte geen `\n`, dan begint de volgende `write` met `\n`: het afgescheurde stuk wordt een eigen regel die de lezer als `afgescheurd` blijft tellen, en de nieuwe regel staat heel op een eigen regel. De schrijver wijzigt of verwijdert nooit een bestaande byte. `check` toont `afgescheurd` als waarschuwing (exit 0 mits de rest klopt) en `ongeldig` als fout (exit 1). `export` weigert bij een `ongeldig` met exit 1, omdat die regel een intrekking kan zijn; een `afgescheurd` stuk blokkeert de export niet, omdat het een gebeurtenis is die nooit plaatsvond, en de export noemt het aantal.
+**De schrijver** doet onder het slot, vóór elke nieuwe regel, in deze volgorde:
+
+1. Hij zoekt de laatste `\n`. Volgen daarna nog bytes, dan is dat de afgescheurde staart.
+2. Hij voegt aan `besluiten.ndjson.afgescheurd` één regel toe met `offset`, `sha256` en de bytes van de staart (base64), plus `\n`, en doet `fsync`. Staat een regel met dezelfde `offset` en `sha256` er al, dan slaat hij deze stap over. Het quarantainebestand volgt dezelfde lezerregel: een eigen laatste stuk zonder `\n` telt niet als vermelding en wordt vóór de volgende vermelding op dezelfde manier ingekort.
+3. Hij kort `besluiten.ndjson` in tot direct na de laatste `\n` (`ftruncate`), en doet `fsync`.
+4. Pas dan schrijft hij de nieuwe regel.
+
+Een crash na stap 2 en vóór stap 3 laat de staart in het bestand en in quarantaine staan; de volgende schrijver vindt dezelfde staart, slaat stap 2 over op `offset` plus `sha256` en kort in. Een crash na stap 3 laat een bestand achter dat op `\n` eindigt. In beide gevallen telt de staart nooit als gebeurtenis. De schrijver wijzigt of verwijdert nooit een byte van een vastgelegde regel; alleen een nooit gemelde staart verhuist, en die blijft in quarantaine bewaard.
+
+**Melding.** `check` toont een `afgescheurd` stuk in het bestand en elke regel in `besluiten.ndjson.afgescheurd` als waarschuwing (exit 0 mits de rest klopt) en `ongeldig` als fout (exit 1). `export` weigert bij een `ongeldig` met exit 1, omdat die regel een intrekking kan zijn; een `afgescheurd` stuk blokkeert de export niet, omdat het een gebeurtenis is die nooit plaatsvond, en de export noemt het aantal.
 
 ### 5. Vertrouwelijkheid en export
 
@@ -155,7 +167,7 @@ Stoppen met het register is de skills en de VNX-adapter niet meer laten schrijve
 
 | Levering | Testplicht uit dit ADR |
 |---|---|
-| B1 | twee bevestigingen op verschillende data geven twee regels; dezelfde bevestiging twee keer geeft één; dubbele import geeft één besluit; import met afwijkende tekst geeft exit 3; afgescheurde staart (lezen, tellen, afsluiten vóór de volgende regel); elke overgang uit de tabel, ook de geweigerde; `te_herzien` op en na de dag van `herzien_op`; weigering per geheimpatroon zonder de waarde in de melding; gelijkheidstest van de patronen |
+| B1 | twee bevestigingen op verschillende data geven twee regels; dezelfde bevestiging twee keer geeft één; dubbele import geeft één besluit; import met afwijkende tekst geeft exit 3; afgescheurde staart (lezen, tellen, ook als geldige JSON zonder `\n`; in quarantaine zetten en inkorten vóór de volgende regel; een crash tussen quarantaine en inkorten); een vervanging met een afgescheurde afsluitende regel en het herstel door `vervang`; elke overgang uit de tabel, ook de geweigerde; `te_herzien` op en na de dag van `herzien_op`; weigering per geheimpatroon zonder de waarde in de melding; gelijkheidstest van de patronen |
 | B2 | `check` per foutsoort van besluit 3; de vertrouwelijkheidsregel van besluit 5; `export` zonder `--voor` geeft exit 2; `export` met een `ongeldig` regel geeft exit 1 |
 
 ## Alternatieven
