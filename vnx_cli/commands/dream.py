@@ -103,11 +103,13 @@ def _cmd_status(args) -> int:
           f"{r['insights_input']}/{r['merged_count']}/{r['dropped_count']}/{r['flagged_count']}")
     print(f"  reviewed    : {bool(r['operator_reviewed'])}")
     import review_gate  # type: ignore[import]
-    pending = review_gate.list_pending_reviews(project_id, _resolve_data_root(project_dir))
+    pending, unreadable = review_gate.pending_review_queue(project_id, _resolve_data_root(project_dir))
     if pending:
         print(f"\n  Pending reviews ({len(pending)}):")
         for p in pending:
             print(f"    - {p['cycle_id']}")
+    if unreadable:
+        print(f"  Unreadable review files ({len(unreadable)}): {', '.join(unreadable)}")
     return 0
 
 
