@@ -1,0 +1,1 @@
+- Review seats: a caller that deliberately asks for a risk class above the derived one now fires the `caller_escalation` signal, so the second review seat stays under the signal rule (OI-2697).
