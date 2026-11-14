@@ -61,19 +61,6 @@ class StarterConfig:
         )
 
 
-@dataclass
-class StarterDispatchResult:
-    """Result of a starter-mode dispatch execution."""
-    dispatch_id: str
-    status: str  # success | error | timeout
-    terminal_id: str = STARTER_TERMINAL_ID
-    started_at: str = ""
-    completed_at: str = ""
-    duration_seconds: float = 0.0
-    receipt_path: Optional[str] = None
-    error: Optional[str] = None
-
-
 # ---------------------------------------------------------------------------
 # Atomic I/O (consistent with codebase pattern)
 # ---------------------------------------------------------------------------

@@ -85,10 +85,6 @@ class InvalidInboxTransitionError(InboxError):
     """Raised when an inbox state transition is not permitted."""
 
 
-class InboxRetryExhaustedError(InboxError):
-    """Raised when retry budget is exhausted."""
-
-
 # ---------------------------------------------------------------------------
 # Data classes
 # ---------------------------------------------------------------------------

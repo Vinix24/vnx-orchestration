@@ -43,11 +43,6 @@ def _warn_pyyaml_once() -> None:
     )
 
 
-def backend_name() -> str:
-    """Return 'ruamel' or 'pyyaml' so callers / tests can introspect."""
-    return _BACKEND
-
-
 def load_yaml(path: Path) -> Any:
     """Read a YAML file and return its parsed Python object."""
     _warn_pyyaml_once()
@@ -84,7 +79,7 @@ def dump_yaml(data: Any, path: Path) -> None:
         )
 
 
-__all__ = ["backend_name", "load_yaml", "dump_yaml"]
+__all__ = ["load_yaml", "dump_yaml"]
 
 
 # Suppress benign PyYAML deprecation chatter triggered by older versions
