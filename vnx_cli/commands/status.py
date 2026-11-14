@@ -182,6 +182,30 @@ def _render_tracks_table(state_dir: Path, project_id: str) -> str:
         conn.close()
 
 
+def _held_worktrees_line(project_dir: Path) -> str:
+    """OI-2811: one line counting dispatch worktrees whose HEAD no remote branch
+    contains (teardown keeps them), with the newest dispatch id."""
+    _engine.ensure_engine_on_path()
+    from pr_enforcement import unpublished_head_commit
+    root = project_dir / ".vnx-data" / "worktrees"
+    held = []
+    for wt in (root.glob("dispatch-*") if root.is_dir() else []):
+        if wt.is_dir() and unpublished_head_commit(wt):
+            held.append(wt)
+    if not held:
+        return "held worktrees: 0"
+    newest = max(held, key=lambda w: w.stat().st_mtime)
+    return f"held worktrees: {len(held)} (newest {newest.name[len('dispatch-'):]})"
+
+
+def _held_worktrees_text(project_dir: Path) -> str:
+    """The held-worktrees line, or why it could not be measured (never raises)."""
+    try:
+        return _held_worktrees_line(project_dir)
+    except Exception as exc:  # noqa: BLE001
+        return f"held worktrees: unavailable ({exc})"
+
+
 def vnx_status(args) -> int:
     project_dir = Path(getattr(args, "project_dir", ".")).resolve()
     emit_json = getattr(args, "json", False)
@@ -294,7 +318,7 @@ def vnx_status(args) -> int:
     else:
         print(f"VNX status — {project_dir}")
         print()
-        print(f"  Active dispatches : {active_count}")
+        print(f"  Active dispatches : {active_count}\n  {_held_worktrees_text(project_dir)}")
         if agents_error is not None:
             print(f"  Agents            : unavailable ({agents_error})")
         else:

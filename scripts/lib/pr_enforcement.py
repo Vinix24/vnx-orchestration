@@ -1033,16 +1033,16 @@ def _delivered_despite_failed_salvage(
 
 
 def _worktree_kept_fields(wt_path: "Path | str", pushed: bool) -> dict:
-    """OI-2744: receipt fields saying the worktree stays because the salvage
+    """OI-2744: receipt fields saying the worktree stays because its HEAD
     commit is on no remote branch (teardown honours the same test)."""
     if pushed:
         return {}
-    sha = unpublished_salvage_commit(wt_path)
+    sha = unpublished_head_commit(wt_path)
     if sha is None:
         return {}
     return {
         "worktree_kept": str(wt_path),
-        "worktree_kept_reason": f"salvage commit {sha[:12]} is not on origin; the worktree is the only checkout of it",
+        "worktree_kept_reason": f"HEAD commit {sha[:12]} is not on origin; the worktree is the only checkout of it",
     }
 
 
@@ -1081,19 +1081,11 @@ def _salvage_push_timeout_s() -> int:
     return value
 
 
-def unpublished_salvage_commit(wt_path: "Path | str") -> "Optional[str]":
-    """SHA of the worktree's HEAD when it is a salvage commit no remote branch
-    contains (OI-2744), else None. Fail-closed: when git cannot answer about a
-    salvage commit, the SHA is returned, so the worktree is kept."""
-    try:
-        subject = subprocess.run(
-            ["git", "-C", str(wt_path), "log", "-1", "--format=%s"],
-            capture_output=True, text=True, timeout=30,
-        )
-        if subject.returncode != 0 or not subject.stdout.startswith(SALVAGE_COMMIT_SUBJECT_PREFIX):
-            return None
-    except Exception:  # noqa: BLE001
-        return None  # vnx-silent-except: HEAD unreadable means no salvage commit is provable; the normal classification rules apply
+def unpublished_head_commit(wt_path: "Path | str") -> "Optional[str]":
+    """SHA of the worktree's HEAD when no remote branch contains it (OI-2744,
+    OI-2811), whoever made the commit, else None. Fail-closed: when git cannot
+    say whether a remote branch contains HEAD, the SHA is returned, so the
+    worktree is kept; an unreadable HEAD returns None (normal classification)."""
     try:
         head = subprocess.run(
             ["git", "-C", str(wt_path), "rev-parse", "HEAD"],
@@ -1102,15 +1094,30 @@ def unpublished_salvage_commit(wt_path: "Path | str") -> "Optional[str]":
         sha = head.stdout.strip()
         if head.returncode != 0 or not sha:
             return None
+    except Exception:  # noqa: BLE001
+        return None  # vnx-silent-except: HEAD unreadable means no unpublished commit is provable; the normal classification rules apply
+    try:
         contains = subprocess.run(
             ["git", "-C", str(wt_path), "branch", "-r", "--contains", sha],
             capture_output=True, text=True, timeout=30,
         )
     except Exception:  # noqa: BLE001
-        return None  # vnx-silent-except: HEAD unreadable means no salvage commit is provable; the normal classification rules apply
+        return sha  # fail closed: the remote check could not be made, so keep the worktree
     if contains.returncode == 0 and contains.stdout.strip():
         return None
     return sha
+
+
+def head_commit_subject(wt_path: "Path | str") -> str:
+    """First 60 characters of the worktree HEAD's subject, '' when unreadable (log display only)."""
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(wt_path), "log", "-1", "--format=%s"],
+            capture_output=True, text=True, timeout=30,
+        )
+        return out.stdout.strip()[:60] if out.returncode == 0 else ""
+    except Exception:  # noqa: BLE001
+        return ""  # vnx-silent-except: display-only subject for a log line
 
 
 def _is_detached_head(cwd: Path) -> bool:

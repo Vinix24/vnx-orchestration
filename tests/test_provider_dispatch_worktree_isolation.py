@@ -622,6 +622,19 @@ def _init_git_repo_with_origin(tmp_path: Path) -> Path:
     return local
 
 
+def _publish_head_elsewhere(wt_path: Path) -> None:
+    """Make HEAD reachable from a remote branch other than dispatch/<id>.
+
+    OI-2811 keeps a worktree whose HEAD is on no remote, so a fixture that means
+    "committed, local branch kept" must publish the commit. A side branch keeps
+    the teardown classification at 'committed' (dispatch/<id> stays unpushed).
+    """
+    subprocess.run(
+        ["git", "-C", str(wt_path), "push", "origin", "HEAD:refs/heads/published-elsewhere"],
+        check=True, capture_output=True,
+    )
+
+
 class TestProviderLaneReapClassification:
     """L3: remove_dispatch_worktree must classify before removing, using the
     single canonical classify() from tmux_worktree — no duplicate logic.
@@ -669,6 +682,7 @@ class TestProviderLaneReapClassification:
         ).strip()
         assert branch_name in branches_before
 
+        _publish_head_elsewhere(wt_path)
         remove_dispatch_worktree(dispatch_id, project_root=local, terminal_id="T1")
 
         # Worktree directory is gone.
@@ -861,6 +875,7 @@ class TestProviderLaneReapClassification:
             check=True, capture_output=True,
         )
 
+        _publish_head_elsewhere(wt_path)
         with patch("event_store.EventStore", return_value=mock_store):
             remove_dispatch_worktree(dispatch_id, project_root=local, terminal_id="T1")
 
@@ -967,6 +982,7 @@ class TestProviderLaneReapClassification:
             check=True, capture_output=True,
         )
 
+        _publish_head_elsewhere(wt_path)
         # With base_sha derived from origin/main (success), classify should work.
         remove_dispatch_worktree(dispatch_id, project_root=local, terminal_id="T1")
 
@@ -1105,6 +1121,7 @@ class TestReviewGateTeardownResetsReproduction:
             check=True, capture_output=True,
         )
 
+        _publish_head_elsewhere(wt_path)
         remove_dispatch_worktree(
             dispatch_id,
             project_root=local,
