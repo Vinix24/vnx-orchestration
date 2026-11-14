@@ -1,0 +1,1 @@
+- `wiring_gate.py --tree --ref <ref>` lists the unused public definitions in scripts/ at a git ref, with the files it could not parse (golf schoon W0a).
