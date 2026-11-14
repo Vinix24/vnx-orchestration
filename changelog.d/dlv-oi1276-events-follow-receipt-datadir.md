@@ -1,1 +1,2 @@
 - Events now resolve their data dir with the same rule as receipts (`vnx_paths.resolve_paths`): a bare `VNX_DATA_DIR` without `VNX_DATA_DIR_EXPLICIT=1` is ignored with one stderr line instead of splitting events from receipts; worktree and bench overrides now set the flag (OI-1276).
+- An explicit `VNX_DATA_DIR` (with `VNX_DATA_DIR_EXPLICIT=1`) now resolves for events without a git call, so `EventStore()` spawns no process (OI-1276, round 2).

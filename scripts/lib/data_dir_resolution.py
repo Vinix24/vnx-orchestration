@@ -128,6 +128,12 @@ def resolve_data_dir_fail_loud() -> Path:
             "vnx_paths.resolve_paths()['VNX_DATA_DIR']"
         )
 
+    if vnx_data and explicit:
+        # Same answer resolve_paths() gives in this case (vnx_paths
+        # _resolve_state_root branch 1: expanduser().resolve()), without the
+        # git call resolve_paths makes to derive a project id.
+        return refuse_version_store(Path(vnx_data).expanduser().resolve(), chain)
+
     from vnx_paths import resolve_paths
 
     with warnings.catch_warnings():

@@ -131,3 +131,20 @@ def test_bare_value_equal_to_resolved_root_is_not_warned(
 
     assert data_dir_resolution.resolve_data_dir_fail_loud() == root
     assert "VNX_DATA_DIR" not in capsys.readouterr().err
+
+
+def test_explicit_vnx_data_dir_spawns_no_process(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An explicit data dir resolves without any git/subprocess call."""
+    import subprocess
+
+    def _boom(*_a, **_k):
+        raise AssertionError("a process was spawned while resolving an explicit data dir")
+
+    monkeypatch.setenv("VNX_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+    for name in ("Popen", "run", "check_output"):
+        monkeypatch.setattr(subprocess, name, _boom)
+    store = event_store.EventStore()
+    assert store._events_dir == (tmp_path.resolve() / "events")
