@@ -1,0 +1,1 @@
+- fix(closure): closure invariant 1 "a request record exists" is now a per-gate check `gate_<gate>_request_record`: a result carrying an `execution_id` with no matching request record in `review_gates/requests/` fails closure; legacy results without the id pass as legacy (OI-1438).

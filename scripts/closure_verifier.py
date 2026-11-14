@@ -28,6 +28,7 @@ from codex_final_gate import enforce_codex_gate
 from codex_severity_translator import translate_findings as translate_codex_findings
 from gate_lane_contract import canonical_review_verdict
 from gate_status import (
+    EXECUTION_ID_FIELD as _EXECUTION_ID_FIELD,
     FAIL_STATES as _GATE_FAIL_STATES,
     PARTIAL_REVIEW_STATES as _GATE_PARTIAL_REVIEW_STATES,
     PASS_STATES as _GATE_PASS_STATES,
@@ -38,6 +39,7 @@ from gate_status import (
     has_complete_evidence as gate_has_complete_evidence,
     is_pass as gate_is_pass,
     is_terminal as gate_is_terminal,
+    is_execution_id as _is_execution_id,
     is_test_run_record as _is_test_run_record,
 )
 from dispatch_spec import RETIRED_GATE_NAMES, Gate
@@ -1506,6 +1508,7 @@ def _find_gate_request_payload(
     pr_id: str,
     results_dir: Path,
     branch: Optional[str] = None,
+    execution_id: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """Locate a gate **request** payload as a fallback when no result exists.
 
@@ -1515,6 +1518,9 @@ def _find_gate_request_payload(
     file is written.  This helper finds that payload and normalises legacy
     ``status``-only writers into the same shape the closure verifier expects
     (with ``state``/``contributed_evidence``/``was_intentionally_absent``).
+
+    ``execution_id`` (OI-1438): only a request record of that run counts; a
+    request without the id, or with another run's, is skipped.
     """
     requests_dir = results_dir.parent / "requests"
     if not requests_dir.exists():
@@ -1555,6 +1561,8 @@ def _find_gate_request_payload(
         # Reject requests recorded for a different branch — a cross-branch request
         # with the same pr_id must not satisfy closure for the current branch.
         if branch and data.get("branch") and data["branch"] != branch:
+            continue
+        if execution_id is not None and data.get(_EXECUTION_ID_FIELD) != execution_id:
             continue
 
         # Normalise legacy `status`-only payloads (writer: _request_claude_github)
@@ -2016,6 +2024,69 @@ def _record_report_check(name: str, label: str, result: Optional[Dict[str, Any]]
     return CheckResult(f"report_{name}", "PASS", f"{label} normalized report exists at {report_path}")
 
 
+def _check_request_records(
+    contract: ReviewContract, results_dir: Path, skip: frozenset = frozenset(),
+) -> List[CheckResult]:
+    """Closure invariant 1 per gate: the result was requested (OI-1438).
+
+    ``skip``: the seats the seat rule already judged (their record is checked in
+    :func:`_seat_evidence_checks`) and the seats the merge did not require, as
+    :func:`_check_contract_hashes`.
+    """
+    checks: List[CheckResult] = []
+    branch = contract.branch or None
+    for gate in contract.review_stack:
+        if gate not in _KNOWN_GATES or gate in skip:
+            continue
+        result = _find_gate_result(gate, contract.pr_id, results_dir, branch=branch)
+        check = _record_request_check(gate, gate, gate, contract.pr_id, result, results_dir, branch)
+        if check is not None:
+            checks.append(check)
+    return checks
+
+
+def _record_request_check(
+    name: str, label: str, gate: str, pr_id: str, result: Optional[Dict[str, Any]],
+    results_dir: Path, branch: Optional[str],
+) -> Optional[CheckResult]:
+    """``gate_<name>_request_record``: the request record of the result's run exists.
+
+    The run's identity is ``execution_id``: minted when the request turns
+    ``executing`` (``gate_runner._mark_executing``), persisted on the request
+    (``gate_recorder.persist_request``) and copied onto every result of the run
+    (``gate_recorder.stamp_request_identity``). A result without the key was
+    written before that writer existed: a legacy PASS that says so. A key
+    holding anything but a minted id is a FAIL, never a legacy record. No
+    result at all is the gate check's own FAIL, not this one's.
+    """
+    if result is None:
+        return None
+    check_name = f"gate_{name}_request_record"
+    if _EXECUTION_ID_FIELD not in result:
+        return CheckResult(
+            check_name, "PASS",
+            f"{label} result for {pr_id} carries no execution_id: legacy record written "
+            "before requests were persisted, request record not required",
+        )
+    execution_id = result[_EXECUTION_ID_FIELD]
+    if not _is_execution_id(execution_id):
+        return CheckResult(
+            check_name, "FAIL",
+            f"{label} result for {pr_id} carries a malformed execution_id {execution_id!r}: "
+            "cannot tie it to a request record",
+        )
+    request = _find_gate_request_payload(gate, pr_id, results_dir, branch=branch, execution_id=execution_id)
+    if request is None:
+        return CheckResult(
+            check_name, "FAIL",
+            f"{label} result for {pr_id} (execution_id {execution_id}) has no matching request "
+            f"record in {results_dir.parent / 'requests'}: the gate was never requested for this run",
+        )
+    return CheckResult(
+        check_name, "PASS", f"{label} request record for {pr_id} found (execution_id {execution_id})",
+    )
+
+
 def _check_deterministic_findings(contract: ReviewContract) -> CheckResult:
     """Return FAIL if any error-severity deterministic findings remain unresolved."""
     error_findings = [f for f in contract.deterministic_findings if f.severity == "error"]
@@ -2135,7 +2206,7 @@ def _seat_rule_checks(
             else f"seat {fill.seat} niet gevuld: {fill.message}"
         )
         checks.append(CheckResult(f"seat_{fill.seat}", "PASS" if fill.filled else "FAIL", detail))
-        checks.extend(_seat_evidence_checks(fill, contract.content_hash))
+        checks.extend(_seat_evidence_checks(fill, contract, results_dir))
     not_required = _seats_not_required(seat_record)
     if not_required:
         checks.append(CheckResult("review_seats_not_required", "PASS", _not_required_text(seat_record, not_required)))
@@ -2198,17 +2269,23 @@ def _not_required_text(seat_record: Dict[str, Any], not_required: Sequence[str])
     )
 
 
-def _seat_evidence_checks(fill: Any, content_hash: str) -> List[CheckResult]:
-    """The old rule's hash and report checks on the record that answers for one seat.
+def _seat_evidence_checks(fill: Any, contract: ReviewContract, results_dir: Path) -> List[CheckResult]:
+    """The old rule's hash, report and request checks on the record that answers for one seat.
 
     A matching hash is a PASS here, so each seat names the reviewer and the hash
-    of the record it checked.
+    of the record it checked. The request check (OI-1438) looks in the slot of
+    the gate that wrote the record, which for a takeover is not the seat.
     """
-    reviewer = fill.reviewer or str((fill.record or {}).get("gate") or fill.seat)
-    label = f"seat {fill.seat}: {reviewer}"
+    record = fill.record or {}
+    record_gate = str(record.get("gate") or fill.seat)
+    label = f"seat {fill.seat}: {fill.reviewer or record_gate}"
     found = (
-        _record_hash_check(fill.seat, label, fill.record, content_hash, report_match=True),
+        _record_hash_check(fill.seat, label, fill.record, contract.content_hash, report_match=True),
         _record_report_check(fill.seat, label, fill.record),
+        _record_request_check(
+            fill.seat, label, record_gate, str(record.get("pr_id") or contract.pr_id), fill.record,
+            results_dir, contract.branch or None,
+        ),
     )
     return [check for check in found if check is not None]
 
@@ -2268,6 +2345,7 @@ def _validate_review_evidence(
 
     checks.extend(_check_contract_hashes(contract, results_dir, seat_gates))
     checks.extend(_check_report_paths(contract, results_dir, seat_gates))
+    checks.extend(_check_request_records(contract, results_dir, seat_gates))
     checks.append(_check_deterministic_findings(contract))
 
     return checks
