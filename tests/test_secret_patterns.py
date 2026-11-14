@@ -1,0 +1,101 @@
+"""secret_patterns: one fixture per ADR-075 decision-3 pattern (all values invented)."""
+
+import sys
+from pathlib import Path
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts" / "lib"))
+
+import secret_patterns as sp
+
+PEM = "-----BEGIN RSA" + " PRIV" + "ATE KEY-----\nMIIfake\n-----END RSA" + " PRIV" + "ATE KEY-----"
+FIXTURES = {  # pattern name -> (text, invented value that must vanish)
+    "sk_key": ("curl -u sk-test0123456789abcdefXYZ x", "sk-test0123456789abcdefXYZ"),
+    "github_token": ("git push https://ghp_test0123456789abcdefghij0@h", "ghp_test0123456789abcdefghij0"),
+    "aws_key_id": ("id AKIATESTFAKE0123456X ok", "AKIATESTFAKE0123456X"),
+    "slack_token": ("post xoxb-test-0123456789-fake", "xoxb-test-0123456789-fake"),
+    "bearer": ("curl -H x Bearer faketoken0123456789", "faketoken0123456789"),
+    "secret_assignment": ("MY_API_KEY=fakevalue77 run", "fakevalue77"),
+    "authorization_header": ("curl -H 'Authorization: Basic fakecred99'", "fakecred99"),
+    "pem_block": (PEM, "MIIfake"),
+    "jwt": ("t eyJfakehdr0.fakebody1.fakesig22 x", "fakebody1"),
+    "long_value": ("run --ref=" + "q" * 20 + "Z" * 20 + " x", "q" * 20 + "Z" * 20),
+}
+
+def test_ten_patterns_one_fixture_each():
+    assert [p.name for p in sp.PATTERNS] == list(FIXTURES) and len(FIXTURES) == 10
+
+@pytest.mark.parametrize("name", list(FIXTURES))
+def test_find_names_and_mask_removes_value(name):
+    text, value = FIXTURES[name]
+    names = sp.find(text)
+    assert name in names and all(value not in n for n in names)
+    out = sp.mask(text)
+    assert value not in out and "<secret>" in out and sp.mask(out) == out
+
+def _no_leak(masked, secret):
+    """No window of 4+ characters of the secret may survive in the masked text."""
+    for i in range(len(secret) - 3):
+        assert secret[i:i + 4] not in masked, (secret[i:i + 4], masked)
+
+
+# (text, secret that must vanish): every shell form of a value.
+SHELL_CASES = {
+    "oi_2835_escaped_dq": ('run PASSWORD="prefix\\"private suffix"', 'prefix\\"private suffix"'),
+    "escaped_dq_then_more": ('run PASSWORD="a1\\"b2\\"c3 d4" next', 'a1\\"b2\\"c3 d4"'),
+    "single_quote_spaces": ("run API_TOKEN='zq9 wv8 xu7' next", "zq9 wv8 xu7"),
+    "ansi_c_escaped_quote": ("run MY_SECRET=$'zq9\\'wv8 xu7' next", "zq9\\'wv8 xu7"),
+    "unclosed_dq": ('run PASSWORD="zq9 wv8 xu7', "zq9 wv8 xu7"),
+    "unclosed_sq": ("run PASSWORD='zq9 wv8 xu7", "zq9 wv8 xu7"),
+    "trailing_backslash_dq": ('run PASSWORD="zq9wv8\\', "zq9wv8"),
+    "unquoted": ("run PASSWORD=zq9wv8xu7 next", "zq9wv8xu7"),
+    "glued_segments": ("run PASSWORD=zq9\"wv8 xu7\"tt6 next", "zq9\"wv8 xu7\"tt6"),
+    "long_value_quoted_escape": ('run --ref="' + "q" * 40 + '\\"tail9 z8" next', "q" * 40 + '\\"tail9 z8"'),
+    "authorization_with_quote": ('Authorization: Basic zq9"wv8xu7', "zq9"),
+}
+
+
+@pytest.mark.parametrize("case", list(SHELL_CASES))
+def test_shell_grammar_leaves_no_tail(case):
+    text, secret = SHELL_CASES[case]
+    out = sp.mask(text)
+    _no_leak(out, secret)
+    assert "<secret>" in out and sp.mask(out) == out
+
+
+def test_oi_2835_literal():
+    assert sp.mask('run PASSWORD="prefix\\"private suffix"') == "run PASSWORD=<secret>"
+
+
+def test_text_after_a_closed_quote_stays():
+    assert sp.mask("a TOKEN='x y' b") == "a TOKEN=<secret> b"
+    assert sp.mask('a TOKEN="x\\"y" b') == "a TOKEN=<secret> b"
+
+
+def test_shell_value_end_is_the_one_reader():
+    assert sp.shell_value_end('"a\\"b" c') == 6
+    assert sp.shell_value_end("'a b' c") == 5
+    assert sp.shell_value_end("$'a\\'b' c") == 7
+    assert sp.shell_value_end('"never closed') == len('"never closed')
+    assert sp.shell_value_end("abc def") == 3
+    assert sp.shell_value_end("abc def", 3) is None
+    with pytest.raises(TypeError):
+        sp.shell_value_end(None)
+
+
+def test_assignment_keeps_name_masks_value():
+    assert sp.mask("export DB_PASSWORD=hunter2x go") == "export DB_PASSWORD=<secret> go"
+    assert sp.mask('x token="a b c"') == "x token=<secret>"
+
+def test_long_value_only_in_equals_or_header_position():
+    sha = "0123456789abcdef0123456789abcdef01234567"
+    assert sp.mask(f"git show {sha}") == f"git show {sha}"
+    assert sha not in sp.mask(f"--sha={sha}")
+    assert sha not in sp.mask(f"X-Thing: {sha}")
+
+@pytest.mark.parametrize("bad", [None, b"sk-x"])
+def test_non_str_raises(bad):
+    for fn in (sp.find, sp.mask):
+        with pytest.raises(TypeError):
+            fn(bad)
