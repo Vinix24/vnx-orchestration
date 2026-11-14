@@ -1,6 +1,5 @@
 """ADR-077 besluit 6: de kopie van de geheimpatronen blijft gelijk aan scripts/lib/secret_patterns.py."""
-import importlib.util
-import sys
+import importlib.util, sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]

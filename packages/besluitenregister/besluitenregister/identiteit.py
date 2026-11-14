@@ -1,7 +1,5 @@
 """Ids van besluit/1 (ADR-077 besluit 2). Canonieke vorm: gesorteerde sleutels, compacte scheiders."""
-import hashlib
-import json
-import uuid
+import hashlib, json, uuid
 
 
 def canoniek(waarde):

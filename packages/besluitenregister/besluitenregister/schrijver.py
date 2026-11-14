@@ -117,4 +117,9 @@ class Register:
         """Nieuwe vastgelegd plus afsluitende vervangen in één write; herhalen herstelt een afgescheurde sluitregel."""
         nieuw = dict(velden, event="vastgelegd", vervangt=oud_id)
         kop = {k: nieuw.get(k) for k in ("context", "besloten_op", "vastgelegd_door")}
-        return self.schrijf(nieuw, lambda ids: dict(kop, event="vervangen", betreft=oud_id, door=ids[0], reden=reden))
+        def sluit(ids):
+            if ids[0] == oud_id:  # ontdubbeling gaf het oude besluit terug: geen opvolger
+                raise Geweigerd(f"vervang: besluit {oud_id} zou door zichzelf vervangen worden")
+            return dict(kop, event="vervangen", betreft=oud_id, door=ids[0], reden=reden)
+
+        return self.schrijf(nieuw, sluit)

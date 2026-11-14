@@ -5,7 +5,6 @@ from pathlib import Path
 
 from .schema import valideer
 
-
 # afgescheurd: [(offset, bytes)] stuk zonder \n; ongeldig: [(regelnummer, meldingen)]; regels: geldig en afgesloten
 Uitslag = namedtuple("Uitslag", "regels afgescheurd ongeldig")
 

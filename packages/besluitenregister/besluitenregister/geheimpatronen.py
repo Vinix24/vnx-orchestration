@@ -5,7 +5,6 @@ from collections import namedtuple
 
 Patroon = namedtuple("Patroon", "name regex")
 
-
 PATTERNS = [
     Patroon('secret_assignment', re.compile('([\\w-]*(?:KEY|TOKEN|SECRET|PASSWORD)[\\w-]*=)(?!<secret>)(?=\\S)', re.IGNORECASE)),
     Patroon('sk_key', re.compile('\\bsk-[A-Za-z0-9][A-Za-z0-9_-]{15,}')),

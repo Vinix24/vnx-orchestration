@@ -13,7 +13,6 @@ from besluitenregister.lezer import lees
 from besluitenregister.schema import valideer
 from besluitenregister.schrijver import GeheimGeweigerd, Geweigerd, HerkomstBotsing, Register
 
-
 klok = partial(datetime, 2026, 11, 14, 9, 0, 0, tzinfo=timezone.utc)  # aanroepen geeft de vaste tijd
 
 
@@ -64,12 +63,6 @@ def test_schrijver_weigert_schemaschending(reg, wijzig, deel):
     assert "betreft: ontbreekt" in valideer({"event": "vervangen"}) and valideer("x") and valideer({"event": "raar"})
 
 
-def test_twee_bevestigingen_twee_regels_zelfde_een(reg):
-    bid = reg.schrijf(besluit()).besluit_id
-    assert [reg.schrijf(bevestig(bid, d)).geschreven for d in ("2026-11-15", "2026-11-16", "2026-11-16")] == [1, 1, 0]
-    assert len(regels(reg)) == 3
-
-
 def test_dubbele_import_een_besluit_en_afwijkende_tekst_geweigerd(reg):
     eerste = reg.schrijf(besluit())
     assert reg.schrijf(besluit()) == (eerste.besluit_id, 0)
@@ -78,6 +71,9 @@ def test_dubbele_import_een_besluit_en_afwijkende_tekst_geweigerd(reg):
     with pytest.raises(Geweigerd, match="context"):
         reg.schrijf(besluit(context="klant:a", titel="Andere"))
     assert len(regels(reg)) == 1
+    bid = eerste.besluit_id  # twee bevestigingen twee regels, dezelfde twee keer één
+    assert [reg.schrijf(bevestig(bid, d)).geschreven for d in ("2026-11-15", "2026-11-16", "2026-11-16")] == [1, 1, 0]
+    assert len(regels(reg)) == 3
 
 
 def test_lezer_staart_ongeldig_en_nooit_schrijven(reg):
@@ -112,6 +108,9 @@ def test_staart_naar_quarantaine_inkorten_en_crash_ertussen(reg):
 
 def test_vervang_en_herstel_na_afgescheurde_afsluitende_regel(reg):
     oud = reg.schrijf(besluit()).besluit_id
+    with pytest.raises(Geweigerd, match="zichzelf"):  # dezelfde velden: ontdubbeling geeft oud terug
+        reg.vervang(oud, besluit(), "zelfde")
+    assert [x["event"] for x in regels(reg)] == ["vastgelegd"]
     nieuw = besluit(titel="Kies B", besluit="We kiezen B.")
     uit = reg.vervang(oud, nieuw, "B is beter")
     assert uit.geschreven == 2
