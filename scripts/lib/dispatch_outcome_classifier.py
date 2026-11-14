@@ -809,27 +809,6 @@ def _write_outcome(
 # peek_derived_status / reconcile_all_tracks)
 # ---------------------------------------------------------------------------
 
-def peek_dispatch_outcome(
-    state_dir: Path,
-    data_dir: Path,
-    project_id: str,
-    dispatch_id: str,
-    *,
-    repo_root: Optional[Path] = None,
-    now: Optional[datetime] = None,
-) -> Dict[str, Any]:
-    """READ-ONLY: compute the outcome without persisting it."""
-    evidence = load_evidence(
-        state_dir, data_dir, project_id, dispatch_id, repo_root=repo_root, now=now,
-    )
-    outcome = classify_outcome(evidence)
-    return {
-        "project_id": project_id,
-        "dispatch_id": dispatch_id,
-        "outcome": outcome,
-    }
-
-
 def reconcile_dispatch_outcome(
     state_dir: Path,
     data_dir: Path,

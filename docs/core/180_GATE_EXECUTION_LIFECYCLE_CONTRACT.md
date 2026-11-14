@@ -27,7 +27,7 @@ When Codex is unavailable (`VNX_CODEX_HEADLESS_ENABLED=0` or `codex` not in PATH
 
 **Defect 3: Stall Without Timeout**
 
-A review CLI can stall on stdout flush (OI-048, first measured on the Gemini CLI, since retired as a reviewer). A stalled gate produces no output, no error, and no timeout — it hangs indefinitely. The `headless_adapter.py` defines `HeadlessTimeoutError` and `headless_timeout()` (default 600s), but these apply to the general headless adapter, not to review gate execution specifically. No gate-type-specific timeout or stall detection exists.
+A review CLI can stall on stdout flush (OI-048, first measured on the Gemini CLI, since retired as a reviewer). A stalled gate produces no output, no error, and no timeout — it hangs indefinitely. The `headless_adapter.py` bounds its subprocess with `headless_timeout()` (default 600s) and, when that expires, records the run as timed out in its result instead of raising, but this applies to the general headless adapter, not to review gate execution specifically. No gate-type-specific timeout or stall detection exists.
 
 ### 1.2 The Fix
 
