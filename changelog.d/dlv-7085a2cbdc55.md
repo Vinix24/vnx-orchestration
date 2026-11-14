@@ -1,0 +1,1 @@
+- Register the prompt logger as this repo's UserPromptSubmit hook.

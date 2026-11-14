@@ -51,6 +51,7 @@ EXPECTED_SCRIPTS = {
         "stop_report_hook.sh",
         "session_stop_rotation.py",
     ],
+    "UserPromptSubmit": ["log_prompt_time.py"],
 }
 
 

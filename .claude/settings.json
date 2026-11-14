@@ -11,6 +11,18 @@
     ]
   },
   "hooks": {
+    "UserPromptSubmit": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -c 'ROOT=$(git rev-parse --show-toplevel 2>/dev/null || echo .); if [ -f \"$ROOT/scripts/hooks/log_prompt_time.py\" ]; then python3 \"$ROOT/scripts/hooks/log_prompt_time.py\"; fi; exit 0'",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
     "PreToolUse": [
       {
         "matcher": "Bash",
