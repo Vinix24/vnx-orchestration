@@ -66,7 +66,11 @@ if ! "$PYTHON" -c 'import sys; sys.exit(0 if (3, 11) <= sys.version_info[:2] < (
     exit 2
 fi
 
-if ! "$PYTHON" -c 'import build, setuptools, wheel' 2>/dev/null; then
+# Check installed distributions, not importable modules: the build checks
+# distributions, and setuptools vendors `wheel` so `import wheel` can lie (OI-2830).
+if ! "$PYTHON" -c 'import importlib.metadata as m
+for n in ("build", "setuptools", "wheel"):
+    m.distribution(n)' 2>/dev/null; then
     echo "[smoke] build toolchain missing — install with: $PYTHON -m pip install build setuptools wheel" >&2
     exit 2
 fi
