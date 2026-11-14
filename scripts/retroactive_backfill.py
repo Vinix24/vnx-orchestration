@@ -23,7 +23,7 @@ import subprocess
 import sys
 from collections import defaultdict
 from dataclasses import dataclass, asdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -353,7 +353,6 @@ def backfill_dispatch_experiments(dry_run: bool = False) -> int:
 
     inserted = 0
     skipped_existing = 0
-    skipped_no_data = 0
 
     now_iso = datetime.now(timezone.utc).isoformat()
 
@@ -366,71 +365,7 @@ def backfill_dispatch_experiments(dry_run: bool = False) -> int:
             skipped_existing += 1
             continue
 
-        instruction_chars = row["instruction_char_count"] or 0
-        pattern_count = row["pattern_count"] or 0
-        role = row["role"] or "unknown"
-        terminal = row["terminal"] or "unknown"
-        cognition = _infer_cognition(row["cognition"], None)
-        # Model is not stored in dispatch_metadata, default to sonnet
-        model = "sonnet"
-
-        # Instruction text is not in dispatch_metadata directly, so we use
-        # instruction_char_count for context item estimation
-        context_items = pattern_count  # pattern_count = intelligence items injected
-        file_count = 0  # no instruction text to parse
-
-        # Outcome from dispatch_metadata
-        outcome_status = row["outcome_status"] or ""
-        success_statuses = {"success", "done", "completed"}
-        failure_statuses = {"failure", "fail", "failed", "blocked", "error"}
-        success: Optional[bool] = None
-        if outcome_status.lower() in success_statuses:
-            success = True
-        elif outcome_status.lower() in failure_statuses:
-            success = False
-        # For ambiguous statuses, leave success as None if no_confirmation or null
-
-        # No_confirmation = dispatch was acknowledged but no clear pass/fail
-        # We count these as None (unknown outcome)
-        if outcome_status == "no_confirmation":
-            success = None
-
-        cqs = row["cqs"]
-
-        # Archive summary for timing + file/test/commit data
-        arch_summary: Optional[ArchiveSummary] = None
-        if dispatch_id in archive_index:
-            arch_summary = _parse_archive(archive_index[dispatch_id])
-
-        # Also check receipt for additional outcome data
-        receipt = receipts.get(dispatch_id)
-        if receipt and success is None:
-            rec_status = receipt.get("status", "")
-            if rec_status in success_statuses:
-                success = True
-            elif rec_status in failure_statuses:
-                success = False
-
-        if receipt and cqs is None:
-            rec_cqs = receipt.get("cqs")
-            if isinstance(rec_cqs, dict):
-                cqs = rec_cqs.get("cqs")
-            elif isinstance(rec_cqs, (int, float)):
-                cqs = float(rec_cqs)
-
-        completion_minutes = _compute_completion_minutes(
-            row["dispatched_at"], row["completed_at"], arch_summary
-        )
-
-        test_count = arch_summary.test_count if arch_summary else 0
-        committed = arch_summary.committed if arch_summary else False
-        lines_changed = arch_summary.lines_changed if arch_summary else 0
-        if arch_summary:
-            file_count = arch_summary.unique_files
-
-        # Dispatch timestamp from DB
-        ts = row["dispatched_at"] or now_iso
-
+        params = _experiment_params(row, receipts, archive_index, now_iso)
         tracker_conn.execute(
             """
             INSERT INTO dispatch_experiments (
@@ -441,17 +376,7 @@ def backfill_dispatch_experiments(dry_run: bool = False) -> int:
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(dispatch_id) DO NOTHING
             """,
-            (
-                dispatch_id, ts,
-                instruction_chars, context_items, 0,
-                role, cognition, model, terminal, file_count,
-                (1 if success else (0 if success is False else None)),
-                cqs,
-                completion_minutes,
-                test_count,
-                (1 if committed else 0),
-                lines_changed,
-            ),
+            params,
         )
         inserted += 1
 
@@ -461,6 +386,104 @@ def backfill_dispatch_experiments(dry_run: bool = False) -> int:
     print(f"[step1] Inserted {inserted} dispatch experiments "
           f"(skipped existing: {skipped_existing})")
     return inserted
+
+
+_EXPERIMENT_SUCCESS_STATUSES = {"success", "done", "completed"}
+_EXPERIMENT_FAILURE_STATUSES = {"failure", "fail", "failed", "blocked", "error"}
+
+
+def _experiment_outcome(outcome_status: str) -> Optional[bool]:
+    """Map a dispatch_metadata outcome_status to True / False / None (unknown)."""
+    success: Optional[bool] = None
+    if outcome_status.lower() in _EXPERIMENT_SUCCESS_STATUSES:
+        success = True
+    elif outcome_status.lower() in _EXPERIMENT_FAILURE_STATUSES:
+        success = False
+    # No_confirmation = dispatch was acknowledged but no clear pass/fail
+    # We count these as None (unknown outcome)
+    if outcome_status == "no_confirmation":
+        success = None
+    return success
+
+
+def _experiment_receipt_fallback(
+    receipt: Optional[dict], success: Optional[bool], cqs
+) -> tuple:
+    """Fill a missing outcome / cqs from the dispatch's task_complete receipt."""
+    if receipt and success is None:
+        rec_status = receipt.get("status", "")
+        if rec_status in _EXPERIMENT_SUCCESS_STATUSES:
+            success = True
+        elif rec_status in _EXPERIMENT_FAILURE_STATUSES:
+            success = False
+
+    if receipt and cqs is None:
+        rec_cqs = receipt.get("cqs")
+        if isinstance(rec_cqs, dict):
+            cqs = rec_cqs.get("cqs")
+        elif isinstance(rec_cqs, (int, float)):
+            cqs = float(rec_cqs)
+    return success, cqs
+
+
+def _experiment_params(
+    row: sqlite3.Row,
+    receipts: dict[str, dict],
+    archive_index: dict[str, Path],
+    now_iso: str,
+) -> tuple:
+    """Build the dispatch_experiments INSERT parameters for one metadata row."""
+    dispatch_id = row["dispatch_id"]
+    instruction_chars = row["instruction_char_count"] or 0
+    pattern_count = row["pattern_count"] or 0
+    role = row["role"] or "unknown"
+    terminal = row["terminal"] or "unknown"
+    cognition = _infer_cognition(row["cognition"], None)
+    # Model is not stored in dispatch_metadata, default to sonnet
+    model = "sonnet"
+
+    # Instruction text is not in dispatch_metadata directly, so we use
+    # instruction_char_count for context item estimation
+    context_items = pattern_count  # pattern_count = intelligence items injected
+    file_count = 0  # no instruction text to parse
+
+    success = _experiment_outcome(row["outcome_status"] or "")
+    cqs = row["cqs"]
+
+    # Archive summary for timing + file/test/commit data
+    arch_summary: Optional[ArchiveSummary] = None
+    if dispatch_id in archive_index:
+        arch_summary = _parse_archive(archive_index[dispatch_id])
+
+    # Also check receipt for additional outcome data
+    success, cqs = _experiment_receipt_fallback(
+        receipts.get(dispatch_id), success, cqs
+    )
+
+    completion_minutes = _compute_completion_minutes(
+        row["dispatched_at"], row["completed_at"], arch_summary
+    )
+
+    test_count = arch_summary.test_count if arch_summary else 0
+    committed = arch_summary.committed if arch_summary else False
+    lines_changed = arch_summary.lines_changed if arch_summary else 0
+    if arch_summary:
+        file_count = arch_summary.unique_files
+
+    # Dispatch timestamp from DB
+    ts = row["dispatched_at"] or now_iso
+
+    return (
+        dispatch_id, ts,
+        instruction_chars, context_items, 0,
+        role, cognition, model, terminal, file_count,
+        (1 if success else (0 if success is False else None)),
+        cqs,
+        completion_minutes,
+        test_count,
+        (1 if committed else 0),
+        lines_changed,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -735,31 +758,47 @@ def simulate_feedback_loop(dry_run: bool = False) -> dict:
         qi_conn.close()
         return {"dispatches_processed": len(dispatches), "patterns_available": len(patterns)}
 
-    # Build a time-sorted list of (last_offered, rowid, current_used, s_count, f_count, conf)
-    # We'll match each pattern to dispatches by checking if last_offered falls in dispatch window
-    # If no window match, we use the overall dispatch success rate to apply proportional updates
+    # Match each pattern to dispatches by checking if last_offered falls in the
+    # dispatch window; no window match means skip (global updates are too noisy).
+    parsed_patterns = _parse_offered_patterns(patterns)
+    now_iso = datetime.now(timezone.utc).isoformat()
+    matched_patterns = _match_patterns_to_dispatches(dispatches, parsed_patterns)
 
-    success_statuses = {"success"}
-    failure_statuses = {"failure", "fail", "failed", "blocked"}
+    updated, boosted, decayed = _apply_pattern_updates(
+        qi_conn, matched_patterns, now_iso
+    )
 
-    # Bucket patterns by last_offered date (approximate match)
-    # For each dispatch: find patterns last_offered within ±2 hours of dispatched_at
-    # If no match, skip (don't do global updates — too noisy)
+    _apply_dispatch_confidence_updates(dispatches)
 
-    boosted = 0
-    decayed = 0
-    updated = 0
+    qi_conn.commit()
+    qi_conn.close()
 
-    # Build pattern list with parsed timestamps
+    print(f"[step5] Feedback loop: {updated} pattern_usage rows updated "
+          f"({boosted} boosted, {decayed} decayed)")
+    return {"updated": updated, "boosted": boosted, "decayed": decayed}
+
+
+_FEEDBACK_SUCCESS_STATUSES = {"success"}
+_FEEDBACK_FAILURE_STATUSES = {"failure", "fail", "failed", "blocked"}
+
+
+def _parse_iso_utc(value: str) -> datetime:
+    """Parse an ISO timestamp, treating naive values as UTC. Raises ValueError."""
+    ts = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    return ts
+
+
+def _parse_offered_patterns(patterns) -> list[dict]:
+    """Build the time-sorted pattern list with parsed last_offered timestamps."""
     parsed_patterns = []
     for p in patterns:
         offered_ts = p["last_offered"]
         if not offered_ts:
             continue
         try:
-            ts = datetime.fromisoformat(offered_ts.replace("Z", "+00:00"))
-            if ts.tzinfo is None:
-                ts = ts.replace(tzinfo=timezone.utc)
+            ts = _parse_iso_utc(offered_ts)
             parsed_patterns.append({
                 "rowid": p["rowid"],
                 "pattern_id": p["pattern_id"],
@@ -774,43 +813,45 @@ def simulate_feedback_loop(dry_run: bool = False) -> dict:
 
     # Sort by timestamp for efficient matching
     parsed_patterns.sort(key=lambda x: x["last_offered"])
+    return parsed_patterns
 
-    # For each dispatch, find patterns offered during that dispatch's window
-    now_iso = datetime.now(timezone.utc).isoformat()
+
+def _dispatch_window(dispatch) -> Optional[tuple[datetime, datetime]]:
+    """Return the +-30 min matching window of a dispatch, or None if unparseable."""
+    dispatched_at = dispatch["dispatched_at"]
+    completed_at = dispatch["completed_at"]
+    if not dispatched_at:
+        return None
+
+    try:
+        t_start = _parse_iso_utc(dispatched_at)
+    except ValueError:
+        return None
+
+    if completed_at:
+        try:
+            t_end = _parse_iso_utc(completed_at)
+        except ValueError:
+            t_end = t_start
+    else:
+        t_end = t_start  # Use just start time for window matching
+
+    # Window: dispatched_at to completed_at, with a 30 min buffer either side
+    return t_start - timedelta(minutes=30), t_end + timedelta(minutes=30)
+
+
+def _match_patterns_to_dispatches(dispatches, parsed_patterns) -> dict[int, dict]:
+    """Accumulate per-pattern deltas for every dispatch window that matches."""
     matched_patterns: dict[int, dict] = {}  # rowid → cumulative updates
 
     for dispatch in dispatches:
         outcome = dispatch["outcome_status"].lower()
-        is_success = outcome in success_statuses
+        is_success = outcome in _FEEDBACK_SUCCESS_STATUSES
 
-        # Parse dispatch time window
-        dispatched_at = dispatch["dispatched_at"]
-        completed_at = dispatch["completed_at"]
-        if not dispatched_at:
+        window = _dispatch_window(dispatch)
+        if window is None:
             continue
-
-        try:
-            t_start = datetime.fromisoformat(dispatched_at.replace("Z", "+00:00"))
-            if t_start.tzinfo is None:
-                t_start = t_start.replace(tzinfo=timezone.utc)
-        except ValueError:
-            continue
-
-        if completed_at:
-            try:
-                t_end = datetime.fromisoformat(completed_at.replace("Z", "+00:00"))
-                if t_end.tzinfo is None:
-                    t_end = t_end.replace(tzinfo=timezone.utc)
-            except ValueError:
-                t_end = t_start
-        else:
-            from datetime import timedelta
-            t_end = t_start  # Use just start time for window matching
-
-        # Window: dispatched_at to completed_at (or +2h buffer for patterns offered just before)
-        from datetime import timedelta
-        window_start = t_start - timedelta(minutes=30)
-        window_end = t_end + timedelta(minutes=30)
+        window_start, window_end = window
 
         for p in parsed_patterns:
             if window_start <= p["last_offered"] <= window_end:
@@ -833,8 +874,16 @@ def simulate_feedback_loop(dry_run: bool = False) -> dict:
                 else:
                     m["failure_delta"] += 1
                     m["confidence"] = max(0.0, m["confidence"] - 0.10)
+    return matched_patterns
 
-    # Apply batch updates
+
+def _apply_pattern_updates(
+    qi_conn: sqlite3.Connection, matched_patterns: dict[int, dict], now_iso: str
+) -> tuple[int, int, int]:
+    """Apply batch pattern_usage updates. Returns (updated, boosted, decayed)."""
+    boosted = 0
+    decayed = 0
+    updated = 0
     for rowid, upd in matched_patterns.items():
         qi_conn.execute(
             """
@@ -860,10 +909,15 @@ def simulate_feedback_loop(dry_run: bool = False) -> dict:
             boosted += 1
         if upd["failure_delta"] > 0:
             decayed += 1
+    return updated, boosted, decayed
 
-    # Also apply dispatch-level confidence updates to success_patterns
-    # via intelligence_persist.update_confidence_from_outcome for dispatches
-    # that have archive evidence (committed = True)
+
+def _apply_dispatch_confidence_updates(dispatches) -> None:
+    """Apply dispatch-level confidence updates to success_patterns.
+
+    Goes through intelligence_persist.update_confidence_from_outcome for each
+    dispatch with a known outcome.
+    """
     sys.path.insert(0, str(SCRIPT_DIR / "lib"))
     try:
         from intelligence_persist import update_confidence_from_outcome as _upcf
@@ -872,9 +926,9 @@ def simulate_feedback_loop(dry_run: bool = False) -> dict:
             did = dispatch["dispatch_id"]
             terminal = dispatch["terminal"] or "unknown"
             status = dispatch["outcome_status"].lower()
-            if status in success_statuses:
+            if status in _FEEDBACK_SUCCESS_STATUSES:
                 out = "success"
-            elif status in failure_statuses:
+            elif status in _FEEDBACK_FAILURE_STATUSES:
                 out = "failure"
             else:
                 continue
@@ -884,13 +938,6 @@ def simulate_feedback_loop(dry_run: bool = False) -> dict:
         print(f"[step5] Applied confidence updates to {dispatch_updates} dispatches' patterns")
     except ImportError as e:
         print(f"[step5] Could not import intelligence_persist: {e}", file=sys.stderr)
-
-    qi_conn.commit()
-    qi_conn.close()
-
-    print(f"[step5] Feedback loop: {updated} pattern_usage rows updated "
-          f"({boosted} boosted, {decayed} decayed)")
-    return {"updated": updated, "boosted": boosted, "decayed": decayed}
 
 
 # ---------------------------------------------------------------------------
