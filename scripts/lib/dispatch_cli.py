@@ -2927,57 +2927,9 @@ def build_runtime_snapshot(
     # read from this process's env, which is per-dispatch (the door runs one
     # process per dispatch) — it is never global state. Default path (no override
     # env) is byte-for-byte unchanged.
-    override_gate_verdicts: list[ConstraintVerdict] = []
-    worker_claude_override_reason: Optional[str] = None
-    if (
-        is_claude_lane
-        and spec.target_slot in _BUILD_WORKER_SLOTS
-        and os.environ.get(WORKER_CLAUDE_OVERRIDE_ENV) == "1"
-    ):
-        reason = (os.environ.get(WORKER_CLAUDE_OVERRIDE_REASON_ENV) or "").strip()
-        if reason:
-            worker_claude_override_reason = reason
-        else:
-            # Override env set but no audit reason -> the override is INERT and the
-            # dispatch is REFUSED (blocking). Fail loud, never silently fall back to
-            # either kimi-k3 or claude.
-            override_gate_verdicts.append(ConstraintVerdict(
-                code="worker-claude-override-reason-required",
-                severity="blocking",
-                message=(
-                    f"{WORKER_CLAUDE_OVERRIDE_ENV}=1 is set but "
-                    f"{WORKER_CLAUDE_OVERRIDE_REASON_ENV} is empty/absent — the "
-                    "worker-claude override is inert without an audit reason. "
-                    "Refusing; without a reason the override does not apply and "
-                    "this dispatch is blocked — it does not fall through to the "
-                    "sonnet default pin."
-                ),
-            ))
-
-    if is_claude_lane:
-        if worker_claude_override_reason is not None:
-            # Override granted: SKIP the kimi-k3 model_pins coercion for THIS
-            # dispatch only, so effective_model is the requested claude model. The
-            # constraint check below still runs against this model (registry,
-            # kimi-via-cli-only, etc.) — the override is claude->claude, never a
-            # bypass of the constraint engine.
-            effective_model = spec.model or "sonnet"
-        else:
-            # worker-provider-free-choice PR-2: honor ModelPin.semantics instead of
-            # always coercing to the pin. "floor" is today's behavior verbatim —
-            # spec.model is ignored, the pin always wins. "default" is advisory —
-            # spec.model wins when set, the pin only fills in when spec carries no
-            # model at all. The `or "sonnet"` tail stays the last-resort fallback
-            # on both branches.
-            pin = model_pin_specs.get(spec.target_slot)
-            if pin is None:
-                effective_model = spec.model or "sonnet"
-            elif pin.semantics == "floor":
-                effective_model = pin.model or "sonnet"
-            else:  # "default" — loader fails loud on any other value at load time
-                effective_model = spec.model or pin.model or "sonnet"
-    else:
-        effective_model = spec.model or "default"
+    override_gate_verdicts, worker_claude_override_reason, effective_model = (
+        _override_gate_and_effective_model(spec, is_claude_lane, model_pin_specs)
+    )
 
     # claude-headless enforcement: via='headless' for every claude spec, because
     # claude_headless is the only claude lane (dispatch_plan.resolve_claude_lane).
@@ -2985,34 +2937,10 @@ def build_runtime_snapshot(
         via = "headless"
 
     # P0-1: constraint check with instruction_text + check_registry=True; FAIL-CLOSED on error
-    constraint_verdicts: tuple[ConstraintVerdict, ...] = ()
-    try:
-        raw_violations = _constraint_check(
-            provider=provider_value,
-            sub_provider=sub_provider,
-            model=effective_model,
-            terminal_id=spec.target_slot,
-            role=spec.role,
-            via=via,
-            env=os.environ,
-            check_registry=True,
-            instruction_text=vspec.instruction_text,
-        )
-        constraint_verdicts = tuple(
-            ConstraintVerdict(
-                code=v.code,
-                severity=v.severity,
-                message=v.message,
-                override_applied=v.override_applied,
-            )
-            for v in raw_violations
-        )
-    except Exception as exc:
-        constraint_verdicts = (ConstraintVerdict(
-            code="registry-unavailable",
-            severity="blocking",
-            message=f"Constraint registry unavailable — fail-closed: {exc}",
-        ),)
+    constraint_verdicts = _primary_constraint_verdicts(
+        _constraint_check, vspec, provider_value=provider_value, sub_provider=sub_provider,
+        effective_model=effective_model, via=via,
+    )
 
     # Defense-in-depth (dispatch-agent-lane-coercion, OI-LANECOERCE): re-check the
     # RAW requested model so the pin can never mask a mismatched provider.
@@ -3029,26 +2957,10 @@ def build_runtime_snapshot(
     # prepended so it surfaces as THE reject; an applied override is recorded as an
     # audited warn verdict (flows via D3 into plan.warnings — advisory, excluded
     # from the plan digest) carrying the reason, target_slot, and resolved model.
-    if override_gate_verdicts:
-        constraint_verdicts = tuple(override_gate_verdicts) + constraint_verdicts
-    if worker_claude_override_reason is not None:
-        constraint_verdicts = constraint_verdicts + (ConstraintVerdict(
-            code="worker-claude-override-applied",
-            severity="warn",
-            message=(
-                f"operator override {WORKER_CLAUDE_OVERRIDE_ENV}=1 applied for THIS "
-                f"dispatch only: build worker {spec.target_slot} routes to claude "
-                f"model {effective_model!r} via the headless lane "
-                f"(model-pin coercion skipped). Reason: {worker_claude_override_reason}"
-            ),
-            override_applied=True,
-        ),)
-        logger.warning(
-            "[dispatch_cli] AUDIT worker-claude-override-applied target=%s model=%s reason=%s",
-            spec.target_slot,
-            effective_model,
-            worker_claude_override_reason,
-        )
+    constraint_verdicts = _with_override_verdicts(
+        constraint_verdicts, override_gate_verdicts, worker_claude_override_reason,
+        spec=spec, effective_model=effective_model,
+    )
 
     # P0-2: anchor the pending root BEFORE trusting any bundle path. A symlinked
     # dispatches/pending that escapes the data root cannot host a promoted bundle
@@ -3130,22 +3042,9 @@ def build_runtime_snapshot(
     # smart_router deterministic classifier (the existing vocabulary — never a
     # second one). tier_to falls back to the model->tier reverse map so a
     # dispatch that did not declare a tier still carries an escalation signal.
-    chain_task_class = (spec.task_class or "").strip() or None
-    if chain_task_class is None:
-        try:
-            from smart_router import classify_task  # noqa: PLC0415
-            chain_task_class = classify_task(vspec.instruction_text, spec.role)
-        except Exception:  # noqa: BLE001 — classifier is best-effort; default class is the safe fallback
-            chain_task_class = "01_code_generation"
-    chain_parent = (spec.parent_dispatch or "").strip() or None
-    chain_tier_from = (spec.tier_from or "").strip() or None
-    chain_tier_to = (spec.tier_to or "").strip() or None
-    if chain_tier_to is None:
-        try:
-            from providers.model_normalizer import tier_for_model  # noqa: PLC0415
-            chain_tier_to = tier_for_model(effective_model)
-        except Exception:  # noqa: BLE001 — tier reverse-map is best-effort
-            chain_tier_to = None
+    chain_task_class, chain_parent, chain_tier_from, chain_tier_to = _chain_link_fields(
+        vspec, effective_model,
+    )
 
     # OI-1156: auth-derived billing signal — the claude lane's billing label must
     # follow the AUTH identity (own key / redirect = metered), not the lane. The
@@ -3162,19 +3061,7 @@ def build_runtime_snapshot(
     # root/ref logs an unknown lag and never blocks (fail-open on unknown,
     # fail-closed on a KNOWN lag — a door that refused on "unknown" would block
     # every non-git consumer, which is worse than the problem it fixes).
-    checkout_lag: Optional[int] = None
-    try:
-        from dispatch_worktree_isolation import resolve_consumer_project_root  # noqa: PLC0415
-        checkout_lag = main_checkout_lag(resolve_consumer_project_root())
-    except Exception as exc:  # vnx-silent-except: lag is advisory except for the refusal below; resolution must never block the door
-        _record_bookkeeping_failure(
-            "checkout_lag_resolution", spec.dispatch_id, exc, state_dir=data_dir / "state",
-        )
-    _log_checkout_lag(spec, checkout_lag)
-    if checkout_lag is not None and checkout_lag > 0 and spec.post_merge_verification:
-        constraint_verdicts = constraint_verdicts + (
-            _post_merge_verification_lag_verdict(checkout_lag),
-        )
+    constraint_verdicts = constraint_verdicts + _checkout_lag_verdicts(spec, data_dir=data_dir)
 
     return RuntimeSnapshot(
         constraint_verdicts=constraint_verdicts,
@@ -3193,6 +3080,178 @@ def build_runtime_snapshot(
         # skill is resolved against the checkout the dispatch will run in.
         claude_api_metered=claude_api_metered, repo_root=_resolve_repo_root(),
     )
+
+
+def _override_gate_and_effective_model(
+    spec: DispatchSpec, is_claude_lane: bool, model_pin_specs: "dict[str, ModelPin]",
+) -> "tuple[list[ConstraintVerdict], Optional[str], str]":
+    """build_runtime_snapshot's worker-claude override gate, then the effective model."""
+    override_gate_verdicts: list[ConstraintVerdict] = []
+    worker_claude_override_reason: Optional[str] = None
+    if (
+        is_claude_lane
+        and spec.target_slot in _BUILD_WORKER_SLOTS
+        and os.environ.get(WORKER_CLAUDE_OVERRIDE_ENV) == "1"
+    ):
+        reason = (os.environ.get(WORKER_CLAUDE_OVERRIDE_REASON_ENV) or "").strip()
+        if reason:
+            worker_claude_override_reason = reason
+        else:
+            # Override env set but no audit reason -> the override is INERT and the
+            # dispatch is REFUSED (blocking). Fail loud, never silently fall back to
+            # either kimi-k3 or claude.
+            override_gate_verdicts.append(ConstraintVerdict(
+                code="worker-claude-override-reason-required",
+                severity="blocking",
+                message=(
+                    f"{WORKER_CLAUDE_OVERRIDE_ENV}=1 is set but "
+                    f"{WORKER_CLAUDE_OVERRIDE_REASON_ENV} is empty/absent — the "
+                    "worker-claude override is inert without an audit reason. "
+                    "Refusing; without a reason the override does not apply and "
+                    "this dispatch is blocked — it does not fall through to the "
+                    "sonnet default pin."
+                ),
+            ))
+
+    if is_claude_lane:
+        if worker_claude_override_reason is not None:
+            # Override granted: SKIP the kimi-k3 model_pins coercion for THIS
+            # dispatch only, so effective_model is the requested claude model. The
+            # constraint check below still runs against this model (registry,
+            # kimi-via-cli-only, etc.) — the override is claude->claude, never a
+            # bypass of the constraint engine.
+            effective_model = spec.model or "sonnet"
+        else:
+            # worker-provider-free-choice PR-2: honor ModelPin.semantics instead of
+            # always coercing to the pin. "floor" is today's behavior verbatim —
+            # spec.model is ignored, the pin always wins. "default" is advisory —
+            # spec.model wins when set, the pin only fills in when spec carries no
+            # model at all. The `or "sonnet"` tail stays the last-resort fallback
+            # on both branches.
+            pin = model_pin_specs.get(spec.target_slot)
+            if pin is None:
+                effective_model = spec.model or "sonnet"
+            elif pin.semantics == "floor":
+                effective_model = pin.model or "sonnet"
+            else:  # "default" — loader fails loud on any other value at load time
+                effective_model = spec.model or pin.model or "sonnet"
+    else:
+        effective_model = spec.model or "default"
+    return override_gate_verdicts, worker_claude_override_reason, effective_model
+
+
+def _primary_constraint_verdicts(
+    _constraint_check,
+    vspec: ValidatedSpec,
+    *,
+    provider_value: str,
+    sub_provider: Optional[str],
+    effective_model: str,
+    via: Optional[str],
+) -> "tuple[ConstraintVerdict, ...]":
+    """build_runtime_snapshot's P0-1 constraint check; FAIL-CLOSED on error."""
+    spec = vspec.spec
+    constraint_verdicts: tuple[ConstraintVerdict, ...] = ()
+    try:
+        raw_violations = _constraint_check(
+            provider=provider_value,
+            sub_provider=sub_provider,
+            model=effective_model,
+            terminal_id=spec.target_slot,
+            role=spec.role,
+            via=via,
+            env=os.environ,
+            check_registry=True,
+            instruction_text=vspec.instruction_text,
+        )
+        constraint_verdicts = tuple(
+            ConstraintVerdict(
+                code=v.code,
+                severity=v.severity,
+                message=v.message,
+                override_applied=v.override_applied,
+            )
+            for v in raw_violations
+        )
+    except Exception as exc:
+        constraint_verdicts = (ConstraintVerdict(
+            code="registry-unavailable",
+            severity="blocking",
+            message=f"Constraint registry unavailable — fail-closed: {exc}",
+        ),)
+    return constraint_verdicts
+
+
+def _with_override_verdicts(
+    constraint_verdicts: "tuple[ConstraintVerdict, ...]",
+    override_gate_verdicts: "list[ConstraintVerdict]",
+    worker_claude_override_reason: Optional[str],
+    *,
+    spec: DispatchSpec,
+    effective_model: str,
+) -> "tuple[ConstraintVerdict, ...]":
+    """Fold the worker-claude override verdicts into build_runtime_snapshot's tuple."""
+    if override_gate_verdicts:
+        constraint_verdicts = tuple(override_gate_verdicts) + constraint_verdicts
+    if worker_claude_override_reason is not None:
+        constraint_verdicts = constraint_verdicts + (ConstraintVerdict(
+            code="worker-claude-override-applied",
+            severity="warn",
+            message=(
+                f"operator override {WORKER_CLAUDE_OVERRIDE_ENV}=1 applied for THIS "
+                f"dispatch only: build worker {spec.target_slot} routes to claude "
+                f"model {effective_model!r} via the headless lane "
+                f"(model-pin coercion skipped). Reason: {worker_claude_override_reason}"
+            ),
+            override_applied=True,
+        ),)
+        logger.warning(
+            "[dispatch_cli] AUDIT worker-claude-override-applied target=%s model=%s reason=%s",
+            spec.target_slot,
+            effective_model,
+            worker_claude_override_reason,
+        )
+    return constraint_verdicts
+
+
+def _chain_link_fields(
+    vspec: ValidatedSpec, effective_model: str,
+) -> "tuple[str, Optional[str], Optional[str], Optional[str]]":
+    """build_runtime_snapshot's chain-link fields: task_class, parent, tier_from, tier_to."""
+    spec = vspec.spec
+    chain_task_class = (spec.task_class or "").strip() or None
+    if chain_task_class is None:
+        try:
+            from smart_router import classify_task  # noqa: PLC0415
+            chain_task_class = classify_task(vspec.instruction_text, spec.role)
+        except Exception:  # noqa: BLE001 — classifier is best-effort; default class is the safe fallback
+            chain_task_class = "01_code_generation"
+    chain_parent = (spec.parent_dispatch or "").strip() or None
+    chain_tier_from = (spec.tier_from or "").strip() or None
+    chain_tier_to = (spec.tier_to or "").strip() or None
+    if chain_tier_to is None:
+        try:
+            from providers.model_normalizer import tier_for_model  # noqa: PLC0415
+            chain_tier_to = tier_for_model(effective_model)
+        except Exception:  # noqa: BLE001 — tier reverse-map is best-effort
+            chain_tier_to = None
+    return chain_task_class, chain_parent, chain_tier_from, chain_tier_to
+
+
+def _checkout_lag_verdicts(spec: DispatchSpec, *, data_dir: Path) -> "tuple[ConstraintVerdict, ...]":
+    """build_runtime_snapshot's OI-1214 main-checkout lag measurement and refusal."""
+    checkout_lag: Optional[int] = None
+    try:
+        from dispatch_worktree_isolation import resolve_consumer_project_root  # noqa: PLC0415
+        checkout_lag = main_checkout_lag(resolve_consumer_project_root())
+    except Exception as exc:  # vnx-silent-except: lag is advisory except for the refusal below; resolution must never block the door
+        _record_bookkeeping_failure(
+            "checkout_lag_resolution", spec.dispatch_id, exc, state_dir=data_dir / "state",
+        )
+    _log_checkout_lag(spec, checkout_lag)
+    if checkout_lag is not None and checkout_lag > 0 and spec.post_merge_verification:
+        return (_post_merge_verification_lag_verdict(checkout_lag),)
+    return ()
 
 
 # ---------------------------------------------------------------------------
