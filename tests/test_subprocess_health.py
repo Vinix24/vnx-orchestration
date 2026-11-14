@@ -194,17 +194,27 @@ class TestReceipts:
 
 
 def _record_own_sleeps():
-    """Patch time.sleep and record only the calls made by the calling thread.
+    """Patch time.sleep and record only the retry back-off of deliver_with_recovery.
 
-    time.sleep is process-wide, so a foreign thread (leaked from another test
-    in an xdist worker) can call the patched sleep too; its calls are not the
-    retry back-off these tests are about.
+    time.sleep is process-wide, so any other caller (a leaked thread, or a
+    same-thread retry loop on a shared DB or lock that sleeps 0.001 s, 0.002 s,
+    ... under contention in a full xdist worker) reaches the patched sleep too.
+    Only a call whose caller is ``_backoff_or_fail`` in
+    ``subprocess_dispatch_internals/recovery.py`` is the back-off these tests
+    are about; the caller frame is read past the mock machinery.
     """
-    own = threading.get_ident()
     calls: list = []
+    recovery_file = Path("subprocess_dispatch_internals") / "recovery.py"
 
     def _sleep(seconds):
-        if threading.get_ident() == own:
+        frame = sys._getframe(1)
+        while frame is not None and Path(frame.f_code.co_filename).parent.name == "unittest":
+            frame = frame.f_back
+        if (
+            frame is not None
+            and frame.f_code.co_name == "_backoff_or_fail"
+            and Path(frame.f_code.co_filename).parts[-2:] == recovery_file.parts
+        ):
             calls.append(seconds)
 
     return calls, mock.patch("subprocess_dispatch.time.sleep", side_effect=_sleep)
@@ -325,6 +335,32 @@ class TestDeliverWithRecovery:
             sleep_patch,
         ):
             deliver_with_recovery("T1", "do work", "sonnet", "d1", max_retries=3)
+
+        assert sleeps == [30, 60, 120]
+
+    def test_backoff_ignores_same_thread_contention_sleeps(self, tmp_path, monkeypatch):
+        """A same-thread retry loop in the final-failure path (0.001 s doubling) is not back-off."""
+        from subprocess_dispatch import deliver_with_recovery
+
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        monkeypatch.setenv("VNX_STATE_DIR", str(state_dir))
+        sleeps, sleep_patch = _record_own_sleeps()
+
+        def _contended_promote(*_args, **_kwargs):
+            delay = 0.001
+            for _ in range(5):
+                time.sleep(delay)
+                delay *= 2
+            return None
+
+        with (
+            mock.patch("subprocess_dispatch.deliver_via_subprocess", return_value=_fail_result()),
+            mock.patch("subprocess_dispatch._default_state_dir", return_value=state_dir),
+            mock.patch("subprocess_dispatch._promote_manifest", side_effect=_contended_promote),
+            sleep_patch,
+        ):
+            assert deliver_with_recovery("T1", "do work", "sonnet", "d1", max_retries=3) is False
 
         assert sleeps == [30, 60, 120]
 
