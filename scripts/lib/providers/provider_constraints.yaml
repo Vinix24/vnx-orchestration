@@ -280,7 +280,7 @@ constraints:
       VNX_ENFORCE_WORKER_PERMISSIONS unset the predicate returns False
       (scripts/lib/worker_permissions.py:421-423). The PreToolUse hook
       scripts/hooks/pretooluse_worker_scope_enforce.sh is registered in
-      .claude/settings.json (lines 26-36, matcher Write|Edit|MultiEdit|Bash)
+      .claude/settings.json (lines 26-36, matcher Write|Edit|MultiEdit|NotebookEdit|Bash)
       and inert while enforcement is OFF: it opens with a no-op when the
       predicate is False, so a dispatch declaring only
       scripts/lib/smart_router.py still scores ALLOW on a write outside its
