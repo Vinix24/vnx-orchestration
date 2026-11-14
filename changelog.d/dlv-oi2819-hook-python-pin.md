@@ -1,1 +1,2 @@
 - fix(hooks): the worker-scope hook runs on a pinned interpreter with PyYAML (VNX_PYTHON, repo .venv, homebrew 3.12) instead of the bare python3 (OI-2819)
+- fix(hooks): the pinned interpreter path of the worker-scope hook can be set with VNX_HOOK_PINNED_PYTHON, so its test no longer skips on a machine without homebrew 3.12 (OI-2819)

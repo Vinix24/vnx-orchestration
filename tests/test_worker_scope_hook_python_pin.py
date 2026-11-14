@@ -9,13 +9,10 @@ import subprocess
 import sys
 from pathlib import Path
 
-import pytest
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
 HOOK_DIR = REPO_ROOT / "scripts" / "hooks"
 HOOK_SH = HOOK_DIR / "pretooluse_worker_scope_enforce.sh"
 LIB_SH = HOOK_DIR / "lib_hook_python.sh"
-PINNED = Path("/opt/homebrew/opt/python@3.12/bin/python3.12")
 
 
 def _exe(path: Path, body: str) -> Path:
@@ -53,12 +50,28 @@ def test_wrapper_does_not_call_bare_python3_when_vnx_python_is_set(tmp_path):
 
 
 def test_wrapper_uses_a_pinned_interpreter_without_vnx_python(tmp_path):
-    if not (PINNED.exists() or (REPO_ROOT / ".venv" / "bin" / "python").exists()):
-        pytest.skip("no pinned interpreter on this machine")
+    # Copy the hook into a repo-shaped tmp tree so no real .venv can win.
+    hooks = tmp_path / "repo" / "scripts" / "hooks"
+    shutil.copytree(HOOK_DIR, hooks, ignore=shutil.ignore_patterns("__pycache__"))
+    pin = _exe(tmp_path / "pin" / "python-pinned", "echo pinned-called\n")
     path, marker = _shim_path(tmp_path)
-    env = _env(PATH=path, VNX_ENFORCE_WORKER_PERMISSIONS="0")
-    subprocess.run(["bash", str(HOOK_SH)], input="{}", env=env, capture_output=True, text=True, timeout=30)
+    env = _env(PATH=path, VNX_HOOK_PINNED_PYTHON=str(pin), VNX_ENFORCE_WORKER_PERMISSIONS="0")
+    out = subprocess.run(
+        ["bash", str(hooks / "pretooluse_worker_scope_enforce.sh")],
+        input="{}", env=env, capture_output=True, text=True, timeout=30,
+    )
+    assert out.returncode == 0
+    assert "pinned-called" in out.stdout
     assert not marker.exists()
+
+
+def test_non_executable_pinned_path_falls_through_to_python3(tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    plain = tmp_path / "plain"
+    plain.write_text("x")
+    assert _resolve(root, _env(VNX_HOOK_PINNED_PYTHON=str(plain))) == "python3"
+    assert _resolve(root, _env(VNX_HOOK_PINNED_PYTHON=str(tmp_path / "missing"))) == "python3"
 
 
 def test_vnx_python_wins_over_venv(tmp_path):
@@ -84,5 +97,6 @@ def test_non_executable_vnx_python_falls_through(tmp_path):
 def test_falls_through_to_pinned_then_bare(tmp_path):
     root = tmp_path / "repo"
     root.mkdir()
-    expected = str(PINNED) if os.access(PINNED, os.X_OK) else "python3"
-    assert _resolve(root, _env(VNX_PYTHON="")) == expected
+    pin = _exe(tmp_path / "pin" / "python-pinned", "echo pin\n")
+    assert _resolve(root, _env(VNX_PYTHON="", VNX_HOOK_PINNED_PYTHON=str(pin))) == str(pin)
+    assert _resolve(root, _env(VNX_PYTHON="", VNX_HOOK_PINNED_PYTHON=str(tmp_path / "none"))) == "python3"
