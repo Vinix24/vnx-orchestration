@@ -385,7 +385,7 @@ De deur bepaalt één keer, vóór de eerste poort, in welk project hij merget. 
 
 Kan de deur de repo niet bepalen, dan weigert hij vóór de eerste poort. Een installatie is nooit zijn eigen doel: start je de merge vanuit de installatiemap zelf, dan weigert hij ook.
 
-**De deur zelf** toets je tegen de fabric, nooit tegen het project. In een checkout van de fabric is dat `main`. In een installatie is dat de tag waar hij uit komt: `v<VERSION>` in de repo waar de installatie een clone van is. Een installatie vergelijken met `main` zou elke installatie weigeren die niet op de laatste commit staat, want `main` loopt na een release door. Alle acht de deurbestanden (`_DOOR_INTEGRITY_PATHS`, sinds OI-1849 inclusief `scripts/lib/merge_target.py`, `scripts/lib/vnx_paths.py` en `scripts/lib/ci_contexts.py`) moeten byte-identiek zijn aan die versie.
+**De deur zelf** toets je tegen de fabric, nooit tegen het project. In een checkout van de fabric is dat `main`. In een installatie is dat de tag waar hij uit komt: `v<VERSION>` in de repo waar de installatie een clone van is. Een installatie vergelijken met `main` zou elke installatie weigeren die niet op de laatste commit staat, want `main` loopt na een release door. Alle tien de deurbestanden (`_DOOR_INTEGRITY_PATHS`, sinds OI-1849 inclusief `scripts/lib/merge_target.py`, `scripts/lib/vnx_paths.py` en `scripts/lib/ci_contexts.py`, sinds OI-2667 ook `scripts/lib/forge_gate_publisher.py` en `scripts/lib/forge_check_run.py`) moeten byte-identiek zijn aan die versie.
 
 ### 11.2 Het bestand en de leesvolgorde
 

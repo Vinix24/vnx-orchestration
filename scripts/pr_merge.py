@@ -1433,6 +1433,9 @@ def _no_go_protection(message: str, mode: str = "") -> Dict[str, Any]:
 #: project root (and the state dir) that decision starts from, and
 #: ``ci_contexts.py`` supplies the check identities (``ANY_APP_ID``,
 #: ``RequiredCheck``) the drift comparison judges.
+#: This tuple lists every file whose content decides what the door allows or
+#: publishes; the two forge files (``forge_gate_publisher.py``,
+#: ``forge_check_run.py``) decide whether a permit is published (OI-2667).
 _DOOR_INTEGRITY_PATHS = (
     "scripts/pr_merge.py",
     "scripts/lib/forge_protection_drift.py",
@@ -1442,6 +1445,8 @@ _DOOR_INTEGRITY_PATHS = (
     "scripts/lib/merge_target.py",
     "scripts/lib/vnx_paths.py",
     "scripts/lib/ci_contexts.py",
+    "scripts/lib/forge_gate_publisher.py",
+    "scripts/lib/forge_check_run.py",
 )
 
 
