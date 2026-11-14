@@ -87,6 +87,7 @@ def _run_launcher(
 ) -> subprocess.CompletedProcess:
     env = {
         "HOME": str(home),
+        "VNX_LAUNCHD_GUARD_TEMP_ROOTS": os.environ["VNX_LAUNCHD_GUARD_TEMP_ROOTS"],
         "PATH": os.environ.get("PATH", ""),
         "VNX_HOME": str(home / ".vnx-system" / "current"),
     }
@@ -105,6 +106,7 @@ def test_program_arguments_call_the_pinned_launcher(tmp_path, monkeypatch) -> No
     recording_launchctl(tmp_path / "bin", monkeypatch)
     env = {
         "HOME": str(home),
+        "VNX_LAUNCHD_GUARD_TEMP_ROOTS": os.environ["VNX_LAUNCHD_GUARD_TEMP_ROOTS"],
         "PATH": _reload_path(),
         "VNX_HOME": str(engine),
         "VNX_PROJECT_ID": PROJECT,
@@ -283,6 +285,7 @@ def test_reload_plist_starts_each_family_through_the_launcher(
     recording_launchctl(tmp_path / "bin", monkeypatch)
     env = {
         "HOME": str(home),
+        "VNX_LAUNCHD_GUARD_TEMP_ROOTS": os.environ["VNX_LAUNCHD_GUARD_TEMP_ROOTS"],
         "PATH": _reload_path(),
         "VNX_HOME": str(engine),
         "VNX_PROJECT_ID": PROJECT,

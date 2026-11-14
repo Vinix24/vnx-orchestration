@@ -63,6 +63,10 @@ runs:
         pip install -c "$GITHUB_WORKSPACE/scripts/ci/profile_a_constraints.txt" \
           pytest pytest-xdist pytest-timeout \
           pyyaml jsonschema psutil watchdog hypothesis jinja2 build "pyjwt[crypto]"
+        # Build toolchain for tests/test_wheel_install.py (golf schoon F5, OI-2834):
+        # `build --no-isolation` needs setuptools>=77 and wheel in this env. Kept
+        # out of profile_a_constraints.txt so the selection fingerprint stays put.
+        pip install build "setuptools>=77" wheel
 
     - name: Prepare expected repo layout
       shell: bash

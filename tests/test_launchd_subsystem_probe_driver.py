@@ -146,6 +146,7 @@ def _install(root: Path, engine: Path) -> Dict[str, Any]:
     stub.chmod(0o755)
     env = {
         "HOME": str(home),
+        "VNX_LAUNCHD_GUARD_TEMP_ROOTS": os.environ.get("VNX_LAUNCHD_GUARD_TEMP_ROOTS", "/nonexistent-vnx-test-temp-root"),  # module-scoped fixture runs before the autouse one
         "PATH": f"{stub_dir}{os.pathsep}{os.environ['PATH']}",
         "VNX_HOME": str(engine),
         "VNX_PROJECT_ID": PROJECT,

@@ -23,6 +23,7 @@ reimplementation.
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -281,6 +282,7 @@ class TestReloadPlistResolvesTheRootFromTheRegistry:
 
         env = {
             "HOME": str(home),
+            "VNX_LAUNCHD_GUARD_TEMP_ROOTS": os.environ["VNX_LAUNCHD_GUARD_TEMP_ROOTS"],
             "PATH": os.environ["PATH"],
             "VNX_HOME": str(engine),
             "VNX_TEST_LAUNCHCTL_SHIM": os.environ["VNX_TEST_LAUNCHCTL_SHIM"],

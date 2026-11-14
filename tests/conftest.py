@@ -448,6 +448,17 @@ def _no_ambient_vnx_project_id(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _launchd_guard_temp_roots(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A fake engine under ``tmp_path`` is under the temp dir the install guard refuses.
+
+    The guard keeps its temp-dir rule in the suite: this swaps the set of temp roots for
+    one nothing lives under, in the environment so the ``reload_plist.sh`` subprocess sees
+    it too. The guard's own temp-root tests delete or re-set the variable.
+    """
+    monkeypatch.setenv("VNX_LAUNCHD_GUARD_TEMP_ROOTS", "/nonexistent-vnx-test-temp-root")
+
+
+@pytest.fixture(autouse=True)
 def _vnx_data_dir_isolation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Redirect VNX_DATA_DIR (+ subsystem dirs) so EventStore() without an
     explicit events_dir cannot write to ~/.vnx-data during any test run.
