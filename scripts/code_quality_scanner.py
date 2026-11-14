@@ -422,115 +422,9 @@ class QualityDatabaseManager:
             existing = cursor.fetchone()
 
             if existing:
-                # Update existing record
-                cursor.execute("""
-                    UPDATE vnx_code_quality SET
-                        project_root = ?,
-                        relative_path = ?,
-                        line_count = ?,
-                        code_lines = ?,
-                        comment_lines = ?,
-                        blank_lines = ?,
-                        complexity_score = ?,
-                        cyclomatic_complexity = ?,
-                        cognitive_complexity = ?,
-                        function_count = ?,
-                        class_count = ?,
-                        import_count = ?,
-                        max_function_length = ?,
-                        max_nesting_depth = ?,
-                        has_tests = ?,
-                        test_coverage = ?,
-                        has_docstrings = ?,
-                        docstring_coverage = ?,
-                        quality_warnings = ?,
-                        critical_issues = ?,
-                        warning_issues = ?,
-                        info_issues = ?,
-                        suggested_track = ?,
-                        track_confidence = ?,
-                        language = ?,
-                        framework = ?,
-                        last_scan = CURRENT_TIMESTAMP,
-                        last_modified = ?,
-                        scan_version = ?
-                    WHERE file_path = ?
-                """, (
-                    metrics['project_root'],
-                    metrics['relative_path'],
-                    metrics['line_count'],
-                    metrics['code_lines'],
-                    metrics['comment_lines'],
-                    metrics['blank_lines'],
-                    metrics['complexity_score'],
-                    metrics['cyclomatic_complexity'],
-                    metrics['cognitive_complexity'],
-                    metrics['function_count'],
-                    metrics['class_count'],
-                    metrics['import_count'],
-                    metrics['max_function_length'],
-                    metrics['max_nesting_depth'],
-                    metrics['has_tests'],
-                    metrics['test_coverage'],
-                    metrics['has_docstrings'],
-                    metrics['docstring_coverage'],
-                    metrics['quality_warnings'],
-                    metrics['critical_issues'],
-                    metrics['warning_issues'],
-                    metrics['info_issues'],
-                    metrics['suggested_track'],
-                    metrics['track_confidence'],
-                    metrics['language'],
-                    metrics['framework'],
-                    metrics['last_modified'],
-                    metrics['scan_version'],
-                    metrics['file_path']
-                ))
+                self._update_quality_row(cursor, metrics)
             else:
-                # Insert new record
-                cursor.execute("""
-                    INSERT INTO vnx_code_quality (
-                        file_path, project_root, relative_path,
-                        line_count, code_lines, comment_lines, blank_lines,
-                        complexity_score, cyclomatic_complexity, cognitive_complexity,
-                        function_count, class_count, import_count,
-                        max_function_length, max_nesting_depth,
-                        has_tests, test_coverage, has_docstrings, docstring_coverage,
-                        quality_warnings, critical_issues, warning_issues, info_issues,
-                        suggested_track, track_confidence,
-                        language, framework, last_modified, scan_version
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, (
-                    metrics['file_path'],
-                    metrics['project_root'],
-                    metrics['relative_path'],
-                    metrics['line_count'],
-                    metrics['code_lines'],
-                    metrics['comment_lines'],
-                    metrics['blank_lines'],
-                    metrics['complexity_score'],
-                    metrics['cyclomatic_complexity'],
-                    metrics['cognitive_complexity'],
-                    metrics['function_count'],
-                    metrics['class_count'],
-                    metrics['import_count'],
-                    metrics['max_function_length'],
-                    metrics['max_nesting_depth'],
-                    metrics['has_tests'],
-                    metrics['test_coverage'],
-                    metrics['has_docstrings'],
-                    metrics['docstring_coverage'],
-                    metrics['quality_warnings'],
-                    metrics['critical_issues'],
-                    metrics['warning_issues'],
-                    metrics['info_issues'],
-                    metrics['suggested_track'],
-                    metrics['track_confidence'],
-                    metrics['language'],
-                    metrics['framework'],
-                    metrics['last_modified'],
-                    metrics['scan_version']
-                ))
+                self._insert_quality_row(cursor, metrics)
 
             self.conn.commit()
             return True
@@ -538,6 +432,92 @@ class QualityDatabaseManager:
         except Exception as e:
             log('ERROR', f'Failed to store metrics: {e}')
             return False
+
+    @staticmethod
+    def _quality_values(metrics: Dict) -> tuple:
+        """The per-file columns shared by the UPDATE and the INSERT, in column order."""
+        return (
+            metrics['project_root'],
+            metrics['relative_path'],
+            metrics['line_count'],
+            metrics['code_lines'],
+            metrics['comment_lines'],
+            metrics['blank_lines'],
+            metrics['complexity_score'],
+            metrics['cyclomatic_complexity'],
+            metrics['cognitive_complexity'],
+            metrics['function_count'],
+            metrics['class_count'],
+            metrics['import_count'],
+            metrics['max_function_length'],
+            metrics['max_nesting_depth'],
+            metrics['has_tests'],
+            metrics['test_coverage'],
+            metrics['has_docstrings'],
+            metrics['docstring_coverage'],
+            metrics['quality_warnings'],
+            metrics['critical_issues'],
+            metrics['warning_issues'],
+            metrics['info_issues'],
+            metrics['suggested_track'],
+            metrics['track_confidence'],
+            metrics['language'],
+            metrics['framework'],
+            metrics['last_modified'],
+            metrics['scan_version'],
+        )
+
+    def _update_quality_row(self, cursor, metrics: Dict) -> None:
+        """Update the existing record of ``metrics['file_path']``."""
+        cursor.execute("""
+            UPDATE vnx_code_quality SET
+                project_root = ?,
+                relative_path = ?,
+                line_count = ?,
+                code_lines = ?,
+                comment_lines = ?,
+                blank_lines = ?,
+                complexity_score = ?,
+                cyclomatic_complexity = ?,
+                cognitive_complexity = ?,
+                function_count = ?,
+                class_count = ?,
+                import_count = ?,
+                max_function_length = ?,
+                max_nesting_depth = ?,
+                has_tests = ?,
+                test_coverage = ?,
+                has_docstrings = ?,
+                docstring_coverage = ?,
+                quality_warnings = ?,
+                critical_issues = ?,
+                warning_issues = ?,
+                info_issues = ?,
+                suggested_track = ?,
+                track_confidence = ?,
+                language = ?,
+                framework = ?,
+                last_scan = CURRENT_TIMESTAMP,
+                last_modified = ?,
+                scan_version = ?
+            WHERE file_path = ?
+        """, self._quality_values(metrics) + (metrics['file_path'],))
+
+    def _insert_quality_row(self, cursor, metrics: Dict) -> None:
+        """Insert a new record for ``metrics['file_path']``."""
+        cursor.execute("""
+            INSERT INTO vnx_code_quality (
+                file_path, project_root, relative_path,
+                line_count, code_lines, comment_lines, blank_lines,
+                complexity_score, cyclomatic_complexity, cognitive_complexity,
+                function_count, class_count, import_count,
+                max_function_length, max_nesting_depth,
+                has_tests, test_coverage, has_docstrings, docstring_coverage,
+                quality_warnings, critical_issues, warning_issues, info_issues,
+                suggested_track, track_confidence,
+                language, framework, last_modified, scan_version
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (metrics['file_path'],) + self._quality_values(metrics))
 
     def record_scan_history(self, scan_type: str, files_scanned: int, files_changed: int, issues_found: int, duration: float) -> int:
         """Record scan history entry"""

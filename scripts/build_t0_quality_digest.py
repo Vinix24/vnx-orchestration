@@ -383,6 +383,23 @@ def build_governance_health(
     recs: List[Dict] = []
 
     # 3a: unacknowledged SPC alerts
+    _append_spc_alerts(recs, db, evidence)
+
+    # 3b: failed gates from recent receipts
+    _append_failed_gates(recs, evidence)
+
+    # 3c: governance metrics below threshold
+    _append_low_governance_metrics(recs, db, evidence)
+
+    # Fallback: healthy status when nothing to report
+    if not recs:
+        recs.append(_healthy_status_rec())
+
+    return recs[:MAX_PER_SECTION]
+
+
+def _append_spc_alerts(recs: List[Dict], db: Optional[sqlite3.Connection], evidence: Dict[str, Any]) -> None:
+    """3a: unacknowledged SPC alerts, appended to ``recs`` in place."""
     if db:
         try:
             cursor = db.execute(
@@ -421,7 +438,9 @@ def build_governance_health(
         except sqlite3.OperationalError as exc:
             logger.debug(f"spc_alerts query failed: {exc}")
 
-    # 3b: failed gates from recent receipts
+
+def _append_failed_gates(recs: List[Dict], evidence: Dict[str, Any]) -> None:
+    """3b: failed gates from recent receipts, appended to ``recs`` in place."""
     remaining = MAX_PER_SECTION - len(recs)
     for did in evidence["failed_dispatch_ids"][:remaining]:
         recs.append({
@@ -438,7 +457,9 @@ def build_governance_health(
             },
         })
 
-    # 3c: governance metrics below threshold
+
+def _append_low_governance_metrics(recs: List[Dict], db: Optional[sqlite3.Connection], evidence: Dict[str, Any]) -> None:
+    """3c: governance metrics below threshold, appended to ``recs`` in place."""
     if db:
         remaining = MAX_PER_SECTION - len(recs)
         if remaining > 0:
@@ -475,22 +496,21 @@ def build_governance_health(
             except sqlite3.OperationalError as exc:
                 logger.debug(f"governance_metrics query failed: {exc}")
 
-    # Fallback: healthy status when nothing to report
-    if not recs:
-        recs.append({
-            "rank": 1,
-            "type": "governance_status",
-            "title": "No active governance alerts",
-            "severity": "info",
-            "detail": (
-                f"No SPC alerts, failed gates, or metric anomalies "
-                f"in last {LOOKBACK_HOURS}h"
-            ),
-            "action": "System operating within normal parameters",
-            "evidence": {"file_paths": [], "receipt_ids": [], "dispatch_ids": []},
-        })
 
-    return recs[:MAX_PER_SECTION]
+def _healthy_status_rec() -> Dict:
+    """Fallback record when there is nothing to report."""
+    return {
+        "rank": 1,
+        "type": "governance_status",
+        "title": "No active governance alerts",
+        "severity": "info",
+        "detail": (
+            f"No SPC alerts, failed gates, or metric anomalies "
+            f"in last {LOOKBACK_HOURS}h"
+        ),
+        "action": "System operating within normal parameters",
+        "evidence": {"file_paths": [], "receipt_ids": [], "dispatch_ids": []},
+    }
 
 
 # ── Digest assembly & output ──────────────────────────────────────────────────
