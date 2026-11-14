@@ -204,18 +204,61 @@ def _assemble_reviewer_prompt(pr: str, diff_text: str, verdict_contract: str, in
     l3 = build_review_prompt(gate_name="reviewer", pr=pr, diff_text=diff_text, verdict_contract=verdict_contract,
                              max_chars=0, agentic=True, instruction=instruction)
     assembled = PromptAssembler().assemble(dispatch_metadata={"role": "reviewer"}, instruction=l3)
-    return format_for_provider(assembled, "codex")["pipe_input"] + _review_tests_block(resolve_review_interpreter())
+    return (format_for_provider(assembled, "codex")["pipe_input"]
+            + _review_tests_block(resolve_review_interpreter(), diff_text))
 
 
-def _review_tests_block(interpreter: Optional[str]) -> str:
-    """The codex prompt block naming the interpreter that runs the PR's tests (OI-2591)."""
-    if not interpreter:
-        body = ("No interpreter with pytest was found on this host, so this PR's tests "
-                "cannot be run. `residual_risk` must say that the tests did not run.\n")
-    else:
-        body = (f"Run the PR's tests with `{interpreter} -m pytest <files> -q -p "
-                "no:cacheprovider` before the verdict, and report what came out.\n")
-    return "\n\n## Running the PR's tests\n\n" + body
+_DIFF_HEADER_RE = re.compile(r"^diff --git a/(\S+) b/(\S+)$")
+_NEVER_BLOCKING = ("A missing test command is never a blocking requirement: "
+                   "do not return `blocked` because a test could not be run.\n")
+
+
+def _is_test_path(path: str) -> bool:
+    """A test-named file of any type, or a ``.py`` file under a tests dir (conftest, helpers).
+    A fixture such as ``tests/fixtures/data.json`` is not a test file."""
+    parts = path.split("/")
+    name = parts[-1]
+    stem = name.split(".", 1)[0]
+    if stem.startswith("test_") or stem.endswith(("_test", "_spec")) or ".test." in name or ".spec." in name:
+        return True
+    return name.endswith(".py") and bool({"tests", "test"} & set(parts[:-1]))
+
+
+def _changed_test_files(diff_text: str) -> List[str]:
+    """Test files the diff adds or changes, in diff order; a deleted file is left out."""
+    files: List[str] = []
+    current: Optional[str] = None
+    for line in diff_text.splitlines():
+        header = _DIFF_HEADER_RE.match(line)
+        if header:
+            current = header.group(2) if _is_test_path(header.group(2)) else None
+            if current:
+                files.append(current)
+        elif current and line.startswith("deleted file mode"):
+            files.remove(current)
+            current = None
+    return files
+
+
+def _review_tests_block(interpreter: Optional[str], diff_text: str = "") -> str:
+    """The codex prompt block naming the test command per changed test type (OI-2591, OI-2785).
+    Only ``.py`` tests get a command (pytest); every other type gets a read-them line."""
+    tests = _changed_test_files(diff_text)
+    python = [p for p in tests if p.endswith(".py")]
+    others = sorted({os.path.splitext(p)[1] or "(no extension)" for p in tests if not p.endswith(".py")})
+    body = ""
+    if python or not tests:
+        files = " ".join(python) if python else "<files>"
+        if not interpreter:
+            body = ("No interpreter with pytest was found on this host, so this PR's tests "
+                    "cannot be run. `residual_risk` must say that the tests did not run.\n")
+        else:
+            body = (f"Run the PR's tests with `{interpreter} -m pytest {files} -q -p "
+                    "no:cacheprovider` before the verdict, and report what came out.\n")
+    for ext in others:
+        body += (f"- `{ext}` test files: there is no test command for this type on this host; "
+                 "read those tests instead of running them.\n")
+    return "\n\n## Running the PR's tests\n\n" + body + _NEVER_BLOCKING
 
 
 # The dispatcher (plan_gate_panel._make_default_dispatcher) reports a provider_dispatch
