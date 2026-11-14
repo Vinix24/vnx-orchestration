@@ -10,13 +10,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts" / "lib
 import secret_patterns as sp
 
 PEM = "-----BEGIN RSA" + " PRIV" + "ATE KEY-----\nMIIfake\n-----END RSA" + " PRIV" + "ATE KEY-----"
-FIXTURES = {  # pattern name -> (text, invented value that must vanish)
+FIXTURES = {  # pattern name -> (text, invented value that must vanish); secret_assignment runs first
+    "secret_assignment": ("MY_API_KEY=fakevalue77 run", "fakevalue77"),
     "sk_key": ("curl -u sk-test0123456789abcdefXYZ x", "sk-test0123456789abcdefXYZ"),
     "github_token": ("git push https://ghp_test0123456789abcdefghij0@h", "ghp_test0123456789abcdefghij0"),
     "aws_key_id": ("id AKIATESTFAKE0123456X ok", "AKIATESTFAKE0123456X"),
     "slack_token": ("post xoxb-test-0123456789-fake", "xoxb-test-0123456789-fake"),
     "bearer": ("curl -H x Bearer faketoken0123456789", "faketoken0123456789"),
-    "secret_assignment": ("MY_API_KEY=fakevalue77 run", "fakevalue77"),
     "authorization_header": ("curl -H 'Authorization: Basic fakecred99'", "fakecred99"),
     "pem_block": (PEM, "MIIfake"),
     "jwt": ("t eyJfakehdr0.fakebody1.fakesig22 x", "fakebody1"),
@@ -99,3 +99,31 @@ def test_non_str_raises(bad):
     for fn in (sp.find, sp.mask):
         with pytest.raises(TypeError):
             fn(bad)
+
+
+# Overlapping patterns and command substitutions (round 2 on #2863).
+OVERLAP_CASES = {
+    "token_inside_unquoted_value": ("PASSWORD=sk-test0123456789abcdef/private-suffix run", ["sk-test", "private-suffix"], "run"),
+    "subst_with_spaces": ("PASSWORD=$(printf '%s' 'private-suffix') run", ["private-suffix", "printf"], "run"),
+    "two_token_kinds": ("API_KEY=sk-test0123456789abcdef,ghp_test0123456789abcdefghij0/tail77 go", ["sk-test", "ghp_test", "tail77"], "go"),
+    "quoted_value_with_token": ('MY_TOKEN="pre sk-test0123456789abcdef post99" go', ["sk-test", "pre ", "post99"], "go"),
+    "nested_subst": ("PASSWORD=$(echo $(cat sec ret1) tail88) run", ["tail88", "ret1", "echo"], "run"),
+    "backtick_subst": ("PASSWORD=`printf x1 y2 z3` run", ["printf", "y2", "z3"], "run"),
+    "subst_with_paren_in_quotes": ("PASSWORD=$(echo ')' zz9) run", ["zz9", "echo"], "run"),
+}
+
+
+@pytest.mark.parametrize("case", list(OVERLAP_CASES))
+def test_overlapping_patterns_leave_no_suffix(case):
+    text, gone, kept = OVERLAP_CASES[case]
+    out = sp.mask(text)
+    for g in gone:
+        assert g not in out, (g, out)
+    assert out.endswith(kept) and "<secret>" in out and sp.mask(out) == out
+
+
+@pytest.mark.parametrize("opener", ["$(", "`"])
+def test_unbalanced_substitution_masks_to_end_of_line(opener):
+    out = sp.mask("PASSWORD=" + opener + "printf zz9 yy8\nnext line")
+    assert out == "PASSWORD=<secret>\nnext line"
+    assert sp.mask("PASSWORD=" + opener + "printf zz9 yy8") == "PASSWORD=<secret>"
