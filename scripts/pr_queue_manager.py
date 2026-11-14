@@ -9,6 +9,7 @@ import os
 import re
 import sqlite3
 import sys
+import time
 import json
 import yaml
 from datetime import datetime
@@ -69,6 +70,92 @@ try:
 except ImportError:
     # Non-critical in minimal runtime environments; queue state writes still proceed.
     write_checksum = None
+
+STAGING_LIST_USAGE = (
+    "Usage: pr_queue_manager.py staging-list [--json]\n"
+    "  Lists the staged spec bundles (pending/<id>/dispatch-spec.json) in the\n"
+    "  resolved dispatch dir, oldest first. --json prints the same as a JSON list."
+)
+
+
+def _fmt_age(seconds: float) -> str:
+    seconds = max(0, int(seconds))
+    if seconds < 3600:
+        return f"{seconds // 60}m"
+    if seconds < 86400:
+        return f"{seconds // 3600}h{(seconds % 3600) // 60:02d}m"
+    return f"{seconds // 86400}d{(seconds % 86400) // 3600:02d}h"
+
+
+def list_staged_bundles(dispatch_dir: Path, now: Optional[float] = None) -> List[Dict[str, Any]]:
+    """One entry per ``pending/<id>/dispatch-spec.json``, oldest mtime first.
+
+    An unreadable or invalid file becomes an entry with ``error`` set, never an
+    exception: a broken bundle must stay visible in the listing.
+    """
+    now = time.time() if now is None else now
+    entries: List[Dict[str, Any]] = []
+    for spec_path in (Path(dispatch_dir) / "pending").glob("*/dispatch-spec.json"):
+        entry: Dict[str, Any] = {"dispatch_id": spec_path.parent.name}
+        try:
+            mtime = spec_path.stat().st_mtime
+            spec = json.loads(spec_path.read_text(encoding="utf-8"))
+            if not isinstance(spec, dict):
+                raise ValueError(f"top level is {type(spec).__name__}, not an object")
+        except (OSError, ValueError) as exc:  # JSONDecodeError and UnicodeDecodeError are ValueErrors
+            try:
+                mtime = spec_path.stat().st_mtime
+            except OSError:
+                mtime = now
+            entry.update({"mtime": mtime, "age_seconds": max(0, now - mtime),
+                          "error": f"{type(exc).__name__}: {exc}"})
+        else:
+            entry.update({
+                "dispatch_id": spec.get("dispatch_id") or spec_path.parent.name,
+                "mtime": mtime,
+                "age_seconds": max(0, now - mtime),
+                "track_id": spec.get("track_id"),
+                "role": spec.get("role"),
+                "provider": spec.get("provider"),
+                "model": spec.get("model"),
+                "pr_id": spec.get("pr_id"),
+                "parent_dispatch": spec.get("parent_dispatch"),
+            })
+        entries.append(entry)
+    entries.sort(key=lambda e: (e["mtime"], e["dispatch_id"]))
+    return entries
+
+
+def run_staging_list(argv: List[str]) -> int:
+    """``staging-list`` entry: reads nothing for --help, never raises on a bad bundle."""
+    if "--help" in argv or "-h" in argv:
+        print(STAGING_LIST_USAGE)
+        return 0
+    unknown = [a for a in argv if a != "--json"]
+    if unknown:
+        print(f"staging-list: unknown argument {unknown[0]!r}\n{STAGING_LIST_USAGE}", file=sys.stderr)
+        return 2
+    dispatch_dir = Path(_resolve_vnx_paths()["VNX_DISPATCH_DIR"])
+    entries = list_staged_bundles(dispatch_dir)
+    if "--json" in argv:
+        print(json.dumps(entries, indent=2))
+        return 0
+    if not entries:
+        print(f"No staged spec bundles in {dispatch_dir / 'pending'}.")
+        return 0
+    for e in entries:
+        age = _fmt_age(e["age_seconds"])
+        if "error" in e:
+            print(f"{e['dispatch_id']}  age={age}  INVALID: {e['error']}")
+            continue
+        engine = "/".join(x for x in (e["provider"], e["model"]) if x) or "-"
+        print(
+            f"{e['dispatch_id']}  age={age}  track={e['track_id'] or '-'}  "
+            f"role={e['role'] or '-'}  engine={engine}  pr={e['pr_id'] or '-'}  "
+            f"parent={e['parent_dispatch'] or '-'}"
+        )
+    return 0
+
 
 class PRQueueManager:
     """
@@ -773,79 +860,6 @@ class PRQueueManager:
             traceback.print_exc()
             return False
 
-    def list_staging_dispatches(self) -> None:
-        """
-        List all staging dispatches with dependency status
-        """
-        staging_dir = self.dispatch_dir / "staging"
-
-        if not staging_dir.exists():
-            print("📭 No staging directory found")
-            return
-
-        dispatch_files = sorted(staging_dir.glob("*.md"))
-
-        if not dispatch_files:
-            print("📭 No dispatches in staging")
-            return
-
-        print(f"\n📋 Staging Dispatches ({len(dispatch_files)} total)\n")
-
-        ready = []
-        waiting = []
-
-        for dispatch_file in dispatch_files:
-            metadata = self.extract_v2_metadata(dispatch_file)
-            pr_id = metadata.get('pr_id', 'Unknown')
-
-            # Check dependencies
-            pr = self.get_pr(pr_id)
-            if pr:
-                deps_met, msg = self.check_pr_dependencies(pr_id)
-
-                info = {
-                    'pr_id': pr_id,
-                    'file': dispatch_file.name,
-                    'role': metadata.get('role', 'Unknown'),
-                    'priority': metadata.get('priority', 'Unknown'),
-                    'deps_met': deps_met,
-                    'msg': msg
-                }
-
-                if deps_met:
-                    ready.append(info)
-                else:
-                    waiting.append(info)
-            else:
-                # PR not in queue, probably orphaned
-                print(f"⚠️  {pr_id}: No PR in queue (orphaned dispatch)")
-
-        # Print ready dispatches
-        if ready:
-            print("✅ Ready to Promote (dependencies met):\n")
-            for d in ready:
-                print(f"   {d['pr_id']}")
-                print(f"      File: {d['file']}")
-                print(f"      Role: {d['role']} | Priority: {d['priority']}")
-                print(f"      Status: {d['msg']}")
-                print()
-
-        # Print waiting dispatches
-        if waiting:
-            print("⏳ Waiting (dependencies not met):\n")
-            for d in waiting:
-                print(f"   {d['pr_id']}")
-                print(f"      File: {d['file']}")
-                print(f"      Role: {d['role']} | Priority: {d['priority']}")
-                print(f"      Blocked by: {d['msg']}")
-                print()
-
-        # Summary
-        print(f"📊 Summary:")
-        print(f"   Ready: {len(ready)}")
-        print(f"   Waiting: {len(waiting)}")
-        print(f"   Total: {len(dispatch_files)}\n")
-
     def reject_dispatch(self, dispatch_id: str, reason: Optional[str] = None, defer_pr: Optional[str] = None) -> bool:
         """
         Reject a staging dispatch (moves to rejected/)
@@ -1236,10 +1250,7 @@ if __name__ == "__main__":
             )
 
         elif sys.argv[1] == "staging-list":
-            # NEW: List all staging dispatches with dependency status
-            manager = PRQueueManager()
-            manager.list_staging_dispatches()
-            _exit_from_result(_ok_result())
+            raise SystemExit(run_staging_list(sys.argv[2:]))
 
         else:
             print(f"Unknown command: {sys.argv[1]}")
@@ -1261,7 +1272,7 @@ if __name__ == "__main__":
         print("  python pr_queue_manager.py complete PR-X # Mark PR as completed")
         print("")
         print("  🆕 Staging Workflow:")
-        print("  python pr_queue_manager.py staging-list  # List staging with dependency status")
+        print("  python pr_queue_manager.py staging-list [--json]  # List staged spec bundles (pending/<id>/dispatch-spec.json), oldest first")
         print("  python pr_queue_manager.py show <id>    # Show staging dispatch details")
         print("  python pr_queue_manager.py patch <id> --set key=value  # Patch staging dispatch fields")
         print("  python pr_queue_manager.py reject <id> --reason \"...\" [--defer PR-X]  # Reject staging dispatch")
