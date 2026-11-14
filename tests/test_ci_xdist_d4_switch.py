@@ -277,10 +277,10 @@ def test_the_committed_skip_set_names_the_run_it_was_measured_on():
     assert "50 skips" in header
     assert "OI-2518" in header  # the first key added after that run
     assert "OI-2564" in header  # the second key added after that run
-    assert "OI-2589" in header  # the third and fourth keys added after that run
+    assert "OI-2589" in header  # the third to fifth keys added after that run
     entries, problems = cxp.read_expected_skips(EXPECTED_SKIPS)
     assert problems == []
-    assert len(entries) == 54
+    assert len(entries) == 56
     assert ("tests/test_report_to_receipt_converter.py::TestFailClosedBranchNotOnOrigin"
             "::test_existing_branch_passes_check") in entries
     assert ("tests/test_launchd_interpreter_pin.py"
@@ -289,6 +289,8 @@ def test_the_committed_skip_set_names_the_run_it_was_measured_on():
             "::test_stream_events_yields_events") in entries
     assert ("tests/integration/test_gemini_streaming_gated.py::TestGeminiLiveStreaming"
             "::test_all_real_events_have_tier_1") in entries
+    assert ("tests/test_w_init_project_id_threading.py::TestMigrationLinter"
+            "::test_passes_actual_repo_in_normal_mode") in entries
     for line in text.splitlines():
         if line.strip() and not line.startswith("#"):
             assert "  # " in line, line

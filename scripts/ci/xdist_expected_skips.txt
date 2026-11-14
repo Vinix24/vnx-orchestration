@@ -8,7 +8,7 @@
 # were added after that run. OI-2518 (2026-11-03): the branch-on-origin positive
 # control skips when its precondition listing cannot answer under xdist. OI-2564
 # (PR #2449, 2026-11-07): host-conditional, no Homebrew 3.12 (CI run 42317512164).
-# OI-2589 (closing PR 1): two host-conditional gemini skips, no gemini binary.
+# OI-2589 (closing PR 1): two host-conditional gemini skips, no gemini binary; (closing PR 2): one disk-state skip and one unconditional OI-2080 skip.
 #
 # ENTRY RULE. One key per line: a test nodeid
 # (`tests/<path>.py::<Class>::<test>[<param>]`) or a file (`tests/<path>.py`)
@@ -82,3 +82,9 @@ tests/test_workflow_validation.py::test_repo_workflows_pass_validation  # action
 # host-conditional skipif (no gemini binary on the runner).
 tests/integration/test_gemini_streaming_gated.py::TestGeminiLiveStreaming::test_stream_events_yields_events  # gemini binary not installed
 tests/integration/test_gemini_streaming_gated.py::TestGeminiLiveStreaming::test_all_real_events_have_tier_1  # gemini binary not installed
+
+# OI-2589 (dispatch dlv-oi2589-excluded-closing-2): tests/test_gate_status_schema.py leaves
+# test_exclusions.txt, so Profile A runs it again. Its one disk-state test carries a
+# host-conditional skipif (the runner has no review-gate results in its state dir).
+tests/test_gate_status_schema.py::test_real_disk_results_classify_without_unknown_status  # no runtime state present
+tests/test_w_init_project_id_threading.py::TestMigrationLinter::test_passes_actual_repo_in_normal_mode  # OI-2080: unconditional skip, real defect
