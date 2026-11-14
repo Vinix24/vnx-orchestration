@@ -1,0 +1,1 @@
+- `scripts/lib/dispatch_cli.py:build_runtime_snapshot` drops from 194 to 96 executable lines by extract-method into five private helpers, with no change in behaviour (golf schoon R29; `run_dispatch` follows in R29b).
