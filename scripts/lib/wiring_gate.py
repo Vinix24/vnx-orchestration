@@ -12,13 +12,16 @@ Env: VNX_WIRING_GATE_REQUIRED (default "0" = shadow/advisory, "1" = blocking).
 
 from __future__ import annotations
 
+import argparse
 import ast
+import json
 import os
 import re
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional, Tuple
+import sys
+from typing import Dict, List, Optional, Tuple
 
 import yaml
 
@@ -146,7 +149,11 @@ def _extract_defs_via_ast(source: str, filepath: str, line_map: dict[int, int]) 
         tree = ast.parse(source)
     except SyntaxError:
         return []
+    return _public_defs_of_tree(tree, filepath, line_map)
 
+
+def _public_defs_of_tree(tree: ast.AST, filepath: str, line_map: dict[int, int]) -> List[dict]:
+    """The public top-level function/class defs of a parsed module (shared walk)."""
     defs = []
     for node in ast.iter_child_nodes(tree):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -280,12 +287,17 @@ def _grep_callers(symbol_name: str, def_file: str, *, root: Optional[str] = None
     for hit_file in proc.stdout.splitlines():
         hit_file = hit_file.strip()
         hit_file = os.path.relpath(hit_file, root) if root is not None else hit_file.lstrip("./")
-        if hit_file == def_file:
-            continue
-        if hit_file.startswith("tests/") or "/tests/" in hit_file or hit_file.startswith("test_"):
-            continue
-        callers += 1
+        if _counts_as_caller(hit_file, def_file):
+            callers += 1
     return callers
+
+
+def _counts_as_caller(hit_file: str, def_file: str) -> bool:
+    """The caller rule: outside the defining file, and not a test file."""
+    if hit_file == def_file:
+        return False
+    return not (hit_file.startswith("tests/") or "/tests/" in hit_file
+                or hit_file.startswith("test_"))
 
 
 def _classify_symbols(
@@ -417,3 +429,137 @@ def check_pr_wiring(pr_number: int, *, state_dir: Optional[Path] = None) -> Wiri
     must catch this and mark the gate outcome as FAILED, never PASS with 0 checks.
     """
     return analyse_diff(_get_pr_diff(pr_number), state_dir=state_dir)
+
+
+# ---------------------------------------------------------------------------
+# Tree mode: unused public definitions in the whole tree at a git ref
+# ---------------------------------------------------------------------------
+
+_WORD_RE = re.compile(r"\w+")
+
+
+def _git_out(repo: Optional[Path], *args: str, stdin: Optional[bytes] = None) -> bytes:
+    try:
+        proc = subprocess.run(
+            ["git", *args], cwd=str(repo) if repo else None, input=stdin,
+            capture_output=True, timeout=300, check=True,
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as e:
+        raise WiringGateError(f"git {' '.join(args[:2])} failed: {e}") from e
+    return proc.stdout
+
+
+def _read_py_at_ref(repo: Optional[Path], ref: str) -> Tuple[str, Dict[str, Optional[str]]]:
+    """``(sha, {path: source})`` for every .py file at ``ref``; undecodable -> None."""
+    sha = _git_out(repo, "rev-parse", "--verify", f"{ref}^{{commit}}").decode().strip()
+    names = _git_out(repo, "ls-tree", "-r", "-z", "--name-only", sha).decode(
+        "utf-8", "surrogateescape").split("\0")
+    paths = [n for n in names if n.endswith(".py")]
+    sources: Dict[str, Optional[str]] = {}
+    for path in paths:
+        blob = _git_out(repo, "show", f"{sha}:{path}")
+        try:
+            sources[path] = blob.decode("utf-8")
+        except UnicodeDecodeError:
+            sources[path] = None
+    return sha, sources
+
+
+def _tree_definitions(
+    sources: Dict[str, Optional[str]], prefix: str,
+) -> Tuple[List[dict], List[str], int]:
+    """Public defs under ``prefix`` (test files left out) and the unparsable files."""
+    defs: List[dict] = []
+    unparsed: List[str] = []
+    files = 0
+    for path in sorted(sources):
+        if not path.startswith(prefix) or _is_test_file(path):
+            continue
+        files += 1
+        try:
+            if sources[path] is None:
+                raise ValueError("not utf-8")
+            tree = ast.parse(sources[path])
+        except (SyntaxError, ValueError, RecursionError):
+            unparsed.append(path)
+            continue
+        defs.extend(_public_defs_of_tree(tree, path, {}))
+    return defs, unparsed, files
+
+
+def _token_index(sources: Dict[str, Optional[str]]) -> Dict[str, set]:
+    """{identifier token: files holding it}; an unreadable file contributes nothing."""
+    index: Dict[str, set] = {}
+    for path, text in sources.items():
+        if text is None:
+            continue
+        for token in set(_WORD_RE.findall(text)):
+            index.setdefault(token, set()).add(path)
+    return index
+
+
+def _has_caller(name: str, def_file: str, index: Dict[str, set]) -> bool:
+    """grep -l semantics (substring) over the index, with :func:`_counts_as_caller`."""
+    for token, hit_files in index.items():
+        if name in token and any(_counts_as_caller(f, def_file) for f in hit_files):
+            return True
+    return False
+
+
+def check_tree_wiring(
+    ref: str = "HEAD", *, prefix: str = "scripts/",
+    state_dir: Optional[Path] = None, repo: Optional[Path] = None,
+) -> dict:
+    """Unused public definitions under ``prefix`` in the tree at ``ref``.
+
+    Reads blobs with ``git show`` (never the working tree). Same AST walk, same
+    caller rule and same skip list as the PR mode. A file that cannot be parsed
+    is listed under ``unparsed``, never counted as zero.
+    Raises WiringGateError when the ref cannot be read.
+    """
+    skip_list = _load_skip_list(state_dir)
+    sha, sources = _read_py_at_ref(repo, ref)
+    defs, unparsed, n_files = _tree_definitions(sources, prefix)
+    index = _token_index(sources)
+    files: Dict[str, List[dict]] = {}
+    skipped = 0
+    unused = 0
+    for d in defs:
+        if d["name"] in skip_list:
+            skipped += 1
+            continue
+        if _has_caller(d["name"], d["file"], index):
+            continue
+        unused += 1
+        files.setdefault(d["file"], []).append(
+            {"name": d["name"], "line": d["line"], "kind": d["kind"]})
+    return {
+        "ref": ref, "sha": sha, "prefix": prefix, "files": files, "unparsed": unparsed,
+        "totals": {"files": n_files, "definitions": len(defs), "skipped": skipped,
+                   "unused": unused, "unparsed": len(unparsed)},
+    }
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    ap = argparse.ArgumentParser(description="Wiring gate tree mode")
+    ap.add_argument("--tree", action="store_true", required=True)
+    ap.add_argument("--ref", default="HEAD")
+    ap.add_argument("--prefix", default="scripts/")
+    ap.add_argument("--json", action="store_true")
+    args = ap.parse_args(argv)
+    try:
+        result = check_tree_wiring(args.ref, prefix=args.prefix)
+    except WiringGateError as e:
+        print(f"wiring_gate: {e}", file=sys.stderr)
+        return 2
+    if args.json:
+        print(json.dumps(result, indent=2))
+    else:
+        t = result["totals"]
+        print(f"{result['ref']} {result['sha']}: {t['files']} files, {t['definitions']} "
+              f"definitions, {t['unused']} unused, {t['unparsed']} unparsed")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
