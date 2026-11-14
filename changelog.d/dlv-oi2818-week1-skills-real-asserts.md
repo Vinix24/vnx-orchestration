@@ -1,0 +1,1 @@
+- test: tests/test_week_1_skills.py resolves this repo's root and asserts on the current skill and dispatcher layout instead of returning True/False (OI-2818)
