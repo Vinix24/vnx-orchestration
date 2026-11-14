@@ -1,0 +1,1 @@
+- `_close_with_attest` in `scripts/planning_cli.py` is under 100 executable lines (185 -> 95) by extract-method, with a characterisation net pinning its exit codes, output and write order (golf schoon R11).
