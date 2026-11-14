@@ -323,7 +323,21 @@ def validate_installation(project_root: Path) -> List[CheckResult]:
         ))
         return results
 
-    # Check critical directories
+    results.extend(_validate_critical_dirs(vnx_home))
+    results.extend(_validate_critical_files(vnx_home))
+    results.extend(_validate_bin_executable(vnx_home))
+    results.extend(_validate_terminal_templates(vnx_home))
+
+    data_dir = project_root / ".vnx-data"
+    results.extend(_validate_runtime_data(data_dir))
+    results.extend(_validate_mode_file(data_dir))
+
+    return results
+
+
+def _validate_critical_dirs(vnx_home: Path) -> List[CheckResult]:
+    """Check critical directories."""
+    results: List[CheckResult] = []
     critical_dirs = [
         ("bin", "CLI entrypoint"),
         ("scripts", "Runtime scripts"),
@@ -344,8 +358,12 @@ def validate_installation(project_root: Path) -> List[CheckResult]:
                 f"Missing: {rel_path} ({description})",
                 "Re-run install.sh to repair",
             ))
+    return results
 
-    # Check critical files
+
+def _validate_critical_files(vnx_home: Path) -> List[CheckResult]:
+    """Check critical files."""
+    results: List[CheckResult] = []
     critical_files = [
         ("bin/vnx", "CLI entrypoint script"),
         ("scripts/vnx_init.py", "Python init orchestrator"),
@@ -367,8 +385,12 @@ def validate_installation(project_root: Path) -> List[CheckResult]:
                 f"Missing: {rel_path} ({description})",
                 "Re-run install.sh to repair",
             ))
+    return results
 
-    # Check bin/vnx is executable
+
+def _validate_bin_executable(vnx_home: Path) -> List[CheckResult]:
+    """Check bin/vnx is executable."""
+    results: List[CheckResult] = []
     vnx_bin = vnx_home / "bin" / "vnx"
     if vnx_bin.exists() and os.access(str(vnx_bin), os.X_OK):
         results.append(CheckResult(
@@ -381,8 +403,12 @@ def validate_installation(project_root: Path) -> List[CheckResult]:
             "bin/vnx exists but is not executable",
             f"Run: chmod +x {vnx_bin}",
         ))
+    return results
 
-    # Check terminal templates
+
+def _validate_terminal_templates(vnx_home: Path) -> List[CheckResult]:
+    """Check terminal templates."""
+    results: List[CheckResult] = []
     for tid in ["T0", "T1", "T2", "T3"]:
         tmpl = vnx_home / "templates" / "terminals" / f"{tid}.md"
         if tmpl.is_file():
@@ -396,22 +422,26 @@ def validate_installation(project_root: Path) -> List[CheckResult]:
                 f"Missing template: templates/terminals/{tid}.md",
                 "Re-run install.sh to repair",
             ))
+    return results
 
-    # Check if runtime data directory exists (post-init)
-    data_dir = project_root / ".vnx-data"
+
+def _validate_runtime_data(data_dir: Path) -> List[CheckResult]:
+    """Check if runtime data directory exists (post-init)."""
     if data_dir.is_dir():
-        results.append(CheckResult(
+        return [CheckResult(
             "runtime-data", "install", PASS,
             f"Runtime data: {data_dir}",
-        ))
-    else:
-        results.append(CheckResult(
-            "runtime-data", "install", WARN,
-            "No .vnx-data/ (not yet initialized)",
-            "Run: vnx init (or vnx setup)",
-        ))
+        )]
+    return [CheckResult(
+        "runtime-data", "install", WARN,
+        "No .vnx-data/ (not yet initialized)",
+        "Run: vnx init (or vnx setup)",
+    )]
 
-    # Check mode.json
+
+def _validate_mode_file(data_dir: Path) -> List[CheckResult]:
+    """Check mode.json."""
+    results: List[CheckResult] = []
     mode_file = data_dir / "mode.json"
     if mode_file.is_file():
         try:
@@ -432,7 +462,6 @@ def validate_installation(project_root: Path) -> List[CheckResult]:
             "mode", "install", WARN,
             "No mode.json (run 'vnx init --starter' or 'vnx init --operator')",
         ))
-
     return results
 
 
