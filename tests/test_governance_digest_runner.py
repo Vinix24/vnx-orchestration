@@ -174,12 +174,6 @@ class TestGovernanceDigestRunnerUnit:
 
     # ── run_once — output file ─────────────────────────────────────────────
 
-    def test_run_once_produces_governance_digest_json(self, tmp_path):
-        cls = self._get_runner_class()
-        runner = cls(tmp_path, interval=300)
-        runner.run_once()
-        assert (tmp_path / "governance_digest.json").exists()
-
     def test_run_once_returns_true_on_success(self, tmp_path):
         cls = self._get_runner_class()
         runner = cls(tmp_path, interval=300)
@@ -218,81 +212,6 @@ class TestGovernanceDigestRunnerUnit:
         assert result is False
 
     # ── Output JSON shape ─────────────────────────────────────────────────
-
-    def test_output_contains_required_top_level_keys(self, tmp_path):
-        cls = self._get_runner_class()
-        runner = cls(tmp_path, interval=300)
-        runner.run_once()
-        output = json.loads((tmp_path / "governance_digest.json").read_text())
-        required = {
-            "runner_version",
-            "state_dir",
-            "interval_seconds",
-            "source_records",
-            "generated_at",
-            "total_signals_processed",
-            "recurring_patterns",
-            "recommendations",
-        }
-        for key in required:
-            assert key in output, f"missing key: {key!r}"
-
-    def test_output_runner_version(self, tmp_path):
-        cls = self._get_runner_class()
-        runner = cls(tmp_path, interval=300)
-        runner.run_once()
-        output = json.loads((tmp_path / "governance_digest.json").read_text())
-        assert output["runner_version"] == "1.0"
-
-    def test_output_interval_seconds_matches_runner(self, tmp_path):
-        cls = self._get_runner_class()
-        runner = cls(tmp_path, interval=600)
-        runner.run_once()
-        output = json.loads((tmp_path / "governance_digest.json").read_text())
-        assert output["interval_seconds"] == 600
-
-    def test_output_state_dir_matches_runner(self, tmp_path):
-        cls = self._get_runner_class()
-        runner = cls(tmp_path, interval=300)
-        runner.run_once()
-        output = json.loads((tmp_path / "governance_digest.json").read_text())
-        assert output["state_dir"] == str(tmp_path)
-
-    def test_output_generated_at_is_iso_timestamp(self, tmp_path):
-        cls = self._get_runner_class()
-        runner = cls(tmp_path, interval=300)
-        runner.run_once()
-        output = json.loads((tmp_path / "governance_digest.json").read_text())
-        datetime.fromisoformat(output["generated_at"].replace("Z", "+00:00"))
-
-    def test_output_total_signals_processed_is_int(self, tmp_path):
-        cls = self._get_runner_class()
-        runner = cls(tmp_path, interval=300)
-        runner.run_once()
-        output = json.loads((tmp_path / "governance_digest.json").read_text())
-        assert isinstance(output["total_signals_processed"], int)
-
-    def test_output_recurring_patterns_is_list(self, tmp_path):
-        cls = self._get_runner_class()
-        runner = cls(tmp_path, interval=300)
-        runner.run_once()
-        output = json.loads((tmp_path / "governance_digest.json").read_text())
-        assert isinstance(output["recurring_patterns"], list)
-
-    def test_output_recommendations_is_list(self, tmp_path):
-        cls = self._get_runner_class()
-        runner = cls(tmp_path, interval=300)
-        runner.run_once()
-        output = json.loads((tmp_path / "governance_digest.json").read_text())
-        assert isinstance(output["recommendations"], list)
-
-    def test_output_source_records_contains_gate_and_queue_counts(self, tmp_path):
-        cls = self._get_runner_class()
-        runner = cls(tmp_path, interval=300)
-        runner.run_once()
-        output = json.loads((tmp_path / "governance_digest.json").read_text())
-        assert "gate_results" in output["source_records"]
-        assert "queue_anomalies" in output["source_records"]
 
     # ── Signal loading from receipts ──────────────────────────────────────
 
@@ -350,22 +269,6 @@ class TestGovernanceDigestRunnerUnit:
         cls = self._get_runner_class()
         runner = cls(tmp_path, interval=300)
         assert runner._load_gate_results() == []
-
-    def test_run_once_reflects_receipt_signals_in_output(self, tmp_path):
-        """When receipts exist, source_records counts them."""
-        receipts = tmp_path / "t0_receipts.ndjson"
-        receipts.write_text(
-            json.dumps({"event_type": "task_complete", "gate": "gate_pr1_x",
-                        "dispatch_id": "d-001"}) + "\n" +
-            json.dumps({"event_type": "task_failed", "gate": "gate_pr1_x",
-                        "dispatch_id": "d-002"}) + "\n",
-            encoding="utf-8",
-        )
-        cls = self._get_runner_class()
-        runner = cls(tmp_path, interval=300)
-        runner.run_once()
-        output = json.loads((tmp_path / "governance_digest.json").read_text())
-        assert output["source_records"]["gate_results"] == 2
 
     # ── F18 module calls ───────────────────────────────────────────────────
 

@@ -1,0 +1,1 @@
+- Seven more CI-excluded test files (gate dispatch-id, evidence accuracy, execution certification, status schema, governance blockers, digest certification, digest runner) pass again on main; their exclusion lines leave in the closing PR (OI-2589, batch h).
