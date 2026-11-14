@@ -1,0 +1,1 @@
+- `build_projection` is under 100 executable lines by extract-method, with no change in behaviour (golf-schoon R02, first of three functions).
