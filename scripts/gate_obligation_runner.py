@@ -2701,19 +2701,7 @@ def _stale_terminal_evidence(
         dispatch_id = str(record.get("dispatch_id") or path.stem)
         gate = str(record.get("gate") or "")
 
-        evidence_record: Optional[Dict[str, Any]] = None
-        read_error: Optional[str] = None
-        try:
-            evidence_record = json.loads(Path(evidence_path_str).read_text(encoding="utf-8"))
-        except OSError as exc:
-            read_error = f"evidence file unreadable: {exc}"
-        except json.JSONDecodeError as exc:
-            read_error = f"evidence file is not valid JSON: {exc}"
-        if not isinstance(evidence_record, dict):
-            if read_error is None:
-                read_error = "evidence file does not contain a JSON object"
-            evidence_record = {}
-        result_sha = str(evidence_record.get("commit_sha") or "")
+        result_sha, read_error = _read_evidence_commit_sha(evidence_path_str)
 
         # OI-2459 round 2: this read-only diagnostic keeps the snapshot on
         # purpose. It books nothing — it reports binding drift for a human —
@@ -2763,24 +2751,47 @@ def _stale_terminal_evidence(
             )
         findings.append(finding)
     if open_pr_lookup.get("suspect"):
-        findings.append({
-            "dispatch_id": None,
-            "gate": None,
-            "pr_number": None,
-            "obligation_status": None,
-            "obligation_path": None,
-            "evidence_result_path": None,
-            "head_sha": "",
-            "evidence_commit_sha": "",
-            "binding": "unknown",
-            "detail": (
-                f"the open-PR list hit the --limit {_OPEN_PR_LIST_LIMIT} cap "
-                f"({len(open_prs)} PRs returned) — additional open PRs may "
-                "exist beyond the cap and were not checked this run "
-                "(OI-1766): coverage is undetermined, not complete."
-            ),
-        })
+        findings.append(_open_pr_list_capped_finding(len(open_prs)))
     return findings
+
+
+def _read_evidence_commit_sha(evidence_path_str: str) -> Tuple[str, Optional[str]]:
+    """(commit_sha, read_error) of one evidence file; an unreadable or non-object file is ("", why)."""
+    evidence_record: Optional[Dict[str, Any]] = None
+    read_error: Optional[str] = None
+    try:
+        evidence_record = json.loads(Path(evidence_path_str).read_text(encoding="utf-8"))
+    except OSError as exc:
+        read_error = f"evidence file unreadable: {exc}"
+    except json.JSONDecodeError as exc:
+        read_error = f"evidence file is not valid JSON: {exc}"
+    if not isinstance(evidence_record, dict):
+        if read_error is None:
+            read_error = "evidence file does not contain a JSON object"
+        evidence_record = {}
+    result_sha = str(evidence_record.get("commit_sha") or "")
+    return result_sha, read_error
+
+
+def _open_pr_list_capped_finding(returned: int) -> Dict[str, Any]:
+    """The loud ``unknown`` finding when the open-PR list hit the ``--limit`` cap (OI-1766)."""
+    return {
+        "dispatch_id": None,
+        "gate": None,
+        "pr_number": None,
+        "obligation_status": None,
+        "obligation_path": None,
+        "evidence_result_path": None,
+        "head_sha": "",
+        "evidence_commit_sha": "",
+        "binding": "unknown",
+        "detail": (
+            f"the open-PR list hit the --limit {_OPEN_PR_LIST_LIMIT} cap "
+            f"({returned} PRs returned) — additional open PRs may "
+            "exist beyond the cap and were not checked this run "
+            "(OI-1766): coverage is undetermined, not complete."
+        ),
+    }
 
 
 def _evidence_decision(evidence: Tuple[Path, Dict[str, Any]]) -> Dict[str, Any]:
@@ -4779,6 +4790,18 @@ def fulfill_obligation(
     if decision["kind"] == "stay_pending":
         return _fulfill_stay_pending(path, outcome, attempts=attempts, now=now)
 
+    return _fulfill_attempt_gate(
+        state_dir, path, record, resolution, outcome, dispatch_id=dispatch_id, gate=gate,
+        attempts=attempts, now=now, force_rerun=force_rerun, snapshot=snapshot,
+    )
+
+
+def _fulfill_attempt_gate(
+    state_dir: Path, path: Path, record: Dict[str, Any], resolution, outcome: Dict[str, Any], *,
+    dispatch_id: str, gate: str, attempts: int, now: str, force_rerun: str,
+    snapshot: Optional[_GithubSnapshot],
+) -> Dict[str, Any]:
+    """:func:`fulfill_obligation`'s ``attempt_gate`` path: launch under the run lock."""
     # decision["kind"] == "attempt_gate": a PR is resolved — actually run it.
     pr_number = resolution.pr_number
     owner_repo = resolution.owner_repo or _resolve_github_owner_repo(state_dir)
@@ -4820,6 +4843,19 @@ def fulfill_obligation(
     if launch.lock is None:
         outcome.update(launch.refusal or {})
         return outcome
+    return _fulfill_run_gate(
+        state_dir, path, outcome, launch, dispatch_id=dispatch_id, gate=gate, pr_number=pr_number,
+        branch=branch, changed_files=changed_files, head_sha_before_run=head_sha_before_run,
+        attempts=attempts, now=now, force_rerun=force_rerun,
+    )
+
+
+def _fulfill_run_gate(
+    state_dir: Path, path: Path, outcome: Dict[str, Any], launch, *, dispatch_id: str, gate: str,
+    pr_number: Any, branch: Any, changed_files: List[str], head_sha_before_run: Any,
+    attempts: int, now: str, force_rerun: str,
+) -> Dict[str, Any]:
+    """Run the gate while ``launch.lock`` is held, judge its result, release the lock."""
     try:
         manager = _build_manager(state_dir)
         result = manager.request_and_execute(
@@ -4836,16 +4872,8 @@ def fulfill_obligation(
         # Mirror the recorded outcome: a gate the manager could not execute
         # leaves a loud not_executable/failed RESULT record — the obligation
         # must tell the same truth, not a cosmetic "fulfilled".
-        result_status = ""
-        result_reason = ""
-        result_data: Optional[Dict[str, Any]] = None
-        try:
-            if result_file.exists():
-                result_data = json.loads(result_file.read_text(encoding="utf-8"))
-                result_status = str(result_data.get("status") or "")
-                result_reason = str(result_data.get("reason") or "")
-        except (OSError, json.JSONDecodeError) as exc:
-            _LOG.debug("result status unreadable for pr-%s-%s: %s", pr_number, gate, exc)
+        result_status, result_reason, result_data = _read_declared_result(
+            result_file, gate=gate, pr_number=pr_number)
 
         # The head is resolved AGAIN here, after the gate ran, and every sha
         # check below is judged against THIS value — the head at booking time.
@@ -4867,10 +4895,7 @@ def fulfill_obligation(
         # The commit the result under decision actually records. An empty sha
         # (record has no commit_sha, or no record at all) keeps the existing
         # "binding unverifiable" handling: unknown is never a mismatch.
-        result_commit_sha = (
-            str(result_data.get("commit_sha") or "")
-            if isinstance(result_data, dict) else ""
-        )
+        result_commit_sha = _result_commit_sha(result_data)
         result_sha_binding = _classify_sha_binding(head_sha, result_commit_sha)
 
         # D2e: the declared gate's own record can be a permanent dead end
@@ -4890,13 +4915,8 @@ def fulfill_obligation(
         # takeover walk entirely — declared_kind/declared_detail are reused
         # below, after the walk, so a MISMATCH/UNKNOWN_SHA declared record
         # is never silently trusted by the unconditional fallback either.
-        declared_kind, declared_detail = (
-            _has_decided_evidence(result_data, head_sha) if result_data is not None
-            else (_EVIDENCE_NOT_DECIDED, "no result record on disk yet")
-        )
-        takeover_hit = None
-        if declared_kind != _EVIDENCE_USABLE:
-            takeover_hit = _find_takeover_successor_evidence(manager, gate, pr_number, head_sha)
+        declared_kind, declared_detail, takeover_hit = _declared_evidence_and_takeover(
+            manager, result_data, head_sha, gate=gate, pr_number=pr_number)
 
         if takeover_hit is not None:
             return _fulfill_by_takeover(
@@ -4948,6 +4968,49 @@ def fulfill_obligation(
         )
     finally:
         launch.lock.release()
+
+
+def _read_declared_result(
+    result_file: Path, *, gate: str, pr_number: Any,
+) -> Tuple[str, str, Optional[Dict[str, Any]]]:
+    """(status, reason, record) of the declared gate's result file; an unreadable file is ("", "", None).
+
+    A record that parses but is not an object raises out of here (AttributeError)
+    on purpose: :func:`_fulfill_run_gate` books that as a runner error.
+    """
+    result_status = ""
+    result_reason = ""
+    result_data: Optional[Dict[str, Any]] = None
+    try:
+        if result_file.exists():
+            result_data = json.loads(result_file.read_text(encoding="utf-8"))
+            result_status = str(result_data.get("status") or "")
+            result_reason = str(result_data.get("reason") or "")
+    except (OSError, json.JSONDecodeError) as exc:
+        _LOG.debug("result status unreadable for pr-%s-%s: %s", pr_number, gate, exc)
+    return result_status, result_reason, result_data
+
+
+def _result_commit_sha(result_data: Optional[Dict[str, Any]]) -> str:
+    """The commit a result record says it reviewed; "" when there is no record object."""
+    return (
+        str(result_data.get("commit_sha") or "")
+        if isinstance(result_data, dict) else ""
+    )
+
+
+def _declared_evidence_and_takeover(
+    manager, result_data: Optional[Dict[str, Any]], head_sha: str, *, gate: str, pr_number: Any,
+) -> Tuple[str, str, Any]:
+    """(declared_kind, declared_detail, takeover_hit); the takeover chain is walked only when the declared record is not usable."""
+    declared_kind, declared_detail = (
+        _has_decided_evidence(result_data, head_sha) if result_data is not None
+        else (_EVIDENCE_NOT_DECIDED, "no result record on disk yet")
+    )
+    takeover_hit = None
+    if declared_kind != _EVIDENCE_USABLE:
+        takeover_hit = _find_takeover_successor_evidence(manager, gate, pr_number, head_sha)
+    return declared_kind, declared_detail, takeover_hit
 
 
 # ---------------------------------------------------------------------------
