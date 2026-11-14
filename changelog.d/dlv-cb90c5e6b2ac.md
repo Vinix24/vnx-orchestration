@@ -1,0 +1,1 @@
+- `producer_freshness_monitor.main`, `_migrate_v22` and `_migrate_v29` fall under 100 executable lines by extract-method, with characterisation tests pinning their SQL order, log lines, output and exit codes (golf schoon R14).
