@@ -1,1 +1,2 @@
 - CI: 36 test files whose fixes are on main leave `scripts/ci/test_exclusions.txt` and Profile A runs them again; their two host-conditional gemini skips join `xdist_expected_skips.txt` (OI-2589).
+- CI: the pinned skip-set count in `tests/test_ci_xdist_d4_switch.py` follows the two gemini keys (52 to 54) and the skip-set header names OI-2589.
