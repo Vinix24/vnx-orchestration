@@ -149,7 +149,7 @@ def _fill_duration_baselines(con: sqlite3.Connection, result: dict[str, Any]) ->
 
 
 def _fill_common_errors(con: sqlite3.Connection, result: dict[str, Any]) -> None:
-    """--- Common errors (from prevention_rules) ---"""
+    """Common errors: rows of the prevention_rules table."""
     try:
         col_names = {
             row[1]
