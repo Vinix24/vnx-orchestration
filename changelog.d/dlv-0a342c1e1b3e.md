@@ -1,1 +1,1 @@
-- The wheel-install smoke (`tests/test_wheel_install.py`) now runs on the Linux runner: the Profile A job installs `build`, `setuptools>=77` and `wheel`, and the file leaves `scripts/ci/test_exclusions.txt` (golf schoon F5, OI-2834).
+- The wheel-install smoke (`tests/test_wheel_install.py`) now runs on the Linux runner: the `profile-a-prelude` action installs `build`, `setuptools>=77` and `wheel`, and the file leaves `scripts/ci/test_exclusions.txt` (golf schoon F5, OI-2834).
