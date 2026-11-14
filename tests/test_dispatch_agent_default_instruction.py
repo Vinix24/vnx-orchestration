@@ -129,14 +129,19 @@ class TestDispatchAgentDefaultInstruction:
 
         captured_instruction = []
 
-        def fake_deliver(**kwargs):
-            captured_instruction.append(kwargs.get("instruction"))
+        def fake_door(legacy, **kwargs):
+            # The single-entry door is the default lane: the instruction reaches it
+            # as instruction_text (the legacy lambda is only the door-off fallback).
+            captured_instruction.append(kwargs.get("instruction_text"))
             return True
 
         from vnx_cli import _engine
         with patch.object(_engine, "engine_root", return_value=tmp_path), \
              patch("vnx_cli.commands.dispatch_agent._engine.ensure_engine_on_path"), \
-             patch.dict("sys.modules", {"subprocess_dispatch": MagicMock(deliver_with_recovery=fake_deliver)}):
+             patch.dict("sys.modules", {
+                 "subprocess_dispatch": MagicMock(deliver_with_recovery=lambda **k: True),
+                 "dispatch_bridge": MagicMock(deliver_via_door=fake_door),
+             }):
             from vnx_cli.commands.dispatch_agent import vnx_dispatch_agent
             args = Namespace(agent="hello-world", instruction=None, model="sonnet", project_dir=str(tmp_path))
             rc = vnx_dispatch_agent(args)
@@ -192,14 +197,19 @@ class TestDispatchAgentDefaultInstruction:
 
         captured_instruction = []
 
-        def fake_deliver(**kwargs):
-            captured_instruction.append(kwargs.get("instruction"))
+        def fake_door(legacy, **kwargs):
+            # The single-entry door is the default lane: the instruction reaches it
+            # as instruction_text (the legacy lambda is only the door-off fallback).
+            captured_instruction.append(kwargs.get("instruction_text"))
             return True
 
         from vnx_cli import _engine
         with patch.object(_engine, "engine_root", return_value=tmp_path), \
              patch("vnx_cli.commands.dispatch_agent._engine.ensure_engine_on_path"), \
-             patch.dict("sys.modules", {"subprocess_dispatch": MagicMock(deliver_with_recovery=fake_deliver)}):
+             patch.dict("sys.modules", {
+                 "subprocess_dispatch": MagicMock(deliver_with_recovery=lambda **k: True),
+                 "dispatch_bridge": MagicMock(deliver_via_door=fake_door),
+             }):
             from vnx_cli.commands.dispatch_agent import vnx_dispatch_agent
             args = Namespace(agent="hello-world", instruction="Override", model="sonnet", project_dir=str(tmp_path))
             rc = vnx_dispatch_agent(args)
