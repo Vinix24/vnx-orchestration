@@ -1,0 +1,1 @@
+- Five CI-excluded test files (billing safety, installer template leak, plan-gate panel, planning CLI, receipt v2 PR4 wiring) pass on main again; stale fixtures fixed and their exclusion lines removed (OI-2589, batch l).
