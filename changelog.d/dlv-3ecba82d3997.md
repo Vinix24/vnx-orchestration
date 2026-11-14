@@ -1,0 +1,1 @@
+- `governance_audit_view`, `provenance_audit_view` and `pre_merge_advisory` are each under 100 lines now, split into private helpers with the same output (golf schoon R23).
