@@ -2516,6 +2516,44 @@ def verify_pr_closure(
         ))
 
     # 4. Review contract and gate evidence
+    review_evidence_summary = _per_pr_review_checks(
+        checks, pr_id, review_contract, gate_results_dir, paths, receipts_file, branch,
+    )
+
+    # 5. GitHub PR and CI checks (when branch is provided and explicitly required)
+    # Local-only closure cannot pass merge readiness without a real GitHub PR + green checks.
+    # Per-PR mode must mirror the full-feature pre_merge guarantees: state == OPEN and
+    # mergeStateStatus == CLEAN, otherwise a draft, blocked, or merged-but-stale PR with
+    # green CI could be reported as merge-ready.
+    github_pr = _per_pr_github_checks(checks, branch, require_github_pr)
+
+    verdict = "pass" if all(c.status == "PASS" for c in checks) else "fail"
+    return {
+        "verdict": verdict,
+        "mode": "per_pr",
+        "pr_id": pr_id,
+        "branch": branch,
+        "reconciled_state": {
+            "pr_id": pr_reconciled.pr_id,
+            "state": pr_reconciled.state,
+            "provenance": pr_reconciled.provenance,
+        },
+        "checks": [c.__dict__ for c in checks],
+        "review_evidence": review_evidence_summary,
+        "github_pr": github_pr,
+    }
+
+
+def _per_pr_review_checks(
+    checks: List[CheckResult],
+    pr_id: str,
+    review_contract: Optional[ReviewContract],
+    gate_results_dir: Optional[Path],
+    paths: Dict[str, str],
+    receipts_file: Path,
+    branch: Optional[str],
+) -> Optional[Dict[str, Any]]:
+    """Steps 4-5 of ``verify_pr_closure``: append the review checks, return the evidence summary."""
     review_evidence_summary: Optional[Dict[str, Any]] = None
     if review_contract is not None:
         # Per-PR closure must reject a contract for a different PR — combining
@@ -2541,25 +2579,31 @@ def verify_pr_closure(
                 )
             )
 
-            review_evidence_summary = {
-                "contract_pr_id": review_contract.pr_id,
-                "contract_hash": review_contract.content_hash,
-                "review_stack": review_contract.review_stack,
-                "risk_class": review_contract.risk_class,
-                "deterministic_finding_count": len(review_contract.deterministic_findings),
-                "error_finding_count": len([f for f in review_contract.deterministic_findings if f.severity == "error"]),
-            }
+            review_evidence_summary = _review_evidence_summary(review_contract)
     else:
         checks.append(CheckResult(
             "review_contract", "FAIL",
             "no review contract provided — per-PR closure requires contract-backed evidence",
         ))
+    return review_evidence_summary
 
-    # 5. GitHub PR and CI checks (when branch is provided and explicitly required)
-    # Local-only closure cannot pass merge readiness without a real GitHub PR + green checks.
-    # Per-PR mode must mirror the full-feature pre_merge guarantees: state == OPEN and
-    # mergeStateStatus == CLEAN, otherwise a draft, blocked, or merged-but-stale PR with
-    # green CI could be reported as merge-ready.
+
+def _review_evidence_summary(review_contract: ReviewContract) -> Dict[str, Any]:
+    """The ``review_evidence`` block of a closure payload."""
+    return {
+        "contract_pr_id": review_contract.pr_id,
+        "contract_hash": review_contract.content_hash,
+        "review_stack": review_contract.review_stack,
+        "risk_class": review_contract.risk_class,
+        "deterministic_finding_count": len(review_contract.deterministic_findings),
+        "error_finding_count": len([f for f in review_contract.deterministic_findings if f.severity == "error"]),
+    }
+
+
+def _per_pr_github_checks(
+    checks: List[CheckResult], branch: Optional[str], require_github_pr: bool,
+) -> Optional[Dict[str, Any]]:
+    """Step 5 of ``verify_pr_closure``: append the GitHub PR and CI checks, return the PR."""
     github_pr: Optional[Dict[str, Any]] = None
     if branch and require_github_pr:
         github_pr = _find_branch_pr(branch)
@@ -2586,22 +2630,7 @@ def verify_pr_closure(
                 "all required GitHub checks green" if all_green
                 else "GitHub checks incomplete or failing — merge readiness blocked",
             ))
-
-    verdict = "pass" if all(c.status == "PASS" for c in checks) else "fail"
-    return {
-        "verdict": verdict,
-        "mode": "per_pr",
-        "pr_id": pr_id,
-        "branch": branch,
-        "reconciled_state": {
-            "pr_id": pr_reconciled.pr_id,
-            "state": pr_reconciled.state,
-            "provenance": pr_reconciled.provenance,
-        },
-        "checks": [c.__dict__ for c in checks],
-        "review_evidence": review_evidence_summary,
-        "github_pr": github_pr,
-    }
+    return github_pr
 
 
 # The producer line a gate report writes about itself. Accepts the bold-field
@@ -3144,6 +3173,32 @@ def verify_closure(
         )
     )
 
+    checks.extend(_feature_pr_state_checks(pr, mode, project_root))
+
+    checks.extend(_validate_test_claims(claims, project_root))
+    checks.append(_check_stale_staging(paths, track.pr_ids))
+
+    # Review contract and gate evidence enforcement
+    review_evidence_summary = _feature_review_checks(checks, review_contract, gate_results_dir, paths, branch, pr)
+
+    verdict = "pass" if all(check.status == "PASS" for check in checks) else "fail"
+    payload = {
+        "verdict": verdict,
+        "mode": mode,
+        "branch": branch,
+        "track_id": track.track_id or None,
+        "feature_title": track.title,
+        "checks": [check.__dict__ for check in checks],
+        "pr": pr,
+        "claim_file": str(claim_file) if claim_file else None,
+        "review_evidence": review_evidence_summary,
+    }
+    return payload
+
+
+def _feature_pr_state_checks(pr: Optional[Dict[str, Any]], mode: str, project_root: Path) -> List[CheckResult]:
+    """The merge-state checks of ``verify_closure`` for the branch's PR, per mode."""
+    checks: List[CheckResult] = []
     if pr:
         if mode == "pre_merge":
             clean = str(pr.get("mergeStateStatus") or "").upper() == "CLEAN" and str(pr.get("state") or "").upper() == "OPEN"
@@ -3182,11 +3237,18 @@ def verify_closure(
                     f"merge commit {'present on origin/main' if on_main else 'missing from origin/main'}",
                 )
             )
+    return checks
 
-    checks.extend(_validate_test_claims(claims, project_root))
-    checks.append(_check_stale_staging(paths, track.pr_ids))
 
-    # Review contract and gate evidence enforcement
+def _feature_review_checks(
+    checks: List[CheckResult],
+    review_contract: Optional[ReviewContract],
+    gate_results_dir: Optional[Path],
+    paths: Dict[str, str],
+    branch: str,
+    pr: Optional[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    """The review-evidence step of ``verify_closure``: append its checks, return the summary."""
     review_evidence_summary: Optional[Dict[str, Any]] = None
     if review_contract is not None:
         effective_results_dir = gate_results_dir
@@ -3202,34 +3264,14 @@ def verify_closure(
                 review_contract, effective_results_dir, branch=branch
             )
         )
-        review_evidence_summary = {
-            "contract_pr_id": review_contract.pr_id,
-            "contract_hash": review_contract.content_hash,
-            "review_stack": review_contract.review_stack,
-            "risk_class": review_contract.risk_class,
-            "deterministic_finding_count": len(review_contract.deterministic_findings),
-            "error_finding_count": len([f for f in review_contract.deterministic_findings if f.severity == "error"]),
-        }
+        review_evidence_summary = _review_evidence_summary(review_contract)
     else:
         checks.append(CheckResult(
             "review_contract",
             "FAIL",
             "no review contract provided — closure requires contract-backed evidence",
         ))
-
-    verdict = "pass" if all(check.status == "PASS" for check in checks) else "fail"
-    payload = {
-        "verdict": verdict,
-        "mode": mode,
-        "branch": branch,
-        "track_id": track.track_id or None,
-        "feature_title": track.title,
-        "checks": [check.__dict__ for check in checks],
-        "pr": pr,
-        "claim_file": str(claim_file) if claim_file else None,
-        "review_evidence": review_evidence_summary,
-    }
-    return payload
+    return review_evidence_summary
 
 
 def _feature_merge_record(pr: Optional[Dict[str, Any]], paths: Dict[str, str]) -> Optional[Dict[str, Any]]:
