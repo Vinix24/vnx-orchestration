@@ -35,7 +35,7 @@ from __future__ import annotations
 
 import re
 import time
-from datetime import date, datetime, timezone
+from datetime import datetime, timezone
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -273,7 +273,6 @@ def _parse_memory_file(file_path: Path, text: str) -> Optional[OperatorMemory]:
 class _NoTimestampLoader(yaml.SafeLoader):
     """Safe loader that keeps timestamps as text so the zone stays checkable."""
 
-
 _NoTimestampLoader.yaml_implicit_resolvers = {
     ch: [(tag, rx) for tag, rx in resolvers if tag != "tag:yaml.org,2002:timestamp"]
     for ch, resolvers in yaml.SafeLoader.yaml_implicit_resolvers.items()
@@ -283,10 +282,7 @@ _VALIDITY_FIELDS = ("valid_from", "invalid_at", "superseded_by")
 
 
 def _read_validity_fields(text: str) -> Dict[str, object]:
-    """Read the validity fields: ``metadata.<f>`` first, then top level (ADR-078 § 5).
-
-    An absent or unparseable frontmatter yields all ``None`` (note stays valid).
-    """
+    """``metadata.<f>`` first, then top level (ADR-078 § 5); unparseable gives all None."""
     result: Dict[str, object] = {f: None for f in _VALIDITY_FIELDS}
     m = _FRONTMATTER_RE.match(text)
     if not m:
@@ -304,39 +300,22 @@ def _read_validity_fields(text: str) -> Dict[str, object]:
     return result
 
 
-_DATE_RES = (
-    (re.compile(r"^\d{4}-\d{2}-\d{2}$"), "%Y-%m-%d"),
-    (re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$"), "%Y-%m-%dT%H:%M:%SZ"),
-    (re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\+00:00$"), "%Y-%m-%dT%H:%M:%S+00:00"),
-)
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}:\d{2}(Z|\+00:00))?$")
 MAX_SUPERSEDE_LINKS = 10
 
 
 def _parse_utc(value: object) -> Optional[datetime]:
-    """Parse a validity date to aware UTC; ``None`` when unreadable."""
-    if isinstance(value, datetime):
-        if value.tzinfo is None:
-            return None
-        return value.astimezone(timezone.utc)
-    if isinstance(value, date):
-        return datetime(value.year, value.month, value.day, tzinfo=timezone.utc)
-    if not isinstance(value, str):
+    """Parse an ISO 8601 UTC date (date only = 00:00Z); ``None`` when unreadable."""
+    if not isinstance(value, str) or not _DATE_RE.match(value.strip()):
         return None
-    text = value.strip()
-    for rx, fmt in _DATE_RES:
-        if rx.match(text):
-            try:
-                return datetime.strptime(text, fmt).replace(tzinfo=timezone.utc)
-            except ValueError:
-                return None
-    return None
+    try:
+        return datetime.fromisoformat(value.strip()).replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
 
 
 def _temporarily_out(mem: OperatorMemory, now: datetime, warnings: List[dict]) -> bool:
-    """Rule (a)/(b): ``invalid_at <= now`` or ``valid_from > now``.
-
-    An unreadable date counts as not set, with an ``unreadable_date`` warning.
-    """
+    """Rule (a)/(b); an unreadable date counts as unset, with a warning."""
     out = False
     for field_name in ("invalid_at", "valid_from"):
         raw = getattr(mem, field_name)
