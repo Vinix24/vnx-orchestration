@@ -51,11 +51,7 @@ def _run_ldm(db_path: Path, *args: str, project_id: str | None = "vnx-dev"):
         env["VNX_PROJECT_ID"] = project_id
     r = subprocess.run([sys.executable, str(SCRIPTS_DIR / "log_dispatch_metadata.py"), *args],
                        env=env, capture_output=True, text=True)
-    # Drop the interpreter's utcnow() DeprecationWarning (3.12+): it is not the script's output.
-    lines = r.stderr.splitlines(keepends=True)
-    own = [ln for i, ln in enumerate(lines) if "DeprecationWarning: datetime.datetime.utcnow()" not in ln
-           and not (i and "DeprecationWarning: datetime.datetime.utcnow()" in lines[i - 1])]
-    return r.returncode, r.stdout, "".join(own)
+    return r.returncode, r.stdout, r.stderr
 
 
 def _rows(db_path: Path):
