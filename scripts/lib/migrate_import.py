@@ -485,69 +485,65 @@ def _import_table(
                     continue
                 row_data["snippet_rowid"] = mapped_rowid
 
-            values = [row_data[column] for column in insert_cols]
-            quoted_insert_cols = ", ".join(f'"{c}"' for c in insert_cols)
-            placeholders = ", ".join("?" for _ in insert_cols)
-            try:
-                cur = con.execute(
-                    f"INSERT OR IGNORE INTO {table} ({quoted_insert_cols}) VALUES ({placeholders})",
-                    values,
-                )
-                if cur.rowcount == 1:
-                    central_rowid = cur.lastrowid
-                    con.execute(
-                        "INSERT OR IGNORE INTO p4_import_idempotency "
-                        "(project_id, source_table, source_rowid) VALUES (?, ?, ?)",
-                        (project.project_id, table, rid),
-                    )
-                    # Self-heal: if a prior run logged this row as skipped (conflict
-                    # / integrity error), mark it resolved now that the import
-                    # succeeded. (Finding 3 round 2.)
-                    _resolve_prior_skip(con, project.project_id, table, rid)
-                    if table == "code_snippets":
-                        # Preserve the logical snippet linkage without forcing raw
-                        # rowid reuse across projects, which would collide.
-                        _record_rowid_mapping(
-                            con,
-                            project.project_id,
-                            table,
-                            rid,
-                            int(central_rowid),
-                        )
-                    inserted += 1
-                else:
-                    # SQLite IGNOREd the row (UNIQUE/PRIMARY KEY conflict). Do NOT
-                    # write to p4_import_idempotency — that table must reflect
-                    # actually-imported rows so re-runs can re-attempt the conflict
-                    # if the central row is later deleted/repaired. Audit the skip.
-                    LOG.warning(
-                        "INSERT IGNORED project=%s table=%s rowid=%s (central key conflict)",
-                        project.project_id, table, rid,
-                    )
-                    _record_skip(
-                        con,
-                        project.project_id,
-                        table,
-                        rid,
-                        "insert_or_ignore_conflict",
-                        run_id,
-                    )
-                    skipped += 1
-            except sqlite3.IntegrityError as exc:
-                LOG.warning(
-                    "INSERT skipped project=%s table=%s rowid=%s err=%s",
-                    project.project_id, table, rid, exc,
-                )
-                _record_skip(
-                    con,
-                    project.project_id,
-                    table,
-                    rid,
-                    f"integrity_error:{exc}",
-                    run_id,
-                )
+            if _insert_import_row(con, project, table, rid, row_data, insert_cols, run_id):
+                inserted += 1
+            else:
                 skipped += 1
     return ImportSummary(project.project_id, "", table, inserted, skipped)
+
+
+def _insert_import_row(
+    con: sqlite3.Connection,
+    project: ProjectEntry,
+    table: str,
+    rid: int,
+    row_data: dict,
+    insert_cols: list[str],
+    run_id: Optional[str],
+) -> bool:
+    """INSERT OR IGNORE one prepared row; True = inserted, False = skipped and audited."""
+    values = [row_data[column] for column in insert_cols]
+    quoted_insert_cols = ", ".join(f'"{c}"' for c in insert_cols)
+    placeholders = ", ".join("?" for _ in insert_cols)
+    try:
+        cur = con.execute(
+            f"INSERT OR IGNORE INTO {table} ({quoted_insert_cols}) VALUES ({placeholders})",
+            values,
+        )
+        if cur.rowcount == 1:
+            central_rowid = cur.lastrowid
+            con.execute(
+                "INSERT OR IGNORE INTO p4_import_idempotency "
+                "(project_id, source_table, source_rowid) VALUES (?, ?, ?)",
+                (project.project_id, table, rid),
+            )
+            # Self-heal: if a prior run logged this row as skipped (conflict
+            # / integrity error), mark it resolved now that the import
+            # succeeded. (Finding 3 round 2.)
+            _resolve_prior_skip(con, project.project_id, table, rid)
+            if table == "code_snippets":
+                # Preserve the logical snippet linkage without forcing raw
+                # rowid reuse across projects, which would collide.
+                _record_rowid_mapping(con, project.project_id, table, rid, int(central_rowid))
+            return True
+        else:
+            # SQLite IGNOREd the row (UNIQUE/PRIMARY KEY conflict). Do NOT
+            # write to p4_import_idempotency — that table must reflect
+            # actually-imported rows so re-runs can re-attempt the conflict
+            # if the central row is later deleted/repaired. Audit the skip.
+            LOG.warning(
+                "INSERT IGNORED project=%s table=%s rowid=%s (central key conflict)",
+                project.project_id, table, rid,
+            )
+            _record_skip(con, project.project_id, table, rid, "insert_or_ignore_conflict", run_id)
+            return False
+    except sqlite3.IntegrityError as exc:
+        LOG.warning(
+            "INSERT skipped project=%s table=%s rowid=%s err=%s",
+            project.project_id, table, rid, exc,
+        )
+        _record_skip(con, project.project_id, table, rid, f"integrity_error:{exc}", run_id)
+        return False
 
 
 # ---------------------------------------------------------------------------
