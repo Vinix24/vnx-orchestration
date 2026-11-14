@@ -82,3 +82,8 @@ tests/test_workflow_validation.py::test_repo_workflows_pass_validation  # action
 # host-conditional skipif (no gemini binary on the runner).
 tests/integration/test_gemini_streaming_gated.py::TestGeminiLiveStreaming::test_stream_events_yields_events  # gemini binary not installed
 tests/integration/test_gemini_streaming_gated.py::TestGeminiLiveStreaming::test_all_real_events_have_tier_1  # gemini binary not installed
+
+# OI-2589 (dispatch dlv-oi2589-excluded-closing-2): tests/test_gate_status_schema.py leaves
+# test_exclusions.txt, so Profile A runs it again. Its one disk-state test carries a
+# host-conditional skipif (no .vnx-data/state/review_gates/results on the runner).
+tests/test_gate_status_schema.py::test_real_disk_results_classify_without_unknown_status  # no runtime state present

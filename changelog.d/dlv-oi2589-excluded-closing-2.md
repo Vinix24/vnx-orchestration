@@ -1,0 +1,1 @@
+- ci: 28 exclusion lines of batches h to k leave scripts/ci/test_exclusions.txt now that their fixes are on main, so Profile A runs those files again (OI-2589, closing PR 2).

@@ -277,10 +277,10 @@ def test_the_committed_skip_set_names_the_run_it_was_measured_on():
     assert "50 skips" in header
     assert "OI-2518" in header  # the first key added after that run
     assert "OI-2564" in header  # the second key added after that run
-    assert "OI-2589" in header  # the third and fourth keys added after that run
+    assert "OI-2589" in header  # the third to fifth keys added after that run
     entries, problems = cxp.read_expected_skips(EXPECTED_SKIPS)
     assert problems == []
-    assert len(entries) == 54
+    assert len(entries) == 55
     assert ("tests/test_report_to_receipt_converter.py::TestFailClosedBranchNotOnOrigin"
             "::test_existing_branch_passes_check") in entries
     assert ("tests/test_launchd_interpreter_pin.py"
