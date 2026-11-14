@@ -169,6 +169,12 @@ def _schrijf_atomair(pad, tekst):
         os.unlink(tmp)
         raise
 
+def _uit_pad(uit, logdir):
+    pad = Path(uit).resolve()  # volgt symlinks en haalt .. weg
+    if pad.is_dir() or pad in {(logdir / n).resolve() for n in (NDJSON, NDJSON + ".afgescheurd", MD)}:
+        raise Gebruik(f"--uit: weigert {uit}: dat is een bestand van het register zelf of een map")
+    return pad
+
 def _kop(a, regels):
     slug = a.slug or (regels[0]["context"] if regels else None)
     if not slug:
@@ -223,8 +229,9 @@ def _uitvoeren(a):
     if uit.ongeldig:  # export: een ongeldige regel kan een intrekking zijn (ADR-077 § 4)
         print(f"export geweigerd: ongeldige regel(s) {', '.join(str(n) for n, _ in uit.ongeldig)}", file=sys.stderr)
         return 1
+    doel = _uit_pad(a.uit, logdir) if a.uit else None
     tekst = document(uit, a.voor, a.van, a.tot, a.reikwijdte)
-    _schrijf_atomair(Path(a.uit), tekst) if a.uit else sys.stdout.write(tekst)
+    _schrijf_atomair(doel, tekst) if doel else sys.stdout.write(tekst)
     return 0
 
 def _parser():

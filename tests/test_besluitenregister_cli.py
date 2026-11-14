@@ -148,3 +148,30 @@ def test_entrypoint_python_m(tmp_path):
     p = subprocess.run([sys.executable, "-m", "besluitenregister", "list", "--context", str(tmp_path)], timeout=60,
                        env=dict(os.environ, PYTHONPATH=str(PAKKET)), capture_output=True, text=True, cwd=tmp_path)
     assert p.returncode == 0 and "0 regels" in p.stdout, p.stderr
+
+def _uit_pad(soort, ctx, buiten):
+    (buiten / "ln").symlink_to(ctx / "besluiten.ndjson")
+    return {"ndjson": ctx / "besluiten.ndjson", "symlink": buiten / "ln",
+            "punten": ctx / "sub" / ".." / "besluiten.ndjson", "afgescheurd": ctx / "besluiten.ndjson.afgescheurd",
+            "md": ctx / "BESLUITEN.md", "map": ctx}[soort]
+
+@pytest.mark.parametrize("soort", ["ndjson", "symlink", "punten", "afgescheurd", "md", "map"])
+def test_export_uit_weigert_eigen_registerbestanden(capsys, tmp_path, soort):
+    ctx, buiten = tmp_path / "ctx", tmp_path / "buiten"
+    (ctx / "sub").mkdir(parents=True)
+    buiten.mkdir()
+    add(capsys, ctx, "Kies A")
+    run(capsys, "render", "--context", ctx)
+    (ctx / "besluiten.ndjson.afgescheurd").write_bytes(b"staart\n")
+    voor = {p.name: p.read_bytes() for p in ctx.iterdir() if p.is_file()}
+    pad = _uit_pad(soort, ctx, buiten)
+    code, out, err = run(capsys, "export", "--context", ctx, "--voor", "intern", "--uit", pad)
+    assert code == 2 and out == "" and str(pad) in err
+    assert {p.name: p.read_bytes() for p in ctx.iterdir() if p.is_file()} == voor
+
+def test_export_uit_naar_ander_bestand_in_de_context_werkt(capsys, tmp_path):
+    add(capsys, tmp_path, "Kies A")
+    voor = (tmp_path / "besluiten.ndjson").read_bytes()
+    assert run(capsys, "export", "--context", tmp_path, "--voor", "intern", "--uit", tmp_path / "export-intern.md")[0] == 0
+    assert "Kies A" in (tmp_path / "export-intern.md").read_text()
+    assert (tmp_path / "besluiten.ndjson").read_bytes() == voor

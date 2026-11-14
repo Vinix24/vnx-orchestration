@@ -1,1 +1,1 @@
-- Besluitenregister B2: the CLI `python3 -m besluitenregister` with add, list, show, vervang, trek-in, herzien, bevestig, check, render and export (ADR-077), plus a README for use outside VNX.
+- Besluitenregister B2: the CLI `python3 -m besluitenregister` with add, list, show, vervang, trek-in, herzien, bevestig, check, render and export (ADR-077; `export --uit` refuses the register's own files and directories), plus a README for use outside VNX.
