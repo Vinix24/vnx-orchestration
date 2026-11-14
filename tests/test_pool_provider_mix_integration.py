@@ -216,6 +216,8 @@ class TestPoolManagerMockSpawn:
             CREATE TABLE terminal_leases (
                 terminal_id TEXT,
                 project_id TEXT,
+                state TEXT NOT NULL DEFAULT 'idle',
+                lease_token TEXT NOT NULL DEFAULT '',
                 last_heartbeat_at TEXT,
                 worker_pid INTEGER,
                 PRIMARY KEY (terminal_id, project_id)
