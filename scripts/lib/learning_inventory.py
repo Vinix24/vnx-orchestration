@@ -1,5 +1,6 @@
 """Read-only inventory behind ``vnx learning status`` (loop D4): the failure-class
-corpus of the receipt window, the three operator queues with the age of the oldest
+corpus of the receipt window (a contract_invalid receipt is dated by its effective
+timestamp, ``ingested_at`` before ``timestamp``), the three operator queues with the age of the oldest
 pending entry, the three access paths, and the recorded decisions plus queue mode.
 Every reader is read-only and fail-closed: a missing, ``None``, unreadable or
 unknown value is reported as such, never counted as a clean zero or read as full
@@ -10,7 +11,7 @@ import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
-from contract_invalid_window import is_contract_invalid
+from contract_invalid_window import contract_invalid_effective_timestamp, is_contract_invalid
 from learning_failure_class import FAILURE_CLASSES, classify_failure
 from prevention_rule_store import DecisionsUnreadable, QueueUnreadable, decisions, load_queue
 from receipt_outcome import noise_reason
@@ -84,7 +85,10 @@ def corpus_summary(state_dir: Path, project_id: str, *, now: Optional[datetime] 
             summary["noise"] += 1
             summary["noise_reasons"][reason] = summary["noise_reasons"].get(reason, 0) + 1
             continue
-        stamp = _parse_ts(receipt.get("timestamp"))
+        # A contract_invalid receipt is dated by the shared effective rule
+        # (``ingested_at`` first, then ``timestamp``); every other one by ``timestamp``.
+        stamp = _parse_ts(contract_invalid_effective_timestamp(receipt)
+                          if is_contract_invalid(receipt) else receipt.get("timestamp"))
         if stamp is None:
             summary["unreadable"] += 1
             continue
