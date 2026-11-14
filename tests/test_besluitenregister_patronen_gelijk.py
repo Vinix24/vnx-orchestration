@@ -6,7 +6,6 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "packages" / "besluitenregister"))
 from besluitenregister.geheimpatronen import PATTERNS as KOPIE
 
-
 def test_patronen_per_positie_gelijk():
     pad = ROOT / "scripts" / "lib" / "secret_patterns.py"
     assert pad.is_file(), f"{pad} ontbreekt: de gelijkheidstest slaat nooit over"

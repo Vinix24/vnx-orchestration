@@ -8,7 +8,6 @@ from .schema import valideer
 # afgescheurd: [(offset, bytes)] stuk zonder \n; ongeldig: [(regelnummer, meldingen)]; regels: geldig en afgesloten
 Uitslag = namedtuple("Uitslag", "regels afgescheurd ongeldig")
 
-
 def lees(pad):
     data = Path(pad).read_bytes() if Path(pad).exists() else b""
     stukken = data.split(b"\n")
