@@ -1,0 +1,1 @@
+- ADR-078 legt het geheugengrootboek `memory_ledger/1`, de binding `memory_sources/1`, de geldigheidsvelden zonder wissen en de grenzen van de memory-doctor vast (geheugen-in-de-store M1).
