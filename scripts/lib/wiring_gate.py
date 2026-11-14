@@ -465,15 +465,126 @@ def _read_py_at_ref(repo: Optional[Path], ref: str) -> Tuple[str, Dict[str, Opti
     return sha, sources
 
 
+# Tree-mode counting rule, version 4. Decorators that prove a definition is
+# registered (the framework or registry calls it); every other decorator proves
+# nothing and does not count. One entry per decorator, with the reason.
+TREE_REGISTRATION_DECORATORS: Dict[str, str] = {
+    "fastapi_route": (
+        "@<app>.get/post/put/delete/patch(...) on a name bound to FastAPI(...) in the "
+        "same module: the framework dispatches the request to the function"),
+    "register_probe": (
+        "@register_probe(...): the probe registry stores the class and the runner "
+        "instantiates it by name"),
+}
+_FASTAPI_METHODS = frozenset({"get", "post", "put", "delete", "patch"})
+TREE_DEFAULT_EXCLUDED_PREFIXES: Tuple[str, ...] = ("scripts/benchmark/field-tests/",)
+TREE_SKIPS_PATH = "scripts/ci/wiring_tree_skips.yaml"
+_SHELL_PY_HEREDOC_RE = re.compile(
+    r"\bpython3?(?:\.\d+)?\b[^\n]*<<-?\s*(['\"]?)(\w+)\1")
+_SHELL_PY_DASH_C_RE = re.compile(
+    r"\bpython3?(?:\.\d+)?\s+(?:-\w+\s+)*-c\s+(\"(?:[^\"\\]|\\.)*\"|'[^']*')", re.DOTALL)
+
+
+def _read_blob(repo: Optional[Path], sha: str, path: str) -> Optional[str]:
+    blob = _git_out(repo, "show", f"{sha}:{path}")
+    try:
+        return blob.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+
+
+def _shell_python_segments(text: str) -> str:
+    """The Python inside a shell script: heredocs fed to python and ``python -c``."""
+    parts: List[str] = []
+    lines = text.split("\n")
+    i = 0
+    while i < len(lines):
+        m = _SHELL_PY_HEREDOC_RE.search(lines[i])
+        i += 1
+        if not m:
+            continue
+        while i < len(lines) and lines[i].strip() != m.group(2):
+            parts.append(lines[i])
+            i += 1
+    parts.extend(m.group(1) for m in _SHELL_PY_DASH_C_RE.finditer(text))
+    return "\n".join(parts)
+
+
+def _non_python_tokens(repo: Optional[Path], sha: str) -> set:
+    """Identifier tokens in the Python of ``bin/vnx`` and every ``*.sh`` at ``sha``."""
+    names = _git_out(repo, "ls-tree", "-r", "-z", "--name-only", sha).decode(
+        "utf-8", "surrogateescape").split("\0")
+    tokens: set = set()
+    for path in names:
+        if path != "bin/vnx" and not path.endswith(".sh"):
+            continue
+        text = _read_blob(repo, sha, path)
+        if text is not None:
+            tokens.update(_WORD_RE.findall(_shell_python_segments(text)))
+    return tokens
+
+
+def _name_refs(node: ast.AST) -> set:
+    refs = set()
+    for sub in ast.walk(node):
+        if isinstance(sub, ast.Name):
+            refs.add(sub.id)
+        elif isinstance(sub, ast.Attribute):
+            refs.add(sub.attr)
+    return refs
+
+
+def _fastapi_app_names(tree: ast.AST) -> set:
+    names = set()
+    for node in ast.iter_child_nodes(tree):
+        if not (isinstance(node, ast.Assign) and isinstance(node.value, ast.Call)):
+            continue
+        func = node.value.func
+        if (getattr(func, "id", None) or getattr(func, "attr", None)) == "FastAPI":
+            names.update(t.id for t in node.targets if isinstance(t, ast.Name))
+    return names
+
+
+def _is_registration_decorator(dec: ast.AST, app_names: set) -> bool:
+    if not isinstance(dec, ast.Call):
+        return False
+    func = dec.func
+    if isinstance(func, ast.Name):
+        return func.id == "register_probe"
+    if isinstance(func, ast.Attribute):
+        if func.attr == "register_probe":
+            return True
+        return (func.attr in _FASTAPI_METHODS and isinstance(func.value, ast.Name)
+                and func.value.id in app_names)
+    return False
+
+
+def _wired_without_other_files(tree: ast.AST) -> set:
+    """Top-level names used elsewhere in their own file, or registered by a decorator."""
+    app_names = _fastapi_app_names(tree)
+    nodes = list(ast.iter_child_nodes(tree))
+    refs = [_name_refs(n) for n in nodes]
+    wired = set()
+    for i, node in enumerate(nodes):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            continue
+        if any(_is_registration_decorator(d, app_names) for d in node.decorator_list):
+            wired.add(node.name)
+        elif any(node.name in refs[j] for j in range(len(nodes)) if j != i):
+            wired.add(node.name)
+    return wired
+
+
 def _tree_definitions(
-    sources: Dict[str, Optional[str]], prefix: str,
+    sources: Dict[str, Optional[str]], prefix: str, excluded: Tuple[str, ...] = (),
 ) -> Tuple[List[dict], List[str], int]:
-    """Public defs under ``prefix`` (test files left out) and the unparsable files."""
+    """Public defs under ``prefix`` (tests, excluded prefixes left out), the unparsable
+    files. Each def carries ``self_wired`` (own-file use or a registration decorator)."""
     defs: List[dict] = []
     unparsed: List[str] = []
     files = 0
     for path in sorted(sources):
-        if not path.startswith(prefix) or _is_test_file(path):
+        if not path.startswith(prefix) or _is_test_file(path) or path.startswith(excluded):
             continue
         files += 1
         try:
@@ -483,7 +594,10 @@ def _tree_definitions(
         except (SyntaxError, ValueError, RecursionError):
             unparsed.append(path)
             continue
-        defs.extend(_public_defs_of_tree(tree, path, {}))
+        wired = _wired_without_other_files(tree)
+        for d in _public_defs_of_tree(tree, path, {}):
+            d["self_wired"] = d["name"] in wired
+            defs.append(d)
     return defs, unparsed, files
 
 
@@ -506,35 +620,68 @@ def _has_caller(name: str, def_file: str, index: Dict[str, set]) -> bool:
     return False
 
 
+def _load_tree_skips(repo: Optional[Path], sha: str) -> set:
+    """``{(name, file)}`` from the tracked skip file at ``sha``; an entry without a
+    reason, or a malformed file, raises WiringGateError (exit 2). Absent file = none."""
+    try:
+        text = _read_blob(repo, sha, TREE_SKIPS_PATH)
+    except WiringGateError:
+        return set()  # the file does not exist at this ref
+    try:
+        data = yaml.safe_load(text) if text is not None else ValueError("not utf-8")
+    except yaml.YAMLError as e:
+        raise WiringGateError(f"{TREE_SKIPS_PATH} is not valid YAML: {e}") from e
+    if isinstance(data, ValueError) or not isinstance(data, list):
+        raise WiringGateError(f"{TREE_SKIPS_PATH} must be a list of {{name, file, reason}}")
+    skips = set()
+    for i, entry in enumerate(data):
+        fields = [entry.get(k) if isinstance(entry, dict) else None
+                  for k in ("name", "file", "reason")]
+        if not all(isinstance(v, str) and v.strip() for v in fields):
+            raise WiringGateError(
+                f"{TREE_SKIPS_PATH} entry {i} needs a non-empty name, file and reason")
+        skips.add((fields[0], fields[1]))
+    return skips
+
+
 def check_tree_wiring(
     ref: str = "HEAD", *, prefix: str = "scripts/",
     state_dir: Optional[Path] = None, repo: Optional[Path] = None,
+    exclude_prefixes: Tuple[str, ...] = (),
 ) -> dict:
-    """Unused public definitions under ``prefix`` in the tree at ``ref``.
+    """Unused public definitions under ``prefix`` in the tree at ``ref`` (rule v4).
 
-    Reads blobs with ``git show`` (never the working tree). Same AST walk, same
-    caller rule and same skip list as the PR mode. A file that cannot be parsed
-    is listed under ``unparsed``, never counted as zero.
-    Raises WiringGateError when the ref cannot be read.
+    Reads blobs with ``git show`` (never the working tree). A definition is used when
+    another non-test file names it, when its own file uses it outside its own body, when
+    ``bin/vnx`` or a ``*.sh`` Python segment names it, or when a proven registration
+    decorator wires it. Skips: the runtime ``wiring_skip.yaml`` plus the tracked
+    ``scripts/ci/wiring_tree_skips.yaml`` at ``ref``. A file that cannot be parsed is
+    listed under ``unparsed``, never counted as zero.
+    Raises WiringGateError when the ref cannot be read or the tracked skip file is bad.
     """
     skip_list = _load_skip_list(state_dir)
     sha, sources = _read_py_at_ref(repo, ref)
-    defs, unparsed, n_files = _tree_definitions(sources, prefix)
+    tree_skips = _load_tree_skips(repo, sha)
+    excluded = tuple(dict.fromkeys(TREE_DEFAULT_EXCLUDED_PREFIXES + tuple(exclude_prefixes)))
+    defs, unparsed, n_files = _tree_definitions(sources, prefix, excluded)
     index = _token_index(sources)
+    shell_tokens = _non_python_tokens(repo, sha)
     files: Dict[str, List[dict]] = {}
     skipped = 0
     unused = 0
     for d in defs:
-        if d["name"] in skip_list:
+        if d["name"] in skip_list or (d["name"], d["file"]) in tree_skips:
             skipped += 1
             continue
-        if _has_caller(d["name"], d["file"], index):
+        if d["self_wired"] or d["name"] in shell_tokens or _has_caller(
+                d["name"], d["file"], index):
             continue
         unused += 1
         files.setdefault(d["file"], []).append(
             {"name": d["name"], "line": d["line"], "kind": d["kind"]})
     return {
         "ref": ref, "sha": sha, "prefix": prefix, "files": files, "unparsed": unparsed,
+        "excluded_prefixes": list(excluded),
         "totals": {"files": n_files, "definitions": len(defs), "skipped": skipped,
                    "unused": unused, "unparsed": len(unparsed)},
     }
@@ -545,10 +692,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--tree", action="store_true", required=True)
     ap.add_argument("--ref", default="HEAD")
     ap.add_argument("--prefix", default="scripts/")
+    ap.add_argument("--exclude-prefix", action="append", default=[],
+                    help="path prefix left out of the tree mode (repeatable)")
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args(argv)
     try:
-        result = check_tree_wiring(args.ref, prefix=args.prefix)
+        result = check_tree_wiring(args.ref, prefix=args.prefix,
+                                   exclude_prefixes=tuple(args.exclude_prefix))
     except WiringGateError as e:
         print(f"wiring_gate: {e}", file=sys.stderr)
         return 2
@@ -557,7 +707,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     else:
         t = result["totals"]
         print(f"{result['ref']} {result['sha']}: {t['files']} files, {t['definitions']} "
-              f"definitions, {t['unused']} unused, {t['unparsed']} unparsed")
+              f"definitions, {t['unused']} unused, {t['unparsed']} unparsed "
+              f"(excluded: {', '.join(result['excluded_prefixes']) or 'none'})")
     return 0
 
 
