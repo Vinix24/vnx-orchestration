@@ -360,74 +360,9 @@ def verify_pr(
             # exceeds the rolling budget, and the PR trail must append-only EXTEND
             # the base-branch trail — deleting rows to free budget is rejected.
             if ov_ok and ov_manifest is not None:
-                from attest_override import (
-                    ATTEST_DIR as _AO_DIR,
-                    OVERRIDE_TRAIL_FILE as _AO_TRAIL,
-                    count_overrides_in_window,
-                    get_override_budget,
+                ov_ok, _ov_detail = _enforce_override_trail(
+                    repo_root, base_ref, allowed_signers_path, ov_manifest, _ov_detail,
                 )
-                _pr_trail = repo_root / _AO_DIR / _AO_TRAIL
-                _pr_lines = (
-                    _pr_trail.read_text(encoding="utf-8").splitlines()
-                    if _pr_trail.exists() else []
-                )
-                _base = subprocess.run(
-                    ["git", "show", f"{base_ref}:{_AO_DIR}/{_AO_TRAIL}"],
-                    cwd=str(repo_root), capture_output=True,
-                )
-                if _base.returncode == 0:
-                    _base_lines = _base.stdout.decode(
-                        "utf-8", "replace"
-                    ).splitlines()
-                    if _pr_lines[: len(_base_lines)] != _base_lines:
-                        ov_ok = False
-                        _ov_detail = (
-                            "override trail does not append-only extend the base "
-                            "branch (budget-reset attempt)"
-                        )
-                # Trail-membership (round-3 finding): the override RECORD file
-                # alone is not enough — a matching, validly-signed entry MUST exist
-                # in the append-only trail, else the audit ledger / rolling budget
-                # was bypassed by keeping the record but deleting the trail row.
-                if ov_ok:
-                    from attest_override import ATTESTATION_OVERRIDE as _AO_TYPE
-                    from attestation import verify_attestation as _verify
-                    from ndjson_hash_chain import walk_chain as _walk
-                    _ck = ov_manifest.get("content_key")
-                    _in_trail = False
-                    if _pr_trail.exists():
-                        for _i, _e, _h in _walk(_pr_trail):
-                            if not isinstance(_e, dict):
-                                continue
-                            if _e.get("attestation_type") != _AO_TYPE:
-                                continue
-                            if _e.get("content_key") != _ck:
-                                continue
-                            _m = {k: v for k, v in _e.items() if k != "prev_hash"}
-                            if _verify(_m, allowed_signers_path):
-                                _in_trail = True
-                                break
-                    if not _in_trail:
-                        ov_ok = False
-                        _ov_detail = (
-                            "override record is not recorded in the append-only "
-                            "trail (audit-ledger bypass)"
-                        )
-                if ov_ok:
-                    try:
-                        _used = count_overrides_in_window(
-                            _pr_trail, allowed_signers=allowed_signers_path
-                        )
-                    except ValueError as _e:
-                        ov_ok = False
-                        _ov_detail = str(_e)
-                    else:
-                        _budget = get_override_budget()
-                        if _used > _budget:
-                            ov_ok = False
-                            _ov_detail = (
-                                f"override budget exhausted ({_used}/{_budget})"
-                            )
         if ok:
             # Evidence-bound phase — still inside the signer-file scope, so the
             # evidence signatures verify against a file that exists.
@@ -442,6 +377,13 @@ def verify_pr(
                 return failure
             return (0, "PASS: attestation valid")
 
+    return _override_verdict(ov_ok, ov_manifest, _ov_detail, reason)
+
+
+def _override_verdict(
+    ov_ok: bool, ov_manifest: "dict | None", _ov_detail: str, reason: str,
+) -> "tuple[int, str]":
+    """Final verdict when the regular attestation did not pass."""
     if ov_ok and ov_manifest is not None:
         signer = ov_manifest.get("signer_identity", "unknown")
         ck_short = ov_manifest.get("content_key", "?")[:12]
@@ -458,6 +400,94 @@ def verify_pr(
         return (1, f"override REJECTED: {_ov_detail}")
 
     return (1, f"FAIL: {reason}")
+
+
+def _enforce_override_trail(
+    repo_root: Path,
+    base_ref: str,
+    allowed_signers_path: Path,
+    ov_manifest: dict,
+    _ov_detail: str,
+) -> "tuple[bool, str]":
+    """Anti-reset, trail-membership and budget checks of a validly-signed override."""
+    ov_ok = True
+    from attest_override import (
+        ATTEST_DIR as _AO_DIR,
+        OVERRIDE_TRAIL_FILE as _AO_TRAIL,
+        count_overrides_in_window,
+        get_override_budget,
+    )
+    _pr_trail = repo_root / _AO_DIR / _AO_TRAIL
+    _pr_lines = (
+        _pr_trail.read_text(encoding="utf-8").splitlines()
+        if _pr_trail.exists() else []
+    )
+    _base = subprocess.run(
+        ["git", "show", f"{base_ref}:{_AO_DIR}/{_AO_TRAIL}"],
+        cwd=str(repo_root), capture_output=True,
+    )
+    if _base.returncode == 0:
+        _base_lines = _base.stdout.decode(
+            "utf-8", "replace"
+        ).splitlines()
+        if _pr_lines[: len(_base_lines)] != _base_lines:
+            ov_ok = False
+            _ov_detail = (
+                "override trail does not append-only extend the base "
+                "branch (budget-reset attempt)"
+            )
+    # Trail-membership (round-3 finding): the override RECORD file
+    # alone is not enough — a matching, validly-signed entry MUST exist
+    # in the append-only trail, else the audit ledger / rolling budget
+    # was bypassed by keeping the record but deleting the trail row.
+    if ov_ok:
+        _in_trail = _override_in_trail(_pr_trail, ov_manifest, allowed_signers_path)
+        if not _in_trail:
+            ov_ok = False
+            _ov_detail = (
+                "override record is not recorded in the append-only "
+                "trail (audit-ledger bypass)"
+            )
+    if ov_ok:
+        try:
+            _used = count_overrides_in_window(
+                _pr_trail, allowed_signers=allowed_signers_path
+            )
+        except ValueError as _e:
+            ov_ok = False
+            _ov_detail = str(_e)
+        else:
+            _budget = get_override_budget()
+            if _used > _budget:
+                ov_ok = False
+                _ov_detail = (
+                    f"override budget exhausted ({_used}/{_budget})"
+                )
+    return ov_ok, _ov_detail
+
+
+def _override_in_trail(
+    _pr_trail: Path, ov_manifest: dict, allowed_signers_path: Path,
+) -> bool:
+    """True when a validly-signed trail entry records this override."""
+    from attest_override import ATTESTATION_OVERRIDE as _AO_TYPE
+    from attestation import verify_attestation as _verify
+    from ndjson_hash_chain import walk_chain as _walk
+    _ck = ov_manifest.get("content_key")
+    _in_trail = False
+    if _pr_trail.exists():
+        for _i, _e, _h in _walk(_pr_trail):
+            if not isinstance(_e, dict):
+                continue
+            if _e.get("attestation_type") != _AO_TYPE:
+                continue
+            if _e.get("content_key") != _ck:
+                continue
+            _m = {k: v for k, v in _e.items() if k != "prev_hash"}
+            if _verify(_m, allowed_signers_path):
+                _in_trail = True
+                break
+    return _in_trail
 
 
 # ---------------------------------------------------------------------------
