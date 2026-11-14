@@ -427,46 +427,9 @@ def emit_dispatch_receipt(
     """
     _validate_provider(provider)
 
-    # dispatch-20260802-model-ssot-en-ketenlink: model identity is normalized to
-    # the canonical wave7_models.yaml key here, at the receipt boundary — the
-    # same model can no longer land in the ledger under several spellings
-    # (deepseek/deepseek-v4-pro vs deepseek-v4-pro, kimi-code/k3 vs kimi-k3,
-    # claude-sonnet-5 vs sonnet-5). Unmapped strings pass through unchanged and
-    # are caught by the fail-closed model validator downstream.
-    try:
-        from providers.model_normalizer import normalize_model_name  # noqa: PLC0415
-        model = normalize_model_name(model)
-        if model_resolved:
-            model_resolved = normalize_model_name(model_resolved)
-    except Exception:  # noqa: BLE001 — a normalizer failure must never block receipt emission
-        logger.debug("emit_dispatch_receipt: model normalization failed dispatch=%s", dispatch_id, exc_info=True)
-
-    # Chain-link fallback: the caller may not know the fields (the tmux worker
-    # path writes its own receipt via append_receipt_payload and inherits them
-    # from the door's env); the door exports them so every lane lands the same
-    # value. Explicit kwargs win over env.
-    parent_dispatch = parent_dispatch or os.environ.get("VNX_PARENT_DISPATCH") or None
-    task_class = task_class or os.environ.get("VNX_TASK_CLASS") or None
-    tier_from = tier_from or os.environ.get("VNX_TIER_FROM") or None
-    tier_to = tier_to or os.environ.get("VNX_TIER_TO") or None
-
-    # Receipt-quality PR-B1: backfill token_usage for the claude-harness lanes
-    # from the local Claude Code session transcript when the caller has nothing
-    # usable (no live usage API on the subscription lane). Only ever tightens
-    # the data — a caller-supplied real token_usage is never overwritten, and
-    # any harvest failure (no session_id, no transcript, non-harness providers)
-    # leaves token_usage exactly as passed in.
-    if provider in CLAUDE_HARNESS_PROVIDERS and session_id and (not token_usage or token_usage.get("unavailable")):
-        try:
-            from token_harvest import harvest_session_tokens  # noqa: PLC0415
-            harvested = harvest_session_tokens(session_id)
-            if harvested and not harvested.get("unavailable"):
-                token_usage = harvested
-        except Exception as exc:  # noqa: BLE001 — harvesting must never break receipt emission
-            logger.debug(
-                "emit_dispatch_receipt: token harvest failed for dispatch=%s session_id=%s: %s",
-                dispatch_id, session_id, exc,
-            )
+    model, model_resolved = _normalize_receipt_models(dispatch_id, model, model_resolved)
+    parent_dispatch, task_class, tier_from, tier_to = _chain_link_fields(parent_dispatch, task_class, tier_from, tier_to)
+    token_usage = _harvested_token_usage(dispatch_id, provider, session_id, token_usage)
 
     # Receipt-quality PR-B0: the v2 receipt shape is codified in
     # receipt_schema.ReceiptV2 — the contract validates receipt_kind
@@ -525,6 +488,73 @@ def emit_dispatch_receipt(
         model_resolved=model_resolved or None, context_manifest=_context_manifest_stamp(dispatch_id, provider, session_id, state_dir), token_usage_normalized=token_usage_normalized, start_context_tokens=start_context_tokens,
     ).to_dict()
 
+    receipt_path = _append_dispatch_receipt(receipt, state_dir, dispatch_id)
+    logger.info("governance_emit: receipt written dispatch=%s provider=%s status=%s", dispatch_id, provider, status)
+    return receipt_path
+
+
+def _normalize_receipt_models(
+    dispatch_id: str, model: str, model_resolved: Optional[str],
+) -> Tuple[str, Optional[str]]:
+    """``(model, model_resolved)`` normalized to the canonical key, or unchanged on a normalizer failure."""
+    # dispatch-20260802-model-ssot-en-ketenlink: model identity is normalized to
+    # the canonical wave7_models.yaml key here, at the receipt boundary — the
+    # same model can no longer land in the ledger under several spellings
+    # (deepseek/deepseek-v4-pro vs deepseek-v4-pro, kimi-code/k3 vs kimi-k3,
+    # claude-sonnet-5 vs sonnet-5). Unmapped strings pass through unchanged and
+    # are caught by the fail-closed model validator downstream.
+    try:
+        from providers.model_normalizer import normalize_model_name  # noqa: PLC0415
+        model = normalize_model_name(model)
+        if model_resolved:
+            model_resolved = normalize_model_name(model_resolved)
+    except Exception:  # noqa: BLE001 — a normalizer failure must never block receipt emission
+        logger.debug("emit_dispatch_receipt: model normalization failed dispatch=%s", dispatch_id, exc_info=True)
+    return model, model_resolved
+
+
+def _chain_link_fields(
+    parent_dispatch: Optional[str], task_class: Optional[str],
+    tier_from: Optional[str], tier_to: Optional[str],
+) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[str]]:
+    """The four chain-link fields, each falling back to the door's env when the caller has none."""
+    # Chain-link fallback: the caller may not know the fields (the tmux worker
+    # path writes its own receipt via append_receipt_payload and inherits them
+    # from the door's env); the door exports them so every lane lands the same
+    # value. Explicit kwargs win over env.
+    parent_dispatch = parent_dispatch or os.environ.get("VNX_PARENT_DISPATCH") or None
+    task_class = task_class or os.environ.get("VNX_TASK_CLASS") or None
+    tier_from = tier_from or os.environ.get("VNX_TIER_FROM") or None
+    tier_to = tier_to or os.environ.get("VNX_TIER_TO") or None
+    return parent_dispatch, task_class, tier_from, tier_to
+
+
+def _harvested_token_usage(
+    dispatch_id: str, provider: str, session_id: Optional[str], token_usage: Dict[str, int],
+) -> Dict[str, int]:
+    """``token_usage``, or the session transcript's usage for a claude-harness lane with nothing usable."""
+    # Receipt-quality PR-B1: backfill token_usage for the claude-harness lanes
+    # from the local Claude Code session transcript when the caller has nothing
+    # usable (no live usage API on the subscription lane). Only ever tightens
+    # the data — a caller-supplied real token_usage is never overwritten, and
+    # any harvest failure (no session_id, no transcript, non-harness providers)
+    # leaves token_usage exactly as passed in.
+    if provider in CLAUDE_HARNESS_PROVIDERS and session_id and (not token_usage or token_usage.get("unavailable")):
+        try:
+            from token_harvest import harvest_session_tokens  # noqa: PLC0415
+            harvested = harvest_session_tokens(session_id)
+            if harvested and not harvested.get("unavailable"):
+                token_usage = harvested
+        except Exception as exc:  # noqa: BLE001 — harvesting must never break receipt emission
+            logger.debug(
+                "emit_dispatch_receipt: token harvest failed for dispatch=%s session_id=%s: %s",
+                dispatch_id, session_id, exc,
+            )
+    return token_usage
+
+
+def _append_dispatch_receipt(receipt: Dict[str, Any], state_dir: Path, dispatch_id: str) -> Path:
+    """Append ``receipt`` via the shared locked primitive; ``RuntimeError`` on a write failure."""
     receipt_path = Path(state_dir) / "t0_receipts.ndjson"
     receipt_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -569,8 +599,6 @@ def emit_dispatch_receipt(
     # the store this receipt was appended to.
     if result.status == "appended":
         _update_confidence_from_receipt(receipt, state_dir=Path(state_dir))
-
-    logger.info("governance_emit: receipt written dispatch=%s provider=%s status=%s", dispatch_id, provider, status)
     return receipt_path
 
 
