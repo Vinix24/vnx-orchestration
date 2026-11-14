@@ -1,0 +1,1 @@
+- The operator memory indexer no longer injects a note that is out of force: `invalid_at <= now`, `valid_from > now`, or a `superseded_by` chain (at most 10 links) that reaches a valid note. Fields are read from `metadata.<field>` first, then the top level. A cycle, a missing successor, an unreadable date or a chain of 11 keeps the note in, with a warning (ADR-078 M3).

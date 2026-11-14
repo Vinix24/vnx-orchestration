@@ -35,9 +35,12 @@ from __future__ import annotations
 
 import re
 import time
+from datetime import datetime, timezone
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+
+import yaml
 
 import lesson_refs
 from vnx_paths import project_id_from_state_dir, resolve_paths
@@ -95,6 +98,11 @@ class OperatorMemory:
     open_item_refs: frozenset = frozenset()   # OI-<n> named in the body
     # one tuple per ref: (ref, resolved, status, closed_at, pr_id, reason)
     open_item_status: tuple = ()
+    # Validity fields as written in the frontmatter (ADR-078 § 5/6), raw and
+    # unvalidated: ``None`` when unset, absent or the frontmatter did not parse.
+    valid_from: object = None
+    invalid_at: object = None
+    superseded_by: object = None
 
 
 @dataclass
@@ -245,6 +253,8 @@ def _parse_memory_file(file_path: Path, text: str) -> Optional[OperatorMemory]:
     for ref_m in _FILE_REF_RE.finditer(body):
         referenced.add(ref_m.group(1))
 
+    validity = _read_validity_fields(text)
+
     return OperatorMemory(
         name=name,
         description=description,
@@ -254,7 +264,136 @@ def _parse_memory_file(file_path: Path, text: str) -> Optional[OperatorMemory]:
         tags=tags,
         referenced_files=frozenset(referenced),
         open_item_refs=frozenset(lesson_refs.find_oi_refs(body)),
+        valid_from=validity["valid_from"],
+        invalid_at=validity["invalid_at"],
+        superseded_by=validity["superseded_by"],
     )
+
+
+class _NoTimestampLoader(yaml.SafeLoader):
+    """Safe loader that keeps timestamps as text so the zone stays checkable."""
+
+_NoTimestampLoader.yaml_implicit_resolvers = {
+    ch: [(tag, rx) for tag, rx in resolvers if tag != "tag:yaml.org,2002:timestamp"]
+    for ch, resolvers in yaml.SafeLoader.yaml_implicit_resolvers.items()
+}
+
+_VALIDITY_FIELDS = ("valid_from", "invalid_at", "superseded_by")
+
+
+def _read_validity_fields(text: str) -> Dict[str, object]:
+    """``metadata.<f>`` first, then top level (ADR-078 § 5); unparseable gives all None."""
+    result: Dict[str, object] = {f: None for f in _VALIDITY_FIELDS}
+    m = _FRONTMATTER_RE.match(text)
+    if not m:
+        return result
+    try:
+        doc = yaml.load(m.group(1), Loader=_NoTimestampLoader)  # SafeLoader subclass: no object construction
+    except yaml.YAMLError:
+        return result
+    if not isinstance(doc, dict):
+        return result
+    meta = doc.get("metadata")
+    for f in _VALIDITY_FIELDS:
+        value = meta.get(f) if isinstance(meta, dict) else None
+        result[f] = value if value is not None else doc.get(f)
+    return result
+
+
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}:\d{2}(Z|\+00:00))?$")
+MAX_SUPERSEDE_LINKS = 10
+
+
+def _parse_utc(value: object) -> Optional[datetime]:
+    """Parse an ISO 8601 UTC date (date only = 00:00Z); ``None`` when unreadable."""
+    if not isinstance(value, str) or not _DATE_RE.match(value.strip()):
+        return None
+    try:
+        return datetime.fromisoformat(value.strip()).replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+
+def _temporarily_out(mem: OperatorMemory, now: datetime, warnings: List[dict]) -> bool:
+    """Rule (a)/(b); an unreadable date counts as unset, with a warning."""
+    out = False
+    for field_name in ("invalid_at", "valid_from"):
+        raw = getattr(mem, field_name)
+        if raw is None or (isinstance(raw, str) and not raw.strip()):
+            continue
+        when = _parse_utc(raw)
+        if when is None:
+            warnings.append({"kind": "unreadable_date", "note": mem.file_path.name,
+                             "field": field_name})
+        elif field_name == "invalid_at" and when <= now:
+            out = True
+        elif field_name == "valid_from" and when > now:
+            out = True
+    return out
+
+
+def _successor_name(raw: object) -> Optional[str]:
+    """File name of the successor, or ``None`` for a path / non-text value."""
+    if not isinstance(raw, str):
+        return None
+    name = raw.strip()
+    if not name or "/" in name or "\\" in name or name in (".", ".."):
+        return None
+    return name if name.endswith(".md") else name + ".md"
+
+
+def _is_superseded(
+    mem: OperatorMemory,
+    by_name: Dict[str, OperatorMemory],
+    now: datetime,
+    warnings: List[dict],
+) -> bool:
+    """Rule (c): the ``superseded_by`` chain reaches a valid successor."""
+    def warn(kind: str) -> bool:
+        warnings.append({"kind": kind, "note": mem.file_path.name})
+        return False
+
+    current, visited = mem, {mem.file_path.name}
+    for _ in range(MAX_SUPERSEDE_LINKS):
+        name = _successor_name(current.superseded_by)
+        nxt = by_name.get(name) if name else None
+        if nxt is None:
+            return warn("successor_missing")
+        if nxt.file_path.name in visited:
+            return warn("cycle")
+        if not _temporarily_out(nxt, now, []):
+            return True
+        if nxt.superseded_by is None:
+            return warn("successor_not_valid")
+        visited.add(nxt.file_path.name)
+        current = nxt
+    return warn("chain_too_long")
+
+
+def filter_valid_memories(
+    entries: List[OperatorMemory],
+    now: datetime,
+    warnings: Optional[List[dict]] = None,
+) -> List[OperatorMemory]:
+    """Drop notes that are out of force at ``now`` (ADR-078 § 6).
+
+    ``now`` must be timezone-aware. Notes that cannot be judged (cycle, missing
+    successor, unreadable date, chain too long) stay in, with a warning appended
+    to ``warnings``. Successors are never added.
+    """
+    if now.tzinfo is None:
+        raise ValueError("now must be timezone-aware (UTC)")
+    now = now.astimezone(timezone.utc)
+    sink: List[dict] = warnings if warnings is not None else []
+    by_name = {m.file_path.name: m for m in entries}
+    kept: List[OperatorMemory] = []
+    for mem in entries:
+        if _temporarily_out(mem, now, sink):
+            continue
+        if mem.superseded_by is not None and _is_superseded(mem, by_name, now, sink):
+            continue
+        kept.append(mem)
+    return kept
 
 
 def _score_memory(
@@ -346,6 +485,8 @@ def fetch_relevant_memories(
     *,
     max_chars: int = MAX_MEMORY_CHARS,
     memory_dir: Optional[Path] = None,
+    now: Optional[datetime] = None,
+    warnings: Optional[List[dict]] = None,
 ) -> List[OperatorMemory]:
     """Fetch operator memories matching this dispatch's role + scope + instruction.
 
@@ -353,6 +494,10 @@ def fetch_relevant_memories(
 
     If memory_dir is not provided, it is derived from cwd using the Claude Code
     slug convention. Returns empty list if memory dir is missing (graceful skip).
+
+    Notes out of force at ``now`` (default: current UTC time) are left out
+    (``invalid_at``, ``valid_from``, ``superseded_by``; ADR-078 § 6). Validity
+    warnings are appended to ``warnings`` when a list is given.
     """
     # Resolve memory directory
     if memory_dir is None:
@@ -386,6 +531,12 @@ def fetch_relevant_memories(
         except ValueError:
             continue  # escape attempt — silently skip
 
+    if not safe_entries:
+        return []
+
+    safe_entries = filter_valid_memories(
+        safe_entries, now if now is not None else datetime.now(timezone.utc), warnings
+    )
     if not safe_entries:
         return []
 
