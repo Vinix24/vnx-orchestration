@@ -2651,8 +2651,16 @@ def _project_state_verdicts(spec: DispatchSpec, *, state_dir: Path) -> "tuple[Co
     return tuple(verdict for verdict in verdicts if verdict is not None)
 
 
-def _print_panel_lane_exclusion(results) -> None:
-    """One audit line naming how many panel-lane attempts provider_exhausted left out (OI-1800)."""
+def _print_measurement_notes(results, unmeasurable_status) -> None:
+    """The door's non-verdict stop-condition lines: what stayed unmeasurable, and
+    one audit line naming how many panel-lane attempts provider_exhausted left out (OI-1800)."""
+    unmeasurable = [r.check_id for r in results if r.status == unmeasurable_status]
+    if unmeasurable:
+        print(
+            f"[dispatch_cli] [stop-conditions] unmeasurable (not a green "
+            f"light, not a refusal): {', '.join(unmeasurable)}",
+            file=sys.stderr,
+        )
     for r in results:
         excluded = r.evidence.get("panel_lane_excluded") if r.check_id == "provider_exhausted" else None
         if not isinstance(excluded, dict) or not excluded:
@@ -2716,15 +2724,8 @@ def _check_stop_conditions_verdict(
         )
         return None
 
-    _print_panel_lane_exclusion(results)
+    _print_measurement_notes(results, CheckStatus.UNMEASURABLE)
     triggered = [r for r in results if r.status == CheckStatus.TRIGGERED]
-    unmeasurable = [r.check_id for r in results if r.status == CheckStatus.UNMEASURABLE]
-    if unmeasurable:
-        print(
-            f"[dispatch_cli] [stop-conditions] unmeasurable (not a green "
-            f"light, not a refusal): {', '.join(unmeasurable)}",
-            file=sys.stderr,
-        )
 
     blocking_eligible = [r for r in triggered if r.check_id in _STOP_CONDITIONS_BLOCKING_CHECK_IDS]
     warn_only_triggered = [r for r in triggered if r.check_id not in _STOP_CONDITIONS_BLOCKING_CHECK_IDS]
