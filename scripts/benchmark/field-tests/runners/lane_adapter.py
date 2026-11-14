@@ -293,19 +293,7 @@ def dispatch(
     # completion instruction (identical for every lane → fairness preserved)
     # pointing at the exact absolute report path that this adapter's report search
     # polls. The worker writes the 4-heading report there on completion.
-    _report_sink = (REPORT_DIR_CANDIDATES[0] / f"{dispatch_id}.md") if REPORT_DIR_CANDIDATES else None
-    if _report_sink is not None:
-        _report_sink.parent.mkdir(parents=True, exist_ok=True)
-        instruction = (
-            instruction
-            + "\n\n# COMPLETION PROTOCOL (required)\n"
-            + "When the assignment is fully done and verified, write a brief completion "
-            + "report to this EXACT absolute path:\n"
-            + f"  {_report_sink}\n"
-            + "The report MUST contain these markdown headings: `## Summary`, `## Changes`, "
-            + "`## Verification`, `## Open Items`. The harness detects completion from this "
-            + "file; without it the run is recorded as a DNF even if your work is correct.\n"
-        )
+    instruction = _append_completion_protocol(instruction, dispatch_id)
 
     # VNX_BENCH_CLAUDE_HEADLESS=1 (operator-authorized `claude -p` for the benchmark):
     # route claude through provider_dispatch --provider claude, which materializes the
@@ -333,18 +321,10 @@ def dispatch(
         )
     via_provider = lane["provider"] != "claude" or _claude_headless_p
     try:
-        if _claude_headless_p:
-            rc, out, err = _provider_dispatch(
-                lane, dispatch_id, instruction, dispatch_paths, deadline_seconds, role,
-            )
-        elif lane["provider"] == "claude":
-            rc, out, err = _claude_subprocess_headless(
-                lane, dispatch_id, instruction, dispatch_paths, deadline_seconds, role,
-            )
-        else:
-            rc, out, err = _provider_dispatch(
-                lane, dispatch_id, instruction, dispatch_paths, deadline_seconds, role,
-            )
+        rc, out, err = _invoke_lane(
+            lane, _claude_headless_p, dispatch_id, instruction,
+            dispatch_paths, deadline_seconds, role,
+        )
     except subprocess.TimeoutExpired as exc:
         wallclock = time.monotonic() - start
         seed_status, seed_status_err = _main_seed_status(dispatch_paths)
@@ -362,41 +342,13 @@ def dispatch(
     wallclock = time.monotonic() - start
 
     # Search for the worker-emitted report across known locations.
-    report_path: Optional[Path] = None
-    for candidate_dir in REPORT_DIR_CANDIDATES:
-        for suffix in (".md", "_report.md"):
-            p = candidate_dir / f"{dispatch_id}{suffix}"
-            if p.exists():
-                report_path = p
-                break
-        if report_path is not None:
-            break
+    report_path = _find_report(dispatch_id)
 
     # Distinguish three failure modes so the scorer can apply the right verdict:
     #   - immediate_exit: wallclock < threshold and no report (rate-limit, spawn failure)
     #   - no_report: ran for real but never produced report (lane bug)
     #   - rc_nonzero: dispatcher itself returned non-zero
-    failure_reason: Optional[str] = None
-    if rc != 0 and report_path is None:
-        if (
-            "benchmark provider isolation required" in err
-            or "benchmark seed materialization" in err
-        ):
-            failure_reason = (
-                "provider isolation failed; refusing shared main checkout: "
-                f"{err.strip()[-300:]}"
-            )
-        elif wallclock < MIN_REAL_WALLCLOCK_SECONDS:
-            failure_reason = (
-                f"immediate_exit (wall={wallclock:.2f}s, rc={rc}); "
-                "likely subscription rate-limit or spawn failure"
-            )
-        else:
-            failure_reason = f"rc={rc} report_exists=False"
-    elif rc != 0:
-        failure_reason = f"rc={rc} (report present)"
-    elif report_path is None:
-        failure_reason = "no_report (worker rc=0 but never emitted unified_report)"
+    failure_reason = _classify_failure(rc, err, report_path, wallclock)
 
     # Locate the worker's actual materialized seed output for verify.py.
     workdir: Optional[Path] = None
@@ -433,6 +385,85 @@ def dispatch(
         error=failure_reason,
         workdir=workdir,
     )
+
+
+def _append_completion_protocol(instruction: str, dispatch_id: str) -> str:
+    # Equal-context strips the skill's completion protocol. Append a UNIFORM
+    # completion instruction (identical for every lane → fairness preserved)
+    # pointing at the exact absolute report path that this adapter's report search
+    # polls. The worker writes the 4-heading report there on completion.
+    _report_sink = (REPORT_DIR_CANDIDATES[0] / f"{dispatch_id}.md") if REPORT_DIR_CANDIDATES else None
+    if _report_sink is not None:
+        _report_sink.parent.mkdir(parents=True, exist_ok=True)
+        instruction = (
+            instruction
+            + "\n\n# COMPLETION PROTOCOL (required)\n"
+            + "When the assignment is fully done and verified, write a brief completion "
+            + "report to this EXACT absolute path:\n"
+            + f"  {_report_sink}\n"
+            + "The report MUST contain these markdown headings: `## Summary`, `## Changes`, "
+            + "`## Verification`, `## Open Items`. The harness detects completion from this "
+            + "file; without it the run is recorded as a DNF even if your work is correct.\n"
+        )
+    return instruction
+
+
+def _invoke_lane(
+    lane: dict, claude_headless_p: bool, dispatch_id: str, instruction: str,
+    dispatch_paths: str, deadline_seconds: int, role: str,
+) -> tuple[int, str, str]:
+    if claude_headless_p:
+        return _provider_dispatch(
+            lane, dispatch_id, instruction, dispatch_paths, deadline_seconds, role,
+        )
+    if lane["provider"] == "claude":
+        return _claude_subprocess_headless(
+            lane, dispatch_id, instruction, dispatch_paths, deadline_seconds, role,
+        )
+    return _provider_dispatch(
+        lane, dispatch_id, instruction, dispatch_paths, deadline_seconds, role,
+    )
+
+
+def _find_report(dispatch_id: str) -> Optional[Path]:
+    # Search for the worker-emitted report across known locations.
+    for candidate_dir in REPORT_DIR_CANDIDATES:
+        for suffix in (".md", "_report.md"):
+            p = candidate_dir / f"{dispatch_id}{suffix}"
+            if p.exists():
+                return p
+    return None
+
+
+def _classify_failure(
+    rc: int, err: str, report_path: Optional[Path], wallclock: float,
+) -> Optional[str]:
+    # Distinguish three failure modes so the scorer can apply the right verdict:
+    #   - immediate_exit: wallclock < threshold and no report (rate-limit, spawn failure)
+    #   - no_report: ran for real but never produced report (lane bug)
+    #   - rc_nonzero: dispatcher itself returned non-zero
+    failure_reason: Optional[str] = None
+    if rc != 0 and report_path is None:
+        if (
+            "benchmark provider isolation required" in err
+            or "benchmark seed materialization" in err
+        ):
+            failure_reason = (
+                "provider isolation failed; refusing shared main checkout: "
+                f"{err.strip()[-300:]}"
+            )
+        elif wallclock < MIN_REAL_WALLCLOCK_SECONDS:
+            failure_reason = (
+                f"immediate_exit (wall={wallclock:.2f}s, rc={rc}); "
+                "likely subscription rate-limit or spawn failure"
+            )
+        else:
+            failure_reason = f"rc={rc} report_exists=False"
+    elif rc != 0:
+        failure_reason = f"rc={rc} (report present)"
+    elif report_path is None:
+        failure_reason = "no_report (worker rc=0 but never emitted unified_report)"
+    return failure_reason
 
 
 def load_lanes(models_yaml: Path, lane_ids: list[str]) -> list[dict]:
