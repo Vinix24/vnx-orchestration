@@ -12,7 +12,7 @@ import itertools
 import re
 import subprocess
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Dict, FrozenSet, Iterable, List, Mapping, Optional, Sequence, Set
 
 from gate_reanchor import (MODULE_LEVEL, WHOLE_MODULE, ImportGraph, ReanchorError, Symbol,
@@ -152,18 +152,39 @@ def _scope_sources(source: str) -> Dict[str, List[str]]:
     return out
 
 
-#: Suffix -> scope sources of a file. Only a suffix listed here can prove a symbol-level change; every other path is
-#: ``no_symbol_provider`` and forces a full review (OI-2784). A provider for ``.ts`` or ``.md`` is one entry here.
-SYMBOL_PROVIDERS: Mapping[str, Callable[[str], Dict[str, List[str]]]] = {".py": _scope_sources}
-
-
 def path_suffix(path: str) -> str:
-    """The suffix the registry is keyed on, or ``NO_SUFFIX`` for a path without one."""
+    """The suffix of ``path``, or ``NO_SUFFIX`` for a path without one."""
     return Path(path).suffix or NO_SUFFIX
 
 
+def _is_changelog_fragment(path: str) -> bool:
+    parts = PurePosixPath(path).parts
+    return len(parts) == 2 and parts[0] == "changelog.d" and PurePosixPath(parts[1]).suffix == ".md"
+
+
+INERT_CHANGELOG = "changelog fragment"
+#: Content type -> (path matcher, scope sources). Only a type listed here is known; every other path is
+#: ``no_symbol_provider`` and forces a full review (OI-2784). A ``None`` provider is an inert type: no symbols, no
+#: callers, it cannot change any code. A provider for ``.ts`` or ``.md`` is one entry here.
+SYMBOL_PROVIDERS: Mapping[str, tuple[Callable[[str], bool], Optional[Callable[[str], Dict[str, List[str]]]]]] = {
+    ".py": (lambda p: path_suffix(p) == ".py", _scope_sources),
+    INERT_CHANGELOG: (_is_changelog_fragment, None),  # only ``changelog.d/<name>.md`` at the repo root
+}
+
+
+def content_type(path: str) -> Optional[str]:
+    """The registry key whose matcher takes ``path``, or ``None`` when its symbols cannot be computed."""
+    return next((key for key, (matches, _) in SYMBOL_PROVIDERS.items() if matches(path)), None)
+
+
 def has_symbol_provider(path: str) -> bool:
-    return path_suffix(path) in SYMBOL_PROVIDERS
+    """True when the symbols of ``path`` are known: computed by a provider, or none because the type is inert."""
+    return content_type(path) is not None
+
+
+def is_inert(path: str) -> bool:
+    key = content_type(path)
+    return key is not None and SYMBOL_PROVIDERS[key][1] is None
 
 
 def no_provider_paths(paths: Iterable[str]) -> Dict[str, str]:
@@ -173,8 +194,9 @@ def no_provider_paths(paths: Iterable[str]) -> Dict[str, str]:
 
 def _changed_symbols(repo: Path, old_tree: str, new_tree: str, path: str, run: Runner) -> FrozenSet[Symbol]:
     module = Path(path).stem
-    provider = SYMBOL_PROVIDERS.get(path_suffix(path))
-    if provider is None:  # no proof either way; classify_change makes such a path REWORK/no_symbol_provider
+    key = content_type(path)
+    provider = SYMBOL_PROVIDERS[key][1] if key is not None else None
+    if provider is None:  # inert, or no proof either way: classify_change makes the latter REWORK/no_symbol_provider
         return frozenset()
     try:
         old, new = (provider(run(repo, ["show", f"{t}:{path}"])) for t in (old_tree, new_tree))
@@ -205,7 +227,7 @@ def seat_input_set(repo: Path, head: str, own_diff_paths: Iterable[str]) -> Froz
     for src, deps in graph.edges.items():
         for dep in deps:
             reverse.setdefault(dep, set()).add(src)
-    stems = {Path(p).stem for p in paths if has_symbol_provider(p)}
+    stems = {Path(p).stem for p in paths if has_symbol_provider(p) and not is_inert(p)}
     reached = reachable_modules(stems, ImportGraph(edges=reverse), depth=1)
     return frozenset(paths | {p for p in listing if p.endswith(".py") and Path(p).stem in reached})
 
@@ -241,7 +263,7 @@ def decide(merge_base_equal: bool, tree_equal: bool, replay_clean: bool, base_mo
         return (NO_CODE_CHANGE, None) if tree_equal else (REWORK, None)
     if not (replay_clean and tree_equal):
         return REWORK, REASON_REBASE_REWORK
-    if set(base_move_paths) & set(input_set):
+    if {p for p in base_move_paths if not is_inert(p)} & set(input_set):  # an inert file has no callers to break
         return REWORK, REASON_INPUT_SET
     return TRIVIAL_REBASE, None
 

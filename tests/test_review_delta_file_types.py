@@ -99,5 +99,56 @@ def test_decide_without_a_known_provider_set_cannot_prove(no_provider):
 
 
 def test_registry_is_the_one_place_that_names_a_provider():
-    assert set(rc.SYMBOL_PROVIDERS) == {".py"}
+    assert set(rc.SYMBOL_PROVIDERS) == {".py", rc.INERT_CHANGELOG}
     assert rc.no_provider_paths(["a.py", "b.ts", "Makefile"]) == {"b.ts": ".ts", "Makefile": "(no suffix)"} and rc.NO_SUFFIX == "(no suffix)"
+
+
+FRAG = "changelog.d/x.md"
+NOT_INERT = [("docs/x.md", ".md"), ("changelog.d/sub/x.md", ".md"), ("changelog.d/x.txt", ".txt"),
+             ("x/changelog.d/y.md", ".md")]
+
+
+def test_changelog_fragment_beside_python_keeps_the_python_changekind(repo):
+    parent = commit(repo, {FEAT: "def feature():\n    return 1\n", FRAG: "- one\n"}, "feature")
+    git(repo, "commit", "-q", "--allow-empty", "-m", "no code")
+    head = git(repo, "rev-parse", "HEAD")
+    rec = rc.classify_change(repo, "main", parent, head, rc.seat_input_set(repo, head, {FEAT, FRAG}))
+    assert (rec.changekind, rec.full_review_reason, rec.no_provider_paths) == (rc.NO_CODE_CHANGE, None, {})
+    fix = commit(repo, {FEAT: "def feature():\n    return 2\n", FRAG: "- two\n"}, "fix")
+    rec = rc.classify_change(repo, "main", head, fix, rc.seat_input_set(repo, fix, {FEAT, FRAG}))
+    assert (rec.changekind, rec.full_review_reason, rec.no_provider_paths) == (rc.REWORK, None, {})
+
+
+def test_pure_changelog_fragment_change_is_not_no_symbol_provider(repo):
+    parent = commit(repo, {FRAG: "- one\n"}, "fragment")
+    head = commit(repo, {FRAG: "- two\n"}, "fragment again")
+    rec = rc.classify_change(repo, "main", parent, head, rc.seat_input_set(repo, head, {FRAG}))
+    assert (rec.changekind, rec.full_review_reason, rec.no_provider_paths) == (rc.REWORK, None, {})
+
+
+def test_prompt_line_of_a_changelog_fragment_says_it_is_inert():
+    line = prompt_line(FRAG, rc.ChangeKindRecord(rc.REWORK, "p", "q", {}, "v1"))
+    assert line == f"  - {FRAG}: changelog fragment (no callers)"
+
+
+@pytest.mark.parametrize("path,suffix", NOT_INERT)
+def test_only_a_md_directly_under_root_changelog_d_is_inert(repo, path, suffix):
+    parent = commit(repo, {path: "one\n"}, "edit")
+    head = commit(repo, {path: "two\n"}, "fix")
+    rec = rc.classify_change(repo, "main", parent, head, rc.seat_input_set(repo, head, {path}))
+    assert (rec.changekind, rec.full_review_reason, rec.no_provider_paths) == (rc.REWORK, rc.REASON_NO_SYMBOL_PROVIDER,
+                                                                               {path: suffix})
+    assert not rc.is_inert(path)
+
+
+def test_changelog_fragment_in_the_base_move_never_touches_the_input_set(repo):
+    assert rc.decide(False, True, True, [FRAG], [FRAG], {}, {}) == (rc.TRIVIAL_REBASE, None)
+    assert rc.decide(False, True, True, [FRAG, FEAT], [FRAG, FEAT], {}, {}) == (rc.REWORK, rc.REASON_INPUT_SET)
+    parent = commit(repo, {FEAT: "def feature():\n    return 1\n"}, "feature")
+    git(repo, "checkout", "-q", "main")
+    commit(repo, {"changelog.d/other.md": "- other\n"}, "main moves")
+    git(repo, "checkout", "-q", "--detach")
+    git(repo, "cherry-pick", parent)
+    head = git(repo, "rev-parse", "HEAD")
+    rec = rc.classify_change(repo, "main", parent, head, rc.seat_input_set(repo, head, {FEAT}))
+    assert (rec.changekind, rec.full_review_reason, rec.no_provider_paths) == (rc.TRIVIAL_REBASE, None, {})
