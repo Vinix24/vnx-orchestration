@@ -1840,6 +1840,91 @@ def _convert_one_detailed(
     if receipt is None:
         return None, "malformed"
 
+    _guard_did = receipt.get("dispatch_id")
+    _guard_matched = _completion_already_booked(receipt, receipts_file)
+
+    # The sync call sits outside the OSError-scoped try of
+    # _completion_already_booked and outside
+    # any handler that reads a specific exception attribute (see the
+    # append_receipt_payload try/except below): a sync-branch failure of
+    # ANY shape must never be mistaken for — or swallowed alongside — an
+    # NDJSON-read or booking failure. _sync_report_open_items() never raises
+    # on its own (it self-guards and logs), so this call is a plain
+    # statement, not a try body.
+    if _guard_matched:
+        if not dry_run:
+            _sync_report_open_items(receipt, text)
+        return AppendResult(
+            status="duplicate",
+            receipts_file=Path(receipts_file),
+            idempotency_key=_guard_did,
+        ), "duplicate"
+
+    if dry_run:
+        return _dry_run_outcome(
+            receipt, report_path, AppendReceiptError,
+            rejected_detail_sink, error_reason_sink,
+        )
+
+    # The booking call and its AppendReceiptError/.code handling are scoped
+    # to this try alone. The open-items sync runs strictly AFTER this block
+    # returns a result, never inside it — a sync-branch failure (of any
+    # shape, with or without a .code attribute) must never be caught by a
+    # handler that assumes every exception here is an AppendReceiptError.
+    try:
+        result = append_receipt_payload(
+            receipt,
+            receipts_file=receipts_file,
+            cache_window_seconds=cache_window_seconds,
+            # skip_enrichment covers the quality advisory hooks and the
+            # provenance/session/cqs enrichment. The confidence update is an
+            # outcome hook and runs regardless: a converter receipt is the
+            # only outcome record a dispatch gets when the lane wrote none.
+            skip_enrichment=True,
+        )
+    except AppendReceiptError as exc:
+        if exc.code in MODEL_REFUSAL_CODES:
+            # receipt_conversion_rejection_beacon.parse_rejections keys on the
+            # exact "REJECTED (fail-closed) dispatch=... file=... reason=..."
+            # shape of this line: every model refusal logs it, whatever its code.
+            logger.warning(
+                "report_to_receipt_converter: REJECTED (fail-closed) dispatch=%s file=%s reason=%s",
+                receipt.get("dispatch_id"), report_path.name, exc.message,
+            )
+            _note_rejected_detail(rejected_detail_sink, receipt, report_path, exc.message)
+            # A model refusal (no model, or a value that is not a model name)
+            # is a verdict on the report's bytes: no later scan can turn it
+            # into a receipt, so keeping the file in the scanned directory
+            # only re-fails the beacon on every scan and buries the next new
+            # refusal under an alarm that is already on.
+            # Quarantine, not deletion: the report stays readable in
+            # receipt_deadletter/ and an operator can put it back once the
+            # model has been fixed (new bytes, new hash, so the watermark entry
+            # _deadletter_report leaves does not shadow it). The INDEX line
+            # carries the refusal's own code. Only when the state dir is
+            # known, the same guard as the unknown_dispatch quarantine; a
+            # caller without receipts_file leaves the report for the next
+            # directory scan to quarantine.
+            if state_dir_for_route is not None:
+                _deadletter_report(report_path, exc.code, state_dir_for_route)
+            return None, "rejected"
+        logger.warning(
+            "report_to_receipt_converter: append failed for %s: %s",
+            report_path.name, exc,
+        )
+        return _error_outcome(error_reason_sink, f"append failed: {exc.code}")
+    except Exception as exc:
+        logger.warning(
+            "report_to_receipt_converter: append failed for %s: %s",
+            report_path.name, exc,
+        )
+        return _error_outcome(error_reason_sink, f"append failed: {type(exc).__name__}")
+
+    return _booked_outcome(result, receipt, text, report_path, error_reason_sink)
+
+
+def _completion_already_booked(receipt: Dict[str, Any], receipts_file: Optional[str]) -> bool:
+    """True when *receipts_file* already holds the completion line *receipt* would book."""
     # OI-1017/OI-1048 guard: when the envelope hot-path already wrote a
     # receipt for this dispatch (binding body-contract enforcement landed
     # before the converter's periodic sweep), skip the append to avoid
@@ -1900,139 +1985,70 @@ def _convert_one_detailed(
                     break
         except OSError:
             pass  # can't read NDJSON — fall through to normal append (idempotency will catch it)
+    return _guard_matched
 
-    # The sync call sits outside the OSError-scoped try above and outside
-    # any handler that reads a specific exception attribute (see the
-    # append_receipt_payload try/except below): a sync-branch failure of
-    # ANY shape must never be mistaken for — or swallowed alongside — an
-    # NDJSON-read or booking failure. _sync_report_open_items() never raises
-    # on its own (it self-guards and logs), so this call is a plain
-    # statement, not a try body.
-    if _guard_matched:
-        if not dry_run:
-            _sync_report_open_items(receipt, text)
-        return AppendResult(
-            status="duplicate",
-            receipts_file=Path(receipts_file),
-            idempotency_key=_guard_did,
-        ), "duplicate"
 
-    if dry_run:
-        # OI-1744: a dry run must measure what a real scan would WRITE — and
-        # a report whose receipt fails the append-time fail-closed validation
-        # (append_receipt_internals/validation.py::_validate_receipt →
-        # _validate_model_present et al.) writes NOTHING on a real run.
-        # Before this check, dry-run reported every buildable receipt as
-        # "would_append", counting would-be REJECTED reports as future
-        # bookings (measured on the vnx-dev backlog 2026-09-20: reports still
-        # missing a real model — the 14 F1-3 could not restore — counted as
-        # "would book"). Run the same PURE validation append_receipt_payload()
-        # runs and mirror the real path's outcome mapping exactly
-        # (missing_model -> "rejected", any other AppendReceiptError ->
-        # "error"), so a dry-run count is a faithful preview, not an
-        # overestimate. _validate_receipt writes nothing — it only raises.
-        # (Model refusals are the codes in MODEL_REFUSAL_CODES.)
-        try:
-            from append_receipt_internals.validation import (  # noqa: PLC0415
-                _validate_receipt,
-            )
-            _validate_receipt(receipt)
-        except AppendReceiptError as exc:
-            if exc.code in MODEL_REFUSAL_CODES:
-                logger.warning(
-                    "report_to_receipt_converter: [dry-run] REJECTED (fail-closed) "
-                    "dispatch=%s file=%s reason=%s",
-                    receipt.get("dispatch_id"), report_path.name, exc.message,
-                )
-                if rejected_detail_sink is not None:
-                    rejected_detail_sink.append({
-                        "dispatch_id": str(receipt.get("dispatch_id") or ""),
-                        "file": report_path.name,
-                        "reason": exc.message,
-                        "rejected_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-                    })
-                return None, "rejected"
-            logger.warning(
-                "report_to_receipt_converter: [dry-run] append validation failed "
-                "for %s: %s",
-                report_path.name, exc,
-            )
-            return _error_outcome(error_reason_sink, f"dry-run append validation failed: {exc.code}")
-        except Exception as exc:
-            logger.warning(
-                "report_to_receipt_converter: [dry-run] append validation crashed "
-                "for %s: %s: %s",
-                report_path.name, type(exc).__name__, exc,
-            )
-            return _error_outcome(error_reason_sink, f"dry-run append validation crashed: {type(exc).__name__}")
-        logger.info(
-            "report_to_receipt_converter: [dry-run] would book dispatch=%s "
-            "event_type=%s status=%s file=%s",
-            receipt.get("dispatch_id"), receipt.get("event_type"),
-            receipt.get("status"), report_path.name,
-        )
-        return receipt, "would_append"
-
-    # The booking call and its AppendReceiptError/.code handling are scoped
-    # to this try alone. The open-items sync runs strictly AFTER this block
-    # returns a result, never inside it — a sync-branch failure (of any
-    # shape, with or without a .code attribute) must never be caught by a
-    # handler that assumes every exception here is an AppendReceiptError.
+def _dry_run_outcome(
+    receipt: Dict[str, Any], report_path: Path, AppendReceiptError: Any,
+    rejected_detail_sink: Optional[List[Dict[str, Any]]],
+    error_reason_sink: Optional[List[str]],
+) -> Tuple[Optional[Any], str]:
+    """The dry-run outcome of a built receipt: the append-time validation, no write."""
+    # OI-1744: a dry run must measure what a real scan would WRITE — and
+    # a report whose receipt fails the append-time fail-closed validation
+    # (append_receipt_internals/validation.py::_validate_receipt →
+    # _validate_model_present et al.) writes NOTHING on a real run.
+    # Before this check, dry-run reported every buildable receipt as
+    # "would_append", counting would-be REJECTED reports as future
+    # bookings (measured on the vnx-dev backlog 2026-09-20: reports still
+    # missing a real model — the 14 F1-3 could not restore — counted as
+    # "would book"). Run the same PURE validation append_receipt_payload()
+    # runs and mirror the real path's outcome mapping exactly
+    # (missing_model -> "rejected", any other AppendReceiptError ->
+    # "error"), so a dry-run count is a faithful preview, not an
+    # overestimate. _validate_receipt writes nothing — it only raises.
+    # (Model refusals are the codes in MODEL_REFUSAL_CODES.)
     try:
-        result = append_receipt_payload(
-            receipt,
-            receipts_file=receipts_file,
-            cache_window_seconds=cache_window_seconds,
-            # skip_enrichment covers the quality advisory hooks and the
-            # provenance/session/cqs enrichment. The confidence update is an
-            # outcome hook and runs regardless: a converter receipt is the
-            # only outcome record a dispatch gets when the lane wrote none.
-            skip_enrichment=True,
+        from append_receipt_internals.validation import (  # noqa: PLC0415
+            _validate_receipt,
         )
+        _validate_receipt(receipt)
     except AppendReceiptError as exc:
         if exc.code in MODEL_REFUSAL_CODES:
-            # receipt_conversion_rejection_beacon.parse_rejections keys on the
-            # exact "REJECTED (fail-closed) dispatch=... file=... reason=..."
-            # shape of this line: every model refusal logs it, whatever its code.
             logger.warning(
-                "report_to_receipt_converter: REJECTED (fail-closed) dispatch=%s file=%s reason=%s",
+                "report_to_receipt_converter: [dry-run] REJECTED (fail-closed) "
+                "dispatch=%s file=%s reason=%s",
                 receipt.get("dispatch_id"), report_path.name, exc.message,
             )
-            if rejected_detail_sink is not None:
-                rejected_detail_sink.append({
-                    "dispatch_id": str(receipt.get("dispatch_id") or ""),
-                    "file": report_path.name,
-                    "reason": exc.message,
-                    "rejected_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-                })
-            # A model refusal (no model, or a value that is not a model name)
-            # is a verdict on the report's bytes: no later scan can turn it
-            # into a receipt, so keeping the file in the scanned directory
-            # only re-fails the beacon on every scan and buries the next new
-            # refusal under an alarm that is already on.
-            # Quarantine, not deletion: the report stays readable in
-            # receipt_deadletter/ and an operator can put it back once the
-            # model has been fixed (new bytes, new hash, so the watermark entry
-            # _deadletter_report leaves does not shadow it). The INDEX line
-            # carries the refusal's own code. Only when the state dir is
-            # known, the same guard as the unknown_dispatch quarantine; a
-            # caller without receipts_file leaves the report for the next
-            # directory scan to quarantine.
-            if state_dir_for_route is not None:
-                _deadletter_report(report_path, exc.code, state_dir_for_route)
+            _note_rejected_detail(rejected_detail_sink, receipt, report_path, exc.message)
             return None, "rejected"
         logger.warning(
-            "report_to_receipt_converter: append failed for %s: %s",
+            "report_to_receipt_converter: [dry-run] append validation failed "
+            "for %s: %s",
             report_path.name, exc,
         )
-        return _error_outcome(error_reason_sink, f"append failed: {exc.code}")
+        return _error_outcome(error_reason_sink, f"dry-run append validation failed: {exc.code}")
     except Exception as exc:
         logger.warning(
-            "report_to_receipt_converter: append failed for %s: %s",
-            report_path.name, exc,
+            "report_to_receipt_converter: [dry-run] append validation crashed "
+            "for %s: %s: %s",
+            report_path.name, type(exc).__name__, exc,
         )
-        return _error_outcome(error_reason_sink, f"append failed: {type(exc).__name__}")
+        return _error_outcome(error_reason_sink, f"dry-run append validation crashed: {type(exc).__name__}")
+    logger.info(
+        "report_to_receipt_converter: [dry-run] would book dispatch=%s "
+        "event_type=%s status=%s file=%s",
+        receipt.get("dispatch_id"), receipt.get("event_type"),
+        receipt.get("status"), report_path.name,
+    )
+    return receipt, "would_append"
 
+
+def _booked_outcome(
+    result: Any, receipt: Dict[str, Any], text: str, report_path: Path,
+    error_reason_sink: Optional[List[str]],
+) -> Tuple[Optional[Any], str]:
+    """The outcome of a real append that returned; open items sync only on a booked row."""
     # append_receipt_payload's documented contract (payload.py's own OI-948
     # guard, and its mirror in scripts/append_receipt.py main()) is: return an
     # AppendResult or raise AppendReceiptError — never return None. Every real
@@ -2057,6 +2073,20 @@ def _convert_one_detailed(
     if result.status in ("appended", "duplicate"):
         _sync_report_open_items(receipt, text)
     return result, result.status
+
+
+def _note_rejected_detail(
+    sink: Optional[List[Dict[str, Any]]], receipt: Dict[str, Any],
+    report_path: Path, reason: str,
+) -> None:
+    """Name one model refusal in *sink*: dispatch, file, reason and the time of the refusal."""
+    if sink is not None:
+        sink.append({
+            "dispatch_id": str(receipt.get("dispatch_id") or ""),
+            "file": report_path.name,
+            "reason": reason,
+            "rejected_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        })
 
 
 def convert_report_to_receipt(
