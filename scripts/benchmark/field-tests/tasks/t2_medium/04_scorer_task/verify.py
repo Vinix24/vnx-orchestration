@@ -59,14 +59,7 @@ def verify(workdir: Path, task_meta: dict) -> dict[str, Any]:
 
     with tempfile.TemporaryDirectory() as tmp:
         tmp_dir = Path(tmp)
-        for rel in files_written:
-            src = seed_dir / rel
-            dst = tmp_dir / rel
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy(src, dst)
-        shutil.copy(init_script, tmp_dir / "init_seed_db.py")
-        if (seed_dir / "schema.sql").exists():
-            shutil.copy(seed_dir / "schema.sql", tmp_dir / "schema.sql")
+        _stage_workspace(seed_dir, tmp_dir, files_written, init_script)
 
         init_proc = subprocess.run(
             [sys.executable, "init_seed_db.py"],
@@ -80,78 +73,108 @@ def verify(workdir: Path, task_meta: dict) -> dict[str, Any]:
             }
 
         checks: list[tuple[str, bool, str]] = []
+        checks.extend(_migration_checks(tmp_dir))
+        checks.append(_pytest_check(tmp_dir))
+        checks.append(_cli_check(tmp_dir))
 
+    return _summarize(checks, files_written)
+
+
+def _stage_workspace(
+    seed_dir: Path, tmp_dir: Path, files_written: list[str], init_script: Path
+) -> None:
+    for rel in files_written:
+        src = seed_dir / rel
+        dst = tmp_dir / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(src, dst)
+    shutil.copy(init_script, tmp_dir / "init_seed_db.py")
+    if (seed_dir / "schema.sql").exists():
+        shutil.copy(seed_dir / "schema.sql", tmp_dir / "schema.sql")
+
+
+def _migration_checks(tmp_dir: Path) -> list[tuple[str, bool, str]]:
+    checks: list[tuple[str, bool, str]] = []
+    try:
+        mig_proc = subprocess.run(
+            ["sqlite3", "documents.db"],
+            input=(tmp_dir / "migrations" / "001_add_document_scores.sql").read_text(),
+            cwd=tmp_dir, capture_output=True, text=True, timeout=30, check=False,
+        )
+        mig_ok = mig_proc.returncode == 0
+        checks.append((
+            "migration applies cleanly",
+            mig_ok,
+            f"rc={mig_proc.returncode} stderr={mig_proc.stderr[-200:]}",
+        ))
+    except Exception as exc:
+        checks.append(("migration applies cleanly", False, str(exc)))
+        mig_ok = False
+
+    if mig_ok:
         try:
-            mig_proc = subprocess.run(
+            mig2 = subprocess.run(
                 ["sqlite3", "documents.db"],
                 input=(tmp_dir / "migrations" / "001_add_document_scores.sql").read_text(),
                 cwd=tmp_dir, capture_output=True, text=True, timeout=30, check=False,
             )
-            mig_ok = mig_proc.returncode == 0
             checks.append((
-                "migration applies cleanly",
-                mig_ok,
-                f"rc={mig_proc.returncode} stderr={mig_proc.stderr[-200:]}",
+                "migration idempotent",
+                mig2.returncode == 0,
+                f"rc={mig2.returncode}",
             ))
         except Exception as exc:
-            checks.append(("migration applies cleanly", False, str(exc)))
-            mig_ok = False
+            checks.append(("migration idempotent", False, str(exc)))
+    return checks
 
-        if mig_ok:
-            try:
-                mig2 = subprocess.run(
-                    ["sqlite3", "documents.db"],
-                    input=(tmp_dir / "migrations" / "001_add_document_scores.sql").read_text(),
-                    cwd=tmp_dir, capture_output=True, text=True, timeout=30, check=False,
-                )
-                checks.append((
-                    "migration idempotent",
-                    mig2.returncode == 0,
-                    f"rc={mig2.returncode}",
-                ))
-            except Exception as exc:
-                checks.append(("migration idempotent", False, str(exc)))
 
-        pytest_proc = subprocess.run(
-            [sys.executable, "-m", "pytest", "tests/test_scorer.py", "-v", "--tb=short", "-q"],
-            cwd=tmp_dir, capture_output=True, text=True, timeout=180, check=False,
+def _pytest_check(tmp_dir: Path) -> tuple[str, bool, str]:
+    pytest_proc = subprocess.run(
+        [sys.executable, "-m", "pytest", "tests/test_scorer.py", "-v", "--tb=short", "-q"],
+        cwd=tmp_dir, capture_output=True, text=True, timeout=180, check=False,
+    )
+    pytest_out = pytest_proc.stdout + "\n" + pytest_proc.stderr
+    pass_match = re.search(r"(\d+) passed", pytest_out)
+    fail_match = re.search(r"(\d+) failed", pytest_out)
+    pytest_pass = int(pass_match.group(1)) if pass_match else 0
+    pytest_fail = int(fail_match.group(1)) if fail_match else 0
+    return (
+        "15 tests pass",
+        pytest_pass >= 15 and pytest_fail == 0,
+        f"passed={pytest_pass} failed={pytest_fail}",
+    )
+
+
+def _cli_check(tmp_dir: Path) -> tuple[str, bool, str]:
+    try:
+        cli_proc = subprocess.run(
+            [sys.executable, "cli.py", "--db", "documents.db", "--project-id", "default"],
+            cwd=tmp_dir, capture_output=True, text=True, timeout=60, check=False,
         )
-        pytest_out = pytest_proc.stdout + "\n" + pytest_proc.stderr
-        pass_match = re.search(r"(\d+) passed", pytest_out)
-        fail_match = re.search(r"(\d+) failed", pytest_out)
-        pytest_pass = int(pass_match.group(1)) if pass_match else 0
-        pytest_fail = int(fail_match.group(1)) if fail_match else 0
-        checks.append((
-            "15 tests pass",
-            pytest_pass >= 15 and pytest_fail == 0,
-            f"passed={pytest_pass} failed={pytest_fail}",
-        ))
+        cli_ok = cli_proc.returncode == 0
+        cli_json_ok = False
+        if cli_ok:
+            try:
+                out = json.loads(cli_proc.stdout.strip().splitlines()[-1])
+                cli_json_ok = (
+                    isinstance(out.get("scored"), int)
+                    and isinstance(out.get("skipped"), int)
+                    and out["scored"] + out["skipped"] == 50
+                )
+            except (json.JSONDecodeError, KeyError, IndexError):
+                cli_json_ok = False
+        return (
+            "CLI exits 0 and prints valid {scored, skipped} json totaling 50",
+            cli_ok and cli_json_ok,
+            f"rc={cli_proc.returncode} stdout-tail={cli_proc.stdout[-200:]}",
+        )
+    except Exception as exc:
+        return ("CLI smoke", False, str(exc))
 
-        try:
-            cli_proc = subprocess.run(
-                [sys.executable, "cli.py", "--db", "documents.db", "--project-id", "default"],
-                cwd=tmp_dir, capture_output=True, text=True, timeout=60, check=False,
-            )
-            cli_ok = cli_proc.returncode == 0
-            cli_json_ok = False
-            if cli_ok:
-                try:
-                    out = json.loads(cli_proc.stdout.strip().splitlines()[-1])
-                    cli_json_ok = (
-                        isinstance(out.get("scored"), int)
-                        and isinstance(out.get("skipped"), int)
-                        and out["scored"] + out["skipped"] == 50
-                    )
-                except (json.JSONDecodeError, KeyError, IndexError):
-                    cli_json_ok = False
-            checks.append((
-                "CLI exits 0 and prints valid {scored, skipped} json totaling 50",
-                cli_ok and cli_json_ok,
-                f"rc={cli_proc.returncode} stdout-tail={cli_proc.stdout[-200:]}",
-            ))
-        except Exception as exc:
-            checks.append(("CLI smoke", False, str(exc)))
 
+def _summarize(
+    checks: list[tuple[str, bool, str]], files_written: list[str]
+) -> dict[str, Any]:
     pass_count = sum(1 for _, ok, _ in checks if ok)
     expected = 4
 
