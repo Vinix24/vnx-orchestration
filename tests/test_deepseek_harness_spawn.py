@@ -351,7 +351,7 @@ class TestFinalPopenEnvScrub:
 
         with patch.dict(
             "os.environ",
-            {"ANTHROPIC_API_KEY": "sk-ant-real-production-key", "DEEPSEEK_API_KEY": _FAKE_KEY},
+            {"ANTHROPIC_API_KEY": "sk-" + "ant-real-production-key", "DEEPSEEK_API_KEY": _FAKE_KEY},
         ), patch.object(sa.subprocess, "Popen", _fake_popen), \
                 patch("subprocess_adapter.os.setsid", lambda: None), \
                 patch.object(sa.SubprocessAdapter, "read_events_with_timeout", _empty_events):

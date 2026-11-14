@@ -48,7 +48,7 @@ _SKIP_SUFFIXES = {".pyc", ".pyo", ".so", ".dylib", ".bin"}
 def _py_files(base: Path):
     """Yield all .py files under base, skipping cache/binary dirs."""
     for p in base.rglob("*.py"):
-        if any(part in _SKIP_DIRS for part in p.parts):
+        if any(part in _SKIP_DIRS for part in p.relative_to(base).parts):
             continue
         yield p
 
@@ -58,7 +58,9 @@ def _all_text_files(base: Path):
     for p in base.rglob("*"):
         if not p.is_file():
             continue
-        if any(part in _SKIP_DIRS for part in p.parts):
+        # Relative to base: a checkout living under .vnx-data/worktrees/ must
+        # still be scanned; only skip dirs inside the scanned tree.
+        if any(part in _SKIP_DIRS for part in p.relative_to(base).parts):
             continue
         if p.suffix in _SKIP_SUFFIXES:
             continue
@@ -196,6 +198,30 @@ class TestBS3NoHardcodedAPIKeys:
             "Hardcoded Anthropic API key pattern found in .github/workflows/:\n"
             + "\n".join(f"  {v}" for v in violations)
         )
+
+
+class TestScanBaseUnderSkippedDir:
+    """The scan must work when the checkout itself sits under .vnx-data/."""
+
+    def test_key_planted_under_dot_vnx_data_base_is_found(self, tmp_path):
+        base = tmp_path / ".vnx-data" / "worktrees" / "wt" / "tests"
+        base.mkdir(parents=True)
+        (base / "t.py").write_text('K = "' + "sk-" + 'ant-' + 'a' * 20 + '"\n')
+        files = list(_all_text_files(base))
+        assert len(files) == 1
+        assert TestBS3NoHardcodedAPIKeys._KEY_PATTERN.search(files[0].read_text())
+
+    def test_skip_dirs_inside_base_are_still_skipped(self, tmp_path):
+        (tmp_path / ".git").mkdir()
+        (tmp_path / ".git" / "x.txt").write_text("x")
+        (tmp_path / "node_modules").mkdir()
+        (tmp_path / "node_modules" / "y.py").write_text("y")
+        (tmp_path / "ok.txt").write_text("z")
+        assert [p.name for p in _all_text_files(tmp_path)] == ["ok.txt"]
+        assert list(_py_files(tmp_path)) == []
+
+    def test_real_tests_dir_scan_reads_files(self):
+        assert len(list(_all_text_files(TESTS_DIR))) > 100
 
 
 # ---------------------------------------------------------------------------
