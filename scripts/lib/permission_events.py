@@ -37,7 +37,7 @@ FIELDS = ("schema ts event_id project_id session_id account origin bron "
 _VALUE = r"""(?:"[^"]*"|'[^']*'|\S*)"""
 _LEAD_CD = re.compile(r"^\s*cd\s+" + _VALUE + r"\s*&&\s*")
 _LEAD_ENV = re.compile(r"^\s*[A-Za-z_]\w*=" + _VALUE + r"\s+")
-_HOME_PATH = re.compile(r"(?<![\w.<])(?:/Users/[^/\s'\"]+|/home/[^/\s'\"]+|~)(?:/[^\s'\"]*)?")
+_HOME_PATH = re.compile(r"(?<![\w.<])(?:/(?:Users|home)/[^/\s'\"]+|~)(?:/[^\s'\"]*)?")
 _RULES = (  # (pattern, replacement): rule 2, ids, then rule 3, paths, then rule 4
     (re.compile(r"\bdlv-[0-9a-f]{6,}(?:-[a-z0-9]+)*"), "<dlv>"),
     (re.compile(r"\b\d{8}-\d{6}-[\w-]+"), "<dispatch>"),
@@ -45,7 +45,7 @@ _RULES = (  # (pattern, replacement): rule 2, ids, then rule 3, paths, then rule
     (re.compile(r"\b(?=[0-9a-f]*\d)(?=[0-9a-f]*[a-f])[0-9a-f]{7,40}\b"), "<sha>"),
     (re.compile(r"(?<![\w/.])[^\s'\"]*/scratchpad(?:/[^\s'\"]*)?"), "<scratchpad>"),
     (re.compile(r"(?<![\w/.<])(?:/private)?/tmp(?:/[^\s'\"]*)?"), "<tmp>"),
-    (re.compile(r"(?<![\w.<])(?:/Users/[^/\s'\"]+|/home/[^/\s'\"]+|~)/\.vnx-data(?:/[^\s'\"]*)?"), "<vnx-data>"),
+    (re.compile(r"(?<![\w.<])(?:/(?:Users|home)/[^/\s'\"]+|~)/\.vnx-data(?:/[^\s'\"]*)?"), "<vnx-data>"),
 )
 _NUMBER = re.compile(r"(?<![\w./<-])\d+(?![\w./>-])")
 _HEREDOC = re.compile(r"<<-?\s*['\"]?\w+['\"]?.*", re.DOTALL)

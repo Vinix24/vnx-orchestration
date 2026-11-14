@@ -38,8 +38,8 @@ def _ledger(tmp_path):
     ("mkdir -p /tmp/work/a", "mkdir -p <tmp>"),
     ("cd /Users/x/repo && VNX_X=1 bin/vnx deliverable promote dlv-4856e810fb14",
      "bin/vnx deliverable promote <dlv>"),
-    ("ls ~/.vnx-data/p/state/x /tmp/s/scratchpad/a", "ls <vnx-data> <scratchpad>"),
-    ("ls /Users/me/Development/clients/acme/f", "ls ~/..."),
+    ("ls ~/.vnx-data/p/state/x /home/u/.vnx-data/s /Users/u/.vnx-data/s /tmp/s/scratchpad/a", "ls <vnx-data> <vnx-data> <vnx-data> <scratchpad>"),
+    ("ls /Users/me/Development/clients/acme/f /home/me/d/f", "ls ~/... ~/..."),
 ])
 def test_normalise_forms_and_idempotent(raw, expected):
     out = pe.normalise(raw)
