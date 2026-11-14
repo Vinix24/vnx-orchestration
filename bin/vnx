@@ -386,9 +386,10 @@ Gate commands (pre-merge verification):
                         Open PR N, reviewed before the round ledger, as the operator:
                         an attested line in review_gates/rounds.ndjson plus a receipt;
                         the B3 cap starts at zero there; idempotent
-  impact collect|report [--since <date|Nd>]
+  impact collect|backtest|report [--since <date|Nd>]
                         The impact shadow ledger (state/impact_shadow.ndjson) from the CI artifacts,
-                        and its report: misses, reduced share, wall clock (ADR-074; report is read-only)
+                        and its report: misses, reduced share, wall clock (ADR-074; report is read-only);
+                        backtest rebuilds S for old pull_request runs from their Profile A evidence
   roadmap <sub>       Roadmap orchestration and auto-next feature loading
   context-manifest    Read the context-manifest sidecar per provider (read-only)
                         Options: --json, --by provider, --state-dir <dir>
@@ -2695,7 +2696,16 @@ main() {
       "$VNX_PYTHON" "$VNX_HOME/scripts/planning_cli.py" objective "$@"
       ;;
     horizon)
-      "$VNX_PYTHON" "$VNX_HOME/scripts/planning_cli.py" horizon "$@"
+      case "${1:-}" in
+        plan-gate|deliverable)
+          horizon_verb="$1"
+          shift
+          "$VNX_PYTHON" "$VNX_HOME/scripts/planning_cli.py" "$horizon_verb" "$@"
+          ;;
+        *)
+          "$VNX_PYTHON" "$VNX_HOME/scripts/planning_cli.py" horizon "$@"
+          ;;
+      esac
       ;;
     deliverable)
       "$VNX_PYTHON" "$VNX_HOME/scripts/planning_cli.py" deliverable "$@"
