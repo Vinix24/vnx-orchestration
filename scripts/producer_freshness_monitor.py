@@ -183,15 +183,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             beacon_checks = {"skipped": True, "error": str(exc)}
     report["beacon_reader_coverage"] = beacon_checks
 
-    job_exits: Dict[str, object] = {"skipped": True}
-    if not args.skip_job_exits and not args.no_write:
-        try:
-            import job_exit_capture  # noqa: PLC0415
-
-            job_exits = job_exit_capture.harvest_launchd(state_dir)
-        except Exception as exc:  # vnx-silent-except: the launchd harvest is a bonus signal; an unexpected failure (e.g. a ValueError from a corrupt harvest cache, not just ImportError/OSError) must not take the already-built sweep findings down with it
-            job_exits = {"skipped": True, "error": str(exc)}
-    report["job_exits"] = job_exits
+    report["job_exits"] = _harvest_job_exits(args, state_dir)
 
     if not args.no_write:
         try:
@@ -208,6 +200,18 @@ def main(argv: Optional[List[str]] = None) -> int:
     else:
         emit_json(report)
     return EXIT_OK  # OI-1039: findings reported via health file + NDJSON, not exit code
+
+
+def _harvest_job_exits(args: argparse.Namespace, state_dir: Path) -> Dict[str, object]:
+    job_exits: Dict[str, object] = {"skipped": True}
+    if not args.skip_job_exits and not args.no_write:
+        try:
+            import job_exit_capture  # noqa: PLC0415
+
+            job_exits = job_exit_capture.harvest_launchd(state_dir)
+        except Exception as exc:  # vnx-silent-except: the launchd harvest is a bonus signal; an unexpected failure (e.g. a ValueError from a corrupt harvest cache, not just ImportError/OSError) must not take the already-built sweep findings down with it
+            job_exits = {"skipped": True, "error": str(exc)}
+    return job_exits
 
 
 if __name__ == "__main__":

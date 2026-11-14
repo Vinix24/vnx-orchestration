@@ -906,9 +906,30 @@ def _migrate_v22(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE _dispatch_metadata_v22 RENAME TO dispatch_metadata")
         log('INFO', 'Migrated dispatch_metadata: composite UNIQUE (project_id, dispatch_id) (ADR-007)')
 
-        # Step 5: Recreate the three views that were dropped in step 1.
-        # These are the canonical view definitions from schemas/quality_intelligence.sql.
-        conn.execute("""
+        _v22_recreate_dependent_views(conn)
+
+    # Ensure composite (project_id, provider) index — covers legacy DBs where
+    # _migrate_v21 ran before project_id existed and left a plain (provider) index.
+    conn.execute("DROP INDEX IF EXISTS idx_dispatch_meta_provider")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_dispatch_meta_provider "
+        "ON dispatch_metadata (project_id, provider)"
+    )
+    # Recreate other indexes (idempotent IF NOT EXISTS).
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_dispatch_meta_id ON dispatch_metadata (dispatch_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_dispatch_meta_terminal ON dispatch_metadata (terminal)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_dispatch_meta_role ON dispatch_metadata (role)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_dispatch_meta_gate ON dispatch_metadata (gate)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_dispatch_meta_outcome ON dispatch_metadata (outcome_status)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_dispatch_meta_dispatched ON dispatch_metadata (dispatched_at DESC)")
+    log('INFO', 'Migrated dispatch_metadata: composite (project_id, provider) index ensured (ADR-007)')
+
+
+def _v22_recreate_dependent_views(conn: sqlite3.Connection) -> None:
+    """Recreate the three dispatch_metadata views _migrate_v22 dropped (its step 5)."""
+    # Step 5: Recreate the three views that were dropped in step 1.
+    # These are the canonical view definitions from schemas/quality_intelligence.sql.
+    conn.execute("""
             CREATE VIEW IF NOT EXISTS dispatch_success_by_role AS
             SELECT
                 role,
@@ -923,7 +944,7 @@ def _migrate_v22(conn: sqlite3.Connection) -> None:
             GROUP BY role
             ORDER BY total_dispatches DESC
         """)
-        conn.execute("""
+    conn.execute("""
             CREATE VIEW IF NOT EXISTS intelligence_effectiveness AS
             SELECT
                 CASE WHEN intelligence_json IS NOT NULL AND intelligence_json != '' THEN 'with_intelligence' ELSE 'without_intelligence' END as intelligence_used,
@@ -935,7 +956,7 @@ def _migrate_v22(conn: sqlite3.Connection) -> None:
             WHERE outcome_status IS NOT NULL
             GROUP BY intelligence_used
         """)
-        conn.execute("""
+    conn.execute("""
             CREATE VIEW IF NOT EXISTS cost_per_dispatch AS
             SELECT
                 dm.dispatch_id,
@@ -954,23 +975,7 @@ def _migrate_v22(conn: sqlite3.Connection) -> None:
             LEFT JOIN session_analytics sa ON sa.dispatch_id = dm.dispatch_id
             WHERE dm.outcome_status IS NOT NULL
         """)
-        log('INFO', 'Recreated dispatch_metadata-dependent views after table rebuild')
-
-    # Ensure composite (project_id, provider) index — covers legacy DBs where
-    # _migrate_v21 ran before project_id existed and left a plain (provider) index.
-    conn.execute("DROP INDEX IF EXISTS idx_dispatch_meta_provider")
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_dispatch_meta_provider "
-        "ON dispatch_metadata (project_id, provider)"
-    )
-    # Recreate other indexes (idempotent IF NOT EXISTS).
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_dispatch_meta_id ON dispatch_metadata (dispatch_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_dispatch_meta_terminal ON dispatch_metadata (terminal)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_dispatch_meta_role ON dispatch_metadata (role)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_dispatch_meta_gate ON dispatch_metadata (gate)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_dispatch_meta_outcome ON dispatch_metadata (outcome_status)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_dispatch_meta_dispatched ON dispatch_metadata (dispatched_at DESC)")
-    log('INFO', 'Migrated dispatch_metadata: composite (project_id, provider) index ensured (ADR-007)')
+    log('INFO', 'Recreated dispatch_metadata-dependent views after table rebuild')
 
 
 def _migrate_v23(conn: sqlite3.Connection) -> None:
@@ -1434,21 +1439,7 @@ def _migrate_v29(conn: sqlite3.Connection) -> None:
     - Fail loudly instead of trusting INSERT OR IGNORE: assert the copied row
       count equals the source row count before swapping the table in.
     """
-    # Step 0: Ensure project_id column exists before table recreation.
-    cols = {r[1] for r in conn.execute("PRAGMA table_info(session_analytics)").fetchall()}
-    if "project_id" not in cols:
-        conn.execute(
-            "ALTER TABLE session_analytics ADD COLUMN project_id TEXT NOT NULL DEFAULT 'vnx-dev'"
-        )
-        cols = {r[1] for r in conn.execute("PRAGMA table_info(session_analytics)").fetchall()}
-
-    # Ensure other missing columns exist (context_reset_count, dispatch_id).
-    if "context_reset_count" not in cols:
-        conn.execute(
-            "ALTER TABLE session_analytics ADD COLUMN context_reset_count INTEGER DEFAULT 0"
-        )
-    if "dispatch_id" not in cols:
-        conn.execute("ALTER TABLE session_analytics ADD COLUMN dispatch_id TEXT")
+    _v29_ensure_columns(conn)
 
     # Idempotent guard: skip rebuild if composite UNIQUE already present.
     needs_rebuild = not _has_composite_unique(
@@ -1570,8 +1561,34 @@ def _migrate_v29(conn: sqlite3.Connection) -> None:
         )
         log('INFO', f'Replayed {len(captured_indexes)} captured session_analytics index(es) + ensured idx_session_dispatch')
 
-        # Step 9: Recreate the cost_per_dispatch view.
-        conn.execute("""
+        _v29_recreate_cost_view(conn)
+
+    _v29_backfill_project_id(conn)
+
+
+def _v29_ensure_columns(conn: sqlite3.Connection) -> None:
+    """Add project_id, context_reset_count and dispatch_id to session_analytics when absent."""
+    # Step 0: Ensure project_id column exists before table recreation.
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(session_analytics)").fetchall()}
+    if "project_id" not in cols:
+        conn.execute(
+            "ALTER TABLE session_analytics ADD COLUMN project_id TEXT NOT NULL DEFAULT 'vnx-dev'"
+        )
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(session_analytics)").fetchall()}
+
+    # Ensure other missing columns exist (context_reset_count, dispatch_id).
+    if "context_reset_count" not in cols:
+        conn.execute(
+            "ALTER TABLE session_analytics ADD COLUMN context_reset_count INTEGER DEFAULT 0"
+        )
+    if "dispatch_id" not in cols:
+        conn.execute("ALTER TABLE session_analytics ADD COLUMN dispatch_id TEXT")
+
+
+def _v29_recreate_cost_view(conn: sqlite3.Connection) -> None:
+    """Recreate the cost_per_dispatch view _migrate_v29 dropped (its step 9)."""
+    # Step 9: Recreate the cost_per_dispatch view.
+    conn.execute("""
             CREATE VIEW IF NOT EXISTS cost_per_dispatch AS
             SELECT
                 dm.dispatch_id,
@@ -1590,8 +1607,11 @@ def _migrate_v29(conn: sqlite3.Connection) -> None:
             LEFT JOIN session_analytics sa ON sa.dispatch_id = dm.dispatch_id
             WHERE dm.outcome_status IS NOT NULL
         """)
-        log('INFO', 'Recreated cost_per_dispatch view')
+    log('INFO', 'Recreated cost_per_dispatch view')
 
+
+def _v29_backfill_project_id(conn: sqlite3.Connection) -> None:
+    """Stamp vnx-dev on session_analytics rows whose project_id is still NULL."""
     # Backfill NULL project_ids for any rows that predate the column addition.
     null_count = conn.execute(
         "SELECT COUNT(*) FROM session_analytics WHERE project_id IS NULL"
