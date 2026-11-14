@@ -55,8 +55,7 @@ _HEREDOC = re.compile(r"(?<!<)<<(?!<).*", re.DOTALL)  # a here-string (<<<) is n
 
 
 def _strip_lead(text: str) -> str:
-    """Drop leading ``cd <path> &&`` and ``NAME=value`` words; every value is read by
-    ``shell_value_end``, the one shell grammar."""
+    """Drop leading ``cd <path> &&`` and ``NAME=value`` words (values read by ``shell_value_end``)."""
     while True:
         cd = _LEAD_CD.match(text)
         if cd:
@@ -159,12 +158,10 @@ def _validate(event: Dict[str, Any], project_id: str) -> Dict[str, str]:
     return clean
 
 def _scan(path: Path) -> tuple:
-    """(event_ids, unparseable line count) of the ledger; a damaged line is kept, it only
-    cannot dedupe. Never returns a line's content."""
+    """(event_ids, unparseable line count); a damaged line is kept, never returned."""
     ids: set = set()
     bad = 0
-    raw = path.read_bytes() if path.exists() else b""
-    for line in raw.split(b"\n"):
+    for line in (path.read_bytes() if path.exists() else b"").split(b"\n"):
         if not line.strip():
             continue
         try:
@@ -179,9 +176,8 @@ def _scan(path: Path) -> tuple:
 
 
 def _append_all(path: Path, payload: bytes) -> None:
-    """Append ``payload`` completely (caller holds the lock): a torn last line gets a
-    newline first, a short write loops on, a write of 0 or an error raises OSError and
-    the file goes back to its old length so no half line stays."""
+    """Append ``payload`` completely (caller holds the lock): a torn tail gets a newline first, a short
+    write loops on, a write of 0 or an error raises and restores the old length."""
     fd = os.open(path, os.O_RDWR | os.O_APPEND | os.O_CREAT, 0o600)
     try:
         old = os.fstat(fd).st_size
@@ -203,13 +199,17 @@ def _append_all(path: Path, payload: bytes) -> None:
 
 
 def _load_coverage(path: Path) -> tuple:
+    """Existing projection; a missing file starts empty, any other failure is logged and raised."""
     try:
         doc = json.loads(path.read_text(encoding="utf-8"))
-        if doc.get("schema") == COVERAGE_SCHEMA:
-            return dict(doc["sources"]), int(doc.get("unparseable_lines", 0))
-    except (OSError, ValueError, KeyError, AttributeError, TypeError):  # vnx-silent-except: a missing projection starts empty
-        pass
-    return {}, 0
+        if doc["schema"] != COVERAGE_SCHEMA or not isinstance(doc["sources"], dict):
+            raise ValueError("unexpected schema or sources")
+        return dict(doc["sources"]), int(doc.get("unparseable_lines", 0))
+    except FileNotFoundError:
+        return {}, 0
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        print(f"permission_events: cannot use {path.name} ({type(exc).__name__}), not overwriting it", file=sys.stderr)
+        raise
 
 
 def _store_coverage(path: Path, project_id: str, sources: Dict[str, Any], unparseable: int) -> None:
@@ -220,13 +220,8 @@ def _store_coverage(path: Path, project_id: str, sources: Dict[str, Any], unpars
 def write_events(
     events: Iterable[Dict[str, Any]], project_id: str, state_dir: Optional[Path] = None,
 ) -> int:
-    """Append new events (O_APPEND, fsync, under the lock); returns lines written.
-
-    Validates every event first, so a bad one writes nothing. An event_id already in the
-    ledger is skipped; existing lines are never touched. Lines that are not JSON or lack
-    an event_id are counted as ``unparseable_lines`` in the coverage record (one stderr
-    warning, no content) and never stop the ledger.
-    """
+    """Append new events under the lock; returns lines written. A bad event writes nothing, a known
+    event_id is skipped, unparseable ledger lines are counted in the coverage record (no content)."""
     clean = [_validate(e, project_id) for e in events]
     state = _state_dir(project_id, state_dir)
     path = state / "permission_events.ndjson"
