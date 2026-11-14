@@ -498,36 +498,8 @@ def build_metrics(receipts: List[Dict[str, Any]], invalid_lines: int, state_dir:
     by_worker: Dict[str, Dict[str, Any]] = defaultdict(_new_usage_bucket)
     event_counts: Dict[str, int] = defaultdict(int)
 
-    totals = _new_totals(len(receipts), invalid_lines)
-
-    # The census counts every raw line; the booking below counts one witness per
-    # dispatch attempt (OI-2468).
-    for receipt in receipts:
-        event_counts[_raw_event_type(receipt)] += 1
-
-    for receipt in _cost_lines(receipts):
-        totals["events_analyzed"] += 1
-        terminal = str(receipt.get("terminal") or "unknown").strip().upper() or "UNKNOWN"
-        provider = str(receipt.get("provider") or _infer_provider(terminal, terminal_map)).strip().lower() or "unknown"
-        model = _infer_model(receipt, terminal, terminal_map)
-        worker_key = f"{terminal}|{provider}"
-
-        input_tokens, output_tokens, total_tokens, estimated_cost = _resolve_receipt_usage(receipt, model, totals)
-
-        buckets = [by_model[model], by_terminal[terminal], by_worker[worker_key]]
-        for bucket in buckets:
-            bucket["events"] += 1
-
-        _book_tokens(totals, buckets, input_tokens, output_tokens, total_tokens)
-        _book_cost(totals, buckets, estimated_cost)
-
-    return _assemble_metrics(totals, event_counts, by_model, by_terminal, by_worker, state_dir, source_path)
-
-
-def _new_totals(receipts_total: int, invalid_lines: int) -> Dict[str, Any]:
-    """The zeroed totals block of a metrics report."""
-    return {
-        "receipts_total": receipts_total,
+    totals = {
+        "receipts_total": len(receipts),
         "invalid_receipt_lines": invalid_lines,
         "events_analyzed": 0,
         "receipts_with_known_tokens": 0,
@@ -550,96 +522,81 @@ def _new_totals(receipts_total: int, invalid_lines: int) -> Dict[str, Any]:
         }
     }
 
+    # The census counts every raw line; the booking below counts one witness per
+    # dispatch attempt (OI-2468).
+    for receipt in receipts:
+        event_counts[_raw_event_type(receipt)] += 1
 
-def _resolve_receipt_usage(receipt: Dict[str, Any], model: str, totals: Dict[str, Any]) -> Tuple[Any, Any, Any, Any]:
-    """Tokens and cost of one receipt, transcript first and receipt as fallback.
+    for receipt in _cost_lines(receipts):
+        totals["events_analyzed"] += 1
+        terminal = str(receipt.get("terminal") or "unknown").strip().upper() or "UNKNOWN"
+        provider = str(receipt.get("provider") or _infer_provider(terminal, terminal_map)).strip().lower() or "unknown"
+        model = _infer_model(receipt, terminal, terminal_map)
+        worker_key = f"{terminal}|{provider}"
 
-    Counts the outcome in ``totals["resolution_stats"]``.
-    """
-    # Phase 2: Try to resolve usage from transcript first, fallback to receipt
-    resolved_usage = resolve_usage_for_receipt(receipt)
-    resolution_status = resolved_usage["resolution_status"]
+        # Phase 2: Try to resolve usage from transcript first, fallback to receipt
+        resolved_usage = resolve_usage_for_receipt(receipt)
+        resolution_status = resolved_usage["resolution_status"]
 
-    if resolution_status == "resolved":
-        # Successfully resolved from transcript
-        totals["resolution_stats"]["resolved"] += 1
-        return (
-            resolved_usage["input_tokens"],
-            resolved_usage["output_tokens"],
-            resolved_usage["total_tokens"],
-            resolved_usage["cost_usd"],
-        )
+        if resolution_status == "resolved":
+            # Successfully resolved from transcript
+            input_tokens = resolved_usage["input_tokens"]
+            output_tokens = resolved_usage["output_tokens"]
+            total_tokens = resolved_usage["total_tokens"]
+            estimated_cost = resolved_usage["cost_usd"]
+            totals["resolution_stats"]["resolved"] += 1
+        else:
+            # Fallback to extracting from receipt (legacy behavior)
+            input_tokens, output_tokens, total_tokens = _extract_tokens(receipt)
+            estimated_cost = _estimate_cost(model, input_tokens, output_tokens)
 
-    # Fallback to extracting from receipt (legacy behavior)
-    input_tokens, output_tokens, total_tokens = _extract_tokens(receipt)
-    estimated_cost = _estimate_cost(model, input_tokens, output_tokens)
+            # Track resolution failure reason
+            if resolution_status.startswith("error"):
+                totals["resolution_stats"]["error"] += 1
+            elif resolution_status == "no_session_id":
+                totals["resolution_stats"]["no_session_id"] += 1
+            elif resolution_status == "transcript_not_found":
+                totals["resolution_stats"]["transcript_not_found"] += 1
+            elif resolution_status == "no_usage_data":
+                totals["resolution_stats"]["no_usage_data"] += 1
 
-    # Track resolution failure reason
-    if resolution_status.startswith("error"):
-        totals["resolution_stats"]["error"] += 1
-    elif resolution_status == "no_session_id":
-        totals["resolution_stats"]["no_session_id"] += 1
-    elif resolution_status == "transcript_not_found":
-        totals["resolution_stats"]["transcript_not_found"] += 1
-    elif resolution_status == "no_usage_data":
-        totals["resolution_stats"]["no_usage_data"] += 1
+            # If we got tokens from receipt, count as fallback
+            if input_tokens is not None and output_tokens is not None:
+                totals["resolution_stats"]["fallback_to_receipt"] += 1
 
-    # If we got tokens from receipt, count as fallback
-    if input_tokens is not None and output_tokens is not None:
-        totals["resolution_stats"]["fallback_to_receipt"] += 1
-    return input_tokens, output_tokens, total_tokens, estimated_cost
+        has_known_tokens = input_tokens is not None and output_tokens is not None and total_tokens is not None
 
-
-def _book_tokens(
-    totals: Dict[str, Any],
-    buckets: List[Dict[str, Any]],
-    input_tokens: Any,
-    output_tokens: Any,
-    total_tokens: Any,
-) -> None:
-    """Book one receipt's tokens (or the lack of them) into the totals and its buckets."""
-    has_known_tokens = input_tokens is not None and output_tokens is not None and total_tokens is not None
-    if has_known_tokens:
-        totals["receipts_with_known_tokens"] += 1
-        totals["input_tokens"] += int(input_tokens)
-        totals["output_tokens"] += int(output_tokens)
-        totals["total_tokens"] += int(total_tokens)
+        buckets = [by_model[model], by_terminal[terminal], by_worker[worker_key]]
         for bucket in buckets:
-            bucket["receipts_with_known_tokens"] += 1
-            bucket["input_tokens"] += int(input_tokens)
-            bucket["output_tokens"] += int(output_tokens)
-            bucket["total_tokens"] += int(total_tokens)
-    else:
-        totals["receipts_with_unknown_tokens"] += 1
-        for bucket in buckets:
-            bucket["receipts_with_unknown_tokens"] += 1
+            bucket["events"] += 1
 
+        if has_known_tokens:
+            totals["receipts_with_known_tokens"] += 1
+            totals["input_tokens"] += int(input_tokens)
+            totals["output_tokens"] += int(output_tokens)
+            totals["total_tokens"] += int(total_tokens)
+            for bucket in buckets:
+                bucket["receipts_with_known_tokens"] += 1
+                bucket["input_tokens"] += int(input_tokens)
+                bucket["output_tokens"] += int(output_tokens)
+                bucket["total_tokens"] += int(total_tokens)
+        else:
+            totals["receipts_with_unknown_tokens"] += 1
+            for bucket in buckets:
+                bucket["receipts_with_unknown_tokens"] += 1
 
-def _book_cost(totals: Dict[str, Any], buckets: List[Dict[str, Any]], estimated_cost: Any) -> None:
-    """Book one receipt's estimated cost (or an unknown cost) into the totals and its buckets."""
-    if estimated_cost is None:
-        totals["receipts_with_unknown_cost"] += 1
-        for bucket in buckets:
-            bucket["receipts_with_unknown_cost"] += 1
-    else:
-        totals["receipts_with_estimated_cost"] += 1
-        totals["estimated_cost_usd"] += estimated_cost
-        for bucket in buckets:
-            bucket["receipts_with_estimated_cost"] += 1
-            bucket["estimated_cost_usd"] += estimated_cost
+        if estimated_cost is None:
+            totals["receipts_with_unknown_cost"] += 1
+            for bucket in buckets:
+                bucket["receipts_with_unknown_cost"] += 1
+        else:
+            totals["receipts_with_estimated_cost"] += 1
+            totals["estimated_cost_usd"] += estimated_cost
+            for bucket in buckets:
+                bucket["receipts_with_estimated_cost"] += 1
+                bucket["estimated_cost_usd"] += estimated_cost
 
-
-def _assemble_metrics(
-    totals: Dict[str, Any],
-    event_counts: Dict[str, int],
-    by_model: Dict[str, Dict[str, Any]],
-    by_terminal: Dict[str, Dict[str, Any]],
-    by_worker: Dict[str, Dict[str, Any]],
-    state_dir: Path,
-    source_path: Path,
-) -> Dict[str, Any]:
-    """The report dict of ``build_metrics`` from the booked totals and buckets."""
-    return {
+    metrics = {
         "generated_at_utc": datetime.now(timezone.utc).isoformat(),
         "version": "1.0",
         "source": {
@@ -661,6 +618,7 @@ def _assemble_metrics(
             "No external billing APIs are queried.",
         ],
     }
+    return metrics
 
 
 def format_human(metrics: Dict[str, Any]) -> str:

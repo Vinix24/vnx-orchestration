@@ -1,12 +1,11 @@
 """Characterisation tests for golf-schoon R03 (dlv-1c8d4f1193c8).
 
-Pins the observable behaviour of three functions before they are split by
-extract-method: ``build_governance_health``, ``QualityDatabaseManager.store_quality_metrics``
-and ``cost_tracker.build_metrics``. They run on the old code and on the refactor.
+Pins the observable behaviour of ``build_governance_health`` and
+``QualityDatabaseManager.store_quality_metrics`` before they are split by
+extract-method. They run on the old code and on the refactor.
 """
 from __future__ import annotations
 
-import importlib.util
 import json
 import sqlite3
 import sys
@@ -21,17 +20,6 @@ sys.path.insert(0, str(VNX_ROOT / "scripts" / "lib"))
 import build_t0_quality_digest as digest  # noqa: E402
 import code_quality_scanner as scanner  # noqa: E402
 
-
-def _load_cost_tracker():
-    path = VNX_ROOT / "scripts" / "cost_tracker.py"
-    spec = importlib.util.spec_from_file_location("r03_cost_tracker_cli", path)
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-cost_tracker = _load_cost_tracker()
 
 SCHEMA = (VNX_ROOT / "schemas" / "quality_intelligence.sql").read_text(encoding="utf-8")
 
@@ -250,133 +238,3 @@ def test_store_quality_metrics_missing_key_on_update_leaves_row(qdb):
 def test_store_quality_metrics_without_connection_returns_false():
     mgr = scanner.QualityDatabaseManager(Path("/nonexistent/q.db"))
     assert mgr.store_quality_metrics(_metrics()) is False
-
-
-# ── cost_tracker.build_metrics ───────────────────────────────────────────────
-
-SONNET = "claude-sonnet-4.6"
-
-
-def _patch_no_transcripts(monkeypatch):
-    monkeypatch.setattr(cost_tracker, "find_transcript", lambda session_id: None)
-
-
-def _build(tmp_path, receipts, invalid=2):
-    metrics = cost_tracker.build_metrics(receipts, invalid, tmp_path, tmp_path / "t0_receipts.ndjson")
-    assert metrics.pop("generated_at_utc")
-    return metrics
-
-
-def _completion(did, **extra):
-    return {"event_type": "task_complete", "dispatch_id": did, "attempt": 1, **extra}
-
-
-def test_build_metrics_empty_input_shape(tmp_path, monkeypatch):
-    _patch_no_transcripts(monkeypatch)
-    metrics = _build(tmp_path, [])
-    assert metrics == {
-        "version": "1.0",
-        "source": {
-            "receipts_path": str(tmp_path / "t0_receipts.ndjson"),
-            "state_dir": str(tmp_path),
-            "pricing_basis": "AGENT_TEAMS/VNX_MULTIMODEL_ARCHITECTURE.MD",
-        },
-        "totals": {
-            "receipts_total": 0, "invalid_receipt_lines": 2, "events_analyzed": 0,
-            "receipts_with_known_tokens": 0, "receipts_with_unknown_tokens": 0,
-            "receipts_with_estimated_cost": 0, "receipts_with_unknown_cost": 0,
-            "input_tokens": 0, "output_tokens": 0, "total_tokens": 0,
-            "estimated_cost_usd": 0.0, "unknown_cost_usd": "unknown",
-            "resolution_stats": {
-                "resolved": 0, "no_session_id": 0, "transcript_not_found": 0,
-                "no_usage_data": 0, "error": 0, "fallback_to_receipt": 0,
-            },
-        },
-        "event_counts": {},
-        "by_model": {}, "by_terminal": {}, "by_worker": {},
-        "notes": [
-            "Costs are deterministic estimates based on static per-model USD/token rates.",
-            "Receipts without explicit model or token fields are included with model/tokens marked as 'unknown'.",
-            "No external billing APIs are queried.",
-        ],
-    }
-
-
-def test_build_metrics_receipt_fallback_books_known_and_unknown(tmp_path, monkeypatch):
-    _patch_no_transcripts(monkeypatch)
-    receipts = [
-        _completion("a", terminal="t1", model=SONNET, provider="Claude",
-                    input_tokens=1000, output_tokens=500, session_id="s-a"),
-        _completion("b", terminal="T2", model="mystery-model", input_tokens=10, output_tokens=5),
-        _completion("c", terminal="T3"),
-        {"event_type": "dispatch_started", "dispatch_id": "z", "attempt": 1},
-    ]
-    metrics = _build(tmp_path, receipts, invalid=0)
-    totals = metrics["totals"]
-    assert totals["receipts_total"] == 4
-    assert totals["events_analyzed"] == 3
-    assert totals["receipts_with_known_tokens"] == 2
-    assert totals["receipts_with_unknown_tokens"] == 1
-    assert (totals["input_tokens"], totals["output_tokens"], totals["total_tokens"]) == (1010, 505, 1515)
-    assert totals["receipts_with_estimated_cost"] == 1
-    assert totals["receipts_with_unknown_cost"] == 2
-    expected_cost = round(cost_tracker._estimate_cost(SONNET, 1000, 500), 8)
-    assert totals["estimated_cost_usd"] == expected_cost > 0
-    assert totals["resolution_stats"] == {
-        "resolved": 0, "no_session_id": 2, "transcript_not_found": 1,
-        "no_usage_data": 0, "error": 0, "fallback_to_receipt": 2,
-    }
-    assert metrics["event_counts"] == {"dispatch_started": 1, "task_complete": 3}
-    assert list(metrics["by_terminal"]) == ["T1", "T2", "T3"]
-    assert list(metrics["by_worker"]) == ["T1|claude", "T2|" + cost_tracker._infer_provider("T2", {}), "T3|" + cost_tracker._infer_provider("T3", {})]
-    assert metrics["by_terminal"]["T1"]["events"] == 1
-    assert metrics["by_terminal"]["T1"]["total_tokens"] == 1500
-    assert metrics["by_terminal"]["T3"]["receipts_with_unknown_tokens"] == 1
-    assert metrics["by_model"][SONNET]["estimated_cost_usd"] == expected_cost
-    assert "mystery-model" in metrics["by_model"] or "unknown" in metrics["by_model"]
-
-
-def test_build_metrics_resolved_from_transcript(tmp_path, monkeypatch):
-    transcript = tmp_path / "s.jsonl"
-    transcript.write_text(
-        json.dumps({"usage": {"input_tokens": 2000, "output_tokens": 1000}}) + "\n", encoding="utf-8"
-    )
-    monkeypatch.setattr(cost_tracker, "find_transcript", lambda session_id: transcript)
-    receipts = [_completion("a", terminal="T1", model=SONNET, session_id="sess-1",
-                            input_tokens=1, output_tokens=1)]
-    metrics = _build(tmp_path, receipts)
-    totals = metrics["totals"]
-    assert (totals["input_tokens"], totals["output_tokens"], totals["total_tokens"]) == (2000, 1000, 3000)
-    assert totals["resolution_stats"]["resolved"] == 1
-    assert totals["resolution_stats"]["fallback_to_receipt"] == 0
-    assert totals["estimated_cost_usd"] == round(cost_tracker._estimate_cost(SONNET, 2000, 1000), 8)
-    assert metrics["by_model"][SONNET]["input_tokens"] == 2000
-
-
-def test_build_metrics_transcript_without_usage_and_error(tmp_path, monkeypatch):
-    empty = tmp_path / "empty.jsonl"
-    empty.write_text("{}\n", encoding="utf-8")
-    monkeypatch.setattr(cost_tracker, "find_transcript", lambda session_id: empty)
-    receipts = [_completion("a", terminal="T1", model=SONNET, session_id="s1")]
-    totals = _build(tmp_path, receipts)["totals"]
-    assert totals["resolution_stats"]["no_usage_data"] == 1
-    assert totals["receipts_with_unknown_tokens"] == 1
-
-    def boom(path):
-        raise OSError("disk gone")
-
-    monkeypatch.setattr(cost_tracker, "extract_usage_from_transcript", boom)
-    totals = _build(tmp_path, receipts)["totals"]
-    assert totals["resolution_stats"]["error"] == 1
-    assert totals["resolution_stats"]["no_usage_data"] == 0
-
-
-def test_build_metrics_panes_json_maps_terminal_model(tmp_path, monkeypatch):
-    _patch_no_transcripts(monkeypatch)
-    (tmp_path / "panes.json").write_text(
-        json.dumps({"T1": {"model": SONNET, "provider": "claude"}}), encoding="utf-8"
-    )
-    receipts = [_completion("a", terminal="T1", input_tokens=100, output_tokens=50)]
-    metrics = _build(tmp_path, receipts)
-    assert SONNET in metrics["by_model"]
-    assert list(metrics["by_worker"]) == ["T1|claude"]

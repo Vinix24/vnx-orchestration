@@ -470,54 +470,54 @@ class QualityDatabaseManager:
     def _update_quality_row(self, cursor, metrics: Dict) -> None:
         """Update the existing record of ``metrics['file_path']``."""
         cursor.execute("""
-            UPDATE vnx_code_quality SET
-                project_root = ?,
-                relative_path = ?,
-                line_count = ?,
-                code_lines = ?,
-                comment_lines = ?,
-                blank_lines = ?,
-                complexity_score = ?,
-                cyclomatic_complexity = ?,
-                cognitive_complexity = ?,
-                function_count = ?,
-                class_count = ?,
-                import_count = ?,
-                max_function_length = ?,
-                max_nesting_depth = ?,
-                has_tests = ?,
-                test_coverage = ?,
-                has_docstrings = ?,
-                docstring_coverage = ?,
-                quality_warnings = ?,
-                critical_issues = ?,
-                warning_issues = ?,
-                info_issues = ?,
-                suggested_track = ?,
-                track_confidence = ?,
-                language = ?,
-                framework = ?,
-                last_scan = CURRENT_TIMESTAMP,
-                last_modified = ?,
-                scan_version = ?
-            WHERE file_path = ?
-        """, self._quality_values(metrics) + (metrics['file_path'],))
+                    UPDATE vnx_code_quality SET
+                        project_root = ?,
+                        relative_path = ?,
+                        line_count = ?,
+                        code_lines = ?,
+                        comment_lines = ?,
+                        blank_lines = ?,
+                        complexity_score = ?,
+                        cyclomatic_complexity = ?,
+                        cognitive_complexity = ?,
+                        function_count = ?,
+                        class_count = ?,
+                        import_count = ?,
+                        max_function_length = ?,
+                        max_nesting_depth = ?,
+                        has_tests = ?,
+                        test_coverage = ?,
+                        has_docstrings = ?,
+                        docstring_coverage = ?,
+                        quality_warnings = ?,
+                        critical_issues = ?,
+                        warning_issues = ?,
+                        info_issues = ?,
+                        suggested_track = ?,
+                        track_confidence = ?,
+                        language = ?,
+                        framework = ?,
+                        last_scan = CURRENT_TIMESTAMP,
+                        last_modified = ?,
+                        scan_version = ?
+                    WHERE file_path = ?
+                """, self._quality_values(metrics) + (metrics['file_path'],))
 
     def _insert_quality_row(self, cursor, metrics: Dict) -> None:
         """Insert a new record for ``metrics['file_path']``."""
         cursor.execute("""
-            INSERT INTO vnx_code_quality (
-                file_path, project_root, relative_path,
-                line_count, code_lines, comment_lines, blank_lines,
-                complexity_score, cyclomatic_complexity, cognitive_complexity,
-                function_count, class_count, import_count,
-                max_function_length, max_nesting_depth,
-                has_tests, test_coverage, has_docstrings, docstring_coverage,
-                quality_warnings, critical_issues, warning_issues, info_issues,
-                suggested_track, track_confidence,
-                language, framework, last_modified, scan_version
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (metrics['file_path'],) + self._quality_values(metrics))
+                    INSERT INTO vnx_code_quality (
+                        file_path, project_root, relative_path,
+                        line_count, code_lines, comment_lines, blank_lines,
+                        complexity_score, cyclomatic_complexity, cognitive_complexity,
+                        function_count, class_count, import_count,
+                        max_function_length, max_nesting_depth,
+                        has_tests, test_coverage, has_docstrings, docstring_coverage,
+                        quality_warnings, critical_issues, warning_issues, info_issues,
+                        suggested_track, track_confidence,
+                        language, framework, last_modified, scan_version
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (metrics['file_path'],) + self._quality_values(metrics))
 
     def record_scan_history(self, scan_type: str, files_scanned: int, files_changed: int, issues_found: int, duration: float) -> int:
         """Record scan history entry"""
