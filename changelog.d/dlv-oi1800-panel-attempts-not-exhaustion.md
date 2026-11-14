@@ -1,0 +1,1 @@
+- Stop-conditions: failed attempts from the panel lane (deliberation panel, plan-gate seats, tiebreak) no longer count toward `provider_exhausted` for a build or gate dispatch, and the door names how many it left out (OI-1800).

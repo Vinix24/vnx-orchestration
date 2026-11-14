@@ -2651,6 +2651,21 @@ def _project_state_verdicts(spec: DispatchSpec, *, state_dir: Path) -> "tuple[Co
     return tuple(verdict for verdict in verdicts if verdict is not None)
 
 
+def _print_panel_lane_exclusion(results) -> None:
+    """One audit line naming how many panel-lane attempts provider_exhausted left out (OI-1800)."""
+    for r in results:
+        excluded = r.evidence.get("panel_lane_excluded") if r.check_id == "provider_exhausted" else None
+        if not isinstance(excluded, dict) or not excluded:
+            continue
+        per_provider = ", ".join(f"{provider}={count}" for provider, count in sorted(excluded.items()))
+        print(
+            f"[dispatch_cli] [stop-conditions] provider_exhausted left out "
+            f"{sum(excluded.values())} panel-lane attempt(s) ({per_provider}): panel, plan-gate "
+            f"and tiebreak attempts do not count for a build or gate dispatch (OI-1800)",
+            file=sys.stderr,
+        )
+
+
 def _check_stop_conditions_verdict(
     *,
     state_dir: Path,
@@ -2658,6 +2673,7 @@ def _check_stop_conditions_verdict(
     dry_run: bool = False,
     relevant_spec_providers: Optional[Set[str]] = None,
     relevant_gates: Optional[Set[str]] = None,
+    dispatch_id: str = "",
 ) -> Optional[ConstraintVerdict]:
     """Measure stop_conditions.run_all_checks() live and return a BLOCKING
     ConstraintVerdict iff a check in _STOP_CONDITIONS_BLOCKING_CHECK_IDS is
@@ -2674,9 +2690,13 @@ def _check_stop_conditions_verdict(
     check to the sub-entities that are actually relevant to THIS dispatch;
     everything scoped out is folded into the WARN-only report, never
     dropped.
+
+    OI-1800: unless ``dispatch_id`` is itself a panel-lane id, panel-lane
+    attempts leave provider_exhausted; the door names how many in one line.
     """
     from stop_conditions import (  # noqa: PLC0415
         CheckStatus,
+        is_panel_lane_dispatch,
         ledger_label_is_relevant,
         run_all_checks,
         triggered_entity_labels,
@@ -2687,7 +2707,7 @@ def _check_stop_conditions_verdict(
         # write_halt=False: a measurement pass never writes on its own — see
         # point 5 above and the explicit write_halt_file call further down,
         # gated on an ACTUAL blocking-eligible trigger on a real fire.
-        results = run_all_checks(state_dir=state_dir, write_halt=False)
+        results = run_all_checks(state_dir=state_dir, write_halt=False, exclude_panel_lane=not is_panel_lane_dispatch(dispatch_id))
     except Exception as exc:  # vnx-silent-except: a bug in the checker must never itself become an outage of the whole door — degrade to "not measured", never crash the fire
         print(
             f"[dispatch_cli] [WARN] stop-conditions measurement raised "
@@ -2696,6 +2716,7 @@ def _check_stop_conditions_verdict(
         )
         return None
 
+    _print_panel_lane_exclusion(results)
     triggered = [r for r in results if r.status == CheckStatus.TRIGGERED]
     unmeasurable = [r.check_id for r in results if r.status == CheckStatus.UNMEASURABLE]
     if unmeasurable:
@@ -3066,7 +3087,7 @@ def build_runtime_snapshot(
         override_reason=stop_conditions_override_reason,
         dry_run=dry_run,
         relevant_spec_providers=_relevant_spec_providers,
-        relevant_gates=_relevant_gates,
+        relevant_gates=_relevant_gates, dispatch_id=spec.dispatch_id,
     )
     if stop_verdict is not None:
         constraint_verdicts = constraint_verdicts + (stop_verdict,)
