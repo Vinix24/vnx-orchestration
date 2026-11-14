@@ -1,0 +1,1 @@
+- refactor: `FPCCertificationChecksMixin._certify_task_class_routing` and `emit_dispatch_receipt` under 100 executable lines by extract-method, behaviour unchanged (golf schoon R19).
