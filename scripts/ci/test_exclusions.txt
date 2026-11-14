@@ -107,6 +107,7 @@
 # tables; they now hand auto_apply the real 0020 alone. 9/9 green solo.
 tests/test_agent_stream_sse.py  # OI-1227: hangs — exceeds 90s wall-cap solo (per-test --timeout=180), no output within cap
 tests/test_architecture_doc_drift.py  # ADR-053 (tsk-5): NOT red — this whole file already runs as its own blocking Profile A step "Run architecture doc drift guard unit tests" (.github/workflows/vnx-ci.yml:292) on every PR; the parallel-phase copy cost ~8 s and proved nothing extra. tests/test_ci_gates_still_exist.py fails if that step (or its command) disappears.
+tests/test_billing_safety.py  # OI-951: red on the Linux runner, run 43587468816: key patterns in 4 test files (test_deepseek_harness_spawn, test_analyzer_deepseek_flash, test_glm_harness_spawn_credential_scrub, test_litellm_spawn_credential_scrub); passes in a worktree under .vnx-data/ because _SKIP_DIRS matches the absolute path
 tests/test_burnin_certification.py  # hangs without VNX_HEADLESS_CLI=echo; covered by burn-in-headless.yml
 tests/test_cli_init.py  # OI-1420 gemeten 21-08: slaagt solo, valt onder volle sweep (29 failed) op ADR-007 fail-closed: project_id conflict for init backfill (marker=<testnaam>, env:VNX_PROJECT_ID='vnx-dev')
 tests/test_constraint_enforcer.py  # OI-952: order/load-dependent flake, passes solo on both main and branch (OI-658 class)
@@ -119,6 +120,7 @@ tests/test_dashboard_sse_empty_file.py  # OI-1227: exceeds 90s wall-cap solo (pe
 # tests/test_horizon_schema_migration_fix.py — REPAIRED (dispatch 20260930-rel170-auto-apply-fail-closed):
 # the pre-27 fixture relied on auto_apply silently skipping 0027-0031 and the
 # asserts still expected 31 after the OI-1169 sweep. 35/35 green solo.
+tests/test_installer_no_template_leak.py  # OI-1227: red on the Linux runner, run 43587468816: test_no_users_prefix_on_linux_ci fails on /Users/ in .vnx/docs; the Linux-only test skips on macOS
 tests/test_pool_provider_mix_integration.py  # OI-2589: red on the Linux runner — post-spawn registration writes to '/events' (run 43580191462)
 tests/test_quickstart_validation.py  # OI-1420 gemeten 21-08: slaagt solo, valt onder volle sweep (2 failed) op hetzelfde ADR-007 init-backfill project_id-conflict (env:VNX_PROJECT_ID='vnx-dev'); mode.json en .vnx-data/state worden nooit aangemaakt omdat `vnx init` fail-closed weigert
 tests/test_repo_map.py  # OI-1420 + D1 (OI-2589) gemeten run 42318233090 op ff7ef8d8 (Profile A parallel, 13 failed): 11x NameError '_TSParser' (TestExtractPythonSymbols, TestBuildDependencyGraph) en 2x ModuleNotFoundError 'networkx' (TestPersonalizedBoost); de runner heeft geen tree-sitter en geen networkx (bewust niet geïnstalleerd, zie profile-a-prelude/action.yml), lokaal groen: omgeving, geen codefout (CI image-klasse)
