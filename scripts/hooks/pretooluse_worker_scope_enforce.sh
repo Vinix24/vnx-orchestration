@@ -41,6 +41,13 @@ fi
 
 # Fail open on any core error: a broken hook must never block or error out a
 # legitimate tool call. Block/allow is communicated via JSON stdout only.
-python3 "$CORE" || true
+# Interpreter: pinned (VNX_PYTHON > repo .venv > homebrew 3.12 > python3) so the
+# policy's PyYAML import does not depend on what bare python3 points at (OI-2819).
+PY="python3"
+if [[ -f "${HOOK_DIR}/lib_hook_python.sh" ]]; then
+  # shellcheck source=/dev/null
+  source "${HOOK_DIR}/lib_hook_python.sh" && PY="$(vnx_hook_python "${HOOK_DIR}/../..")" || PY="python3"
+fi
+"$PY" "$CORE" || true
 
 exit 0
