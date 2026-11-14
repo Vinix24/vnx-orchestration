@@ -5,7 +5,7 @@ Operator decision 2026-09-25: at 500K context a T0 MUST rotate to a fresh sessio
 flight may be finished; nothing new is started. A running /goal carries over to the successor.
 
 Registered on UserPromptSubmit, PreToolUse and Stop. T0 only. A session is guarded when all
-three rules hold (``is_guarded_session``, plan t0-guard-gebruikersniveau), and is a silent
+three rules hold (``guarded_root``, plan t0-guard-gebruikersniveau), and is a silent
 no-op otherwise:
 
   1. a VNX project with a T0: the root of the session (``hook_coverage.session_project_root``:
@@ -104,11 +104,6 @@ def guarded_root(cwd: str, env: Dict[str, str]) -> Optional[Path]:
     if _DISPATCH_WORKTREE_CWD_RE.search((cwd or "").replace("\\", "/")):
         return None
     return hook_coverage.session_project_root(cwd, env)
-
-
-def is_guarded_session(cwd: str, env: Dict[str, str]) -> bool:
-    """Rules 1-3 (module docstring)."""
-    return guarded_root(cwd, env) is not None
 
 
 def project_covers(event: str, payload: dict, env: Dict[str, str]) -> bool:

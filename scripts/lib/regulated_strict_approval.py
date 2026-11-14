@@ -34,10 +34,6 @@ Cross-profile isolation (per contract Section 6):
   - This module is only activated for regulated_strict dispatches.
   - No side-effects on non-regulated governance paths.
 
-Feature flag: VNX_REGULATED_STRICT_ENABLED
-  0 (default) = profile defined but not activatable (audit_gate missing)
-  1 = pilot mode — explicit enabling required
-
 Usage (record a pre-execution approval):
     policy = regulated_strict_policy()
     record = policy.record_approval(
@@ -59,21 +55,11 @@ Usage (check closeout requirements):
 
 from __future__ import annotations
 
-import os
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from typing import List, Optional
-
-
-# ---------------------------------------------------------------------------
-# Feature flag
-# ---------------------------------------------------------------------------
-
-def is_regulated_strict_enabled() -> bool:
-    """Check if regulated_strict profile is enabled (pilot mode)."""
-    return os.environ.get("VNX_REGULATED_STRICT_ENABLED", "0") == "1"
 
 
 # ---------------------------------------------------------------------------

@@ -97,7 +97,8 @@ matches `Bash|Skill|SlashCommand` only.
 
 ## Who is guarded
 
-A session is guarded only when all three rules hold (`t0_context_guard.is_guarded_session`).
+A session is guarded only when all three rules hold (`t0_context_guard.guarded_root`, which
+`t0_context_guard.handle` calls first: no root, no guard).
 
 1. **A VNX project with a T0.** The root of the payload `cwd` has a `.vnx-project-id` whose
    first line is not empty, and a `.claude/terminals/T0/CLAUDE.md`. The root is the nearest
