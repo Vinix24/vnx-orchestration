@@ -1051,6 +1051,62 @@
       "symbol": "_receipt_exists_for_dispatch"
     },
     {
+      "file": "tests/test_envelope_govern_transient_api_error.py",
+      "line": 20,
+      "mechanism": "direct-call",
+      "module_target": "envelope_govern",
+      "symbol": "_govern"
+    },
+    {
+      "file": "tests/test_envelope_govern_transient_api_error.py",
+      "line": 21,
+      "mechanism": "direct-call",
+      "module_target": "envelope_govern_support",
+      "symbol": "transient_api_error_line"
+    },
+    {
+      "file": "tests/test_envelope_govern_transient_api_error.py",
+      "line": 22,
+      "mechanism": "direct-call",
+      "module_target": "envelope_types",
+      "symbol": "EnvelopeSpec"
+    },
+    {
+      "file": "tests/test_envelope_govern_transient_api_error.py",
+      "line": 22,
+      "mechanism": "direct-call",
+      "module_target": "envelope_types",
+      "symbol": "_AdapterResult"
+    },
+    {
+      "file": "tests/test_envelope_govern_transient_api_error.py",
+      "line": 50,
+      "mechanism": "patch-string",
+      "module_target": "envelope_govern",
+      "symbol": "_archive_dispatch_events"
+    },
+    {
+      "file": "tests/test_envelope_govern_transient_api_error.py",
+      "line": 50,
+      "mechanism": "patch-string",
+      "module_target": "envelope_govern",
+      "symbol": "_clear_dispatch_events"
+    },
+    {
+      "file": "tests/test_envelope_govern_transient_api_error.py",
+      "line": 52,
+      "mechanism": "patch-string",
+      "module_target": "envelope_govern",
+      "symbol": "_receipt_exists_for_dispatch"
+    },
+    {
+      "file": "tests/test_envelope_govern_transient_api_error.py",
+      "line": 65,
+      "mechanism": "logger-name",
+      "module_target": "envelope_govern",
+      "symbol": ""
+    },
+    {
       "file": "tests/test_envelope_governed_record.py",
       "line": 29,
       "mechanism": "direct-call",
@@ -2228,35 +2284,35 @@
     },
     {
       "file": "tests/test_plan_gate_panel.py",
-      "line": 34,
+      "line": 36,
       "mechanism": "direct-call",
       "module_target": "envelope_types",
       "symbol": "_AdapterResult"
     },
     {
       "file": "tests/test_plan_gate_panel.py",
-      "line": 1357,
+      "line": 1367,
       "mechanism": "patch.object-attr",
       "module_target": "envelope_adapters_claude",
       "symbol": "ClaudeSubprocessAdapter.run"
     },
     {
       "file": "tests/test_plan_gate_panel.py",
-      "line": 1358,
+      "line": 1368,
       "mechanism": "direct-call",
       "module_target": "envelope_adapters_claude",
       "symbol": "ClaudeSubprocessAdapter"
     },
     {
       "file": "tests/test_plan_gate_panel.py",
-      "line": 1702,
+      "line": 1712,
       "mechanism": "patch.object-attr",
       "module_target": "envelope_adapters_claude",
       "symbol": "ClaudeSubprocessAdapter.run"
     },
     {
       "file": "tests/test_plan_gate_panel.py",
-      "line": 1703,
+      "line": 1713,
       "mechanism": "direct-call",
       "module_target": "envelope_adapters_claude",
       "symbol": "ClaudeSubprocessAdapter"
@@ -2312,35 +2368,35 @@
     },
     {
       "file": "tests/test_provider_dispatch_worktree_isolation.py",
-      "line": 1183,
+      "line": 1200,
       "mechanism": "direct-call",
       "module_target": "dispatch_envelope",
       "symbol": "_AdapterResult"
     },
     {
       "file": "tests/test_provider_dispatch_worktree_isolation.py",
-      "line": 1183,
+      "line": 1200,
       "mechanism": "direct-call",
       "module_target": "dispatch_envelope",
       "symbol": "_enforce_push_pr"
     },
     {
       "file": "tests/test_provider_dispatch_worktree_isolation.py",
-      "line": 1274,
+      "line": 1291,
       "mechanism": "direct-call",
       "module_target": "dispatch_envelope",
       "symbol": "_AdapterResult"
     },
     {
       "file": "tests/test_provider_dispatch_worktree_isolation.py",
-      "line": 1274,
+      "line": 1291,
       "mechanism": "direct-call",
       "module_target": "dispatch_envelope",
       "symbol": "_enforce_push_pr"
     },
     {
       "file": "tests/test_provider_dispatch_worktree_isolation.py",
-      "line": 1290,
+      "line": 1307,
       "mechanism": "logger-name",
       "module_target": "dispatch_envelope",
       "symbol": ""
@@ -2466,7 +2522,7 @@
     },
     {
       "file": "tests/test_receipt_v2_pr4_wiring.py",
-      "line": 453,
+      "line": 458,
       "mechanism": "direct-call",
       "module_target": "dispatch_envelope",
       "symbol": "_verification_from_report"
@@ -2774,12 +2830,14 @@
     "envelope_govern_support::_archive_late_dispatch_events",
     "envelope_govern_support::_clear_dispatch_events",
     "envelope_govern_support::_is_lane_completion_receipt",
+    "envelope_govern_support::_name_transient_api_error",
     "envelope_govern_support::_publish_phantom_verdict",
     "envelope_govern_support::_receipt_exists_for_dispatch",
     "envelope_govern_support::_resolve_fix_forward_diff",
     "envelope_govern_support::_resolve_phantom_diff",
     "envelope_govern_support::_unknown_verification",
     "envelope_govern_support::_verification_from_report",
+    "envelope_govern_support::transient_api_error_line",
     "envelope_prepare::_prepare",
     "envelope_prepare::_record_integrity",
     "envelope_prepare::_verify_role_application",
