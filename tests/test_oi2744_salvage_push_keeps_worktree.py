@@ -135,16 +135,17 @@ def test_successful_salvage_push_removes_worktree_as_before(repo):
     assert not wt.exists()
 
 
-def test_plain_committed_worktree_is_still_removed(repo):
-    """Only a salvage commit triggers the keep; an ordinary local commit is reaped as before."""
+def test_published_committed_worktree_is_still_removed(repo):
+    """A committed worktree whose HEAD is on origin is reaped as before (OI-2811 keeps only unpublished HEADs)."""
     wt = repo.worktree("t6", dirty=True)
     _git(wt, "commit", "-am", "worker: edit")
+    _git(wt, "push", "origin", "dispatch/t6")
     _teardown(repo, "t6")
     assert not wt.exists()
 
 
-def test_unpublished_salvage_commit_fails_closed_on_unreadable_remote_check(repo):
+def test_unpublished_head_commit_fails_closed_on_unreadable_remote_check(repo):
     wt = repo.worktree("t7", dirty=True)
     _git(wt, "commit", "-am", f"{pe.SALVAGE_COMMIT_SUBJECT_PREFIX} test")
-    assert pe.unpublished_salvage_commit(wt) == _git(wt, "rev-parse", "HEAD").stdout.strip()
-    assert pe.unpublished_salvage_commit(repo.root / "missing") is None
+    assert pe.unpublished_head_commit(wt) == _git(wt, "rev-parse", "HEAD").stdout.strip()
+    assert pe.unpublished_head_commit(repo.root / "missing") is None

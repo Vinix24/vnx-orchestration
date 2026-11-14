@@ -1,1 +1,2 @@
 - test: tests/test_week_1_skills.py resolves this repo's root and asserts on the current skill and dispatcher layout instead of returning True/False (OI-2818)
+- test: merged main into this branch (the OI-2589 batch k edit to the old tests/test_week_1_skills.py is already contained in the rewrite) (OI-2818)

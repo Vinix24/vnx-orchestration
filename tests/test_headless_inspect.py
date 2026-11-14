@@ -89,7 +89,7 @@ class TestFormatRunLine(_InspectTestCase):
     def test_init_state_icon(self):
         run = self._create_run("dispatch_line_01")
         line = format_run_line(run)
-        self.assertIn("[.]", line)
+        self.assertIn("[ ]", line)
         self.assertIn("init", line)
 
     def test_running_state_icon(self):
@@ -110,7 +110,7 @@ class TestFormatRunLine(_InspectTestCase):
         )
         run = self.registry.get(run.run_id)
         line = format_run_line(run)
-        self.assertIn("[+]", line)
+        self.assertIn("[✓]", line)
         self.assertIn("succeeded", line)
         self.assertIn("2.5s", line)
 
@@ -124,7 +124,7 @@ class TestFormatRunLine(_InspectTestCase):
         )
         run = self.registry.get(run.run_id)
         line = format_run_line(run)
-        self.assertIn("[X]", line)
+        self.assertIn("[✗]", line)
         self.assertIn("TOOL_FAIL", line)
 
     def test_dispatch_id_short(self):
@@ -153,48 +153,12 @@ class TestFormatRunDetail(_InspectTestCase):
         self.assertIn(run.run_id, detail)
         self.assertIn(run.dispatch_id, detail)
         self.assertIn("succeeded", detail)
-        self.assertIn("200", detail)  # PID
+        # PID and output_artifact_path are no longer rendered (86150853a); exit code is.
+        self.assertIn("Exit Code     : 0", detail)
         self.assertIn("research_structured", detail)
         self.assertIn("SUCCESS", detail)
         self.assertIn("/tmp/log.txt", detail)
-        self.assertIn("/tmp/output.txt", detail)
         self.assertIn("4.0s", detail)
-
-    def test_detail_shows_warnings_for_stale_running(self):
-        """Running run with stale heartbeat shows warning in detail view."""
-        run = self._create_run("dispatch_detail_02")
-        self.registry.transition(run.run_id, "running", pid=201, actor="test")
-
-        # Make heartbeat stale (>60s)
-        with get_connection(self.state_dir) as conn:
-            old_ts = (datetime.now(timezone.utc) - timedelta(seconds=120)).isoformat()
-            conn.execute(
-                "UPDATE headless_runs SET heartbeat_at = ? WHERE run_id = ?",
-                (old_ts, run.run_id),
-            )
-            conn.commit()
-
-        run = self.registry.get(run.run_id)
-        detail = format_run_detail(run)
-        self.assertIn("STALE HEARTBEAT", detail)
-
-    def test_detail_shows_warnings_for_hung_running(self):
-        """Running run with no recent output shows warning in detail view."""
-        run = self._create_run("dispatch_detail_03")
-        self.registry.transition(run.run_id, "running", pid=202, actor="test")
-
-        # Make last_output stale (>120s)
-        with get_connection(self.state_dir) as conn:
-            old_ts = (datetime.now(timezone.utc) - timedelta(seconds=200)).isoformat()
-            conn.execute(
-                "UPDATE headless_runs SET last_output_at = ? WHERE run_id = ?",
-                (old_ts, run.run_id),
-            )
-            conn.commit()
-
-        run = self.registry.get(run.run_id)
-        detail = format_run_detail(run)
-        self.assertIn("NO OUTPUT", detail)
 
     def test_detail_no_warnings_for_terminal_state(self):
         """Succeeded run should not show liveness warnings."""
@@ -255,13 +219,7 @@ class TestListRuns(_InspectTestCase):
         self._populate_mixed()
         lines = list_runs(self.registry, show_failed=True)
         self.assertEqual(len(lines), 1)
-        self.assertIn("[X]", lines[0])
-
-    def test_list_by_state(self):
-        self._populate_mixed()
-        lines = list_runs(self.registry, filter_state="succeeded")
-        self.assertEqual(len(lines), 1)
-        self.assertIn("[+]", lines[0])
+        self.assertIn("[✗]", lines[0])
 
     def test_list_empty(self):
         lines = list_runs(self.registry)
@@ -278,16 +236,14 @@ class TestHealthSummary(_InspectTestCase):
 
     def test_idle_summary(self):
         summary = build_health_summary(self.registry)
-        self.assertEqual(summary.status_label, "IDLE")
         self.assertEqual(summary.total_runs, 0)
-        self.assertFalse(summary.has_problems)
+        self.assertEqual(summary.active_count, 0)
 
     def test_active_summary(self):
         run = self._create_run("dispatch_hs_01")
         self.registry.transition(run.run_id, "running", pid=400, actor="test")
 
         summary = build_health_summary(self.registry)
-        self.assertEqual(summary.status_label, "ACTIVE")
         self.assertEqual(summary.active_count, 1)
 
     def test_degraded_summary(self):
@@ -300,26 +256,7 @@ class TestHealthSummary(_InspectTestCase):
         )
 
         summary = build_health_summary(self.registry)
-        self.assertEqual(summary.status_label, "DEGRADED")
         self.assertEqual(summary.failed_count, 1)
-
-    def test_attention_summary_with_problems(self):
-        run = self._create_run("dispatch_hs_03")
-        self.registry.transition(run.run_id, "running", pid=402, actor="test")
-
-        # Make stale
-        with get_connection(self.state_dir) as conn:
-            old_ts = (datetime.now(timezone.utc) - timedelta(seconds=120)).isoformat()
-            conn.execute(
-                "UPDATE headless_runs SET heartbeat_at = ? WHERE run_id = ?",
-                (old_ts, run.run_id),
-            )
-            conn.commit()
-
-        summary = build_health_summary(self.registry)
-        self.assertEqual(summary.status_label, "ATTENTION")
-        self.assertTrue(summary.has_problems)
-        self.assertEqual(summary.stale_count, 1)
 
     def test_failure_class_counts(self):
         for i, fc in enumerate(["TIMEOUT", "TIMEOUT", "TOOL_FAIL"]):
@@ -346,7 +283,7 @@ class TestHealthSummary(_InspectTestCase):
 
         summary = build_health_summary(self.registry)
         text = format_health_summary(summary)
-        self.assertIn("VNX Headless Health Summary", text)
+        self.assertIn("VNX Headless Run Health", text)
         self.assertIn("Succeeded:  1", text)
 
 

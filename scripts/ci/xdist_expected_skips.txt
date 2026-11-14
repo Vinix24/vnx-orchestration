@@ -4,13 +4,11 @@
 # cutover window (plan line 129): VNX CI run 41119890499, head 75011469, on
 # 2026-10-30, artifact `profile-a-evidence` of its serial Profile A
 # (junit-full.xml + manifest-full.json, phase `full`, run attempt 1). That run
-# recorded 50 skips and no collection-time skip; every one is listed below with
-# the reason it carried. Two keys were added after that run. The D4 round of
-# OI-2518 (2026-11-03): the positive control of the branch-on-origin check now
-# skips when its precondition listing cannot answer under xdist, so that skip
-# is accepted here with the reason it carries. OI-2564 (track
-# launchd-interpreter-pin, PR #2449, 2026-11-07): a host-conditional skip on a
-# runner without Homebrew 3.12, measured in VNX CI run 42317512164.
+# recorded 50 skips and no collection-time skip; each is listed below. Four keys
+# were added after that run. OI-2518 (2026-11-03): the branch-on-origin positive
+# control skips when its precondition listing cannot answer under xdist. OI-2564
+# (PR #2449, 2026-11-07): host-conditional, no Homebrew 3.12 (CI run 42317512164).
+# OI-2589 (closing PR 1): two host-conditional gemini skips, no gemini binary.
 #
 # ENTRY RULE. One key per line: a test nodeid
 # (`tests/<path>.py::<Class>::<test>[<param>]`) or a file (`tests/<path>.py`)
@@ -78,3 +76,9 @@ tests/test_oi1452_canonical_failure_reason.py::test_kimi_real_pr1677_record_and_
 tests/test_report_to_receipt_converter.py::TestFailClosedBranchNotOnOrigin::test_existing_branch_passes_check  # OI-2518: the precondition `git ls-remote --heads origin dispatch/*` timed out after 10 s under xdist — the listing is only the positive control, so the test skips instead of failing; a skip is not a pass
 tests/test_report_to_receipt_converter_staleness.py::TestConverterBeaconFreshnessLiveStore::test_converter_beacon_is_fresh_on_the_live_store  # no live VNX store resolvable — no store with a booked receipt (state/t0_receipts.ndjson) was found, so the tripwire has nothing to measure (CI runner / fresh machine)
 tests/test_workflow_validation.py::test_repo_workflows_pass_validation  # actionlint not installed
+
+# OI-2589 (dispatch dlv-oi2589-excluded-closing-1): tests/integration/test_gemini_streaming_gated.py
+# leaves test_exclusions.txt, so Profile A runs it again. Its two live tests carry a
+# host-conditional skipif (no gemini binary on the runner).
+tests/integration/test_gemini_streaming_gated.py::TestGeminiLiveStreaming::test_stream_events_yields_events  # gemini binary not installed
+tests/integration/test_gemini_streaming_gated.py::TestGeminiLiveStreaming::test_all_real_events_have_tier_1  # gemini binary not installed
