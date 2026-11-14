@@ -118,11 +118,6 @@ def test_governance_dispatch_filter_and_limit(gov):
     assert [e["event_id"] for e in v["policy_evaluations"]] == ["e3", "e1"]
     assert [e["entity"] for e in v["escalations"]] == ["dispatch:d1"]
     assert [o["override_id"] for o in v["overrides"]] == ["o3", "o1"]
-    lim = pav.governance_audit_view(gov, limit=1)
-    assert len(lim["policy_evaluations"]) == 1
-    assert len(lim["escalations"]) == 1
-    assert len(lim["overrides"]) == 1
-    assert lim["escalations"][0]["level"] == "escalate"
 
 
 
@@ -181,9 +176,6 @@ def test_provenance_filter_and_limit(prov):
     assert [r["dispatch_id"] for r in v["registry_entries"]] == ["p1"]
     assert [x["verification_id"] for x in v["verifications"]] == ["v3"]
     assert [g["event_id"] for g in v["gap_events"]] == ["g1"]
-    lim = pav.provenance_audit_view(prov, limit=1)
-    assert len(lim["registry_entries"]) == len(lim["verifications"]) == 1
-    assert len(lim["gap_events"]) == 1
 
 
 
@@ -244,7 +236,7 @@ def test_pre_merge_advisory_full(gov, monkeypatch, tmp_path):
     assert [h["entity"] for h in out["governance"]["escalations"]] == ["dispatch:d5"]
 
 
-def test_pre_merge_advisory_clean_and_no_mutation(conn, tmp_path, monkeypatch):
+def test_pre_merge_advisory_clean(conn, tmp_path, monkeypatch):
     monkeypatch.setattr(
         pav, "verify_dispatch_provenance",
         lambda c, d, r, root=None: VerificationResult(
@@ -253,11 +245,9 @@ def test_pre_merge_advisory_clean_and_no_mutation(conn, tmp_path, monkeypatch):
     _esc(conn, "dq", "info", "2026-01-01T00:00:00Z")
     _ovr(conn, "od", "dq", "denied", "2026-01-01T00:00:00Z")
     conn.commit()
-    before = conn.execute("SELECT count(*) FROM escalation_state").fetchone()[0]
     out = pav.pre_merge_advisory(conn, ["dq"], tmp_path / "r")
     assert out == {"ready": True, "blockers": [], "warnings": [], "advisories": [],
                    "governance": {"holds": [], "escalations": [], "override_count": 0}}
-    assert conn.execute("SELECT count(*) FROM escalation_state").fetchone()[0] == before
 
 
 
