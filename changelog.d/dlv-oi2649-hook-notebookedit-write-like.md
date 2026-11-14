@@ -1,0 +1,1 @@
+- The worker-scope hook now scope-checks NotebookEdit (target `notebook_path`) like Write/Edit/MultiEdit, also blocks it on a refused policy, and names its allow decision for Task and mcp__ tools (OI-2649).
