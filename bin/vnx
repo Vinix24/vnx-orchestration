@@ -2690,7 +2690,7 @@ main() {
       "$VNX_PYTHON" "$VNX_HOME/scripts/pr_queue_manager.py" staging-list "$@"
       ;;
     queue-status)
-      "$VNX_PYTHON" "$VNX_HOME/scripts/pr_queue_manager.py" queue-status "$@"
+      "$VNX_PYTHON" "$VNX_HOME/scripts/planning_cli.py" horizon queue "$@"
       ;;
     objective)
       "$VNX_PYTHON" "$VNX_HOME/scripts/planning_cli.py" objective "$@"
