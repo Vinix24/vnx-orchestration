@@ -1,1 +1,2 @@
 - A dispatch worktree whose HEAD no remote branch contains is kept whoever made the commit, and `vnx status` shows the held-worktree count (OI-2811).
+- Four worktree-isolation tests publish their fixture commit to a remote branch so they follow the keep-any-unpublished-head rule (OI-2811).
