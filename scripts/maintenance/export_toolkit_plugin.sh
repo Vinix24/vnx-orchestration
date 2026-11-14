@@ -302,8 +302,7 @@ def lines(path):
     return path.read_text(encoding="utf-8", errors="replace").splitlines()
 
 
-skip_parts = {"__pycache__", ".pytest_cache"}
-files = [(p, None) for p in folder.rglob("*") if p.is_file() and not skip_parts & set(p.parts) and p.suffix != ".pyc"]
+files = [(p, None) for p in folder.rglob("*") if p.is_file()]
 files += [(p, before) for p, before in extras if p.is_file()]
 hits = []
 for path, before in files:
@@ -354,6 +353,13 @@ for record in filter(None, run("ls-tree", "-r", "-z", "--full-tree", rev, "--", 
     if mode not in (b"100644", b"100755") or not name.startswith(prefix):
         sys.exit("%s at %s is not a regular file below %s" % (os.fsdecode(name), rev, top))
     entries.append((mode, oid, name[len(prefix):]))
+artefacts = [
+    "build artefact in the export source at %s: %s" % (rev, os.fsdecode(prefix + rel))
+    for _, _, rel in entries
+    if {b"__pycache__", b".pytest_cache"} & set(rel.split(b"/")) or rel.endswith((b".pyc", b".pyo"))
+]
+if artefacts:
+    sys.exit("\n".join(artefacts))
 blobs = run("cat-file", "--batch", data=b"".join(oid + b"\n" for _, oid, _ in entries))
 pos, records = 0, []
 for mode, oid, rel in entries:
