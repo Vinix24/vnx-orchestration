@@ -178,7 +178,7 @@ class TestPromptStaysByteIdentical:
         with_block = _build_codex_prompt(_payload())
 
         # The builder's return value before OI-2591: assembly, nothing appended.
-        monkeypatch.setattr(gate_runner, "_review_tests_block", lambda interp: "")
+        monkeypatch.setattr(gate_runner, "_review_tests_block", lambda interp, diff_text="": "")
         before_change = _build_codex_prompt(_payload())
 
         assert with_block == before_change + block
