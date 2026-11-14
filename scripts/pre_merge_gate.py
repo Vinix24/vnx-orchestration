@@ -1020,57 +1020,80 @@ def check_ci_workflow(
             }
     resolved_workflow_name = _resolve_ci_workflow_name(workflow_name, project_workflow)
 
-    # ── Resolve head SHA ──────────────────────────────────────────────────
     if head_sha is None:
-        try:
-            result = subprocess.run(
-                ["git", "rev-parse", "HEAD"],
-                cwd=str(project_root),
-                capture_output=True, text=True, timeout=10,
-            )
-            if result.returncode != 0:
-                return {
-                    "check": "ci_workflow",
-                    "status": SKIPPED_UNVERIFIED,
-                    "detail": "could not resolve HEAD SHA — CI workflow could not be verified",
-                    "ci_conclusion": None,
-                    "ci_ran_on_sha": False,
-                }
-            head_sha = result.stdout.strip()
-        except (subprocess.TimeoutExpired, FileNotFoundError):
-            return {
+        head_sha, unresolved = _resolve_ci_head_sha(project_root)
+        if unresolved is not None:
+            return unresolved
+
+    if branch is None:
+        branch, unresolved = _resolve_ci_branch(project_root)
+        if unresolved is not None:
+            return unresolved
+
+    runs, unverified = _query_ci_runs(project_root, branch, resolved_workflow_name)
+    if unverified is not None:
+        return unverified
+    return _ci_verdict_from_runs(runs, head_sha, branch, resolved_workflow_name)
+
+
+def _resolve_ci_head_sha(project_root: Path) -> "tuple[Optional[str], Optional[Dict[str, Any]]]":
+    """Resolve HEAD's SHA via git; ``(sha, None)`` or ``(None, skipped-result)``."""
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=str(project_root),
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode != 0:
+            return None, {
                 "check": "ci_workflow",
                 "status": SKIPPED_UNVERIFIED,
                 "detail": "could not resolve HEAD SHA — CI workflow could not be verified",
                 "ci_conclusion": None,
                 "ci_ran_on_sha": False,
             }
+        return result.stdout.strip(), None
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return None, {
+            "check": "ci_workflow",
+            "status": SKIPPED_UNVERIFIED,
+            "detail": "could not resolve HEAD SHA — CI workflow could not be verified",
+            "ci_conclusion": None,
+            "ci_ran_on_sha": False,
+        }
 
-    if branch is None:
-        try:
-            result = subprocess.run(
-                ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-                cwd=str(project_root),
-                capture_output=True, text=True, timeout=10,
-            )
-            if result.returncode != 0:
-                return {
-                    "check": "ci_workflow",
-                    "status": SKIPPED_UNVERIFIED,
-                    "detail": "could not resolve branch name — CI workflow could not be verified",
-                    "ci_conclusion": None,
-                    "ci_ran_on_sha": False,
-                }
-            branch = result.stdout.strip()
-        except (subprocess.TimeoutExpired, FileNotFoundError):
-            return {
+
+def _resolve_ci_branch(project_root: Path) -> "tuple[Optional[str], Optional[Dict[str, Any]]]":
+    """Resolve the branch name via git; ``(branch, None)`` or ``(None, skipped-result)``."""
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            cwd=str(project_root),
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode != 0:
+            return None, {
                 "check": "ci_workflow",
                 "status": SKIPPED_UNVERIFIED,
                 "detail": "could not resolve branch name — CI workflow could not be verified",
                 "ci_conclusion": None,
                 "ci_ran_on_sha": False,
             }
+        return result.stdout.strip(), None
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return None, {
+            "check": "ci_workflow",
+            "status": SKIPPED_UNVERIFIED,
+            "detail": "could not resolve branch name — CI workflow could not be verified",
+            "ci_conclusion": None,
+            "ci_ran_on_sha": False,
+        }
 
+
+def _query_ci_runs(
+    project_root: Path, branch: str, resolved_workflow_name: str,
+) -> "tuple[Optional[Any], Optional[Dict[str, Any]]]":
+    """List the workflow's runs on *branch*; ``(runs, None)`` or ``(None, skipped-result)``."""
     # ── Query gh for workflow runs ─────────────────────────────────────────
     try:
         result = subprocess.run(
@@ -1085,7 +1108,7 @@ def check_ci_workflow(
             capture_output=True, text=True, timeout=15,
         )
     except (subprocess.TimeoutExpired, FileNotFoundError):
-        return {
+        return None, {
             "check": "ci_workflow",
             "status": SKIPPED_UNVERIFIED,
             "detail": "gh CLI not available — CI workflow could not be verified",
@@ -1095,7 +1118,7 @@ def check_ci_workflow(
 
     if result.returncode != 0:
         stderr = (result.stderr or "").strip()
-        return {
+        return None, {
             "check": "ci_workflow",
             "status": SKIPPED_UNVERIFIED,
             "detail": (
@@ -1109,14 +1132,20 @@ def check_ci_workflow(
     try:
         runs = json.loads(result.stdout)
     except json.JSONDecodeError:
-        return {
+        return None, {
             "check": "ci_workflow",
             "status": SKIPPED_UNVERIFIED,
             "detail": "gh output unparseable — CI workflow could not be verified",
             "ci_conclusion": None,
             "ci_ran_on_sha": False,
         }
+    return runs, None
 
+
+def _ci_verdict_from_runs(
+    runs: Any, head_sha: str, branch: str, resolved_workflow_name: str,
+) -> Dict[str, Any]:
+    """GO/HOLD verdict from the listed runs against *head_sha*."""
     # ── Match run to HEAD SHA ──────────────────────────────────────────────
     for run in runs:
         if run.get("headSha") == head_sha:
