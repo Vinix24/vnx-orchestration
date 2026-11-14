@@ -1741,12 +1741,7 @@ class LearningLoop:
         the extraction (``_ledger_gate``): a refused ledger stops the cycle with its reason.
         """
         self.queue_error = None  # this cycle's queue failure only, never a previous cycle's
-        if self.persist:
-            gate = evaluate_activation_gate(state_dir=self.db_path.parent)
-        else:
-            # Shadow mode changes nothing, so it needs no arm-switch: running it
-            # is exactly how the operator sees what the loop WOULD do.
-            gate = {"action": "run", "probe_health": None, "detail": "shadow mode: gate not consulted"}
+        gate = self._cycle_gate()
 
         if gate["action"] == "dormant":
             print("💤 Learning loop dormant (VNX_LEARNING_LOOP_ENABLED=0) — no-op, no beacon")
@@ -1792,6 +1787,32 @@ class LearningLoop:
         print("\n💾 Step 5: Saving pattern metrics...")
         self.save_pattern_metrics()
 
+        self._cycle_bridge_and_supersede()
+        self._cycle_reconcile_confidence()
+        reason_result = self._cycle_reason_evaluator()
+
+        # 6. Generate report
+        print("\n📈 Step 6: Generating learning report...")
+        report = self.generate_learning_report()
+
+        proposal_count = len(new_rules)
+        self._cycle_fill_report(report, reason_result, receipt_stats, proposal_count)
+
+        elapsed = time.time() - start_time
+        self._cycle_print_summary(elapsed, proposal_count)
+        self._cycle_finish_heartbeat(report, elapsed, len(new_rules))
+        return report
+
+    def _cycle_gate(self) -> Dict[str, Any]:
+        """The activation gate for this cycle; shadow mode never consults it."""
+        if self.persist:
+            return evaluate_activation_gate(state_dir=self.db_path.parent)
+        # Shadow mode changes nothing, so it needs no arm-switch: running it
+        # is exactly how the operator sees what the loop WOULD do.
+        return {"action": "run", "probe_health": None, "detail": "shadow mode: gate not consulted"}
+
+    def _cycle_bridge_and_supersede(self) -> None:
+        """Steps 5.5 and 5.6: bridge to the intelligence DB, queue stale patterns."""
         # 5.5 Persist high-confidence patterns and failures to intelligence DB
         # Off-switch: VNX_LEARN_PERSIST=0 skips the auto-persist of observations.
         print("\n🔗 Step 5.5: Bridging patterns to intelligence DB...")
@@ -1811,51 +1832,53 @@ class LearningLoop:
         if superseded:
             print(f"  ✓ {superseded} patterns queued for operator review")
 
-        # 5.7 Close the feedback loop: sync pattern_usage stats back to
-        # success_patterns.confidence_score so intelligence_selector reads
-        # the current learning state rather than the static initial value.
+    def _cycle_reconcile_confidence(self) -> None:
+        """Step 5.7: sync pattern_usage stats back to success_patterns.confidence_score
+        so intelligence_selector reads the current learning state, not the initial value."""
         print("\n🔁 Step 5.7: Reconciling confidence scores...")
         if not self.persist:
             self.shadow["steps_not_run"].append("reconcile_pattern_confidence")
             print("  Shadow mode — reconcile skipped")
-        else:
-            try:
-                from confidence_reconcile import reconcile_pattern_confidence
-                reconciled = reconcile_pattern_confidence(self.db_path)
-                print(f"  ✓ Reconciled {reconciled} success_patterns rows")
-            except Exception as e:
-                print(f"❌ Error reconciling confidence: {e}")
+            return
+        try:
+            from confidence_reconcile import reconcile_pattern_confidence
+            reconciled = reconcile_pattern_confidence(self.db_path)
+            print(f"  ✓ Reconciled {reconciled} success_patterns rows")
+        except Exception as e:
+            print(f"❌ Error reconciling confidence: {e}")
 
-        # 5.8 Reason-aware injection-effectiveness evaluator (injection-effectiveness-eval-loop
-        # PR-B): measure-only tuning proposals from the pattern_injection_outcome reason
-        # distribution. Gated behind its OWN opt-in flags (VNX_INJECTION_WHY_ENABLED AND
-        # VNX_INJECTION_FEEDBACK_ENABLED — the latter already required =1 to have reached this
-        # point via evaluate_activation_gate). No new flag; never auto-applies a tuning change
-        # (G-L1) — proposals land in pending_injection_tuning.json for operator review only.
+    def _cycle_reason_evaluator(self) -> Dict[str, Any]:
+        """Step 5.8: reason-aware injection-effectiveness evaluator (injection-effectiveness-eval-loop
+        PR-B): measure-only tuning proposals from the pattern_injection_outcome reason
+        distribution. Gated behind its OWN opt-in flags (VNX_INJECTION_WHY_ENABLED AND
+        VNX_INJECTION_FEEDBACK_ENABLED — the latter already required =1 to have reached this
+        point via evaluate_activation_gate). No new flag; never auto-applies a tuning change
+        (G-L1) — proposals land in pending_injection_tuning.json for operator review only."""
         print("\n🔬 Step 5.8: Reason-aware injection tuning proposals...")
         reason_result = {"ran": False, "proposals_written": 0, "proposals_generated": 0}
         if not self.persist:
             self.shadow["steps_not_run"].append("run_reason_evaluator_and_propose")
             print("  Shadow mode — reason evaluator skipped")
-        else:
-            try:
-                from injection_effectiveness_probe import run_reason_evaluator_and_propose
-                reason_result = run_reason_evaluator_and_propose(state_dir=self.db_path.parent)
-                if reason_result["ran"]:
-                    print(
-                        f"  ✓ {reason_result['proposals_written']} new tuning proposal(s) queued "
-                        f"({reason_result['proposals_generated']} generated this run)"
-                    )
-                else:
-                    print("  Injection-tuning flags off — reason evaluator skipped")
-            except Exception as e:
-                print(f"❌ Error running reason evaluator: {e}")
+            return reason_result
+        try:
+            from injection_effectiveness_probe import run_reason_evaluator_and_propose
+            reason_result = run_reason_evaluator_and_propose(state_dir=self.db_path.parent)
+            if reason_result["ran"]:
+                print(
+                    f"  ✓ {reason_result['proposals_written']} new tuning proposal(s) queued "
+                    f"({reason_result['proposals_generated']} generated this run)"
+                )
+            else:
+                print("  Injection-tuning flags off — reason evaluator skipped")
+        except Exception as e:
+            print(f"❌ Error running reason evaluator: {e}")
+        return reason_result
 
-        # 6. Generate report
-        print("\n📈 Step 6: Generating learning report...")
-        report = self.generate_learning_report()
-
-        proposal_count = len(new_rules)
+    def _cycle_fill_report(
+        self, report: Dict[str, Any], reason_result: Dict[str, Any],
+        receipt_stats: Dict[str, Any], proposal_count: int,
+    ) -> None:
+        """Step 6 tail: stamp the cycle statistics and mode onto the report."""
         self.learning_stats["proposal_count"] = proposal_count
         self.learning_stats["injection_tuning_proposals"] = reason_result.get("proposals_written", 0)
         self.learning_stats["receipts_read"] = receipt_stats["read"]
@@ -1873,7 +1896,7 @@ class LearningLoop:
         if self.ledger_verdict is not None:
             report["ledger_verdict"] = self.ledger_verdict
 
-        elapsed = time.time() - start_time
+    def _cycle_print_summary(self, elapsed: float, proposal_count: int) -> None:
         print(f"\n✅ Learning cycle completed in {elapsed:.2f} seconds")
         print(f"  • Patterns tracked: {len(self.pattern_metrics)}")
         print(f"  • Confidence adjustments: {self.learning_stats['confidence_adjustments']}")
@@ -1881,6 +1904,8 @@ class LearningLoop:
         print(f"  • Patterns archived: {self.learning_stats['patterns_archived']}")
         print("=" * 60)
 
+    def _cycle_finish_heartbeat(self, report: Dict[str, Any], elapsed: float, new_rule_count: int) -> None:
+        """Degrade the report on a queue failure; otherwise beat ``ok`` in persist mode."""
         if self.queue_error:
             report["status"] = "degraded"
             report["reason"] = self.queue_error
@@ -1890,12 +1915,10 @@ class LearningLoop:
                 "elapsed_seconds": round(elapsed, 2),
                 "patterns_tracked": len(self.pattern_metrics),
                 "confidence_adjustments": self.learning_stats.get("confidence_adjustments", 0),
-                "new_prevention_rules": len(new_rules),
+                "new_prevention_rules": new_rule_count,
                 "patterns_archived": self.learning_stats.get("patterns_archived", 0),
                 "ledger_status": self.ledger_verdict["status"],
             })
-
-        return report
 
 
 # ---------------------------------------------------------------------------
