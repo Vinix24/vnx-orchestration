@@ -155,7 +155,7 @@ def test_main_fatal_and_exhausted_errors(monkeypatch, tmp_path):
 ])
 def test_main_rejects_an_unusable_request(monkeypatch, payload, message):
     rc, events, _ = _run_main(monkeypatch, payload, [])
-    assert (rc, events) == (1, [{"error_type": "runner_error", "message": message}])
+    assert (rc, events) == (ar._EXIT_ERR, [{"error_type": "runner_error", "message": message}])
 
 
 def _reconcile(calls, terminals, tmux=None, reasons=("r1",)):
