@@ -1,0 +1,1 @@
+- The wheel-install smoke preflight now checks the installed distributions (build, setuptools, wheel) that `python -m build --no-isolation` checks, not importable modules, so a vendored `wheel` no longer passes it (OI-2830).

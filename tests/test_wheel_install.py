@@ -9,6 +9,7 @@ Marked ``integration`` (matches ``test_wheel_build.py``) — it builds a wheel a
 spins up a virtualenv, so it is slower and network-touching on a cold cache.
 """
 
+import importlib.metadata
 import shutil
 import subprocess
 import sys
@@ -25,12 +26,14 @@ PREFLIGHT_EXIT = 2
 
 
 def _build_toolchain_available() -> bool:
-    try:
-        import build  # noqa: F401
-        import setuptools  # noqa: F401
-        import wheel  # noqa: F401
-    except ImportError:
-        return False
+    # The build (`python -m build --no-isolation`) checks installed distributions,
+    # not importable modules: setuptools vendors `wheel`, so `import wheel` can
+    # succeed with no wheel distribution installed (OI-2830).
+    for name in ("build", "setuptools", "wheel"):
+        try:
+            importlib.metadata.distribution(name)
+        except importlib.metadata.PackageNotFoundError:
+            return False
     return True
 
 
