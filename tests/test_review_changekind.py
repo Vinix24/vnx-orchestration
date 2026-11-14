@@ -160,3 +160,26 @@ def test_vanished_function_is_unverifiable_and_forces_full_review(repo):
     assert [a["status"] for a in out["anchors"]] == ["present", "unverifiable", "unverifiable"]
     assert out["full_review_reason"] == rc.REASON_ANCHOR
     assert rc.anchors_present(repo, head, found[:1])["full_review_reason"] is None
+
+
+def test_a_clean_rebase_onto_a_base_that_added_a_security_path_is_rework_and_names_it(repo):
+    parent = commit(repo, {FEAT: FEATURE}, "feature")
+    head = move_main(repo, {".github/workflows/ci.yml": "name: ci\n"}, pick=parent)
+    rec = rc.classify_change(repo, "main", parent, head, {FEAT})
+    assert (rec.changekind, rec.full_review_reason) == (rc.REWORK, rc.REASON_SECURITY_PATH)
+    assert list(rec.security_paths) == [".github/workflows/ci.yml"]
+    assert rec.security_paths[".github/workflows/ci.yml"] == rc.security_path_kind(".github/workflows/ci.yml")
+
+
+def test_a_clean_rebase_onto_a_base_that_touched_an_ordinary_file_stays_trivial(repo):
+    parent = commit(repo, {FEAT: FEATURE}, "feature")
+    head = move_main(repo, {UNRELATED: "X = 3\n"}, pick=parent)
+    rec = rc.classify_change(repo, "main", parent, head, {FEAT})
+    assert (rec.changekind, rec.full_review_reason, dict(rec.security_paths)) == (rc.TRIVIAL_REBASE, None, {})
+
+
+@pytest.mark.parametrize("name", ["a b.py", "üser.py"])
+def test_seat_input_set_keeps_an_importer_whose_path_has_a_space_or_a_quoted_character(repo, name):
+    path = f"scripts/lib/{name}"
+    commit(repo, {path: USER}, "importer with an awkward name")
+    assert rc.seat_input_set(repo, "pr", {"scripts/lib/lib.py"}) == {"scripts/lib/lib.py", "scripts/lib/user.py", path}

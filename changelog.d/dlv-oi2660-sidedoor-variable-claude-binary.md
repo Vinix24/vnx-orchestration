@@ -1,0 +1,1 @@
+- fix(governance): the side-door audit now sees a claude spawn through a variable binary (`"$CLAUDE_BIN" -p`) and lists `probe_claude_cli.sh` as an audited probe (OI-2660)

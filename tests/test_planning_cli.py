@@ -106,10 +106,10 @@ def _build_db_plan_gate(tmp_path: Path) -> Path:
     seed/resolve lifecycle (`_plan_gate_supported`)."""
     state_dir = _build_db(tmp_path)
     conn = sqlite3.connect(str(state_dir / "runtime_coordination.db"))
-    schema_migration.apply_script_if_below(
-        conn, 30, (_MIGRATIONS / "0030_track_oi_resolved_at.sql").read_text(encoding="utf-8")
-    )
-    conn.commit()
+    # 0030 refuses to apply without 0029 (OI-1213 prerequisite guard, #1556).
+    for ver, fname in ((29, "0029_track_type_discriminator.sql"), (30, "0030_track_oi_resolved_at.sql")):
+        schema_migration.apply_script_if_below(conn, ver, (_MIGRATIONS / fname).read_text(encoding="utf-8"))
+        conn.commit()
     conn.close()
     return state_dir
 

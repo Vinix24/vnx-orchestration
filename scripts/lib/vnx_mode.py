@@ -55,6 +55,19 @@ TIER_STARTER_OPERATOR: FrozenSet[str] = frozenset({
     "roadmap", "insights", "objective", "horizon", "deliverable",
     "install-git-hooks", "uninstall-git-hooks", "install-shell-helper",
     "init-db", "providers", "guard", "preflight",
+    # `vnx daily-metrics` (doorloop PR-13): the read verbs (collect/daily/report)
+    # are safe in both modes, and it owns the opt-in per-project job's install.
+    # Removal of that job follows as a verb in a later change, not here. It is the
+    # only tier that fits a single command with both halves; leaving it out of
+    # every tier made the fabric gate refuse it as an unknown name (measured,
+    # same defect OI-2456 fixed for `preflight`).
+    "daily-metrics",
+    # `vnx main-window` (ADR-073 besluit 8) is the read-only probe of the window on main;
+    # in no tier the mode gate refuses it as an unknown name (OI-2456).
+    "main-window",
+    # `vnx impact` (ADR-074 besluit 8): collect keeps the CI shadow artifacts in a local ledger,
+    # report only reads it. In no tier the mode gate refuses it as an unknown name (OI-2456).
+    "impact",
 })
 
 TIER_OPERATOR_ONLY: FrozenSet[str] = frozenset({

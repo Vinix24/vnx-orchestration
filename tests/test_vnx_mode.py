@@ -278,6 +278,13 @@ class TestCommandGating:
         write_mode(VNXMode.STARTER, str(data_dir))
         check_command_allowed("preflight")  # Should not raise
 
+    def test_main_window_allowed_in_starter_and_operator(self):
+        """`vnx main-window` is a read-only probe: it must sit in the shared
+        tier so the mode gate never refuses it as an unknown name."""
+        assert "main-window" in TIER_STARTER_OPERATOR
+        for mode in VNXMode:
+            check_command_allowed("main-window", mode)  # Should not raise
+
     def test_starter_blocks_operator_commands(self, data_dir):
         for cmd in TIER_OPERATOR_ONLY:
             with pytest.raises(ModeGateError) as exc:

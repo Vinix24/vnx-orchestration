@@ -1,0 +1,1 @@
+- A docs dispatch now gets the writing rules from the file named in `VNX_DOC_STYLE_FILE` appended to its instruction at staging (off when empty), with its path and sha256 recorded on the spec; a set path that cannot be read refuses staging.

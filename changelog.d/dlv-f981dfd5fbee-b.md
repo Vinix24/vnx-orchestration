@@ -1,0 +1,1 @@
+- The merge door gets a `main` preflight before `door`: off without VNX_MAIN_UNVERIFIED_MAX, NO-GO on a red, unmeasurable or full window when it is set, its own `--override-main`, and the admission as `main_admission` on `pr_merged` and `pr_merge_refused` (ci-cost-and-merge-cadence PR 3b, part b).

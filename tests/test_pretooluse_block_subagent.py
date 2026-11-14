@@ -13,7 +13,10 @@ Covers:
   - Valid marker: allow, exactly one new line appended to the audit NDJSON.
   - Expired marker: deny, reason mentions the marker is expired.
   - Marker with an empty/missing reason: deny (never a bare "allow").
-  - Non-Task tool calls: allowed silently (empty stdout) — unaffected by the
+  - OI-2798: the subagent tool is called ``Agent`` since Claude Code 2.1.63
+    (``Task`` survives as an alias). Both names get the same decision through
+    the bash hook and the Python core, and the settings matcher covers both.
+  - Non-subagent tool calls: allowed silently (empty stdout) — unaffected by the
     marker/guard logic (defense-in-depth fast path).
   - CLI (scripts/subagents_allow.py): --status without a marker (exit 1,
     "niet toegestaan"); --reason + --hours grants (exit 0); --status after
@@ -25,6 +28,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
@@ -34,6 +38,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 HOOK_SCRIPT = REPO_ROOT / "scripts" / "hooks" / "pretooluse_block_subagent.sh"
 GUARD_CORE = REPO_ROOT / "scripts" / "hooks" / "pretooluse_subagent_guard.py"
 CLI_SCRIPT = REPO_ROOT / "scripts" / "subagents_allow.py"
+SETTINGS_PATH = REPO_ROOT / ".claude" / "settings.json"
 
 MARKER_FILENAME = "subagents_allowed.json"
 AUDIT_FILENAME = "subagent_use.ndjson"
@@ -53,9 +58,11 @@ def iso_in(hours: float) -> str:
     return _iso(datetime.now(timezone.utc) + timedelta(hours=hours))
 
 
-def make_task_payload(session_id: str = "test-session", prompt: str = "Do a subtask") -> str:
+def make_task_payload(
+    session_id: str = "test-session", prompt: str = "Do a subtask", tool_name: str = "Task"
+) -> str:
     payload = {
-        "tool_name": "Task",
+        "tool_name": tool_name,
         "tool_input": {
             "description": "test subagent",
             "prompt": prompt,
@@ -72,6 +79,19 @@ def run_hook(payload: str, state_dir: Path) -> tuple[int, str]:
     env = dict(os.environ, VNX_STATE_DIR=str(state_dir))
     result = subprocess.run(
         ["bash", str(HOOK_SCRIPT)],
+        input=payload,
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=15,
+    )
+    return result.returncode, result.stdout
+
+
+def run_core(payload: str, state_dir: Path) -> tuple[int, str]:
+    env = dict(os.environ, VNX_STATE_DIR=str(state_dir))
+    result = subprocess.run(
+        [sys.executable, str(GUARD_CORE)],
         input=payload,
         capture_output=True,
         text=True,
@@ -192,6 +212,101 @@ class TestMarkerWithoutReason:
         rc, out = run_hook(make_task_payload(), tmp_path)
         data = json.loads(out)
         assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+# ── OI-2798: the subagent tool is called Agent since Claude Code 2.1.63 ───────
+
+class TestAgentToolName:
+    def test_agent_without_marker_denies_through_the_bash_hook(self, tmp_path):
+        rc, out = run_hook(make_task_payload(tool_name="Agent"), tmp_path)
+        assert rc == 0
+        hso = json.loads(out)["hookSpecificOutput"]
+        assert hso["hookEventName"] == "PreToolUse"
+        assert hso["permissionDecision"] == "deny"
+        assert "Agent" in hso["permissionDecisionReason"]
+
+    def test_agent_without_marker_denies_through_the_python_core(self, tmp_path):
+        rc, out = run_core(make_task_payload(tool_name="Agent"), tmp_path)
+        assert rc == 0
+        hso = json.loads(out)["hookSpecificOutput"]
+        assert hso["permissionDecision"] == "deny"
+        assert "Agent" in hso["permissionDecisionReason"]
+
+    def test_task_deny_reason_still_names_task(self, tmp_path):
+        rc, out = run_core(make_task_payload(tool_name="Task"), tmp_path)
+        assert rc == 0
+        reason = json.loads(out)["hookSpecificOutput"]["permissionDecisionReason"]
+        assert "Task" in reason
+        assert "Agent" not in reason
+
+    def test_agent_with_valid_marker_allows_and_audits_the_tool_name(self, tmp_path):
+        write_marker(tmp_path, reason="agent-handtest")
+        rc, out = run_hook(make_task_payload(session_id="sess-agent", tool_name="Agent"), tmp_path)
+        assert rc == 0
+        assert json.loads(out)["hookSpecificOutput"]["permissionDecision"] == "allow"
+        lines = [
+            ln for ln in (tmp_path / AUDIT_FILENAME).read_text(encoding="utf-8").splitlines()
+            if ln.strip()
+        ]
+        assert len(lines) == 1
+        entry = json.loads(lines[0])
+        assert entry["tool_name"] == "Agent"
+        assert entry["reason"] == "agent-handtest"
+        assert entry["session_id"] == "sess-agent"
+
+    def test_task_with_valid_marker_audits_task(self, tmp_path):
+        write_marker(tmp_path)
+        run_hook(make_task_payload(tool_name="Task"), tmp_path)
+        lines = (tmp_path / AUDIT_FILENAME).read_text(encoding="utf-8").splitlines()
+        assert json.loads(lines[0])["tool_name"] == "Task"
+
+    def test_agent_with_expired_marker_denies(self, tmp_path):
+        write_marker(tmp_path, granted_at=iso_in(-3), expires_at=iso_in(-1))
+        rc, out = run_hook(make_task_payload(tool_name="Agent"), tmp_path)
+        assert rc == 0
+        hso = json.loads(out)["hookSpecificOutput"]
+        assert hso["permissionDecision"] == "deny"
+        assert "verlopen" in hso["permissionDecisionReason"].lower()
+        assert not (tmp_path / AUDIT_FILENAME).exists()
+
+    def test_agent_with_empty_reason_marker_denies(self, tmp_path):
+        write_marker(tmp_path, reason="")
+        rc, out = run_hook(make_task_payload(tool_name="Agent"), tmp_path)
+        assert json.loads(out)["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+    def test_python_core_stays_silent_for_a_bash_payload(self, tmp_path):
+        payload = json.dumps({"tool_name": "Bash", "tool_input": {"command": "ls"}})
+        rc, out = run_core(payload, tmp_path)
+        assert rc == 0
+        assert out.strip() == ""
+
+    def test_python_core_stays_silent_without_a_tool_name(self, tmp_path):
+        rc, out = run_core(json.dumps({"tool_input": {}}), tmp_path)
+        assert rc == 0
+        assert out.strip() == ""
+
+
+class TestSettingsMatcher:
+    def _matcher(self) -> str:
+        settings = json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
+        matchers = [
+            group.get("matcher", "")
+            for group in settings["hooks"]["PreToolUse"]
+            for hook in group.get("hooks", [])
+            if "pretooluse_block_subagent.sh" in hook.get("command", "")
+        ]
+        assert len(matchers) == 1, f"expected one wiring of the subagent guard, got {matchers}"
+        return matchers[0]
+
+    def test_matcher_covers_agent_and_task_on_the_full_tool_name(self):
+        matcher = self._matcher()
+        assert re.fullmatch(matcher, "Agent")
+        assert re.fullmatch(matcher, "Task")
+
+    def test_matcher_does_not_cover_a_non_subagent_tool(self):
+        matcher = self._matcher()
+        assert not re.fullmatch(matcher, "Bash")
+        assert not re.fullmatch(matcher, "AgentFoo")
 
 
 # ── Defense-in-depth: non-Task tools are unaffected ────────────────────────────

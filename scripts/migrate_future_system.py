@@ -3274,6 +3274,23 @@ def backup_store_vacuum_into(db_path: Path) -> Path:
     return backup_path
 
 
+def _backup_before_migration(db_path: Path) -> None:
+    """Take the D6 VACUUM INTO snapshot when the pipeline would mutate, then rotate."""
+    if _pipeline_would_mutate(db_path):
+        backup_store_vacuum_into(db_path)
+        # Rotate older premigrate backups best-effort; never let cleanup
+        # abort the migration. The backup prefix is derived from the live
+        # DB's name so rotation works regardless of the DB path.
+        _premigrate_prefix = f"{db_path.name}.premigrate-"
+        _premigrate_keep = parse_backup_keep(
+            os.environ.get("VNX_PREMIGRATE_BACKUP_KEEP"))
+        rotate_backups_safe(
+            db_path.parent, _premigrate_prefix, _premigrate_keep)
+    else:
+        print("  [backup] skipped — store is already at target schema "
+              "version, no mutation expected")
+
+
 def run(
     project_root: Path | None = None,
     *,
@@ -3335,19 +3352,7 @@ def run(
     print(f"\nVNX migrate_future_system — db: {db_path}")
 
     if backup:
-        if _pipeline_would_mutate(db_path):
-            backup_store_vacuum_into(db_path)
-            # Rotate older premigrate backups best-effort; never let cleanup
-            # abort the migration. The backup prefix is derived from the live
-            # DB's name so rotation works regardless of the DB path.
-            _premigrate_prefix = f"{db_path.name}.premigrate-"
-            _premigrate_keep = parse_backup_keep(
-                os.environ.get("VNX_PREMIGRATE_BACKUP_KEEP"))
-            rotate_backups_safe(
-                db_path.parent, _premigrate_prefix, _premigrate_keep)
-        else:
-            print("  [backup] skipped — store is already at target schema "
-                  "version, no mutation expected")
+        _backup_before_migration(db_path)
 
     _run_pipeline(db_path, project_root,
                   tenant_stamp_fatal=tenant_stamp_fatal,

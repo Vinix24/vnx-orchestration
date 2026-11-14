@@ -1,0 +1,1 @@
+- CI cost (impactselectie-in-schaduw PR 4a-1): the impact collector keeps the shadow artifacts of every VNX CI run attempt in `state/impact_shadow.ndjson` before GitHub deletes them after 90 days.

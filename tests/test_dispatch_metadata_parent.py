@@ -182,3 +182,130 @@ def test_empty_required_field_is_swallowed_not_raised(tmp_path: Path) -> None:
     state_dir = _state(tmp_path)
     assert stamp_lane_start(state_dir, dispatch_id="", terminal="T1", provider="claude") is False
     assert _rows(state_dir, "") == []
+
+
+# --- difficulty_json (herwerk-per-model-en-reviewer): migration v37 and the fill-once writer ---
+
+def _v36_state(tmp_path: Path) -> Path:
+    state_dir = tmp_path / ".vnx-data" / "vnx-dev" / "state"
+    state_dir.mkdir(parents=True)
+    before = {k: v for k, v in quality_db_init.MIGRATIONS.items() if k < 37}
+    with patch.dict(quality_db_init.MIGRATIONS, before, clear=True):
+        assert quality_db_init.bootstrap_qi_db(
+            state_dir / "quality_intelligence.db", REPO / "schemas" / "quality_intelligence.sql")
+    return state_dir
+
+
+def _cols(state_dir: Path) -> set:
+    conn = sqlite3.connect(str(state_dir / "quality_intelligence.db"))
+    try:
+        return {r[1] for r in conn.execute("PRAGMA table_info(dispatch_metadata)")}
+    finally:
+        conn.close()
+
+
+def test_v37_adds_the_column_keeps_rows_and_is_idempotent(tmp_path: Path) -> None:
+    state_dir = _v36_state(tmp_path)
+    assert "difficulty_json" not in _cols(state_dir)
+    assert stamp_lane_start(state_dir, dispatch_id="dlv-old", terminal="T1", provider="claude")
+    conn = sqlite3.connect(str(state_dir / "quality_intelligence.db"))
+    try:
+        quality_db_init._migrate_v37(conn)
+        quality_db_init._migrate_v37(conn)
+        conn.commit()
+    finally:
+        conn.close()
+    assert "difficulty_json" in _cols(state_dir)
+    rows = _rows(state_dir, "dlv-old")
+    assert len(rows) == 1 and rows[0]["difficulty_json"] is None
+
+
+def test_difficulty_is_stored_and_fill_once(tmp_path: Path) -> None:
+    state_dir = _state(tmp_path)
+    kw = dict(dispatch_id="dlv-diff", terminal="T1", provider="claude", model="sonnet")
+    assert stamp_lane_start(state_dir, difficulty_json='{"file_count": 3}', **kw)
+    assert stamp_lane_start(state_dir, difficulty_json='{"file_count": 9}', **kw)
+    assert stamp_lane_start(state_dir, **kw)
+    assert _rows(state_dir, "dlv-diff")[0]["difficulty_json"] == '{"file_count": 3}'
+
+
+def test_difficulty_fills_an_empty_slot_on_an_existing_row(tmp_path: Path) -> None:
+    state_dir = _state(tmp_path)
+    kw = dict(dispatch_id="dlv-late", terminal="T1", provider="claude")
+    assert stamp_lane_start(state_dir, **kw)
+    assert stamp_lane_start(state_dir, difficulty_json='{"file_count": 1}', **kw)
+    assert _rows(state_dir, "dlv-late")[0]["difficulty_json"] == '{"file_count": 1}'
+
+
+def test_store_without_the_column_takes_the_row_without_it(tmp_path: Path) -> None:
+    state_dir = _v36_state(tmp_path)
+    assert stamp_lane_start(state_dir, dispatch_id="dlv-v36", terminal="T1", provider="claude",
+                            difficulty_json='{"file_count": 2}') is True
+    assert len(_rows(state_dir, "dlv-v36")) == 1
+    assert "difficulty_json" not in _cols(state_dir)
+
+
+# --- difficulty rides the parent_dispatch path: spec -> snapshot -> plan -> lane start ---
+
+_DIFFICULTY = {"schema": 1, "file_count": 3, "band": "medium"}
+
+
+def _spec_json(tmp_path: Path, **extra) -> Path:
+    import json
+    raw = {"schema_version": 1, "project_id": "vnx-dev", "dispatch_id": "dlv-diff-1",
+           "staging_id": "st-1", "instruction_file": str(tmp_path / "i.md"),
+           "role": "backend-developer", "target_slot": "T1", **extra}
+    f = tmp_path / "dispatch-spec.json"
+    f.write_text(json.dumps(raw), encoding="utf-8")
+    return f
+
+
+def test_spec_parser_reads_difficulty_as_is(tmp_path: Path) -> None:
+    from dispatch_cli import load_spec
+    assert load_spec(_spec_json(tmp_path, difficulty=_DIFFICULTY)).difficulty == _DIFFICULTY
+    assert load_spec(_spec_json(tmp_path)).difficulty is None
+
+
+@pytest.mark.parametrize("bad", ["hard", 3, ["a"], True])
+def test_spec_parser_refuses_a_difficulty_that_is_not_an_object(tmp_path: Path, bad) -> None:
+    from dispatch_cli import load_spec
+    with pytest.raises(ValueError, match="difficulty must be an object"):
+        load_spec(_spec_json(tmp_path, difficulty=bad))
+
+
+def test_compile_plan_carries_the_snapshot_difficulty(tmp_path: Path) -> None:
+    assert _headless_plan(tmp_path, "dlv-origin-1").difficulty is None
+    instr = tmp_path / "instruction.md"
+    text = "# Test instruction\n"
+    spec = DispatchSpec(
+        schema_version=1, project_id="vnx-dev", dispatch_id="dlv-diff-2", staging_id="st-2",
+        instruction_file=instr, role="backend-developer", target_slot="T1", gate="codex_gate",
+        dispatch_paths=(), provider=Provider.CLAUDE, model="sonnet", allow_headless=True,
+        headless_reason="test", difficulty=_DIFFICULTY,
+    )
+    vspec = ValidatedSpec(spec=spec, instruction_text=text, normalized_paths=(),
+                          instruction_sha256=hashlib.sha256(text.encode("utf-8")).hexdigest())
+    slots = ["T0", "T1", "T2", "T3"]
+    plan = compile_plan(vspec, RuntimeSnapshot(
+        staging_promoted=True, target_health={s: "healthy" for s in slots},
+        target_capable={s: True for s in slots}, difficulty=spec.difficulty))
+    assert plan.difficulty == _DIFFICULTY
+
+
+def _stamp(tmp_path: Path, difficulty) -> list:
+    import dataclasses
+    state_dir = _state(tmp_path)
+    plan = dataclasses.replace(_headless_plan(tmp_path, "dlv-origin-1"), difficulty=difficulty)
+    dispatch_envelope._stamp_headless_start(
+        plan, SimpleNamespace(dispatch_id="dlv-parent-1", terminal_id="T1", provider="claude",
+                              model="sonnet", role="backend-developer", pr_id="77"), state_dir)
+    return _rows(state_dir, "dlv-parent-1")
+
+
+def test_headless_start_writes_sorted_difficulty_json(tmp_path: Path) -> None:
+    rows = _stamp(tmp_path, {"schema": 1, "file_count": 3, "band": "medium"})
+    assert rows[0]["difficulty_json"] == '{"band": "medium", "file_count": 3, "schema": 1}'
+
+
+def test_headless_start_without_difficulty_writes_null(tmp_path: Path) -> None:
+    assert _stamp(tmp_path, None)[0]["difficulty_json"] is None

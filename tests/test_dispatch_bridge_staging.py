@@ -346,3 +346,33 @@ def test_bridge_settle_failure_does_not_change_exit_code(tmp_path, monkeypatch, 
     assert rc == 0
     assert "bundle settle failed" in capsys.readouterr().err
     assert (tmp_path / "dispatches" / "pending" / _GOOD_ID / "dispatch-spec.json").is_file()
+
+
+# --- difficulty (herwerk-per-model-en-reviewer, ADR-071 decision rule part b) ---
+
+def _spec(path):
+    return json.loads(Path(path).read_text(encoding="utf-8"))
+
+
+def test_stage_records_difficulty_with_file_count_from_paths(tmp_path):
+    paths = tuple({"path": f"scripts/f{i}.py", "kind": "modify"} for i in range(3))
+    spec = _spec(_stage(tmp_path, dispatch_paths=paths, difficulty={
+        "line_budget": 300, "plan_complexity": "high", "route_reason": "opus for round 2"}))
+    assert spec["difficulty"] == {"schema": 1, "line_budget": 300, "plan_complexity": "high",
+                                  "route_reason": "opus for round 2", "file_count": 3}
+
+
+def test_stage_without_difficulty_still_records_file_count_and_nulls(tmp_path):
+    assert _spec(_stage(tmp_path))["difficulty"] == {
+        "schema": 1, "line_budget": None, "plan_complexity": None, "route_reason": None, "file_count": 0}
+
+
+@pytest.mark.parametrize("bad", [
+    {"surprise": 1}, {"line_budget": 0}, {"line_budget": True}, {"line_budget": "9"},
+    {"plan_complexity": "huge"}, {"route_reason": "x" * 201}, {"route_reason": "  "},
+    {"route_reason": 5}, {"file_count": -1}, {"file_count": 1.5},
+])
+def test_stage_refuses_bad_difficulty_and_writes_no_bundle(tmp_path, bad):
+    with pytest.raises(ValueError, match="difficulty"):
+        _stage(tmp_path, difficulty=bad)
+    assert not (tmp_path / "dispatches" / "pending" / _GOOD_ID).exists()

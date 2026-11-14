@@ -288,6 +288,20 @@ def insert_lease(
     conn.commit()
 
 
+def seed_leases(db_path: Path, *terminal_ids: str, project_id: str = "vnx-dev") -> None:
+    """Insert idle terminal_leases rows into a file DB.
+
+    worker_pool_membership has a FOREIGN KEY on terminal_leases(terminal_id,
+    project_id) since #698, so add_member needs the lease row first.
+    """
+    conn = sqlite3.connect(str(db_path))
+    try:
+        for terminal_id in terminal_ids:
+            insert_lease(conn, terminal_id, project_id)
+    finally:
+        conn.close()
+
+
 def insert_membership(
     conn: sqlite3.Connection,
     terminal_id: str,

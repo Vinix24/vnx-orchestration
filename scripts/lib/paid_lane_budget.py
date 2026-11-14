@@ -130,6 +130,11 @@ _PAID_TOP_LEVEL_PROVIDER_KEYS = {
 }
 
 
+# The text a budget refusal starts with. failure_classification reads the same
+# constant to give the refusal its own class (OI-2783), so the literal lives only here.
+PAID_LANE_BUDGET_REFUSAL_PREFIX = "paid_lane_daily_budget_exceeded:"
+
+
 class PaidLaneBudgetExceededError(RuntimeError):
     """Raised when a paid-lane dispatch is refused for exceeding the daily cap."""
 
@@ -138,7 +143,7 @@ class PaidLaneBudgetExceededError(RuntimeError):
         self.spent_usd = spent_usd
         self.budget_usd = budget_usd
         super().__init__(
-            f"paid_lane_daily_budget_exceeded: provider={provider} "
+            f"{PAID_LANE_BUDGET_REFUSAL_PREFIX} provider={provider} "
             f"spent_today_usd={spent_usd:.6f} daily_budget_usd={budget_usd:.6f} — "
             f"refusing further paid-lane spend today "
             f"(operator override: {ENV_OVERRIDE}=1)"

@@ -1733,6 +1733,7 @@ def _emit_governance(
     immediately without retry.
     """
     from governance_emit import emit_dispatch_receipt, emit_unified_report
+    from receipt_token_fields import receipt_token_fields
 
     state_dir = _resolve_state_dir()
     data_dir = _resolve_data_dir()
@@ -1864,6 +1865,9 @@ def _emit_governance(
                 duration_seconds=duration,
                 token_usage=token_usage,
                 cost_usd=cost_usd, cost_source=cost_source, cost_ledger_run_ids=_run_ids,
+                # No ledger record is at hand here (``_book_dispatch_cost`` returns only the cost triple):
+                # the normalized tokens come from the lane's own usage.
+                **receipt_token_fields(provider=provider, role=vars(args).get("role"), token_usage=token_usage, session_id=getattr(result, "session_id", None), ledger_record=None),
                 state_dir=state_dir,
                 report_path=str(report_path),
                 events_path=events_path,
@@ -1891,16 +1895,8 @@ def _emit_governance(
                 # method="pending-report" explicitly, never a silent blank —
                 # this sub-path is never backfilled (append-only, no second
                 # write for this dispatch_id).
-                verification={
-                    "method": "pending-report",
-                    "tests_run": None,
-                    "tests_passed": None,
-                    "tests_failed": None,
-                    "command": None,
-                    "pr_ref": None,
-                    "push_verified": None,
-                    "spec_deviation": None,
-                },
+                verification={"method": "pending-report", "tests_run": None, "tests_passed": None, "tests_failed": None,
+                              "command": None, "pr_ref": None, "push_verified": None, "spec_deviation": None},
                 role=_role,
                 receipt_kind="dispatch",
                 role_applied=(

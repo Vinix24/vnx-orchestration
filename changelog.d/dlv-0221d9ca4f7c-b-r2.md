@@ -1,0 +1,1 @@
+- Staging records the difficulty of a dispatch (line budget, file count, plan complexity, route reason) on the spec; migration v37 adds `dispatch_metadata.difficulty_json` and the lane-start writer takes it fill-once (herwerk-per-model-en-reviewer, part b, PR 1 of 2).

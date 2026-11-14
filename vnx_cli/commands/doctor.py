@@ -1528,6 +1528,17 @@ def _dream_check(name: str, doc: dict) -> Check:
     return Check(name, WARN, f"{summary}; " + "; ".join(parts or [f"state={doc.get('state')}"]))
 
 
+def _check_steering(data_root: Path) -> Check:
+    """The steering report's consumer (ADR-072 decision 17): stale, absent or `error` is a WARN, never a FAIL."""
+    try:
+        _engine.ensure_engine_on_path()
+        import operator_steering_dream
+        fresh, message = operator_steering_dream.assess_report(data_root / "state")
+    except Exception as exc:  # fail-closed: an unmeasurable report is a WARN, never a PASS and never a crash
+        return Check("steering:report", WARN, f"unmeasured: {exc}")
+    return Check("steering:report", PASS if fresh else WARN, message)
+
+
 def _check_dream(project_dir: Path) -> list[Check]:
     """The dream checks of ``vnx doctor``: one ``assess()`` call, three projections of it."""
     try:
@@ -1582,6 +1593,7 @@ def vnx_doctor(args) -> int:
     checks.append(_check_embedded_path_assumptions())
     checks.extend(_check_t0_state_freshness(project_dir, data_root))
     checks.extend(_check_dream(project_dir))
+    checks.append(_check_steering(data_root))
 
     passed = sum(1 for c in checks if c.status == PASS)
     warned = sum(1 for c in checks if c.status == WARN)

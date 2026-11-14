@@ -295,6 +295,113 @@ def _count_pending_dispatches(directory: Path) -> int:
     return len(ids)
 
 
+_STALE_STAGED_DEFAULT_MINUTES = 30
+_STALE_STAGED_MAX_ITEMS = 10
+
+
+def _stale_staged_threshold() -> Tuple[int, Optional[str]]:
+    """(minutes, note); an invalid env value falls back to 30 and says so."""
+    raw = os.environ.get("VNX_STALE_STAGED_MINUTES")
+    if not (raw or "").strip():
+        return _STALE_STAGED_DEFAULT_MINUTES, None
+    try:
+        minutes = int(raw.strip())
+    except ValueError:
+        minutes = 0
+    if minutes <= 0:
+        return _STALE_STAGED_DEFAULT_MINUTES, (
+            f"invalid VNX_STALE_STAGED_MINUTES={raw!r}: using {_STALE_STAGED_DEFAULT_MINUTES}"
+        )
+    return minutes, None
+
+
+def _receipt_dispatch_ids(receipts_path: Path) -> set:
+    """Dispatch ids named by any receipt line; raises OSError when unreadable."""
+    if not receipts_path.exists():
+        return set()
+    ids: set = set()
+    for line in receipts_path.read_text(encoding="utf-8", errors="ignore").splitlines():
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue  # vnx-silent-except: a torn line names no dispatch; the file read itself is what must not fail
+        if isinstance(rec, dict) and rec.get("dispatch_id"):
+            ids.add(str(rec["dispatch_id"]))
+    return ids
+
+
+def _has_dispatch_worktree(dispatch_id: str, project_root: Path, state_dir: Path) -> bool:
+    """A dispatch worktree dir or its occupancy claim exists (as _build_live_work resolves it)."""
+    from dispatch_worktree_isolation import (
+        _dispatch_worktree_dir, _sanitize_dispatch_id, claims_dir_for_state_dir,
+    )
+    claim = claims_dir_for_state_dir(state_dir) / f"{_sanitize_dispatch_id(dispatch_id)}.json"
+    return _dispatch_worktree_dir(project_root, dispatch_id).exists() or claim.exists()
+
+
+def _build_stale_staged(
+    dispatch_dir: Path,
+    state_dir: Path,
+    project_root: Optional[Path] = None,
+    now: Optional[datetime] = None,
+) -> Dict[str, Any]:
+    """Staged bundles older than the threshold with no receipt and no worktree (OI-1553).
+
+    A failed read gives ``available: False`` with a reason, never an empty list.
+    """
+    minutes, note = _stale_staged_threshold()
+    _central = _central_state_dir_for(state_dir)
+    receipts_path = (_central if _central is not None else state_dir) / "t0_receipts.ndjson"
+    pending = dispatch_dir / "pending"
+    actual_now = (now if now is not None else _now_utc()).timestamp()
+    try:
+        if project_root is None:
+            from dispatch_worktree_isolation import resolve_consumer_project_root
+            project_root = resolve_consumer_project_root()
+        receipted = _receipt_dispatch_ids(receipts_path)
+        found: List[Tuple[float, str]] = []
+        for entry in (sorted(pending.iterdir()) if pending.is_dir() else []):
+            spec = entry / "dispatch-spec.json"
+            if not (entry.is_dir() and spec.is_file()):
+                continue
+            age = (actual_now - spec.stat().st_mtime) / 60.0
+            if (
+                age >= minutes
+                and entry.name not in receipted
+                and not _has_dispatch_worktree(entry.name, project_root, state_dir)
+            ):
+                found.append((age, entry.name))
+    except Exception as exc:  # vnx-silent-except: surfaced as available:false with the reason
+        log.warning("stale_staged unreadable: %s", exc)
+        return {"available": False, "reason": f"{type(exc).__name__}: {exc}", "threshold_minutes": minutes}
+    found.sort(reverse=True)
+    out: Dict[str, Any] = {
+        "available": True,
+        "threshold_minutes": minutes,
+        "count": len(found),
+        "items": [
+            {"dispatch_id": did, "age_minutes": int(age)}
+            for age, did in found[:_STALE_STAGED_MAX_ITEMS]
+        ],
+        "more": max(0, len(found) - _STALE_STAGED_MAX_ITEMS),
+    }
+    if note:
+        out["threshold_note"] = note
+    return out
+
+
+def _stale_staged_index_summary(section: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    if not isinstance(section, dict) or section.get("available") is not True:
+        reason = section.get("reason") if isinstance(section, dict) else None
+        return {"available": False, "reason": reason or "not measured"}
+    items = section.get("items") or []
+    return {
+        "available": True,
+        "count": section.get("count", 0),
+        "oldest_id": items[0]["dispatch_id"] if items else None,
+    }
+
+
 def _measure_queue_count(
     counter: Callable[[Path], int], directory: Path
 ) -> Tuple[Optional[int], Optional[str]]:
@@ -2661,6 +2768,7 @@ def build_t0_state(
     track_freshness = _reconcile_tracks_fresh(state_dir, project_id, store=tracks_store)
 
     queues = _build_queues(dispatch_dir, state_dir)
+    stale_staged = _build_stale_staged(dispatch_dir, state_dir)  # OI-1553
     tracks = _build_tracks(state_dir)
     dream_reviews = _build_dream_reviews(state_dir, project_id)  # auto-dream cycles awaiting T0 review (OI-896)
     contract_invalid = _build_contract_invalid_summary(state_dir)  # contract_invalid receipt counters (OI-1638)
@@ -2688,6 +2796,7 @@ def build_t0_state(
         "generated_at": _now_iso(),
         # staleness_seconds removed (R6.4): call compute_staleness_seconds() at read time
         "queues": queues,
+        "stale_staged": stale_staged,
         "tracks": tracks,
         "track_freshness": track_freshness,
         "dream_reviews": dream_reviews,
@@ -2870,6 +2979,7 @@ def _build_t0_index(state: Dict[str, Any]) -> Dict[str, Any]:
             "blocking_open_items": open_items.get("blocker_count", 0),
         },
         "live_work": _live_work_index_summary(state.get("live_work")),
+        "stale_staged": _stale_staged_index_summary(state.get("stale_staged")),
         "recent_receipts": (state.get("recent_receipts") or [])[:3],
         # D4b: what a T0 still has to decide on; replaces the receipt pull cursor
         "open_outcomes": _open_outcomes_index_summary(state.get("open_outcomes")),

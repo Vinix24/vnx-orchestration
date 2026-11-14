@@ -42,6 +42,27 @@ def _tree(path: Path):
     return sorted(str(p.relative_to(path)) for p in path.rglob("*"))
 
 
+def test_write_refuses_the_real_central_store_under_a_test_runner():
+    import vnx_paths
+    real_root = Path(os.path.expanduser("~")) / ".vnx-data" / "oi2732-guard-probe-nonexistent"
+    with pytest.raises(vnx_paths.TestIsolationGuardError):
+        probe._write(real_root, {"state": "ok", "project_id": PROJECT, "findings": []},
+                     append=True)
+    assert not real_root.exists()
+
+
+def test_write_under_tmp_path_still_writes_ledger_and_beacon(tmp_path):
+    document = {"state": "ok", "project_id": PROJECT, "findings": []}
+    probe._write(tmp_path, document, append=True)
+    assert len((tmp_path / "state" / probe.LEDGER_NAME).read_text().splitlines()) == 1
+    assert (tmp_path / "health" / f"{probe.BEACON_COMPONENT}.json").is_file()
+
+
+def test_docstring_names_the_real_beacon_path():
+    assert "state/health" not in probe.__doc__
+    assert "<data_root>/health/dream_liveness.json" in probe.__doc__
+
+
 def test_json_prints_the_document(root, capsys):
     assert probe.main(["--project-id", PROJECT, "--json"]) == 0
     assert json.loads(capsys.readouterr().out)["schema"] == "dream_liveness/1"

@@ -1,0 +1,1 @@
+- Config: the PR-size thresholds of the merge gate and the injection-WHY flag read the project store with a raising resolver, so an unreadable store is named (`project_config_error`) instead of silently read as unset; the answers stay the defaults and off (OI-2795, dlv-oi2795-strict-resolver).

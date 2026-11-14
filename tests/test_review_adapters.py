@@ -13,6 +13,7 @@ import sys
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch, PropertyMock
 
 # Ensure scripts/lib and scripts/lib/adapters are importable
@@ -210,77 +211,71 @@ class TestCodexInlineFileContents(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 class TestGeminiTimeoutHandling(unittest.TestCase):
+    """execute() delegates to spawn_gemini / spawn_codex (Wave 4.6); the tests
+    patch the spawn function the adapter imported, not the removed drain helpers."""
+
     def test_gemini_timeout_handling(self):
-        """execute() returns status='timeout' when process exceeds timeout."""
+        """execute() returns status='timeout' when the spawn reports timed_out."""
         adapter = GeminiAdapter("T3")
+        spawn_result = SimpleNamespace(
+            timed_out=True, token_usage=None, returncode=1, completion_text="",
+        )
 
-        def slow_drain(proc, timeout, *args, **kwargs):
-            # Simulate timeout by returning "timeout" status
-            return "", "", "timeout"
+        with patch("adapters.gemini_adapter.spawn_gemini", return_value=spawn_result) as spawn, \
+             patch("adapters.gemini_adapter.provider_switch.require"):
+            result = adapter.execute("Review this.", context={"changed_files": []})
 
-        with patch("adapters.gemini_adapter.shutil.which", return_value="/usr/bin/gemini"), \
-             patch("adapters.gemini_adapter.collect_file_contents", return_value=""), \
-             patch("adapters.gemini_adapter.subprocess.Popen") as mock_popen, \
-             patch.object(GeminiAdapter, "_drain_with_timeout", side_effect=slow_drain), \
-             patch.object(GeminiAdapter, "_kill"):
-            mock_proc = MagicMock()
-            mock_proc.stdin = MagicMock()
-            mock_proc.returncode = None
-            mock_popen.return_value = mock_proc
-
-            result = adapter.execute(
-                "Review this.",
-                context={"changed_files": []},
-            )
-
+        spawn.assert_called_once()
         self.assertEqual(result.status, "timeout")
         self.assertIn("timeout", result.output.lower())
         self.assertFalse(result.committed)
         self.assertEqual(result.provider, "gemini")
 
     def test_codex_timeout_handling(self):
-        """execute() returns status='timeout' when codex process exceeds timeout."""
+        """A timed-out codex spawn exits non-zero: execute() reports status='failed'."""
         adapter = CodexAdapter("T3")
+        spawn_result = SimpleNamespace(
+            returncode=1, completion_text="", token_usage=None, error="timeout",
+            timed_out=True,
+        )
 
-        def slow_drain(proc, timeout, stall):
-            return "", "", "timeout"
-
-        with patch("adapters.codex_adapter.shutil.which", return_value="/usr/bin/codex"), \
-             patch("adapters.codex_adapter.collect_file_contents", return_value=""), \
-             patch("adapters.codex_adapter.subprocess.Popen") as mock_popen, \
-             patch.object(CodexAdapter, "_drain_with_stall_detection", side_effect=slow_drain), \
-             patch.object(CodexAdapter, "_kill"):
-            mock_proc = MagicMock()
-            mock_proc.stdin = MagicMock()
-            mock_proc.returncode = None
-            mock_popen.return_value = mock_proc
-
+        with patch("adapters.codex_adapter.spawn_codex", return_value=spawn_result) as spawn, \
+             patch.object(CodexAdapter, "record_outcome"):
             result = adapter.execute("Analyze this.", context={"changed_files": []})
 
-        self.assertEqual(result.status, "timeout")
+        spawn.assert_called_once()
+        self.assertEqual(result.status, "failed")
         self.assertEqual(result.provider, "codex")
 
     def test_codex_stall_handling(self):
-        """execute() returns status='failed' when codex stalls."""
+        """A stalled codex spawn exits non-zero: execute() reports status='failed'."""
         adapter = CodexAdapter("T3")
+        spawn_result = SimpleNamespace(
+            returncode=1, completion_text="", token_usage=None, error="stall",
+            timed_out=False,
+        )
 
-        def stall_drain(proc, timeout, stall):
-            return "", "", "stall"
-
-        with patch("adapters.codex_adapter.shutil.which", return_value="/usr/bin/codex"), \
-             patch("adapters.codex_adapter.collect_file_contents", return_value=""), \
-             patch("adapters.codex_adapter.subprocess.Popen") as mock_popen, \
-             patch.object(CodexAdapter, "_drain_with_stall_detection", side_effect=stall_drain), \
-             patch.object(CodexAdapter, "_kill"):
-            mock_proc = MagicMock()
-            mock_proc.stdin = MagicMock()
-            mock_proc.returncode = None
-            mock_popen.return_value = mock_proc
-
+        with patch("adapters.codex_adapter.spawn_codex", return_value=spawn_result), \
+             patch.object(CodexAdapter, "record_outcome") as record:
             result = adapter.execute("Analyze.", context={"changed_files": []})
 
         self.assertEqual(result.status, "failed")
-        self.assertIn("stall", result.output.lower())
+        record.assert_called_once()
+        self.assertFalse(record.call_args.args[0])
+        self.assertIn("stall", record.call_args.args[1])
+
+    def test_codex_zero_returncode_is_done(self):
+        """Counter-case: only a zero returncode yields status='done'."""
+        adapter = CodexAdapter("T3")
+        spawn_result = SimpleNamespace(
+            returncode=0, completion_text="ok", token_usage=None, error=None,
+            timed_out=False,
+        )
+        with patch("adapters.codex_adapter.spawn_codex", return_value=spawn_result), \
+             patch.object(CodexAdapter, "record_outcome"):
+            result = adapter.execute("Analyze.", context={"changed_files": []})
+        self.assertEqual(result.status, "done")
+        self.assertEqual(result.output, "ok")
 
 
 # ---------------------------------------------------------------------------
@@ -338,10 +333,10 @@ class TestResolveAdapterCodex(unittest.TestCase):
         import os
         import adapters as _adapters_pkg
 
-        with patch.dict(os.environ, {"VNX_PROVIDER_T3": "ollama"}):
+        with patch.dict(os.environ, {"VNX_PROVIDER_T3": "unknown-provider"}):
             with self.assertRaises(ValueError) as ctx:
                 _adapters_pkg.resolve_adapter("T3")
-        self.assertIn("ollama", str(ctx.exception))
+        self.assertIn("unknown-provider", str(ctx.exception))
 
     def test_resolve_adapter_default_is_claude(self):
         """resolve_adapter defaults to ClaudeAdapter when env var is unset."""
@@ -354,35 +349,6 @@ class TestResolveAdapterCodex(unittest.TestCase):
             adapter = _adapters_pkg.resolve_adapter("T3")
 
         self.assertIsInstance(adapter, ClaudeAdapter)
-
-
-# ---------------------------------------------------------------------------
-# NDJSON parsing (codex)
-# ---------------------------------------------------------------------------
-
-class TestCodexNDJSONParsing(unittest.TestCase):
-    def test_parses_agent_message_events(self):
-        ndjson = "\n".join([
-            json.dumps({"type": "agent_message", "content": "Finding: SQL injection risk"}),
-            json.dumps({"type": "agent_message", "content": "Finding: no input validation"}),
-            json.dumps({"type": "status", "value": "done"}),
-        ])
-        events, findings = CodexAdapter._parse_ndjson(ndjson)
-        self.assertEqual(len(events), 3)
-        self.assertIn("SQL injection risk", findings)
-        self.assertIn("no input validation", findings)
-
-    def test_skips_malformed_lines(self):
-        ndjson = "not json\n" + json.dumps({"type": "agent_message", "content": "ok"})
-        events, findings = CodexAdapter._parse_ndjson(ndjson)
-        self.assertEqual(len(events), 1)
-        self.assertIn("ok", findings)
-
-    def test_falls_back_to_raw_when_no_message_events(self):
-        ndjson = json.dumps({"type": "status", "value": "done"})
-        events, findings = CodexAdapter._parse_ndjson(ndjson)
-        # No agent_message events — findings is the raw stripped text
-        self.assertEqual(findings, ndjson.strip())
 
 
 # ---------------------------------------------------------------------------

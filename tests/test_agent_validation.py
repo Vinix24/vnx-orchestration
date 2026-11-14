@@ -21,9 +21,9 @@ def test_agent_validation():
     print("-" * 40)
 
     # Test 1: Valid agent
-    result = gatherer.validate_agent("developer")
-    assert result["valid"] == True, "Developer should be valid"
-    print("✅ Test 1: Valid agent 'developer' - PASSED")
+    result = gatherer.validate_agent("backend-developer")
+    assert result["valid"] == True, "backend-developer should be valid"
+    print("✅ Test 1: Valid agent backend-developer - PASSED")
 
     # Test 2: Invalid agent
     result = gatherer.validate_agent("invalid-agent")
@@ -38,9 +38,9 @@ def test_agent_validation():
 
     # Test 4: Agent suggestions
     test_cases = {
-        "debug": "debugging-specialist",
-        "refactor": "refactoring-expert",
-        "perf": "performance-engineer",
+        "debug": "debugger",
+        "refactor": "python-optimizer",
+        "perf": "performance-profiler",
         "test": "quality-engineer"
     }
 
@@ -56,7 +56,7 @@ def test_agent_validation():
     print("✅ Test 5: Dispatch blocked for invalid agent - PASSED")
 
     # Test 6: Dispatch allowed
-    result = gatherer.gather_for_dispatch("Test task", "T1", "developer")
+    result = gatherer.gather_for_dispatch("Test task", "T1", "backend-developer")
     assert result.get("agent_validated") == True, "Should validate correct agent"
     assert result.get("dispatch_blocked") != True, "Should not block valid agent"
     print("✅ Test 6: Dispatch allowed for valid agent - PASSED")

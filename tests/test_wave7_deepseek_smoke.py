@@ -49,7 +49,10 @@ class TestProviderDispatchRoutesDeepSeek:
             event_writer_failures=0,
         )
 
-        with patch("provider_spawns.litellm_spawn.spawn_litellm", return_value=mock_result) as mock_spawn:
+        # The route-constraint gate forbids plain litellm:deepseek since the
+        # OI-867 proxy/harness split; this smoke covers the routing behind it.
+        with patch("provider_spawns.litellm_spawn.spawn_litellm", return_value=mock_result) as mock_spawn, \
+                patch("provider_dispatch._check_constraints"):
             with patch.dict(os.environ, {"DEEPSEEK_API_KEY": "sk-test-key"}):
                 from provider_dispatch import main
                 rc = main([

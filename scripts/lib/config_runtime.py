@@ -128,6 +128,25 @@ def autowire(state_dir: "str | Path | None" = None, project_id: Optional[str] = 
         return False
 
 
+def strict_resolver() -> "Optional[tuple[config_registry.DbResolver, str]]":
+    """``(raising resolver, project_id)`` for the store this process is wired to, or None.
+
+    The store and project are the ones :func:`autowire` bound (``_wired_for`` plus the registry's
+    default project), never a fresh env lookup. The resolver raises on an unreadable store, so a
+    caller that asks ``resolve_with_source(..., strict_resolver=True)`` gets ``project_config_error``
+    instead of "no row". ``autowire`` itself keeps its non-raising resolver for every other reader.
+    None when nothing is wired (no store to read)."""
+    pid = config_registry._default_project_id
+    if not pid:
+        return None
+    for state_dir, wired_pid in reversed(list(_wired_for)):
+        if wired_pid == pid and _wired_for[(state_dir, wired_pid)]:
+            import config_store_db
+            sd = Path(state_dir)
+            return config_store_db.make_db_resolver(lambda _pid: sd, raise_on_error=True), pid
+    return None
+
+
 def get(key: str) -> Optional[str]:
     """Resolve a config value for this process's project (autowiring the DB layer on first use)."""
     autowire()

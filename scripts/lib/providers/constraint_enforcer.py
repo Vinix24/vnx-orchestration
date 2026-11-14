@@ -204,7 +204,7 @@ def _registry_key_for(provider: Optional[str], sub_provider: Optional[str]) -> O
         # so the dead proxy route can be disabled without killing the working
         # harness lane.
         return "deepseek_harness"
-    if base_norm in ("glm-harness", "glm_harness"):
+    if base_norm in ("glm", "glm-harness", "glm_harness"):
         # glm-harness runs GLM models, registered under the `zai` provider in wave7_models.yaml.
         # Without this the registry check rejects a normalized glm-harness dispatch with
         # model-not-in-current-registry BEFORE execution (codex flip-PR F1).

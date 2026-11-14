@@ -1024,6 +1024,13 @@ def main():
             f"({ROLLBACK_ENV_FLAG}=1). Legacy open-items fallback reads are active."
         )
 
+    parser = _build_parser()
+    args = parser.parse_args()
+    return _route_command(parser, args)
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    """The ``open_items_manager`` CLI parser (all subcommands)."""
     parser = argparse.ArgumentParser(description="Open Items Manager")
     subparsers = parser.add_subparsers(dest='command', help='Commands')
 
@@ -1085,6 +1092,12 @@ def main():
     amend_parser.add_argument('--reason', required=True, help='Why this item is being amended (recorded in the audit trail)')
     amend_parser.add_argument('--dispatch-id', dest='dispatch_id', default=None, help='Dispatch ID performing the amendment')
 
+    _add_triage_subparsers(subparsers)
+    return parser
+
+
+def _add_triage_subparsers(subparsers) -> None:
+    """Add digest, rescan, defer-pattern and wontfix-pattern to *subparsers*."""
     # Digest command
     digest_parser = subparsers.add_parser('digest', help='Generate digest')
     digest_parser.add_argument('--last', type=int, default=20,
@@ -1147,8 +1160,9 @@ def main():
         help='Apply mutation (omit for dry-run preview)'
     )
 
-    args = parser.parse_args()
 
+def _route_command(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    """Run the handler for ``args.command``; returns the exit code of :func:`main`."""
     if not args.command:
         parser.print_help()
         return 1

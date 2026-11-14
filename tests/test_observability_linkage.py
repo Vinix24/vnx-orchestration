@@ -60,6 +60,10 @@ def _make_args(provider, dispatch_id="test-h2-001"):
     args.max_retries = 1
     args.gate = ""
     args.role = None
+    # A MagicMock attribute is not JSON-serializable; the receipt carries the real
+    # mandate id (c6e6ec51c), which is None when no delegation mandate is in force.
+    args.mandate_id = None
+    args.deadline_seconds = 900  # the --deadline-seconds argparse default
     return args
 
 
@@ -112,14 +116,8 @@ class TestStateDirGuard:
 # ---------------------------------------------------------------------------
 
 class TestEventsDirGuard:
-    def test_vnx_data_dir_honored_without_explicit_flag(self, monkeypatch, tmp_path):
-        """OI-1179: VNX_DATA_DIR set is honored WITHOUT VNX_DATA_DIR_EXPLICIT=1.
-
-        The old two-flag trap ignored a set VNX_DATA_DIR unless
-        VNX_DATA_DIR_EXPLICIT=1 was ALSO set, silently falling back to the
-        canonical resolver and (in a central install) landing on the read-only
-        pinned version store. A set VNX_DATA_DIR must be respected directly.
-        """
+    def test_bare_vnx_data_dir_not_honored(self, monkeypatch, tmp_path):
+        """OI-1276 (changed from OI-1179): a bare VNX_DATA_DIR is ignored, as for receipts (#225)."""
         data_dir = str(tmp_path / "operator_data")
         monkeypatch.setenv("VNX_DATA_DIR", data_dir)
         monkeypatch.delenv("VNX_DATA_DIR_EXPLICIT", raising=False)
@@ -127,7 +125,7 @@ class TestEventsDirGuard:
 
         result = _events_dir()
 
-        assert result == Path(data_dir).expanduser().resolve() / "events"
+        assert result != Path(data_dir).expanduser().resolve() / "events"
 
     def test_with_explicit_flag_honors_vnx_data_dir(self, monkeypatch, tmp_path):
         """VNX_DATA_DIR + VNX_DATA_DIR_EXPLICIT=1 resolves to that dir/events."""
@@ -147,18 +145,22 @@ class TestEventsDirGuard:
 
         result = _events_dir()
 
-        assert result == Path.home() / ".vnx-data" / "vnx-dev" / "events"
+        # OI-1276: VNX_PROJECT_ID acts through resolve_paths, the receipts' answer.
+        from vnx_paths import resolve_paths
+        assert result == Path(resolve_paths()["VNX_DATA_DIR"]) / "events"
 
     def test_no_project_id_fallback_to_repo_relative(self, monkeypatch):
-        """Without VNX_PROJECT_ID or env, falls back to .vnx-data/events relative to repo."""
+        """Without VNX_PROJECT_ID or env, falls back to the canonical resolver's data dir (OI-1179)."""
         monkeypatch.delenv("VNX_DATA_DIR", raising=False)
         monkeypatch.delenv("VNX_DATA_DIR_EXPLICIT", raising=False)
         monkeypatch.delenv("VNX_PROJECT_ID", raising=False)
 
         result = _events_dir()
 
-        assert result.name == "events"
-        assert result.parts[-2] == ".vnx-data"
+        from vnx_paths import resolve_paths
+
+        assert result == Path(resolve_paths()["VNX_DATA_DIR"]) / "events"
+        assert ".vnx-system/versions" not in str(result)
 
     def test_event_store_uses_consistent_dir_with_explicit(self, monkeypatch, tmp_path):
         """EventStore() constructed with EXPLICIT=1 writes events under data_dir."""
@@ -240,23 +242,28 @@ class TestEventsPathInReceipt:
         assert receipt["events_path"] is None
 
     def test_events_path_null_when_no_events_written(self, tmp_path):
-        """Codex dispatch with empty EventStore produces events_path=null (nothing to archive)."""
-        args = _make_args("codex", dispatch_id="test-evpath-empty-001")
+        """An EventStore with nothing to archive produces events_path=null in the receipt.
 
-        # EventStore with empty file — archive returns None
+        A full codex dispatch can no longer reach this state: its own
+        ``provider_teardown_worktree`` lifecycle event always lands in the store,
+        so the archive is never empty. The null branch is therefore driven at
+        ``_emit_governance`` itself, with a store whose live file is empty.
+        """
+        from datetime import datetime, timezone
+
+        args = _make_args("codex", dispatch_id="test-evpath-empty-001")
         store = EventStore(events_dir=self.events_dir)
         self.events_dir.mkdir(parents=True, exist_ok=True)
+        assert store.archive("T1", "test-evpath-empty-001") is None
 
-        result = _SpawnResult(returncode=0, event_writer_failures=0)
-
-        with patch("provider_spawns.codex_spawn.spawn_codex", return_value=result), \
-             patch("event_store.EventStore", return_value=store), \
-             patch("provider_dispatch._enrich_instruction", return_value="noop"), \
-             patch("provider_costs.emit_provider_cost"), \
+        now = datetime.now(timezone.utc)
+        with patch("provider_costs.emit_provider_cost"), \
              patch("provider_dispatch._record_provider_metadata"):
-            rc = provider_dispatch._dispatch_codex(args)
+            provider_dispatch._emit_governance(
+                args, "codex", "gpt-5.2-codex", _SpawnResult(returncode=0),
+                now, now, "success", event_store=store,
+            )
 
-        assert rc == 0
         receipt = self._last_receipt()
         assert receipt is not None
         assert "events_path" in receipt

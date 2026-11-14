@@ -48,6 +48,16 @@ provider_switched_off — the operator switched the provider family off
                     (a refusal detail can carry "auth" in the operator's
                     reason), and neither the lane cooldown nor the door's
                     known-rejected check counts it. Provider-schakelaar B.
+api_blocked      — an edge block in front of the provider API (Cloudflare
+                    "Attention Required!" page, answered as HTTP 403). Transient:
+                    the next fire of the same dispatch on the same model works.
+                    Matched before the auth keyword bag, so "authenticate" or
+                    "403" in the same text never makes it auth_rejected.
+                    OI-2796.
+paid_lane_budget_exceeded — a paid lane (deepseek/glm harness) was refused by the
+                    daily spend cap before any API call. Deterministic, with a
+                    known next step: another lane, or a refire after 00:00Z UTC.
+                    OI-2783.
 unknown          — everything else; should be rare after OI-866
 
 Vocabulary note (P3, dispatch 20260821-q3-failure-class-split): this module's
@@ -97,6 +107,8 @@ FAILURE_CLASSES = frozenset({
     "tool_missing",
     "local_key_missing",
     "provider_switched_off",
+    "api_blocked",
+    "paid_lane_budget_exceeded",
     "unknown",
 })
 
@@ -188,6 +200,18 @@ _TOOL_MISSING_MARKER = "cli not found"
 # cannot steal the classification back to auth_rejected.
 _LOCAL_KEY_MISSING_MARKER = "local key missing"
 
+# OI-2796, measured 13-11 on dlv-b452a2bd798c and dlv-f121e49516df: the last line of
+# the run was "Failed to authenticate. API Error: 403 Attention Required! | Cloudflare".
+# Both phrases must occur: "cloudflare" alone also names a real, persistent 403 from a
+# provider behind Cloudflare, and "attention required" alone is generic prose.
+_API_BLOCKED_MARKERS = ("attention required", "cloudflare")
+
+_API_BLOCKED_REASON = (
+    "transient block in front of the API (Cloudflare edge, not an auth fact): the work "
+    "is on branch dispatch/<dispatch_id> or in its worktree, refire as a round (-r2) "
+    "after a pause"
+)
+
 # Provider gateways (observed: glm-harness's litellm/OpenRouter proxy) can wrap
 # the real one-line reason inside a multi-KB nested JSON blob carrying dozens
 # of duplicated retry attempts. Prefer the first quoted "message" field (the
@@ -264,6 +288,7 @@ def _classify_marker_failures(
 ) -> Optional[Dict[str, Optional[str]]]:
     """Classify the narrow marker refusal classes, in priority order.
 
+    api_blocked and paid_lane_budget_exceeded (OI-2796, OI-2783), then
     completion_without_execution, no_verdict, tool_missing and
     local_key_missing are matched here — before the broader auth/model keyword
     bags — because each carries a specific, non-overlapping phrase that a
@@ -272,6 +297,9 @@ def _classify_marker_failures(
     matched before the auth bag and never reclassified as auth_rejected (which
     would cool the lane down for everyone).
     """
+    refusal_failure = _classify_refusal_failures(signal_text, error)
+    if refusal_failure is not None:
+        return refusal_failure
     marker_classes = (
         ((_COMPLETION_WITHOUT_EXECUTION_MARKER,), "completion_without_execution"),
         (_NO_VERDICT_MARKERS, "no_verdict"),
@@ -283,6 +311,51 @@ def _classify_marker_failures(
             detail = error if error else _extract_detail(completion)
             return {"failure_class": failure_class, "failure_reason": detail}
     return None
+
+
+def _classify_refusal_failures(
+    signal_text: str, error: Optional[str]
+) -> Optional[Dict[str, Optional[str]]]:
+    """Classify a Cloudflare edge block and a paid-lane budget refusal (OI-2796, OI-2783).
+
+    Both are matched before the auth keyword bag: the edge-block text carries
+    "authenticate" and "403", which would otherwise make it auth_rejected, a class
+    that is treated as a persistent auth or quota fact. A budget refusal is only ever
+    the caller-supplied error, never a model's own completion text.
+    """
+    if all(marker in signal_text for marker in _API_BLOCKED_MARKERS):
+        return {"failure_class": "api_blocked", "failure_reason": _API_BLOCKED_REASON}
+    # Lazy: paid_lane_budget pulls the cost ledger, and this module stays stdlib-only at
+    # import time because stop_conditions and gate_recorder import it.
+    from paid_lane_budget import PAID_LANE_BUDGET_REFUSAL_PREFIX  # noqa: PLC0415
+
+    if error and error.lstrip().startswith(PAID_LANE_BUDGET_REFUSAL_PREFIX):
+        return {
+            "failure_class": "paid_lane_budget_exceeded",
+            "failure_reason": (
+                f"{_extract_detail(error)} — refused before any API call: restage on a "
+                "subscription lane, or refire after 00:00Z UTC when the daily budget resets"
+            ),
+        }
+    return None
+
+
+def _classify_credit_exhausted(
+    signal_text: str,
+    error: Optional[str],
+    completion: str,
+    provider: str,
+    sub_provider: Optional[str],
+) -> Optional[Dict[str, Optional[str]]]:
+    """Classify a provider/gateway balance or credit exhaustion, else None."""
+    if not any(kw in signal_text for kw in CREDIT_EXHAUSTED_KEYWORDS):
+        return None
+    source = _error_source(provider, sub_provider)
+    detail = _extract_detail(error if error else completion)
+    return {
+        "failure_class": "credit_exhausted",
+        "failure_reason": f"{source}: credit/balance exhausted — {detail}",
+    }
 
 
 def classify_failure(
@@ -347,13 +420,11 @@ def classify_failure(
     # ── credit / balance exhaustion ────────────────────────────────────────
     # Checked before model_keywords so glm-harness's outer "500" wrapper never
     # hides the real, actionable 402-credits cause nested inside it.
-    if any(kw in signal_text for kw in CREDIT_EXHAUSTED_KEYWORDS):
-        source = _error_source(provider, sub_provider)
-        detail = _extract_detail(error if error else completion)
-        return {
-            "failure_class": "credit_exhausted",
-            "failure_reason": f"{source}: credit/balance exhausted — {detail}",
-        }
+    credit_failure = _classify_credit_exhausted(
+        signal_text, error, completion, provider, sub_provider
+    )
+    if credit_failure is not None:
+        return credit_failure
 
     # ── narrow marker failures (checked before the auth/model keyword bags) ─
     # completion_without_execution / no_verdict / tool_missing / local_key_missing.

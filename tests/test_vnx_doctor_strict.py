@@ -126,6 +126,8 @@ def _make_clean_project(tmp_path: Path, monkeypatch) -> Path:
     sqlite3.connect(str(state_dir / "quality_intelligence.db")).close()
     (data_root / "dispatches" / "pending").mkdir(parents=True, exist_ok=True)
     _write_ledger_health_beacon(data_root)
+    # The nightly dream step writes this report (ADR-072 decision 17); a project without one is WARN by design.
+    (state_dir / "steering_report.json").write_text('{"schema": "steering_report/1", "status": "ok"}', encoding="utf-8")
     subprocess.run(["git", "init", "-q", str(project)], check=True)
     (project / _engine.PROJECT_FILE_NAME).write_text("vnx-dev\n", encoding="utf-8")
     _inject_launchd(monkeypatch, "vnx-dev")

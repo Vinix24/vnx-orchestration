@@ -76,6 +76,7 @@ from delivery_identity import delivery_identity_fields
 import plan_scope
 import provider_switch
 import schema_manifest
+import open_outcomes
 
 _HORIZON_ORDER = ["now", "next", "later"]
 _HORIZON_LABEL = {"now": "NOW", "next": "NEXT", "later": "LATER", None: "UNSCHEDULED"}
@@ -1220,40 +1221,10 @@ def cmd_objective_link_pr(args: argparse.Namespace) -> int:
     touched_prs = sorted({int(ref.lstrip("#")) for ref in (added + already)})
 
     if new_ref == (existing or ""):
-        # pr_ref itself is unchanged, but the delivery marking is still an
-        # explicit operator assertion — write/upgrade it regardless.
-        conn = _db_conn(state_dir)
-        try:
-            delivery_written = _write_pr_delivery(
-                conn, project_id, track_id, touched_prs, delivery_kind, set_by="operator"
-            )
-            conn.commit()
-        finally:
-            conn.close()
-        payload = {
-            "track_id": track_id,
-            "project_id": project_id,
-            "pr_ref": new_ref,
-            "added": added,
-            "already_present": already,
-            "delivery": delivery_kind,
-            "delivery_written": delivery_written,
-            "action": "noop_no_change",
-            "applied": False,
-        }
-        if not delivery_written:
-            payload["error"] = _DELIVERY_TABLE_MISSING_MSG
-        if args.json:
-            print(json.dumps(payload, indent=2, default=str))
-        else:
-            print(f"\nvnx objective link-pr — {track_id} (project '{project_id}')")
-            print(f"  pr_ref: {new_ref}")
-            if delivery_written:
-                print(f"  delivery ({delivery_kind}) recorded for: {', '.join(f'#{n}' for n in touched_prs)}")
-            else:
-                print(f"  ERROR: {_DELIVERY_TABLE_MISSING_MSG}", file=sys.stderr)
-            print(f"  all provided PR refs already present; no pr_ref change made.\n")
-        return 0
+        return _link_pr_noop(
+            args, state_dir, project_id, track_id, new_ref, added, already,
+            touched_prs, delivery_kind,
+        )
 
     # ADR-007: write is scoped to (track_id, project_id).
     conn = _db_conn(state_dir)
@@ -1292,6 +1263,57 @@ def cmd_objective_link_pr(args: argparse.Namespace) -> int:
     }
     if not delivery_written:
         payload["error"] = _DELIVERY_TABLE_MISSING_MSG
+    _link_pr_print_linked(
+        args, payload, track_id, project_id, new_ref, added, already,
+        delivery_written, delivery_kind, touched_prs,
+    )
+    return 0
+
+
+def _link_pr_noop(
+    args, state_dir, project_id, track_id, new_ref, added, already,
+    touched_prs, delivery_kind,
+) -> int:
+    # pr_ref itself is unchanged, but the delivery marking is still an
+    # explicit operator assertion — write/upgrade it regardless.
+    conn = _db_conn(state_dir)
+    try:
+        delivery_written = _write_pr_delivery(
+            conn, project_id, track_id, touched_prs, delivery_kind, set_by="operator"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    payload = {
+        "track_id": track_id,
+        "project_id": project_id,
+        "pr_ref": new_ref,
+        "added": added,
+        "already_present": already,
+        "delivery": delivery_kind,
+        "delivery_written": delivery_written,
+        "action": "noop_no_change",
+        "applied": False,
+    }
+    if not delivery_written:
+        payload["error"] = _DELIVERY_TABLE_MISSING_MSG
+    if args.json:
+        print(json.dumps(payload, indent=2, default=str))
+    else:
+        print(f"\nvnx objective link-pr — {track_id} (project '{project_id}')")
+        print(f"  pr_ref: {new_ref}")
+        if delivery_written:
+            print(f"  delivery ({delivery_kind}) recorded for: {', '.join(f'#{n}' for n in touched_prs)}")
+        else:
+            print(f"  ERROR: {_DELIVERY_TABLE_MISSING_MSG}", file=sys.stderr)
+        print(f"  all provided PR refs already present; no pr_ref change made.\n")
+    return 0
+
+
+def _link_pr_print_linked(
+    args, payload, track_id, project_id, new_ref, added, already,
+    delivery_written, delivery_kind, touched_prs,
+) -> None:
     if args.json:
         print(json.dumps(payload, indent=2, default=str))
     else:
@@ -1306,7 +1328,6 @@ def cmd_objective_link_pr(args: argparse.Namespace) -> int:
         else:
             print(f"  ERROR: {_DELIVERY_TABLE_MISSING_MSG}", file=sys.stderr)
         print()
-    return 0
 
 
 def cmd_objective_unlink_pr(args: argparse.Namespace) -> int:
@@ -1618,20 +1639,8 @@ def _close_with_attest(
     through tracks.transition_phase (the single-writer). This is an explicit
     operator override; it does NOT resolve blocker open-items.
     """
-    if not args.apply:
-        print(
-            "objective close --attest: --apply is required to write an attestation. "
-            "No change made.",
-            file=sys.stderr,
-        )
-        return 2
-    approval_id = (args.approval_id or "").strip()
-    if not approval_id:
-        print(
-            "objective close --attest: --approval-id is required (the operator's gate token). "
-            "No change made.",
-            file=sys.stderr,
-        )
+    approval_id = _attest_approval_id(args)
+    if approval_id is None:
         return 2
 
     track = tracks_lib.get_track(state_dir, track_id, project_id)
@@ -1655,37 +1664,27 @@ def _close_with_attest(
 
     if declared == target:
         payload["action"] = "noop_already_closed"
-        if args.json:
-            print(json.dumps(payload, indent=2, default=str))
-        else:
-            print(f"\nvnx objective close --attest — {track_id} (project '{project_id}')\n")
-            print(f"  already closed (phase={declared}).\n")
+        _attest_render(args, payload, track_id, project_id, f"  already closed (phase={declared}).\n")
         return 0
 
     # Respect the same deliberate stop-signal as the evidence-grounded path.
     if declared == "parked" and not getattr(args, "include_parked", False):
         payload["action"] = "rejected_parked"
-        if args.json:
-            print(json.dumps(payload, indent=2, default=str))
-        else:
-            print(f"\nvnx objective close --attest — {track_id} (project '{project_id}')\n")
-            print(
-                "  track is PARKED (a deliberate stop). Pass --include-parked to close "
-                "it anyway, or un-park it first. No change made.\n"
-            )
+        _attest_render(
+            args, payload, track_id, project_id,
+            "  track is PARKED (a deliberate stop). Pass --include-parked to close "
+            "it anyway, or un-park it first. No change made.\n",
+        )
         return 2
 
     path = _phase_path_to(declared, target)
     if path is None:
         payload["action"] = "rejected_no_path"
-        if args.json:
-            print(json.dumps(payload, indent=2, default=str))
-        else:
-            print(f"\nvnx objective close --attest — {track_id} (project '{project_id}')\n")
-            print(
-                f"  ERROR: no legal transition path {declared} -> {target} "
-                f"(ALLOWED_TRANSITIONS). No change made.\n"
-            )
+        _attest_render(
+            args, payload, track_id, project_id,
+            f"  ERROR: no legal transition path {declared} -> {target} "
+            f"(ALLOWED_TRANSITIONS). No change made.\n",
+        )
         return 2
     payload["path"] = [declared, *path]
 
@@ -1694,48 +1693,20 @@ def _close_with_attest(
     # stamp. Both APPEND to the refs already on the track, never replace them.
     existing_ref = track.get("pr_ref")
     raw_pr_args = list(getattr(args, "pr", None) or [])
-    resolved_pr_ref: Optional[str] = None
-    ref_tokens = _existing_pr_ref_tokens(existing_ref)
-    if raw_pr_args:
-        resolved_pr_ref, _, _ = _merge_pr_refs(None, raw_pr_args)
-        if resolved_pr_ref is None:
-            payload["action"] = "rejected_invalid_pr"
-            if args.json:
-                print(json.dumps(payload, indent=2, default=str))
-            else:
-                print(f"\nvnx objective close --attest — {track_id} (project '{project_id}')\n")
-                print(
-                    f"  ERROR: no valid PR refs provided via --pr: {raw_pr_args!r}. "
-                    "No change made.\n"
-                )
-            return 2
-        _, pr_added, _ = _merge_pr_refs(existing_ref, raw_pr_args)
-        ref_tokens.extend(pr_added)
-    else:
-        stamp = f"ops-attest:{date.today().isoformat()}"
-        if stamp not in ref_tokens:
-            ref_tokens.append(stamp)
-
-    # Stamp the explicit attestation on the track.
-    attest_ref = ",".join(ref_tokens)
-    conn = _db_conn(state_dir)
-    try:
-        conn.execute(
-            "UPDATE tracks SET pr_ref = ? WHERE track_id = ? AND project_id = ?",
-            (attest_ref, track_id, project_id),
+    ref_tokens, resolved_pr_ref = _attest_ref_tokens(existing_ref, raw_pr_args)
+    if ref_tokens is None:
+        payload["action"] = "rejected_invalid_pr"
+        _attest_render(
+            args, payload, track_id, project_id,
+            f"  ERROR: no valid PR refs provided via --pr: {raw_pr_args!r}. "
+            "No change made.\n",
         )
-        conn.commit()
-    finally:
-        conn.close()
+        return 2
 
-    # Audit the operator attestation (reason + approval_id + full PR provenance:
-    # raw --pr args as given, and the resolved ref actually stamped).
-    tracks_lib._emit_track_event(
-        state_dir,
-        "track_ops_attest",
-        track_id,
-        project_id,
-        "operator",
+    # Stamp the explicit attestation on the track, then audit it.
+    attest_ref = ",".join(ref_tokens)
+    _attest_stamp(
+        state_dir, track_id, project_id, attest_ref,
         {
             "reason": reason,
             "approval_id": approval_id,
@@ -1747,6 +1718,118 @@ def _close_with_attest(
     )
 
     # Walk the legal phase path via the single-writer.
+    walk_exit = _attest_walk(
+        args, payload, state_dir, track_id, project_id,
+        declared=declared, target=target, path=path, reason=reason, approval_id=approval_id,
+    )
+    if walk_exit is not None:
+        return walk_exit
+
+    # Best-effort refresh of derived_status now that phase is 'done'.
+    try:
+        track_reconciler.reconcile_track(state_dir, track_id, project_id, repo_root=repo_root)
+    except Exception:
+        logger.warning("close --attest: derived refresh failed after transition", exc_info=True)
+
+    payload["action"] = "closed"
+    payload["applied"] = True
+    payload["declared_phase"] = target
+    payload["pr_ref"] = attest_ref
+
+    _attest_render(
+        args, payload, track_id, project_id,
+        f"  attested: {reason}",
+        f"  pr_ref set: {attest_ref}",
+        f"  closed: {' -> '.join([declared, *path])} "
+        f"(actor=operator, approval={approval_id}).\n",
+    )
+    return 0
+
+
+def _attest_approval_id(args: argparse.Namespace) -> Optional[str]:
+    """The operator's gate token for ``close --attest``; None after naming the refusal."""
+    if not args.apply:
+        print(
+            "objective close --attest: --apply is required to write an attestation. "
+            "No change made.",
+            file=sys.stderr,
+        )
+        return None
+    approval_id = (args.approval_id or "").strip()
+    if not approval_id:
+        print(
+            "objective close --attest: --approval-id is required (the operator's gate token). "
+            "No change made.",
+            file=sys.stderr,
+        )
+        return None
+    return approval_id
+
+
+def _attest_render(args: argparse.Namespace, payload: dict[str, Any], track_id: str,
+                   project_id: str, *lines: str) -> None:
+    """Print one ``close --attest`` outcome: the payload as JSON, or the header and lines."""
+    if args.json:
+        print(json.dumps(payload, indent=2, default=str))
+    else:
+        print(f"\nvnx objective close --attest — {track_id} (project '{project_id}')\n")
+        for line in lines:
+            print(line)
+
+
+def _attest_ref_tokens(
+    existing_ref: Optional[str], raw_pr_args: list[str]
+) -> tuple[Optional[list[str]], Optional[str]]:
+    """The pr_ref tokens ``close --attest`` stamps, and the resolved --pr ref.
+
+    The real PR(s) (via --pr, normalized and deduplicated like `link-pr`) when
+    given, else the fail-open ops-attest date stamp. Both APPEND to the refs
+    already on the track, never replace them. The tokens are None when --pr
+    was given but held no valid ref.
+    """
+    resolved_pr_ref: Optional[str] = None
+    ref_tokens = _existing_pr_ref_tokens(existing_ref)
+    if raw_pr_args:
+        resolved_pr_ref, _, _ = _merge_pr_refs(None, raw_pr_args)
+        if resolved_pr_ref is None:
+            return None, None
+        _, pr_added, _ = _merge_pr_refs(existing_ref, raw_pr_args)
+        ref_tokens.extend(pr_added)
+    else:
+        stamp = f"ops-attest:{date.today().isoformat()}"
+        if stamp not in ref_tokens:
+            ref_tokens.append(stamp)
+    return ref_tokens, resolved_pr_ref
+
+
+def _attest_stamp(
+    state_dir: Path, track_id: str, project_id: str, attest_ref: str, details: dict[str, Any]
+) -> None:
+    """Write the attested pr_ref on the track, then emit the ``track_ops_attest`` audit event.
+
+    The event carries the reason, the approval_id and the full PR provenance:
+    the raw --pr args as given, and the resolved ref actually stamped.
+    """
+    conn = _db_conn(state_dir)
+    try:
+        conn.execute(
+            "UPDATE tracks SET pr_ref = ? WHERE track_id = ? AND project_id = ?",
+            (attest_ref, track_id, project_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    tracks_lib._emit_track_event(
+        state_dir, "track_ops_attest", track_id, project_id, "operator", details,
+    )
+
+
+def _attest_walk(
+    args: argparse.Namespace, payload: dict[str, Any], state_dir: Path, track_id: str,
+    project_id: str, *, declared: str, target: str, path: list[str], reason: str,
+    approval_id: str,
+) -> Optional[int]:
+    """Walk the attested phase path; None when it reached the target, else exit 2."""
     cur = declared
     try:
         for step in path:
@@ -1761,61 +1844,27 @@ def _close_with_attest(
         payload["declared_phase"] = cur
         payload["action"] = "rejected_not_found"
         payload["error"] = str(exc)
-        if args.json:
-            print(json.dumps(payload, indent=2, default=str))
-        else:
-            print(f"\nvnx objective close --attest — {track_id} (project '{project_id}')\n")
-            print(f"  ERROR: {exc}\n")
+        _attest_render(args, payload, track_id, project_id, f"  ERROR: {exc}\n")
         return 2
     except tracks_lib.InvalidTransitionError as exc:
         payload["declared_phase"] = cur
         payload["action"] = "rejected_walk_failed"
         payload["error"] = str(exc)
-        if args.json:
-            print(json.dumps(payload, indent=2, default=str))
-        else:
-            print(f"\nvnx objective close --attest — {track_id} (project '{project_id}')\n")
-            print(
-                f"  ERROR: transition failed at '{cur}': {exc}. "
-                f"Track left at '{cur}'.\n"
-            )
+        _attest_render(
+            args, payload, track_id, project_id,
+            f"  ERROR: transition failed at '{cur}': {exc}. Track left at '{cur}'.\n",
+        )
         return 2
     except Exception as exc:
         payload["declared_phase"] = cur
         payload["action"] = "rejected_walk_failed"
         payload["error"] = f"{type(exc).__name__}: {exc}"
-        if args.json:
-            print(json.dumps(payload, indent=2, default=str))
-        else:
-            print(f"\nvnx objective close --attest — {track_id} (project '{project_id}')\n")
-            print(
-                f"  ERROR: transition failed at '{cur}': {exc}. "
-                f"Track left at '{cur}'.\n"
-            )
-        return 2
-
-    # Best-effort refresh of derived_status now that phase is 'done'.
-    try:
-        track_reconciler.reconcile_track(state_dir, track_id, project_id, repo_root=repo_root)
-    except Exception:
-        logger.warning("close --attest: derived refresh failed after transition", exc_info=True)
-
-    payload["action"] = "closed"
-    payload["applied"] = True
-    payload["declared_phase"] = target
-    payload["pr_ref"] = attest_ref
-
-    if args.json:
-        print(json.dumps(payload, indent=2, default=str))
-    else:
-        print(f"\nvnx objective close --attest — {track_id} (project '{project_id}')\n")
-        print(f"  attested: {reason}")
-        print(f"  pr_ref set: {attest_ref}")
-        print(
-            f"  closed: {' -> '.join([declared, *path])} "
-            f"(actor=operator, approval={approval_id}).\n"
+        _attest_render(
+            args, payload, track_id, project_id,
+            f"  ERROR: transition failed at '{cur}': {exc}. Track left at '{cur}'.\n",
         )
-    return 0
+        return 2
+    return None
 
 
 def cmd_objective_close(args: argparse.Namespace) -> int:
@@ -3465,7 +3514,7 @@ def cmd_deliverable_close(args: argparse.Namespace) -> int:
 
         if current_state != "ready":
             return _close_off_ready(
-                args, conn, project_id=project_id, dispatch_id=dispatch_id,
+                args, conn, project_id=project_id, dispatch_id=dispatch_id, state_dir=state_dir,
                 current_state=current_state, pr_ref=pr_ref, evidence_number=evidence_number,
             )
 
@@ -3520,6 +3569,10 @@ def cmd_deliverable_close(args: argparse.Namespace) -> int:
 
 #: States in which the deliverable's own attempt failed; only its own round can close one.
 SUPERSEDED_CLOSE_STATES = frozenset({"failed_delivery", "timed_out"})
+#: ``dead_letter`` joins them only behind the T0's own reject of that base (OI-2803): since
+#: OI-2262 the drain moves a base there on a reject, so the reject in the decision log is
+#: the evidence that the attempt was ended on purpose and not lost.
+DEAD_LETTER_STATE = "dead_letter"
 SUPERSEDED_EVENT = "deliverable_superseded"
 
 
@@ -3561,9 +3614,35 @@ def _read_superseded_row(
     ).fetchone()
 
 
+def _newest_reject(state_dir: Path, project_id: str, dispatch_id: str) -> dict:
+    """Whether the T0's newest decision for *dispatch_id* in the decision log is ``reject``.
+
+    Returns ``{"reason": None, "decided_at": <timestamp>}`` on a reject, else ``{"reason": key}``
+    with ``no_decision_log`` (no file), ``log_unreadable`` (the read raised; ``detail`` names the
+    line), ``no_decision`` (the project never decided on this base) or ``newest_not_reject``
+    (the last word was an accept). Fail-closed: only a positive ``reject`` passes; the log is
+    read by ``open_outcomes.read_outcome_decisions_strict``, which keeps the last decision in
+    file order and refuses on any line it cannot read, whichever dispatch it belongs to.
+    """
+    log_path = state_dir / open_outcomes.DECISION_LOG_NAME
+    if not log_path.exists():
+        return {"reason": "no_decision_log"}
+    try:
+        decision = open_outcomes.read_outcome_decisions_strict(log_path, project_id).get(dispatch_id)
+    except open_outcomes.DecisionLogUnreadable as exc:
+        return {"reason": "log_unreadable", "detail": str(exc)}
+    except (OSError, ValueError):
+        return {"reason": "log_unreadable"}
+    if decision is None:
+        return {"reason": "no_decision"}
+    if decision.get("decision") != "reject":
+        return {"reason": "newest_not_reject"}
+    return {"reason": None, "decided_at": decision.get("timestamp")}
+
+
 def _book_superseded_attempt(
     conn: sqlite3.Connection, *, project_id: str, dispatch_id: str, from_state: str,
-    pr_ref: str, evidence_number: int,
+    pr_ref: str, evidence_number: int, extra_metadata: Optional[dict] = None,
 ) -> dict:
     """The work under the lock: find the round, merge the metadata, write the row and the event.
 
@@ -3587,7 +3666,7 @@ def _book_superseded_attempt(
     now = _now_utc()
     metadata.update(superseded_by=round_id, superseded_from=from_state,
                     superseded_evidence_pr=evidence_number, superseded_at=now,
-                    attestation="operator")
+                    attestation="operator", **(extra_metadata or {}))
     changed = conn.execute(
         """
         UPDATE dispatches
@@ -3615,7 +3694,7 @@ def _book_superseded_attempt(
 
 def _close_superseded_attempt(
     conn: sqlite3.Connection, *, project_id: str, dispatch_id: str, from_state: str,
-    pr_ref: str, evidence_number: int,
+    pr_ref: str, evidence_number: int, extra_metadata: Optional[dict] = None,
 ) -> dict:
     """Book a base on its own completed round: ``expired`` plus ``metadata_json.superseded_by``.
 
@@ -3632,7 +3711,7 @@ def _close_superseded_attempt(
     try:
         outcome = _book_superseded_attempt(
             conn, project_id=project_id, dispatch_id=dispatch_id, from_state=from_state,
-            pr_ref=pr_ref, evidence_number=evidence_number,
+            pr_ref=pr_ref, evidence_number=evidence_number, extra_metadata=extra_metadata,
         )
     except BaseException:
         conn.rollback()
@@ -3644,16 +3723,47 @@ def _close_superseded_attempt(
     return outcome
 
 
+def _superseded_refusal(action: str, dispatch_id: str, current_state: str, detail: Optional[str] = None) -> str:
+    """The named reason a supersede close was refused (``action`` is the outcome key; ``detail`` names an unreadable line)."""
+    if action == "log_unreadable" and detail:
+        return f"{detail}, so no T0 reject of this base can be shown (OI-2803)"
+    reasons = {
+        "no_round": f"no round {dispatch_id}-rK is 'completed', so nothing of its own "
+                    "delivered this work (ADR-049: never closed on foreign evidence)",
+        "bad_metadata": "its metadata_json does not parse, so the row is not rewritten",
+        "row_changed": f"its state or its metadata_json changed under the read (it must still "
+                       f"be {current_state!r} with the metadata the write compared against)",
+        "no_decision_log": "there is no t0_decision_log.jsonl, so no T0 reject of this base "
+                           "is on record (OI-2803: a dead_letter base closes only behind that reject)",
+        "log_unreadable": "the t0_decision_log.jsonl cannot be read, so no T0 reject of this "
+                          "base can be shown (OI-2803)",
+        "no_decision": "the T0 never decided on this base in this project, so no reject of "
+                       "it is on record (OI-2803)",
+        "newest_not_reject": "the T0's newest decision on this base is not a reject "
+                             "(OI-2803: a dead_letter base closes only behind a reject)",
+    }
+    return reasons.get(action, "the transition was refused")
+
+
 def _close_off_ready(
     args: argparse.Namespace, conn: sqlite3.Connection, *, project_id: str, dispatch_id: str,
-    current_state: str, pr_ref: str, evidence_number: int,
+    current_state: str, pr_ref: str, evidence_number: int, state_dir: Path,
 ) -> int:
-    """A ``failed_delivery``/``timed_out`` base: booked on its own round, or refused by name."""
-    if current_state in SUPERSEDED_CLOSE_STATES:
-        outcome = _close_superseded_attempt(
-            conn, project_id=project_id, dispatch_id=dispatch_id, from_state=current_state,
-            pr_ref=pr_ref, evidence_number=evidence_number,
-        )
+    """A ``failed_delivery``/``timed_out`` base, or a ``dead_letter`` one the T0 rejected: booked on its own round, or refused by name."""
+    if current_state in SUPERSEDED_CLOSE_STATES or current_state == DEAD_LETTER_STATE:
+        extra_metadata = None
+        outcome = {"action": "pending"}
+        if current_state == DEAD_LETTER_STATE:
+            reject = _newest_reject(state_dir, project_id, dispatch_id)
+            if reject["reason"] is None:
+                extra_metadata = {"superseded_decision_at": reject["decided_at"]}
+            else:
+                outcome = {"action": reject["reason"], "detail": reject.get("detail")}
+        if outcome["action"] == "pending":
+            outcome = _close_superseded_attempt(
+                conn, project_id=project_id, dispatch_id=dispatch_id, from_state=current_state,
+                pr_ref=pr_ref, evidence_number=evidence_number, extra_metadata=extra_metadata,
+            )
         if outcome["action"] == "superseded":
             round_id = outcome["round"]
             if args.json:
@@ -3669,16 +3779,9 @@ def _close_off_ready(
                 print(f"  {current_state} -> expired; delivered by round {round_id} "
                       f"(operator attestation: PR {pr_ref})\n")
             return 0
-        reasons = {
-            "no_round": f"no round {dispatch_id}-rK is 'completed', so nothing of its own "
-                        "delivered this work (ADR-049: never closed on foreign evidence)",
-            "bad_metadata": "its metadata_json does not parse, so the row is not rewritten",
-            "row_changed": f"its state or its metadata_json changed under the read (it must still "
-                           f"be {current_state!r} with the metadata the write compared against)",
-        }
         print(
             f"deliverable close: cannot close {dispatch_id!r}: state {current_state!r}, and "
-            f"{reasons.get(outcome['action'], 'the transition was refused')}. No change made.",
+            f"{_superseded_refusal(outcome['action'], dispatch_id, current_state, outcome.get('detail'))}. No change made.",
             file=sys.stderr,
         )
         return 2
@@ -6928,6 +7031,24 @@ def _build_parser() -> argparse.ArgumentParser:
 
     _add_objective_list_parser(obj_sub, _common)
 
+    _add_objective_show_sync_drift_parsers(obj_sub, _common)
+    _add_objective_reconcile_parser(obj_sub, _common)
+
+    _add_objective_write_parsers(obj_sub, _common)
+
+    _add_objective_hint_and_review_parsers(obj_sub, _common)
+
+    _add_planning_parsers(sub, obj_sub, _common)
+
+    # ------------------------------------------------------------------
+    # plan-gate subcommand (PM plan-first gate)
+    # ------------------------------------------------------------------
+    _add_plan_gate_parsers(sub, _common)
+
+    return parser
+
+
+def _add_objective_show_sync_drift_parsers(obj_sub, _common) -> None:
     p_show = obj_sub.add_parser("show", help="show one objective")
     _common(p_show)
     p_show.add_argument("track_id")
@@ -6955,6 +7076,8 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p_drift.set_defaults(func=cmd_objective_drift)
 
+
+def _add_objective_reconcile_parser(obj_sub, _common) -> None:
     p_reconcile = obj_sub.add_parser(
         "reconcile",
         help="batch git-grounded auto-close: verify PR merge state via gh and close done tracks",
@@ -6982,8 +7105,8 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p_reconcile.set_defaults(func=cmd_objective_reconcile)
 
-    _add_objective_write_parsers(obj_sub, _common)
 
+def _add_objective_hint_and_review_parsers(obj_sub, _common) -> None:
     p_lane_hint = obj_sub.add_parser(
         "set-lane-hint",
         help="set the descriptive dispatch lane_hint (governed|direct|unset) on a track",
@@ -7024,15 +7147,6 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     _common(p_rec_streak)
     p_rec_streak.set_defaults(func=cmd_objective_reconcile_streak)
-
-    _add_planning_parsers(sub, obj_sub, _common)
-
-    # ------------------------------------------------------------------
-    # plan-gate subcommand (PM plan-first gate)
-    # ------------------------------------------------------------------
-    _add_plan_gate_parsers(sub, _common)
-
-    return parser
 
 
 def main(argv: Optional[list[str]] = None) -> int:

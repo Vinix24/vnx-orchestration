@@ -1,0 +1,1 @@
+- A staged dispatch bundle older than 30 minutes (VNX_STALE_STAGED_MINUTES) with no receipt and no worktree is listed in `t0_state.json` and counted in `t0_index.json` as `stale_staged`, so a stalled T0 shows it (OI-1553).

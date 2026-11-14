@@ -97,28 +97,48 @@ def _file_created_iso(path: Path) -> str | None:
         return None
 
 
-def list_pending_reviews(project_id: str, data_root: Path | None = None) -> list[dict]:
-    """Return pending dream cycles awaiting operator review.
+def pending_review_queue(
+    project_id: str, data_root: Path | None = None
+) -> tuple[list[dict], list[str]]:
+    """Return ``(pending, unreadable)`` for the dream review queue (ADR-066).
 
-    Each returned dict is the pending-review payload plus an additive
-    ``created_at`` key (UTC ISO from the file mtime, which replaces the
+    ``pending`` holds the pending-review payloads for ``project_id``, each plus an
+    additive ``created_at`` key (UTC ISO from the file mtime, which replaces the
     ``created_at`` the consolidator wrote into the file) so readers can report the
     age of the oldest waiting review without re-globbing the state dir.
+    ``unreadable`` holds the sorted file NAMES (never content) of every
+    ``*-pending-review.json`` that does not parse, is not a JSON object or cannot be
+    read: such a file is counted, not skipped, because a cycle may be waiting in it.
     """
     dr = _resolve_data_root(data_root)
     state_dir = dr / "state" / "dream"
     if not state_dir.is_dir():
-        return []
-    results = []
+        return [], []
+    results: list[dict] = []
+    unreadable: list[str] = []
     for path in sorted(state_dir.glob("*-pending-review.json")):
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
+        except (ValueError, OSError):  # JSONDecodeError and UnicodeDecodeError are ValueErrors
+            unreadable.append(path.name)
+            continue
+        if not isinstance(data, dict):
+            unreadable.append(path.name)
             continue
         if data.get("project_id") == project_id and data.get("requires_operator_review"):
             data["created_at"] = _file_created_iso(path)
             results.append(data)
-    return results
+    return results, sorted(unreadable)
+
+
+def list_pending_reviews(project_id: str, data_root: Path | None = None) -> list[dict]:
+    """Return pending dream cycles awaiting operator review.
+
+    It drops unreadable review files from its list; ``pending_review_queue`` names
+    them (ADR-066). Each dict is the pending-review payload plus an additive
+    ``created_at`` key (see ``pending_review_queue``).
+    """
+    return pending_review_queue(project_id, data_root)[0]
 
 
 def approve_cycle(

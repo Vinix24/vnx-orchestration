@@ -503,3 +503,82 @@ class TestBackfillReceiptTokenUsage:
             "cache_creation_5m": 300, "cache_creation_1h": 0, "cache_read": 900,
         }
         conn.close()
+
+
+class TestBackfillLedgerRewriteLock:
+    """OI-1940: no rewrite without enrichment, the append lock, verbatim lines."""
+
+    _SESSION = ("INSERT INTO session_analytics (session_id, project_path, session_date, "
+                "dispatch_id, total_input_tokens, total_output_tokens, cache_creation_tokens, "
+                "cache_read_tokens) VALUES ('s1', '/p', '2026-11-13', 'D-1', 10, 20, 1, 2)")
+
+    def _prep(self, tmp_path, monkeypatch, lines: list[bytes]):
+        import link_sessions_dispatches as lsd
+        conn = sqlite3.connect(str(tmp_path / "t.db"))
+        _init_db_schema(conn)
+        conn.execute(self._SESSION)
+        conn.commit()
+        state = tmp_path / "state"
+        state.mkdir()
+        ledger = state / "t0_receipts.ndjson"
+        ledger.write_bytes(b"".join(line + b"\n" for line in lines))
+        monkeypatch.setattr(lsd, "RECEIPTS_FILE", ledger)
+        return lsd, conn, ledger
+
+    _ODD = b'{"a":1,  "b":2}'
+    _UNI = '{"note": "caf\\u00e9", "x": "é"}'.encode("utf-8")
+    _TARGET = b'{"dispatch_id": "D-1", "provider": "claude", "token_usage": null}'
+
+    def test_nothing_to_enrich_leaves_the_file_alone(self, tmp_path, monkeypatch):
+        lsd, conn, ledger = self._prep(tmp_path, monkeypatch, [self._ODD, self._UNI])
+        before, ino = ledger.read_bytes(), ledger.stat().st_ino
+        assert lsd.backfill_receipt_token_usage(conn) == 0
+        assert ledger.read_bytes() == before
+        assert ledger.stat().st_ino == ino
+        assert not ledger.with_suffix(".ndjson.tmp").exists()
+
+    def test_only_the_enriched_line_changes(self, tmp_path, monkeypatch):
+        lsd, conn, ledger = self._prep(
+            tmp_path, monkeypatch, [self._ODD, self._TARGET, self._UNI])
+        assert lsd.backfill_receipt_token_usage(conn) == 1
+        out = ledger.read_bytes().split(b"\n")
+        assert out[0] == self._ODD and out[2] == self._UNI and out[3] == b""
+        assert json.loads(out[1])["token_usage"]["input"] == 10
+
+    def test_taken_append_lock_leaves_ledger_alone_then_enriches(
+            self, tmp_path, monkeypatch, caplog):
+        import fcntl
+        lsd, conn, ledger = self._prep(tmp_path, monkeypatch, [self._TARGET])
+        before = ledger.read_bytes()
+        with open(ledger.parent / "append_receipt.lock", "a+") as holder:
+            fcntl.flock(holder.fileno(), fcntl.LOCK_EX)
+            with caplog.at_level("WARNING"):
+                assert lsd.backfill_receipt_token_usage(conn, lock_timeout_sec=0.2) == 0
+            assert any("append_receipt.lock" in r.getMessage() for r in caplog.records)
+            assert ledger.read_bytes() == before
+        assert lsd.backfill_receipt_token_usage(conn, lock_timeout_sec=0.2) == 1
+        assert b'"input": 10' in ledger.read_bytes()
+
+    def test_line_appended_between_the_passes_survives(self, tmp_path, monkeypatch):
+        lsd, conn, ledger = self._prep(tmp_path, monkeypatch, [self._TARGET])
+        real = lsd._rewrite_ledger_lines
+        calls = []
+
+        def scan_then_append(tokens):
+            result = real(tokens)
+            calls.append(1)
+            if len(calls) == 1:
+                with open(ledger, "ab") as f:
+                    f.write(b'{"late": true}\n')
+            return result
+
+        monkeypatch.setattr(lsd, "_rewrite_ledger_lines", scan_then_append)
+        assert lsd.backfill_receipt_token_usage(conn) == 1
+        assert ledger.read_bytes().endswith(b'{"late": true}\n')
+
+    def test_malformed_and_non_object_lines_stay_verbatim(self, tmp_path, monkeypatch):
+        junk = [b"not json {", b"[1, 2]", b'{"provider":"claude","token_usage":null}']
+        lsd, conn, ledger = self._prep(tmp_path, monkeypatch, junk)
+        before = ledger.read_bytes()
+        assert lsd.backfill_receipt_token_usage(conn) == 0
+        assert ledger.read_bytes() == before

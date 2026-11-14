@@ -58,6 +58,16 @@ def _is_noise_receipt(receipt: Dict, project_id: str) -> bool:
     return noise_reason(receipt, project_id or str(receipt.get("project_id") or "")) is not None
 
 
+def _parse_iso_timestamp(value: str) -> datetime:
+    """Parse an ISO-8601 string (``Z`` or offset, with or without sub-seconds).
+
+    A naive result is read as UTC. Raises ValueError when it cannot be parsed."""
+    ts = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    return ts
+
+
 def _load_recent_receipts(state_dir: Path, hours: int = LOOKBACK_HOURS) -> List[Dict]:
     """Load receipts from the last N hours from t0_receipts.ndjson.
 
@@ -70,6 +80,7 @@ def _load_recent_receipts(state_dir: Path, hours: int = LOOKBACK_HOURS) -> List[
 
     cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
     receipts: List[Dict] = []
+    unparseable = 0
 
     try:
         with open(receipts_path, encoding="utf-8") as fh:
@@ -88,9 +99,11 @@ def _load_recent_receipts(state_dir: Path, hours: int = LOOKBACK_HOURS) -> List[
                             epoch_sec = ts_raw / 1000.0 if ts_raw > 1e10 else float(ts_raw)
                             ts = datetime.fromtimestamp(epoch_sec, tz=timezone.utc)
                         else:
-                            # Normalise: strip sub-seconds, ensure UTC
-                            ts_clean = str(ts_raw).replace("Z", "+00:00").split(".")[0] + "+00:00"
-                            ts = datetime.fromisoformat(ts_clean)
+                            try:
+                                ts = _parse_iso_timestamp(str(ts_raw))
+                            except ValueError:
+                                unparseable += 1
+                                continue
                         if ts > cutoff:
                             receipts.append(r)
                 except (json.JSONDecodeError, ValueError, AttributeError, TypeError):
@@ -98,6 +111,11 @@ def _load_recent_receipts(state_dir: Path, hours: int = LOOKBACK_HOURS) -> List[
     except OSError:
         pass
 
+    if unparseable:
+        logger.warning(
+            "quality digest: skipped %d receipt line(s) with an unparseable timestamp in %s",
+            unparseable, receipts_path,
+        )
     return receipts
 
 
@@ -365,6 +383,23 @@ def build_governance_health(
     recs: List[Dict] = []
 
     # 3a: unacknowledged SPC alerts
+    _append_spc_alerts(recs, db, evidence)
+
+    # 3b: failed gates from recent receipts
+    _append_failed_gates(recs, evidence)
+
+    # 3c: governance metrics below threshold
+    _append_low_governance_metrics(recs, db, evidence)
+
+    # Fallback: healthy status when nothing to report
+    if not recs:
+        recs.append(_healthy_status_rec())
+
+    return recs[:MAX_PER_SECTION]
+
+
+def _append_spc_alerts(recs: List[Dict], db: Optional[sqlite3.Connection], evidence: Dict[str, Any]) -> None:
+    """3a: unacknowledged SPC alerts, appended to ``recs`` in place."""
     if db:
         try:
             cursor = db.execute(
@@ -403,7 +438,9 @@ def build_governance_health(
         except sqlite3.OperationalError as exc:
             logger.debug(f"spc_alerts query failed: {exc}")
 
-    # 3b: failed gates from recent receipts
+
+def _append_failed_gates(recs: List[Dict], evidence: Dict[str, Any]) -> None:
+    """3b: failed gates from recent receipts, appended to ``recs`` in place."""
     remaining = MAX_PER_SECTION - len(recs)
     for did in evidence["failed_dispatch_ids"][:remaining]:
         recs.append({
@@ -420,7 +457,9 @@ def build_governance_health(
             },
         })
 
-    # 3c: governance metrics below threshold
+
+def _append_low_governance_metrics(recs: List[Dict], db: Optional[sqlite3.Connection], evidence: Dict[str, Any]) -> None:
+    """3c: governance metrics below threshold, appended to ``recs`` in place."""
     if db:
         remaining = MAX_PER_SECTION - len(recs)
         if remaining > 0:
@@ -457,22 +496,21 @@ def build_governance_health(
             except sqlite3.OperationalError as exc:
                 logger.debug(f"governance_metrics query failed: {exc}")
 
-    # Fallback: healthy status when nothing to report
-    if not recs:
-        recs.append({
-            "rank": 1,
-            "type": "governance_status",
-            "title": "No active governance alerts",
-            "severity": "info",
-            "detail": (
-                f"No SPC alerts, failed gates, or metric anomalies "
-                f"in last {LOOKBACK_HOURS}h"
-            ),
-            "action": "System operating within normal parameters",
-            "evidence": {"file_paths": [], "receipt_ids": [], "dispatch_ids": []},
-        })
 
-    return recs[:MAX_PER_SECTION]
+def _healthy_status_rec() -> Dict:
+    """Fallback record when there is nothing to report."""
+    return {
+        "rank": 1,
+        "type": "governance_status",
+        "title": "No active governance alerts",
+        "severity": "info",
+        "detail": (
+            f"No SPC alerts, failed gates, or metric anomalies "
+            f"in last {LOOKBACK_HOURS}h"
+        ),
+        "action": "System operating within normal parameters",
+        "evidence": {"file_paths": [], "receipt_ids": [], "dispatch_ids": []},
+    }
 
 
 # ── Digest assembly & output ──────────────────────────────────────────────────

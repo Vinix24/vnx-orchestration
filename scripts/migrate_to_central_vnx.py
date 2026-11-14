@@ -2086,6 +2086,29 @@ def _run_apply(args: argparse.Namespace, projects: list[ProjectEntry]) -> int:
         # doesn't happen to name. See _cleanup_unpopulated_stubs docstring.
         _cleanup_unpopulated_stubs(_created_stubs)
 
+    return _import_and_verify(
+        args, projects, central_state, central_qi, central_rc,
+        pre_snapshot, backup_dir, _test_apply_tmp_dir, _test_apply_cleanup,
+    )
+
+
+def _import_and_verify(
+    args: argparse.Namespace,
+    projects: list[ProjectEntry],
+    central_state: Path,
+    central_qi: Path,
+    central_rc: Path,
+    pre_snapshot: dict[str, Path],
+    backup_dir: Path | None,
+    _test_apply_tmp_dir: str | None,
+    _test_apply_cleanup: Callable[[], None],
+) -> int:
+    """Import every project, rebuild FTS5 (0016) and verify; then report.
+
+    Tail of :func:`_run_apply` after the bootstrap.  Returns 1 on an abort,
+    3 when 0016 fails and 4 when verification fails (central restored from
+    ``pre_snapshot``), else the exit code of :func:`_report_apply_result`.
+    """
     if args.reset_idempotency:
         cleared = reset_idempotency_state(central_qi, central_rc)
         LOG.info(
@@ -2135,6 +2158,29 @@ def _run_apply(args: argparse.Namespace, projects: list[ProjectEntry]) -> int:
         _test_apply_cleanup()
         return 4
 
+    return _report_apply_result(
+        args, central_state, central_qi, central_rc, backup_dir,
+        summaries, failed_projects, verify_report,
+        _test_apply_tmp_dir, _test_apply_cleanup,
+    )
+
+
+def _report_apply_result(
+    args: argparse.Namespace,
+    central_state: Path,
+    central_qi: Path,
+    central_rc: Path,
+    backup_dir: Path | None,
+    summaries: list[ImportSummary],
+    failed_projects: list[str],
+    verify_report: dict,
+    _test_apply_tmp_dir: str | None,
+    _test_apply_cleanup: Callable[[], None],
+) -> int:
+    """Print the apply result, then hand off to :func:`_prune_and_finish`.
+
+    Reached from :func:`_run_apply` only after a passed verification.
+    """
     out_payload = {
         "applied_at": _dt.datetime.now(_dt.timezone.utc).isoformat().replace("+00:00", "Z"),
         "backup_dir": str(backup_dir) if backup_dir is not None else None,
@@ -2171,6 +2217,22 @@ def _run_apply(args: argparse.Namespace, projects: list[ProjectEntry]) -> int:
         if failed_projects:
             print(f"  FAILED projects (rolled back): {', '.join(failed_projects)}")
 
+    return _prune_and_finish(
+        args, central_state, central_qi, central_rc, out_payload,
+        _test_apply_tmp_dir, _test_apply_cleanup,
+    )
+
+
+def _prune_and_finish(
+    args: argparse.Namespace,
+    central_state: Path,
+    central_qi: Path,
+    central_rc: Path,
+    out_payload: dict,
+    _test_apply_tmp_dir: str | None,
+    _test_apply_cleanup: Callable[[], None],
+) -> int:
+    """Prune old backups and presnaps, then clean up a test-apply dir; returns 0."""
     if args.cleanup_backups and _test_apply_tmp_dir is None:
         removed = cleanup_old_backups(args.backup_base, keep_n=args.keep_backups)
         if removed:

@@ -1,0 +1,1 @@
+- `scripts/orphan_sweep.py` `main` is split into private helpers by extract-method, no behaviour change (golf schoon R10).

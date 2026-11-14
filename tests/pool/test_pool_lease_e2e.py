@@ -350,21 +350,31 @@ class TestCliProjectIdResolution:
     def test_resolve_project_id_derives_from_marker_when_none(self, tmp_path):
         from vnx_cli.commands.pool import _resolve_project_id
 
-        # Write a .vnx-project-id marker in tmp_path
-        marker = tmp_path / ".vnx-project-id"
-        marker.write_text("test-project\n")
+        # Since 9d0c37cf3 the id comes from the .vnx-project-id marker in the
+        # project dir, not from vnx_paths.project_id_from_state_dir.
+        (tmp_path / ".vnx-project-id").write_text("test-project\n")
 
-        with patch("vnx_paths.resolve_state_dir", return_value=tmp_path / ".vnx-data" / "state"), \
-             patch("vnx_paths.project_id_from_state_dir") as mock_pid:
-            mock_pid.return_value = "test-project"
-            result = _resolve_project_id(None)
+        assert _resolve_project_id(None, str(tmp_path)) == "test-project"
 
-        assert result == "test-project"
-
-    def test_resolve_project_id_falls_back_to_default_on_error(self):
+    def test_resolve_project_id_without_marker_uses_directory_slug(self, tmp_path):
+        from vnx_cli import _engine
         from vnx_cli.commands.pool import _resolve_project_id
 
-        with patch("vnx_paths.project_id_from_state_dir", return_value=""):
-            result = _resolve_project_id(None)
+        project_dir = tmp_path / "My Pool Project"
+        project_dir.mkdir()
 
-        assert result == "default"
+        result = _resolve_project_id(None, str(project_dir))
+
+        assert result == _engine.slugify_project_id("My Pool Project")
+        assert result and result != "default"
+
+    def test_resolve_project_id_without_marker_or_slug_is_path_hash(self, tmp_path):
+        from vnx_cli.commands.pool import _resolve_project_id
+
+        project_dir = tmp_path / "___"
+        project_dir.mkdir()
+
+        result = _resolve_project_id(None, str(project_dir))
+
+        assert result.startswith("vnx-") and len(result) == len("vnx-") + 8
+        assert result != "default"

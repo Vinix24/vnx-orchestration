@@ -74,23 +74,41 @@ def cert_env(tmp_path, monkeypatch):
     }
 
 
-def _mock_successful_subprocess():
-    """Create a mock subprocess that completes successfully with review output."""
+def _pipe_backed_proc(stdout_text="", stderr_text="", returncode=0):
+    """A finished subprocess whose stdout/stderr are real pipe read ends.
+
+    ``GateRunner`` reads the child through ``fileno()`` + ``os.read`` (not through
+    ``stdout.read``), so a fake needs real descriptors to hand it output.
+    """
+    pipes = []
+    for text in (stdout_text, stderr_text):
+        read_fd, write_fd = os.pipe()
+        os.write(write_fd, text.encode("utf-8"))
+        os.close(write_fd)
+        pipes.append(os.fdopen(read_fd, "rb"))
     mock_proc = MagicMock()
     mock_proc.stdin = MagicMock()
-    mock_proc.stdout = MagicMock()
-    mock_proc.stderr = MagicMock()
-    mock_proc.stdout.read.return_value = (
-        "## Review Summary\n\n"
-        "No blocking findings. Code follows project conventions.\n\n"
-        "### Findings\n"
-        "- [advisory] Consider adding type hints to helper functions\n"
-    )
-    mock_proc.stderr.read.return_value = ""
-    mock_proc.poll.return_value = 0
-    mock_proc.returncode = 0
+    mock_proc.stdout, mock_proc.stderr = pipes
+    mock_proc.poll.return_value = returncode
+    mock_proc.returncode = returncode
     mock_proc.pid = 99999
     return mock_proc
+
+
+def _mock_successful_subprocess(verdict_block=""):
+    """Create a mock subprocess that completes successfully with review output.
+
+    ``verdict_block``: the verdict object a verdict-covered gate (codex_gate,
+    OI-1767/OI-1770) must have written; without it the run books ``unavailable``.
+    """
+    return _pipe_backed_proc(
+        stdout_text=(
+            "## Review Summary\n\n"
+            "No blocking findings. Code follows project conventions.\n\n"
+            "### Findings\n"
+            "- [advisory] Consider adding type hints to helper functions\n"
+        ) + verdict_block,
+    )
 
 
 def _make_request(gate="gemini_review", pr_number=1, pr_id="", **overrides):
@@ -188,13 +206,14 @@ class TestEndToEndEvidenceChain:
         # Capture state at each point
         states_seen = []
 
-        original_persist = runner._persist_request
+        # ea598a633 moved the request write into gate_recorder.persist_request.
+        original_persist = gate_runner._rec.persist_request
 
-        def tracking_persist(gate, pl, **kwargs):
+        def tracking_persist(requests_dir, gate, pl, **kwargs):
             states_seen.append(pl.get("status"))
-            original_persist(gate, pl, **kwargs)
+            return original_persist(requests_dir, gate, pl, **kwargs)
 
-        runner._persist_request = tracking_persist
+        monkeypatch.setattr(gate_runner._rec, "persist_request", tracking_persist)
 
         mock_proc = _mock_successful_subprocess()
         with patch("gate_runner.subprocess.Popen", return_value=mock_proc), \
@@ -361,14 +380,7 @@ class TestTimeoutStallStructuredFailure:
         report_path = str(cert_env["reports_dir"] / "exit-code-cert.md")
         payload, _ = _make_request(report_path=report_path, pr_number=3)
 
-        mock_proc = MagicMock()
-        mock_proc.stdin = MagicMock()
-        mock_proc.stdout = MagicMock()
-        mock_proc.stderr = MagicMock()
-        mock_proc.stdout.read.return_value = "partial output"
-        mock_proc.stderr.read.return_value = "error: auth failed"
-        mock_proc.poll.return_value = 1
-        mock_proc.returncode = 1
+        mock_proc = _pipe_backed_proc("partial output", "error: auth failed", returncode=1)
         mock_proc.pid = 77777
 
         with patch("gate_runner.subprocess.Popen", return_value=mock_proc), \
@@ -587,21 +599,22 @@ class TestArtifactStability:
 
         mock_proc = _mock_successful_subprocess()
 
-        # Track write_text calls to fail only the first result write (the
-        # completed record), but allow the second write (the failure record).
-        original_write = Path.write_text
-        result_write_count = [0]
+        # The result record is written tmp + os.replace (commit_gate_outcome, GE-4b),
+        # no longer through Path.write_text. Fail only the first result replace
+        # (the completed record) and let the later failure record land.
+        original_replace = os.replace
+        result_replace_count = [0]
 
-        def selective_write(self_path, content, **kwargs):
-            if "results" in str(self_path) and "pr-32" in str(self_path):
-                result_write_count[0] += 1
-                if result_write_count[0] == 1:
+        def selective_replace(src, dst, *args, **kwargs):
+            if "results" in str(dst) and "pr-32" in str(dst):
+                result_replace_count[0] += 1
+                if result_replace_count[0] == 1:
                     raise OSError("Permission denied")
-            return original_write(self_path, content, **kwargs)
+            return original_replace(src, dst, *args, **kwargs)
 
         with patch("gate_runner.subprocess.Popen", return_value=mock_proc), \
              patch("gate_runner.select.select", return_value=([], [], [])), \
-             patch.object(Path, "write_text", selective_write):
+             patch("os.replace", selective_replace):
             result = runner.run(gate="gemini_review", request_payload=payload, pr_number=32)
 
         assert result["status"] == "unavailable"
@@ -632,7 +645,9 @@ class TestCrossGateConsistency:
             report_path = str(cert_env["reports_dir"] / f"cross-{gate}.md")
             payload, _ = _make_request(gate=gate, report_path=report_path, pr_number=40)
 
-            mock_proc = _mock_successful_subprocess()
+            mock_proc = _mock_successful_subprocess(
+                verdict_block='\n{"verdict": "PASS", "findings": []}\n' if gate == "codex_gate" else "",
+            )
             with patch("gate_runner.subprocess.Popen", return_value=mock_proc), \
                  patch("gate_runner.select.select", return_value=([], [], [])):
                 result = runner.run(gate=gate, request_payload=payload, pr_number=40)

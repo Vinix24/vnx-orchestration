@@ -389,6 +389,7 @@ def test_closure_verifier_reads_status_completed_as_pass(tmp_path: Path) -> None
     payload = {
         "gate": "codex_gate",
         "pr_id": "PR-99",
+        "branch": "b",  # closure scopes a result to the contract's branch (ADR-005)
         "status": "completed",
         "blocking_findings": [],
         "blocking_count": 0,

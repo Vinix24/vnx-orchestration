@@ -367,7 +367,7 @@ class TestDispatchPathsManifestPlumbing:
         ) as mock_attempt, patch(
             "subprocess_dispatch_internals.recovery._handle_success",
         ), patch(
-            "subprocess_dispatch_internals.recovery._apply_runtime_overrides",
+            "subprocess_dispatch_internals.recovery.apply_runtime_overrides",
             return_value=(300.0, 900.0),
         ):
             import subprocess_dispatch as _sd
@@ -477,47 +477,6 @@ class TestTransientFailThenSuccessNoDualBucket:
     completed/.
     """
 
-    def test_classify_completion_no_dead_letter_on_failure(self, tmp_path: Path) -> None:
-        """_classify_completion with non-zero returncode must NOT call _promote_manifest."""
-        import importlib
-
-        # Import fresh delivery module
-        from subprocess_dispatch_internals import delivery
-
-        promote_calls: list[tuple] = []
-
-        def _fake_promote(dispatch_id: str, stage: str = "completed") -> "str | None":
-            promote_calls.append((dispatch_id, stage))
-            return None
-
-        import subprocess_dispatch as _sd
-
-        mock_adapter = MagicMock()
-        obs = MagicMock()
-        obs.transport_state = {"returncode": 1}
-        mock_adapter.observe.return_value = obs
-        mock_adapter.was_timed_out.return_value = False
-
-        with patch.object(_sd, "_promote_manifest", side_effect=_fake_promote):
-            result = delivery._classify_completion(
-                adapter=mock_adapter,
-                terminal_id="T1",
-                dispatch_id="20260506-transient-fail",
-                session_id=None,
-                event_count=3,
-                touched_files=set(),
-                manifest_path="/active/dispatch/manifest.json",
-                rotation_triggered=False,
-                pending_handover=None,
-            )
-
-        assert result.success is False
-        dead_letter_calls = [c for c in promote_calls if c[1] == "dead_letter"]
-        assert not dead_letter_calls, (
-            "_classify_completion must NOT call _promote_manifest('dead_letter') on a "
-            f"single failed attempt (Fix-5); called with: {dead_letter_calls}"
-        )
-
     def test_handle_final_failure_promotes_dead_letter(self, tmp_path: Path) -> None:
         """_handle_final_failure must call _promote_manifest('dead_letter')."""
         from subprocess_dispatch_internals.recovery import _handle_final_failure
@@ -607,7 +566,7 @@ class TestTransientFailThenSuccessNoDualBucket:
             ), patch(
                 "subprocess_dispatch_internals.recovery._handle_success",
             ) as mock_success, patch(
-                "subprocess_dispatch_internals.recovery._apply_runtime_overrides",
+                "subprocess_dispatch_internals.recovery.apply_runtime_overrides",
                 return_value=(300.0, 900.0),
             ), patch(
                 "subprocess_dispatch_internals.recovery._init_recovery_state",

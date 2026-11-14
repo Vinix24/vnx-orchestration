@@ -114,6 +114,25 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         "VNX_HEADLESS_ROUTING", "string", "0", "dispatch",
         "Headless dispatch routing mode.",
         subsystem="headless-dispatch-routing", status="ACTIVATE"),
+    "VNX_BUILDER_SETTING_SOURCES": _e(
+        "VNX_BUILDER_SETTING_SOURCES", "string", "project,local", "dispatch",
+        "Comma list passed as --setting-sources to headless claude builders (the claude_headless "
+        "lane). Default project,local: the builder starts without the operator's user-level "
+        "CLAUDE.md, rules, skills, plugins and hooks. It carries cleanupPeriodDays from the user "
+        "settings file and claudeMdExcludes for the user-level CLAUDE.md and rules that the "
+        "walk-up from the worktree to ~ would load as project memory; effortLevel is not carried. "
+        "user,project,local restores today's "
+        "argv exactly (no flag). An invalid value falls back to the default and is logged.",
+        approval=True, subsystem="headless-builder-context", status="ACTIVATE",
+        read_site_wired=True, cockpit_canonical=True),
+    "VNX_DOC_STYLE_FILE": _e(
+        "VNX_DOC_STYLE_FILE", "string", "", "dispatch",
+        "Absolute or ~-relative path of a Markdown file with writing rules that staging appends "
+        "to every docs dispatch (task class 04_documentation or 06_design, or paths that are all "
+        "docs/** or *.md outside changelog.d/). Empty means off. A set path that cannot be read "
+        "(missing, not a file, empty) refuses staging of a docs dispatch.",
+        approval=True, subsystem="docs-style-file", status="ACTIVATE",
+        read_site_wired=True),
     "VNX_DEFAULT_REVIEW_STACK": _e(
         "VNX_DEFAULT_REVIEW_STACK", "string", "codex_gate,deepseek_gate", "gate",
         "Comma-separated default review-gate stack. Operator decision 2026-11-11: the Kimi "
@@ -159,6 +178,13 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         "outside the known gate set, or a name repeated (a cycle), fails loud at read time. "
         "Must match gate_request_handler._DEFAULT_REVIEW_GATE_TAKEOVER_CHAIN verbatim "
         "(pinned by test_beta3_e1_review_gate_chain.py).", approval=True,
+        subsystem="governance-enforcement-stack", status="LIVE"),
+    "VNX_SALVAGE_PUSH_TIMEOUT_S": _e(
+        "VNX_SALVAGE_PUSH_TIMEOUT_S", "string", "900", "dispatch",
+        "Seconds the door's push of a dispatch branch may take (OI-2744). A project whose "
+        "pre-push hook runs its CI script needs more than the old 120 s; on a timeout the "
+        "worktree with the salvage commit is kept. A value that is not a positive int falls back to 900.",
+        approval=True,
         subsystem="governance-enforcement-stack", status="LIVE"),
     # OI-2288: the codex review seat's reasoning effort, read by
     # gate_runner.resolve_codex_review_effort at every codex_gate launch. Listed
@@ -232,6 +258,13 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         "row with an approval id since 2026-11-09; every other project has no row and "
         "keeps the risk rule.", approval=True,
         subsystem="governance-enforcement-stack", status="ACTIVATE"),
+    # Deltareview DR-6 (ADR-064 "De schakelaar", ADR-060 amendment). Read by review_scope.active_review_scope.
+    "VNX_REVIEW_SCOPE": _e(
+        "VNX_REVIEW_SCOPE", "string", "", "gate",
+        "Review scope. full (default): every round is a full review. delta_shadow: the shadow delta runs next to "
+        "the full round. delta: the delta decides; writing it is refused without a passed DR-5 measurement, a merged "
+        "DR-7 and a green main CI. Unset, unknown or unreadable reads as full.", approval=True,
+        subsystem="governance-enforcement-stack", status="ACTIVATE"),
     # The PR-size thresholds of scripts/pre_merge_gate.check_pr_size, per project (operator
     # decision 2026-11-09: the limit is configurable, not a hard 450). Same resolution path as
     # VNX_REVIEW_SEAT_RULE. The defaults here are the only copy of 450 and 600; a value that is
@@ -249,6 +282,21 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         "that is not a positive integer, or below VNX_PR_SIZE_WARN, falls back to 600 and is "
         "named in the gate detail.", approval=True,
         subsystem="governance-enforcement-stack", status="LIVE"),
+    # The admission contract of the main window (ADR-073 besluit 3 and 6), read by
+    # main_window.read_admission_config. Unset N is mode off: the gate records GO and the
+    # merge behaviour is unchanged.
+    "VNX_MAIN_UNVERIFIED_MAX": _e(
+        "VNX_MAIN_UNVERIFIED_MAX", "integer", "", "gate",
+        "Merges on main whose VNX CI run may still be running before the door refuses another "
+        "(ADR-073). Unset: mode off. A value that is not a positive integer reads as unset "
+        "(never 0) and is named in the record as invalid_config.", approval=True,
+        subsystem="governance-enforcement-stack", status="ACTIVATE"),
+    "VNX_MAIN_RUN_MAX_AGE_MIN": _e(
+        "VNX_MAIN_RUN_MAX_AGE_MIN", "integer", "40", "gate",
+        "Minutes after which a queued or in-progress main run, or a merge commit without a "
+        "run, is a NO-GO (stale_run, no_run) instead of running. A value that is not a "
+        "positive integer falls back to 40 and is named.", approval=True,
+        subsystem="governance-enforcement-stack", status="ACTIVATE"),
     # OI-2701 (option a), read by review_seat_evaluation.approved_full_fill_pairs. Empty by
     # default: no project approves a takeover, so every project keeps today's behaviour.
     "VNX_REVIEW_TAKEOVER_FULL_FILL": _e(
@@ -259,6 +307,16 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         "approves nobody, as does a malformed entry (logged); any other takeover keeps every "
         "seat.", approval=True,
         subsystem="governance-enforcement-stack", status="ACTIVATE"),
+    # ADR-074 (impactselectie in schaduw). No production code reads this key until PR 3 of the track
+    # impactselectie-in-schaduw: the hook contract is fixed in the ADR first. Empty means every PR
+    # runs the full suite.
+    "VNX_CI_IMPACT_CMD": _e(
+        "VNX_CI_IMPACT_CMD", "string", "", "gate",
+        "Per-project impact-selection hook (ADR-074). Changed paths in; test files plus graph "
+        "version out; exit 0. Any other outcome (non-zero exit, unparseable output, time-out) means "
+        "the full run. The VNX value points to scripts/ci/impact_select.py. Empty (the default) "
+        "selects nothing and every PR runs the full suite.", approval=True,
+        subsystem="governance-enforcement-stack", status="ACTIVATE", read_site_wired=False),
     "VNX_CI_GATE_REQUIRED": _e(
         "VNX_CI_GATE_REQUIRED", "bool", "1", "gate",
         "Require the CI gate before merge.", approval=True,

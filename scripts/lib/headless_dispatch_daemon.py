@@ -50,8 +50,8 @@ def _default_data_dir() -> Path:
     when the canonical resolver returned None, which resolves the keystone
     (``~/.vnx-system/versions/<v>/.vnx-data``) in a central install — a
     read-only pinned version store the daemon then tried to write to. The
-    shared resolver honors a set ``VNX_DATA_DIR`` directly, falls back through
-    ``VNX_PROJECT_ID`` and the canonical resolver, and raises
+    shared resolver gives the receipts' answer (``vnx_paths.resolve_paths``,
+    OI-1276: ``VNX_DATA_DIR`` only with ``VNX_DATA_DIR_EXPLICIT=1``) and raises
     ``DataDirResolutionError`` naming the chain instead of returning a path
     under ``~/.vnx-system/versions/``.
     """

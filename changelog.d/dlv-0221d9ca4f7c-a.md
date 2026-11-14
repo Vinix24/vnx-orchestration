@@ -1,0 +1,1 @@
+- The rework report shows a 95% Wilson interval beside every rate and proposes a builder floor or a seat flag only when the two intervals do not overlap, replacing the 5-point rule (herwerk-per-model-en-reviewer).

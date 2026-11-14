@@ -1,0 +1,1 @@
+- `vnx deliverable close` books a `dead_letter` base on its own completed `<id>-rK` round when the T0's newest decision on that base is `reject`, so a deliverable whose rescued work landed through a round no longer stays `failed`; without that reject, a decision log or a completed round it refuses by name (OI-2803, ADR-049 amendment).

@@ -43,10 +43,10 @@ def test_table_missing_before_v36_and_present_with_the_adr007_key(tmp_path, monk
     assert "rework_edges" not in _tables(old)
     monkeypatch.undo()
     new = _bootstrap(tmp_path / "new.db")
-    assert qdi.HIGHEST_QI_VERSION == 36
+    assert qdi.HIGHEST_QI_VERSION == 37
     with closing(sqlite3.connect(new)) as conn:
         pk = [r[1] for r in sorted(conn.execute("PRAGMA table_info(rework_edges)"), key=lambda r: r[5]) if r[5]]
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 36
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 37
     assert pk == ["project_id", "rework_dispatch_id", "origin_dispatch_id", "kind"]
 
 
@@ -128,6 +128,7 @@ def test_init_leaves_every_existing_table_unchanged(tmp_path, monkeypatch):
     monkeypatch.setattr(qdi, "MIGRATIONS", {k: v for k, v in qdi.MIGRATIONS.items() if k < 36})
     old = _tables(_bootstrap(tmp_path / "old.db"))
     monkeypatch.undo()
+    monkeypatch.setattr(qdi, "MIGRATIONS", {k: v for k, v in qdi.MIGRATIONS.items() if k <= 36})
     new = _tables(_bootstrap(tmp_path / "new.db"))
     assert set(new) - set(old) == {"rework_edges"}
     assert {n: new[n] for n in old} == old

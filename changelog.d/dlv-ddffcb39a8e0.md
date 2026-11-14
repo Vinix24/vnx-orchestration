@@ -1,0 +1,1 @@
+- The profile key `VNX_REVIEW_SCOPE` (full, delta_shadow, delta) reads fail-closed to `full`; the DR-4b shadow delta runs only under `delta_shadow` or `delta`, and writing `delta` is refused without a passed DR-5 measurement, a merged DR-7 and a green main CI (deltareview DR-6 part 1).

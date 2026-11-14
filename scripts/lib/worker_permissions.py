@@ -34,6 +34,7 @@ import fnmatch
 import json
 import logging
 import os
+import stat as _stat
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -194,6 +195,29 @@ def _resolve_agents_dir() -> Optional[Path]:
     return None
 
 
+def _registry_role_names(agents_dir: Path) -> frozenset:
+    """List role names under *agents_dir* using explicit stats.
+
+    An entry is a role when ``stat`` says it is a directory and ``stat`` of
+    ``<entry>/CLAUDE.md`` says it is a regular file. ``FileNotFoundError`` and
+    ``NotADirectoryError`` mean "not a role"; every other ``OSError`` (e.g.
+    ``PermissionError``) propagates so callers can treat the registry as
+    unverifiable. ``Path.is_dir``/``is_file`` are deliberately not used: from
+    Python 3.14 on they read a permission error as ``False``.
+    """
+    roles = []
+    for entry in agents_dir.iterdir():
+        try:
+            if not _stat.S_ISDIR(os.stat(entry).st_mode):
+                continue
+            if not _stat.S_ISREG(os.stat(entry / "CLAUDE.md").st_mode):
+                continue
+        except (FileNotFoundError, NotADirectoryError):
+            continue
+        roles.append(entry.name)
+    return frozenset(roles)
+
+
 def _agents_registry_roles(agents_dir: Optional[Path] = None) -> Optional[frozenset]:
     """Role names present in the agents/ registry (OI-921's role SSOT).
 
@@ -209,17 +233,17 @@ def _agents_registry_roles(agents_dir: Optional[Path] = None) -> Optional[frozen
     "cannot verify against this register" and falls back rather than refusing,
     since the defect this guards against is a role name provably absent from a
     register that DOES exist, not a register this install never shipped.
+
+    Unreadable is decided by an explicit stat (:func:`_registry_role_names`),
+    never by ``is_dir``/``is_file``, because those hide the error from Python
+    3.14 on.
     """
     if agents_dir is None:
         agents_dir = _resolve_agents_dir()
     if agents_dir is None:
         return None
     try:
-        return frozenset(
-            entry.name
-            for entry in agents_dir.iterdir()
-            if entry.is_dir() and (entry / "CLAUDE.md").is_file()
-        )
+        return _registry_role_names(agents_dir)
     except OSError:
         return None
 

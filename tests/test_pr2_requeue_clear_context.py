@@ -46,11 +46,11 @@ class TestClearContextDefault(unittest.TestCase):
         finally:
             os.unlink(tmp_path)
 
-    def test_absent_field_defaults_to_false(self):
-        """When ClearContext is not set, default must be 'false'."""
+    def test_absent_field_defaults_to_true(self):
+        """When ClearContext is not set, default is 'true' (a119d8001 flipped it on purpose)."""
         value = self._run_metadata_helper("[[TARGET:B]]\nRole: backend-developer\n")
-        self.assertEqual(value, "false",
-            f"Expected default 'false', got '{value}'")
+        self.assertEqual(value, "true",
+            f"Expected default 'true', got '{value}'")
 
     def test_explicit_true_returns_true(self):
         """Explicit ClearContext: true must return 'true'."""

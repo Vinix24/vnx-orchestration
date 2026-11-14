@@ -40,17 +40,9 @@ def verify(workdir: Path, task_meta: dict) -> dict[str, Any]:
     init_sql = seed_dir / "init_seed_db.sql"
 
     if not migrate_sql.exists():
-        return {
-            "pass": False,
-            "evidence": "migrate.sql not written by worker",
-            "details": {"pass_count": 0, "expected": 5, "files_written": []},
-        }
+        return _early_failure("migrate.sql not written by worker", [])
     if not init_sql.exists():
-        return {
-            "pass": False,
-            "evidence": "seed init script missing (test bug)",
-            "details": {"pass_count": 0, "expected": 5, "files_written": ["migrate.sql"]},
-        }
+        return _early_failure("seed init script missing (test bug)", ["migrate.sql"])
 
     files_written = ["migrate.sql"]
 
@@ -59,77 +51,13 @@ def verify(workdir: Path, task_meta: dict) -> dict[str, Any]:
 
         ok, msg = _apply_sql_script(db_path, init_sql)
         if not ok:
-            return {
-                "pass": False,
-                "evidence": f"seed init failed: {msg}",
-                "details": {"pass_count": 0, "expected": 5, "files_written": files_written},
-            }
+            return _early_failure(f"seed init failed: {msg}", files_written)
 
         ok, msg = _apply_sql_script(db_path, migrate_sql)
         if not ok:
-            return {
-                "pass": False,
-                "evidence": f"migration failed: {msg}",
-                "details": {"pass_count": 0, "expected": 5, "files_written": files_written},
-            }
+            return _early_failure(f"migration failed: {msg}", files_written)
 
-        checks: list[tuple[str, bool, str]] = []
-        with sqlite3.connect(str(db_path)) as conn:
-            cur = conn.cursor()
-
-            cur.execute(
-                "SELECT COUNT(*) FROM scan_quota WHERE project_id = 'default'"
-            )
-            try:
-                default_rows = cur.fetchone()[0]
-                checks.append(("3 original rows scoped to 'default' tenant",
-                              default_rows == 3,
-                              f"found {default_rows}, expected 3"))
-            except sqlite3.OperationalError as exc:
-                checks.append(("project_id column exists", False, str(exc)))
-
-            try:
-                cur.execute(
-                    "INSERT INTO scan_quota (scan_id, used_count, quota_limit, project_id) "
-                    "VALUES ('scan_a', 0, 100, 'tenant_x')"
-                )
-                conn.commit()
-                checks.append(("cross-tenant insert allowed", True, "inserted scan_a/tenant_x"))
-            except sqlite3.IntegrityError as exc:
-                checks.append(("cross-tenant insert allowed", False, str(exc)))
-
-            try:
-                cur.execute(
-                    "INSERT INTO scan_quota (scan_id, used_count, quota_limit, project_id) "
-                    "VALUES ('scan_a', 0, 100, 'default')"
-                )
-                conn.commit()
-                checks.append(("same-tenant duplicate rejected", False,
-                              "duplicate insert was allowed"))
-            except sqlite3.IntegrityError:
-                checks.append(("same-tenant duplicate rejected", True,
-                              "UNIQUE constraint fired as expected"))
-
-            cur.execute(
-                "SELECT sql FROM sqlite_master WHERE type='index' AND tbl_name='scan_quota'"
-            )
-            index_defs = [row[0] or "" for row in cur.fetchall()]
-            composite_unique = any(
-                "project_id" in (sql or "").lower() and "scan_id" in (sql or "").lower()
-                for sql in index_defs
-            )
-            checks.append(("composite UNIQUE on (project_id, scan_id) exists",
-                          composite_unique,
-                          f"indexes: {[i[:80] for i in index_defs]}"))
-
-            project_id_index = any(
-                "project_id" in (sql or "").lower() and
-                ("scan_id" not in (sql or "").lower() or "create index" in (sql or "").lower())
-                for sql in index_defs
-            )
-            checks.append(("index on (project_id) exists",
-                          project_id_index,
-                          f"indexes: {[i[:80] for i in index_defs]}"))
+        checks = _schema_checks(db_path)
 
         ok2, msg2 = _apply_sql_script(db_path, migrate_sql)
         idempotent = ok2
@@ -138,6 +66,86 @@ def verify(workdir: Path, task_meta: dict) -> dict[str, Any]:
         else:
             checks.append(("migration is idempotent (re-runs cleanly)", False, msg2))
 
+    return _verdict(checks, files_written, idempotent)
+
+
+def _early_failure(evidence: str, files_written: list[str]) -> dict[str, Any]:
+    return {
+        "pass": False,
+        "evidence": evidence,
+        "details": {"pass_count": 0, "expected": 5, "files_written": files_written},
+    }
+
+
+def _schema_checks(db_path: Path) -> list[tuple[str, bool, str]]:
+    checks: list[tuple[str, bool, str]] = []
+    with sqlite3.connect(str(db_path)) as conn:
+        cur = conn.cursor()
+
+        cur.execute(
+            "SELECT COUNT(*) FROM scan_quota WHERE project_id = 'default'"
+        )
+        try:
+            default_rows = cur.fetchone()[0]
+            checks.append(("3 original rows scoped to 'default' tenant",
+                          default_rows == 3,
+                          f"found {default_rows}, expected 3"))
+        except sqlite3.OperationalError as exc:
+            checks.append(("project_id column exists", False, str(exc)))
+
+        try:
+            cur.execute(
+                "INSERT INTO scan_quota (scan_id, used_count, quota_limit, project_id) "
+                "VALUES ('scan_a', 0, 100, 'tenant_x')"
+            )
+            conn.commit()
+            checks.append(("cross-tenant insert allowed", True, "inserted scan_a/tenant_x"))
+        except sqlite3.IntegrityError as exc:
+            checks.append(("cross-tenant insert allowed", False, str(exc)))
+
+        try:
+            cur.execute(
+                "INSERT INTO scan_quota (scan_id, used_count, quota_limit, project_id) "
+                "VALUES ('scan_a', 0, 100, 'default')"
+            )
+            conn.commit()
+            checks.append(("same-tenant duplicate rejected", False,
+                          "duplicate insert was allowed"))
+        except sqlite3.IntegrityError:
+            checks.append(("same-tenant duplicate rejected", True,
+                          "UNIQUE constraint fired as expected"))
+
+        checks.extend(_index_checks(cur))
+    return checks
+
+
+def _index_checks(cur: sqlite3.Cursor) -> list[tuple[str, bool, str]]:
+    cur.execute(
+        "SELECT sql FROM sqlite_master WHERE type='index' AND tbl_name='scan_quota'"
+    )
+    index_defs = [row[0] or "" for row in cur.fetchall()]
+    composite_unique = any(
+        "project_id" in (sql or "").lower() and "scan_id" in (sql or "").lower()
+        for sql in index_defs
+    )
+    project_id_index = any(
+        "project_id" in (sql or "").lower() and
+        ("scan_id" not in (sql or "").lower() or "create index" in (sql or "").lower())
+        for sql in index_defs
+    )
+    return [
+        ("composite UNIQUE on (project_id, scan_id) exists",
+         composite_unique,
+         f"indexes: {[i[:80] for i in index_defs]}"),
+        ("index on (project_id) exists",
+         project_id_index,
+         f"indexes: {[i[:80] for i in index_defs]}"),
+    ]
+
+
+def _verdict(
+    checks: list[tuple[str, bool, str]], files_written: list[str], idempotent: bool
+) -> dict[str, Any]:
     pass_count = sum(1 for _, ok, _ in checks if ok)
     expected = 5
 

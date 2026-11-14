@@ -65,6 +65,7 @@ _HERE = Path(__file__).resolve().parent
 if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))
 
+import main_window  # noqa: E402
 from project_root import resolve_project_root  # noqa: E402
 from event_outcome_semantics import COMPLETION_EVENT_TYPES  # noqa: E402
 from ledger_end_line import DISPATCH_FINISHED_EVENT_TYPE, end_status  # noqa: E402
@@ -253,10 +254,21 @@ def _capture(
 
 # ── Check 1: E1 — main-branch CI conclusion ─────────────────────────────────
 
-DEFAULT_CI_WORKFLOW_NAME = "VNX CI"
-CI_WORKFLOW_NAME_ENV_VAR = "VNX_CI_WORKFLOW_NAME"
-DEFAULT_MAIN_BRANCH = "main"
-GH_RUN_LIST_TIMEOUT = 15
+DEFAULT_MAIN_BRANCH = main_window.DEFAULT_MAIN_BRANCH
+
+
+def _red_window_message(window: "main_window.MainWindow", workflow: str, branch: str) -> str:
+    red = window.first_red
+    origin = (
+        f"PR #{red.pr_number}, dispatch {red.dispatch_id}"
+        if red.mapping == main_window.MAPPING_RECEIPT
+        else "no_receipt"
+    )
+    return (
+        f"{workflow} rood in het venster op '{branch}' (E1: main branch broken after merge). "
+        f"Vermoedelijke oorzaak, niet bewezen: {red.sha} run {red.run_id} ({origin}); "
+        f"het venster telt {len(window.entries)} merge(s) sinds de groene basis {window.base_sha}"
+    )
 
 
 def check_main_ci_red(
@@ -265,16 +277,20 @@ def check_main_ci_red(
     branch: str = DEFAULT_MAIN_BRANCH,
     workflow_name: Optional[str] = None,
     gh_bin: str = "gh",
+    state_dir: Optional[Path] = None,
+    now: Optional[datetime] = None,
 ) -> StopConditionResult:
     """E1: main branch broken after merge.
 
-    Measures the VNX CI workflow conclusion of the most recent run on
-    ``branch`` (default: main). A still-running latest run (in_progress /
-    queued) is UNMEASURABLE — "not yet known", never read as clear or
-    triggered.
+    Reads the window on ``branch`` (the merges since the last green VNX CI
+    run, see ``main_window``). A red run anywhere in the window is TRIGGERED, and
+    so is a named NO-GO entry (``stale_run``, ``no_run``, a cancelled or timed-out
+    run, an unknown conclusion), with its reason. A window with a run that is
+    still running is UNMEASURABLE ("not yet known"), as is anything the reader
+    could not measure.
     """
     check_id = "main_ci_red"
-    resolved_workflow = workflow_name or os.environ.get(CI_WORKFLOW_NAME_ENV_VAR) or DEFAULT_CI_WORKFLOW_NAME
+    resolved_workflow = main_window.resolve_ci_workflow_name(workflow_name)
     root = Path(project_root) if project_root is not None else _default_project_root()
     if root is None:
         return _unmeasurable(check_id, "kon project-root niet resolven: main-CI-status niet meetbaar")
@@ -282,59 +298,32 @@ def check_main_ci_red(
     if shutil.which(gh_bin) is None:
         return _unmeasurable(check_id, "gh CLI niet beschikbaar: main-CI-status niet meetbaar", workflow=resolved_workflow)
 
-    result, err = _capture(
-        [
-            gh_bin, "run", "list",
-            "--branch", branch,
-            "--workflow", resolved_workflow,
-            "--limit", "1",
-            "--json", "conclusion,status,headSha,createdAt,databaseId",
-        ],
-        timeout=GH_RUN_LIST_TIMEOUT,
-        cwd=str(root),
+    window = main_window.read_window(
+        root, state_dir=state_dir, branch=branch, workflow_name=resolved_workflow, gh_bin=gh_bin, now=now
     )
-    if err == "missing":
-        return _unmeasurable(check_id, "gh CLI niet beschikbaar: main-CI-status niet meetbaar", workflow=resolved_workflow)
-    if err == "timeout":
-        return _unmeasurable(check_id, f"gh run list liep vast voor workflow '{resolved_workflow}'", workflow=resolved_workflow, branch=branch)
-    if result is None or result.returncode != 0:
-        stderr = (result.stderr if result else "").strip()
+    evidence = dict(workflow=resolved_workflow, branch=branch, window=window.to_dict())
+    if window.verdict == main_window.VERDICT_RED:
+        return _triggered(check_id, _red_window_message(window, resolved_workflow, branch), **evidence)
+    if window.verdict == main_window.VERDICT_NOGO:
+        nogo = window.first_nogo
+        return _triggered(
+            check_id,
+            f"{resolved_workflow} op '{branch}': {nogo.reason} voor {nogo.sha} (run {nogo.run_id}); "
+            f"het venster telt {len(window.entries)} merge(s) sinds de groene basis {window.base_sha}",
+            **evidence,
+        )
+    if window.verdict == main_window.VERDICT_RUNNING:
         return _unmeasurable(
             check_id,
-            f"gh run list faalde voor workflow '{resolved_workflow}' op branch '{branch}'"
-            + (f" ({stderr[:200]})" if stderr else ""),
-            workflow=resolved_workflow,
-            branch=branch,
+            f"{resolved_workflow} draait nog voor een merge in het venster op '{branch}': conclusie nog niet bekend",
+            **evidence,
         )
-
-    try:
-        runs = json.loads(result.stdout)
-    except json.JSONDecodeError:
-        return _unmeasurable(check_id, f"gh-uitvoer niet te parsen voor workflow '{resolved_workflow}'", workflow=resolved_workflow, branch=branch)
-
-    if not runs:
-        return _unmeasurable(check_id, f"geen VNX CI-run gevonden op branch '{branch}'", workflow=resolved_workflow, branch=branch)
-
-    run = runs[0]
-    status = run.get("status") or ""
-    if status in ("in_progress", "queued"):
-        return _unmeasurable(
-            check_id,
-            f"{resolved_workflow} draait nog op '{branch}' (status={status}): conclusie nog niet bekend",
-            workflow=resolved_workflow, branch=branch, run=run,
-        )
-
-    conclusion = run.get("conclusion") or ""
-    if not conclusion:
-        return _unmeasurable(check_id, f"run afgerond zonder conclusion-veld op '{branch}'", workflow=resolved_workflow, branch=branch, run=run)
-
-    if conclusion == "success":
-        return _clear(check_id, f"{resolved_workflow} geslaagd op '{branch}'", workflow=resolved_workflow, branch=branch, run=run)
-
-    return _triggered(
+    if window.verdict == main_window.VERDICT_GREEN:
+        return _clear(check_id, f"{resolved_workflow} geslaagd op '{branch}': het venster is leeg", **evidence)
+    return _unmeasurable(
         check_id,
-        f"{resolved_workflow} conclusion='{conclusion}' op '{branch}' (E1: main branch broken after merge)",
-        workflow=resolved_workflow, branch=branch, run=run,
+        f"main-CI-venster niet meetbaar voor workflow '{resolved_workflow}' op '{branch}': {window.reason}",
+        **evidence,
     )
 
 
@@ -448,6 +437,38 @@ def _tail_lines(path: Path, max_lines: int) -> List[str]:
 
 DEFAULT_RECEIPT_TAIL_LINES = 5000
 DEFAULT_EXHAUSTION_THRESHOLD = 3
+
+# OI-1800: the dispatch-id prefixes of the panel lane (deliberation panel,
+# plan-gate seats, plan-gate tiebreak). A receipt carries no explicit lane-of-
+# origin field: ``lane`` is the transport (claude_headless, absent on provider
+# lines) and ``role`` is not exclusive (plan-reviewer also rides on kimi-gate-,
+# glm-gate- and test-govern- ids, measured 2026-11-14), so the id prefix is
+# the only label. Minted at:
+#   panel-          scripts/lib/deliberation_panel.py:510 (diverge), :702/:725/:748
+#                   (contrarian/verify/synth); scripts/lib/panel_leg_cost.py:65/:70
+#   plan-gate-      scripts/lib/plan_gate_panel.py:2354
+#   plan-tiebreak-  scripts/lib/plan_gate_tiebreaker.py:1107; scripts/planning_cli.py:4606
+PANEL_LANE_DISPATCH_PREFIXES: Tuple[str, ...] = ("panel-", "plan-gate-", "plan-tiebreak-")
+
+
+def is_panel_lane_dispatch(dispatch_id: Any) -> bool:
+    """Was ``dispatch_id`` minted by the panel lane? A non-string or empty id is not."""
+    return isinstance(dispatch_id, str) and dispatch_id.strip().startswith(PANEL_LANE_DISPATCH_PREFIXES)
+
+
+def _drop_panel_lane(
+    by_provider: Dict[str, List[Dict[str, Any]]],
+) -> Tuple[Dict[str, List[Dict[str, Any]]], Dict[str, int]]:
+    """Split panel-lane attempts out of ``by_provider``: (kept, excluded count per provider)."""
+    kept: Dict[str, List[Dict[str, Any]]] = {}
+    excluded: Dict[str, int] = {}
+    for provider, records in by_provider.items():
+        rest = [r for r in records if not is_panel_lane_dispatch(r.get("dispatch_id"))]
+        if len(rest) != len(records):
+            excluded[provider] = len(records) - len(rest)
+        if rest:
+            kept[provider] = rest
+    return kept, excluded
 
 
 def _attempt_identity(record: Dict[str, Any]) -> Optional[Tuple[str, str, int, str]]:
@@ -571,6 +592,7 @@ def check_provider_exhausted(
     providers: Optional[List[str]] = None,
     threshold: int = DEFAULT_EXHAUSTION_THRESHOLD,
     tail_lines: int = DEFAULT_RECEIPT_TAIL_LINES,
+    exclude_panel_lane: bool = False,
 ) -> StopConditionResult:
     """A provider/lane refuses structurally (example live on the ledger since
     2026-09-03: kimi's weekly quota, HTTP 403 access_terminated_error).
@@ -602,6 +624,13 @@ def check_provider_exhausted(
     practical effect is fewer false UNMEASURABLE verdicts (more real
     attempts are now recognized) without weakening the TRIGGERED condition,
     which still requires the failure_class itself to be exhaustion-specific.
+
+    ``exclude_panel_lane`` (OI-1800, operator decision 2026-11-14): attempts
+    whose dispatch id carries a PANEL_LANE_DISPATCH_PREFIXES prefix leave the
+    window, so dead panel or plan-gate seats cannot halt a build or gate
+    dispatch on a healthy build lane. The count left out per provider is on
+    ``evidence["panel_lane_excluded"]``. False (the default) counts every
+    attempt: a panel dispatch itself, and a caller without a dispatch.
     """
     check_id = "provider_exhausted"
     if receipts_path is not None:
@@ -621,9 +650,15 @@ def check_provider_exhausted(
         return _unmeasurable(check_id, f"receipts-bestand niet leesbaar: {exc}")
 
     by_provider = _provider_attempts(lines, providers)
+    excluded: Dict[str, int] = {}
+    if exclude_panel_lane:
+        by_provider, excluded = _drop_panel_lane(by_provider)
 
     if not by_provider:
-        return _unmeasurable(check_id, f"geen bruikbare provider-attempts gevonden in laatste {tail_lines} regels")
+        return _unmeasurable(
+            check_id, f"geen bruikbare provider-attempts gevonden in laatste {tail_lines} regels",
+            panel_lane_excluded=excluded,
+        )
 
     sub_results: List[StopConditionResult] = []
     for provider, records in by_provider.items():
@@ -647,7 +682,9 @@ def check_provider_exhausted(
                 _clear(sub_id, f"laatste {threshold} attempts voor '{provider}' niet allemaal exhaustion-failures", provider=provider, window=window)
             )
 
-    return _combine(check_id, sub_results, sub_key="per_provider")
+    result = _combine(check_id, sub_results, sub_key="per_provider")
+    result.evidence["panel_lane_excluded"] = excluded
+    return result
 
 
 # ── Check 4: E6 — repeated gate-failure cause ───────────────────────────────
@@ -1004,9 +1041,11 @@ def run_all_checks(
     state_dir: Optional[Path] = None,
     project_root: Optional[Path] = None,
     write_halt: bool = True,
+    exclude_panel_lane: bool = False,
 ) -> List[StopConditionResult]:
     """Run all four stop-condition checks. When any is TRIGGERED and
     ``write_halt`` is true, write/overwrite ``halt.json`` in ``state_dir``.
+    ``exclude_panel_lane`` is passed to check_provider_exhausted (OI-1800).
 
     Never raises: each check function is itself fail-closed-to-unmeasurable,
     never fail-open-to-clear. When the state dir cannot be resolved at all
@@ -1027,14 +1066,16 @@ def run_all_checks(
     resolved_root = Path(project_root) if project_root is not None else _default_project_root()
 
     if resolved_state_dir is not None:
-        provider_result = check_provider_exhausted(resolved_state_dir / "t0_receipts.ndjson")
+        provider_result = check_provider_exhausted(
+            resolved_state_dir / "t0_receipts.ndjson", exclude_panel_lane=exclude_panel_lane,
+        )
         gate_result = check_repeated_gate_failure_cause(resolved_state_dir / "review_gates" / "results")
     else:
         provider_result = _unmeasurable("provider_exhausted", "state-dir niet resolvbaar: geen locatie voor t0_receipts.ndjson")
         gate_result = _unmeasurable("repeated_gate_failure_cause", "state-dir niet resolvbaar: geen locatie voor review_gates/results")
 
     results = [
-        check_main_ci_red(resolved_root),
+        check_main_ci_red(resolved_root, state_dir=resolved_state_dir),
         check_gh_auth_dead(),
         provider_result,
         gate_result,

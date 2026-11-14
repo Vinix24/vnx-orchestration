@@ -322,7 +322,7 @@ class TestGateTogglePost:
                 {"project": "myproject", "gate": "codex_gate", "enabled": True},
                 config_path=cfg,
             )
-            data = sd._read_gate_config(cfg)
+            data = ao._read_gate_config(cfg)
         assert data["gates"]["myproject"]["codex_gate"]["enabled"] is True
 
     def test_persists_enabled_false(self) -> None:
@@ -332,7 +332,7 @@ class TestGateTogglePost:
                 {"project": "myproject", "gate": "codex_gate", "enabled": False},
                 config_path=cfg,
             )
-            data = sd._read_gate_config(cfg)
+            data = ao._read_gate_config(cfg)
         assert data["gates"]["myproject"]["codex_gate"]["enabled"] is False
 
     def test_toggle_updates_existing_value(self) -> None:
@@ -344,7 +344,7 @@ class TestGateTogglePost:
             sd._operator_post_gate_toggle(
                 {"project": "p", "gate": "g", "enabled": False}, config_path=cfg
             )
-            data = sd._read_gate_config(cfg)
+            data = ao._read_gate_config(cfg)
         assert data["gates"]["p"]["g"]["enabled"] is False
 
     def test_missing_project_returns_400(self) -> None:
@@ -420,7 +420,7 @@ class TestGateTogglePost:
                 {"project": "beta", "gate": "codex_gate", "enabled": False},
                 config_path=cfg,
             )
-            data = sd._read_gate_config(cfg)
+            data = ao._read_gate_config(cfg)
         assert data["gates"]["alpha"]["gemini_review"]["enabled"] is True
         assert data["gates"]["beta"]["codex_gate"]["enabled"] is False
 

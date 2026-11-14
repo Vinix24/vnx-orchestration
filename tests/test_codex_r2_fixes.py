@@ -48,6 +48,13 @@ def _function_body(text: str, signature: str) -> str:
     raise AssertionError(f"unbalanced braces for {signature!r}")
 
 
+def _strip_shell_comments(text: str) -> str:
+    """Drop lines whose first non-blank character is `#` (shell comments)."""
+    return "\n".join(
+        line for line in text.splitlines() if not line.lstrip().startswith("#")
+    )
+
+
 # ---------------------------------------------------------------------------
 # Finding 1 — `declare -A` not supported on macOS /bin/bash 3.2
 # ---------------------------------------------------------------------------
@@ -159,7 +166,7 @@ class TestCounterIncrementSafeUnderErrexit:
     def test_process_dispatches_does_not_use_post_increment(self):
         """process_dispatches must not use ((count++)) — fails under set -e."""
         text = DISPATCHER_SH.read_text()
-        body = _function_body(text, "process_dispatches()")
+        body = _strip_shell_comments(_function_body(text, "process_dispatches()"))
         assert "((count++))" not in body, (
             "((count++)) returns exit 1 when count was 0; under `set -e` "
             "this aborts the dispatcher loop after the first dispatch. "

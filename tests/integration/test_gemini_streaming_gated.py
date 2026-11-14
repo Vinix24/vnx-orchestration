@@ -31,6 +31,7 @@ sys.path.insert(0, str(LIB_DIR / "adapters"))
 from adapters.gemini_adapter import GeminiAdapter
 from event_store import EventStore
 from provider_adapter import AdapterResult
+from provider_spawns.gemini_spawn import GeminiSpawnResult
 
 pytestmark = pytest.mark.integration
 
@@ -119,22 +120,23 @@ class TestDefaultOffBehavior:
         monkeypatch.delenv("VNX_GEMINI_STREAM", raising=False)
 
         adapter = GeminiAdapter("T3")
-        fake_result = AdapterResult(
-            status="done",
-            output="legacy output",
-            events=[],
-            event_count=1,
-            duration_seconds=0.5,
-            committed=False,
-            commit_hash=None,
-            report_path=None,
-            provider="gemini",
-            model="gemini-2.5-flash",
-        )
-        adapter._execute_legacy = lambda **_kw: fake_result
+        seen = {}
+
+        def fake_spawn(**kwargs):
+            seen.update(kwargs)
+            kwargs["event_writer"]("T3", {"type": "result", "data": "legacy output"})
+            return GeminiSpawnResult(
+                returncode=0, completion_text="legacy output", events_written=1,
+                session_id=None, timed_out=False,
+            )
+
+        # execute() delegates spawn+stream to spawn_gemini() since ee0ba9382 (PR-4.6.4).
+        monkeypatch.setattr("adapters.gemini_adapter.spawn_gemini", fake_spawn)
 
         result = adapter.execute("test prompt", {})
+        assert seen["terminal_id"] == "T3"
         assert result.status == "done"
+        assert result.output == "legacy output"
         assert result.provider == "gemini"
 
 

@@ -842,6 +842,9 @@ _ROUND_FIELDS: Tuple[str, ...] = ("seat", "override_b3")
 # Operator decisions a request carries into its result (R10): the reason of a
 # force-rerun from the obligation runner (``gate_run_guard.force_rerun_record``).
 _OPERATOR_FIELDS: Tuple[str, ...] = ("force_rerun",)
+# ADR-064 besluit 4: the parent chain a request carries into its result (``review_rounds.PARENT_CHAIN_STRING_FIELDS``).
+_PARENT_CHAIN_FIELDS: Tuple[str, ...] = ("scope", "parent_head_sha", "parent_round_ref", "delta_base", "changekind", "patch_id",
+                                         "full_review_reason")
 
 
 def stamp_request_identity(
@@ -922,7 +925,7 @@ def stamp_request_identity(
     # R1: the seat the request filled and an applied --override-b3 travel with the
     # verdict, so the round ledger books it in that seat, with that override.
     # R10: a force-rerun's reason travels the same way, so the result says why it ran.
-    for field in _ROUND_FIELDS + _OPERATOR_FIELDS:
+    for field in _ROUND_FIELDS + _OPERATOR_FIELDS + _PARENT_CHAIN_FIELDS:
         if request_payload.get(field):
             result_payload[field] = request_payload[field]
     # K3-2a: the run's execution_id travels with the rest of the request's

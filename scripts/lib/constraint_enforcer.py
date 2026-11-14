@@ -70,7 +70,7 @@ def _registry_key_for(provider: Optional[str], sub_provider: Optional[str]) -> O
         return "kimi_cli"
     if base_norm in ("deepseek-harness", "deepseek_harness"):
         return "deepseek_harness"
-    if base_norm in ("glm-harness", "glm_harness"):
+    if base_norm in ("glm", "glm-harness", "glm_harness"):
         return "zai"
     if base_norm == "litellm":
         return sub_norm or None

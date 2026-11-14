@@ -5,7 +5,7 @@ Runs the same ``assess()`` as the doctor, once, and leaves two traces when
 asked to (D15, the whole write surface of this probe):
 
 * one NDJSON line in ``<data_root>/state/dream_liveness.ndjson`` (``--append``);
-* the beacon ``<data_root>/state/health/dream_liveness.json`` whose
+* the beacon ``<data_root>/health/dream_liveness.json`` whose
   ``expected_interval_seconds`` is 90000 (25h): a probe that stops running
   turns the beacon stale, which makes its own death visible.
 
@@ -26,6 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
 import dream_liveness
 from health_beacon import HealthBeacon
 from project_root import resolve_central_data_dir
+from vnx_paths import refuse_real_central_store_write_under_test_runner
 
 BEACON_COMPONENT = "dream_liveness"
 BEACON_INTERVAL_SECONDS = 90000
@@ -53,6 +54,11 @@ def _write(data_root: Path, document: dict, append: bool) -> None:
     state/health, which nothing reads.
     """
     state_dir = data_root / "state"
+    # TestIsolationGuardError is not an OSError, so main() lets it propagate.
+    if append:
+        refuse_real_central_store_write_under_test_runner(state_dir / LEDGER_NAME)
+    refuse_real_central_store_write_under_test_runner(
+        data_root / "health" / f"{BEACON_COMPONENT}.json")
     state_dir.mkdir(parents=True, exist_ok=True)
     if append:
         _append_line(state_dir / LEDGER_NAME, document)

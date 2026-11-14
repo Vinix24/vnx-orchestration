@@ -17,6 +17,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
+
 _LIB = Path(__file__).resolve().parent.parent / "scripts" / "lib"
 if str(_LIB) not in sys.path:
     sys.path.insert(0, str(_LIB))
@@ -373,3 +375,38 @@ def test_open_sidedoor_reports_loudly_but_passes_when_switch_off(monkeypatch, ca
     err = capsys.readouterr().err
     assert "KNOWN OPEN SIDE DOOR" in err, "bucket (b) must be reported by name on stderr"
     assert "scripts/lib/plan_gate_panel.py" in err
+
+
+def _scan_shell_line(tmp_path, line):
+    scripts = tmp_path / "scripts"
+    scripts.mkdir(exist_ok=True)
+    (scripts / "spawner.sh").write_text("#!/usr/bin/env bash\n" + line + "\n", encoding="utf-8")
+    return "scripts/spawner.sh" in audit_mod.scan_raw_claude_spawns(root=tmp_path)
+
+
+@pytest.mark.parametrize("line", [
+    '"$CLAUDE_BIN" -p "x"',
+    '${CLAUDE_BIN} --print',
+    'exec "$CLAUDE_CLI" -p',
+    'out=$("$CLAUDE_BIN" -p hi)',
+])
+def test_variable_claude_binary_spawn_is_found(tmp_path, line):
+    # OI-2660: a spawn through a CLAUDE-named variable in command position is a raw spawn.
+    assert _scan_shell_line(tmp_path, line)
+
+
+@pytest.mark.parametrize("line", [
+    'mkdir -p "$CLAUDE_CONFIG_DIR/klant"',
+    'cp -p "$CLAUDE_MD" /tmp/x',
+    'echo "$CLAUDE_BIN"',
+])
+def test_variable_claude_as_argument_is_not_found(tmp_path, line):
+    assert not _scan_shell_line(tmp_path, line)
+
+
+def test_probe_claude_cli_is_found_and_known():
+    probe = "scripts/probe_claude_cli.sh"
+    result = audit_mod.audit()
+    assert probe in result["raw_claude_found"]
+    assert probe in audit_mod.KNOWN_RAW_CLAUDE_CALLERS
+    assert probe not in result["raw_claude_unaudited"]

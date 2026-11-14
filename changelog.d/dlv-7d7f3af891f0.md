@@ -1,0 +1,1 @@
+- Deltareview DR-8a: `scripts/lib/review_carry_shadow.py` books a carried PASS in shadow (`review_gates/shadow/carry.ndjson`) with seven provenance fields, validated, never a round, replaced by any fresh verdict on the same head, and never for a security path (dlv-7d7f3af891f0).

@@ -127,6 +127,16 @@ SUBSYSTEM_DESCRIPTIONS: Dict[str, str] = {
         "Dispatch lifecycle in the receipt ledger (ADR-045): one start line, "
         "one end line per attempt, and a report that is never a second outcome."
     ),
+    "headless-builder-context": (
+        "Settings levels a claude_headless builder loads (--setting-sources); "
+        "default project,local, user,project,local restores the old argv; "
+        "carries `cleanupPeriodDays` and `claudeMdExcludes` (walk-up, "
+        "claude-code#87590), never `effortLevel`."
+    ),
+    "docs-style-file": (
+        "The Markdown file with writing rules that staging appends to a docs "
+        "dispatch; empty is off, an unreadable set path refuses staging."
+    ),
     "agent-layout": (
         "Agent-as-folder skill layout (track agents-als-map-fase-1): off or "
         "shadow; `on` is phase 2 and reads as off."
@@ -189,6 +199,12 @@ _ROW_ORDER: List[str] = [
     # lifecycle guard, but no writer emits a lifecycle line until K-act -- so it
     # is wired-and-dormant, not claimed LIVE.
     "ledger-lifecycle",
+    # doorloop-en-effectiviteit-dagelijks (lean builder context): the key is read
+    # by the claude_headless adapter at every spawn, no effectiveness probe yet.
+    "headless-builder-context",
+    # doorloop-en-effectiviteit-dagelijks (lean builder context, part 2): the key
+    # is read at staging, no effectiveness probe yet.
+    "docs-style-file",
     # SCOPE
     "plan-gate-panel",
     "plan-gate-task-class-scope",

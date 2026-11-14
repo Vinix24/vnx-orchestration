@@ -1,0 +1,1 @@
+- fix(constraints): the bare provider string `glm` resolves to the `zai` registry key, so the deprecated-glm-models allowlist cannot be sidestepped (OI-1798)

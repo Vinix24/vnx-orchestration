@@ -1,0 +1,1 @@
+- test: the `deliver_with_recovery` back-off test counts only the sleeps of `_backoff_or_fail`, so a retry loop elsewhere in the same worker no longer fails it (OI-2589)

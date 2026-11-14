@@ -35,6 +35,7 @@ from typing import Any, Dict, List, Optional
 from dispatch_identity import _IDENTITY_UNRESOLVED  # single canonical sentinel (dispatch-20260804-190000)
 from envelope_types import EnvelopeSpec, _AdapterResult
 from envelope_prepare import _verify_role_application, _verify_skill_application
+from receipt_token_fields import receipt_token_fields
 from skill_application import skill_receipt_fields
 from envelope_govern_support import (
     _archive_dispatch_events,
@@ -787,6 +788,7 @@ def _govern(
                     duration_seconds=duration,
                     token_usage=adapter_result.token_usage,
                     cost_usd=cost_usd, cost_source=cost_source, cost_ledger_run_ids=_run_ids,
+                    **receipt_token_fields(provider=spec.provider, role=spec.role, session_id=adapter_result.session_id, token_usage=adapter_result.token_usage, ledger_record=_ledger_record),
                     state_dir=spec.state_dir,
                     report_path=str(report_path) if report_path else None,
                     events_path=events_path,
@@ -803,9 +805,7 @@ def _govern(
                     verification=_verification_from_report(report_path),
                     role=_role,
                     receipt_kind="dispatch",
-                    role_applied=(
-                        getattr(_role_app, "role_applied", None) if _role_app is not None else None
-                    ),
+                    role_applied=getattr(_role_app, "role_applied", None) if _role_app is not None else None,
                     role_tier=(
                         getattr(_role_app, "tier", None) if _role_app is not None else None
                     ),

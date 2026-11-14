@@ -85,6 +85,15 @@ def _call_build_session(ar_mod, receipt: dict, state_dir: Path) -> tuple[dict, s
     return result, buf.getvalue()
 
 
+def _assert_read_failed_warning(stderr: str) -> None:
+    """The warning is a structured JSON line: level WARN, code manifest_sha256_read_failed."""
+    records = [json.loads(line) for line in stderr.splitlines() if line.strip()]
+    assert any(
+        r.get("level") == "WARN" and r.get("code") == "manifest_sha256_read_failed"
+        for r in records
+    ), stderr
+
+
 # ── Case A: valid manifest_path → instruction_sha256 in metadata ──────────────
 
 def test_valid_manifest_surfaces_instruction_sha256(ar, tmp_path):
@@ -159,7 +168,7 @@ def test_missing_manifest_file_field_absent_warning_logged(ar, tmp_path):
     metadata, stderr = _call_build_session(ar, receipt, state_dir)
 
     assert "instruction_sha256" not in metadata
-    assert "warning" in stderr.lower()
+    _assert_read_failed_warning(stderr)
 
 
 # ── Case D: malformed manifest JSON → field absent, warning logged ─────────────
@@ -175,7 +184,7 @@ def test_malformed_manifest_json_field_absent_warning_logged(ar, tmp_path):
     metadata, stderr = _call_build_session(ar, receipt, state_dir)
 
     assert "instruction_sha256" not in metadata
-    assert "warning" in stderr.lower()
+    _assert_read_failed_warning(stderr)
 
 
 # ── Case E: existing enrichment (session_id, model) unaffected ───────────────

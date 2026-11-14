@@ -1,0 +1,1 @@
+- rework_report --md: a `## Cost per delivery` section per builder x task_class x risk with the gap counts under it, or the line "Geen kostenas" when the cost ledger is missing (herwerk-per-model-en-reviewer).

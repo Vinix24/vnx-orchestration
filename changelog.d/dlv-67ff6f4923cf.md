@@ -1,0 +1,1 @@
+- Every dispatch receipt carries `token_usage_normalized` (uncached input, cache read, cache write 5m and 1h, output) and, for a claude harness builder, `start_context_tokens`, beside the raw `token_usage` that keeps its shape; the claude adapter now also reports `cache_write` (herwerk-per-model-en-reviewer).

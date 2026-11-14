@@ -47,6 +47,6 @@ def test_verifier_fails_on_bare_seed(task_rel):
 
 
 def test_all_tasks_discovered():
-    # tasks.yaml registers 9 tasks; a silently missing verify.py would
+    # tasks.yaml registers 13 tasks (t4 and t5 tiers added after the original 9); a silently missing verify.py would
     # shrink the parametrization and mask a gap.
-    assert len(TASK_FOLDERS) == 9, f"expected 9 task verifiers, found {len(TASK_FOLDERS)}: {TASK_FOLDERS}"
+    assert len(TASK_FOLDERS) == 13, f"expected 13 task verifiers, found {len(TASK_FOLDERS)}: {TASK_FOLDERS}"

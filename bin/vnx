@@ -329,6 +329,7 @@ Commands:
                        review --weekly  Aggregate last 7d suggestions by target file
   insights           Read-only dispatch parameter + behavioral intelligence signals
                        --json           Machine-readable JSON output
+  daily-metrics <verb> [args]  Daily metrics pass-through; install manages the opt-in 04:10 job
 
 Intelligence commands (git-tracked project knowledge):
   intelligence-export  Export SQLite + state to canonical .vnx-intelligence/ (NDJSON)
@@ -366,6 +367,9 @@ Provider switch (turn model providers on and off, ~/.vnx/providers.json):
   providers check <identifier>       Exit 0 when allowed, 4 when switched off (for shell callers)
   providers usage [--json]           Usage and balance of every provider (read-only, no model call)
 
+Main window (read-only probe, ADR-073):
+  main-window status [--json]        The merges since the last green heavy main run and GO/NO-GO for one more (exit 0 GO, 1 NO-GO, 2 could not run)
+
 Gate commands (pre-merge verification):
   gate-check --pr <ID>  Run deterministic pre-merge gate checks (GO/HOLD verdict)
   pr-ready <N> [<N>..]  Merge readiness: required contexts + gate evidence on the
@@ -376,10 +380,16 @@ Gate commands (pre-merge verification):
   gate-reanchor --pr <N> --gate <G>
                         Move an existing gate verdict onto the PR's current head when
                         the reviewed input is provably identical (read-only; --apply writes)
+  review delta-compare --since <time|Nd> [--planted <manifest>]
+                        The shadow delta against the full codex round, per pair (DR-5)
   review rounds open --pr <N> --reason "..."
                         Open PR N, reviewed before the round ledger, as the operator:
                         an attested line in review_gates/rounds.ndjson plus a receipt;
                         the B3 cap starts at zero there; idempotent
+  impact collect|backtest|report [--since <date|Nd>]
+                        The impact shadow ledger (state/impact_shadow.ndjson) from the CI artifacts,
+                        and its report: misses, reduced share, wall clock (ADR-074; report is read-only);
+                        backtest rebuilds S for old pull_request runs from their Profile A evidence
   roadmap <sub>       Roadmap orchestration and auto-next feature loading
   context-manifest    Read the context-manifest sidecar per provider (read-only)
                         Options: --json, --by provider, --state-dir <dir>
@@ -2680,13 +2690,22 @@ main() {
       "$VNX_PYTHON" "$VNX_HOME/scripts/pr_queue_manager.py" staging-list "$@"
       ;;
     queue-status)
-      "$VNX_PYTHON" "$VNX_HOME/scripts/pr_queue_manager.py" queue-status "$@"
+      "$VNX_PYTHON" "$VNX_HOME/scripts/planning_cli.py" horizon queue "$@"
       ;;
     objective)
       "$VNX_PYTHON" "$VNX_HOME/scripts/planning_cli.py" objective "$@"
       ;;
     horizon)
-      "$VNX_PYTHON" "$VNX_HOME/scripts/planning_cli.py" horizon "$@"
+      case "${1:-}" in
+        plan-gate|deliverable)
+          horizon_verb="$1"
+          shift
+          "$VNX_PYTHON" "$VNX_HOME/scripts/planning_cli.py" "$horizon_verb" "$@"
+          ;;
+        *)
+          "$VNX_PYTHON" "$VNX_HOME/scripts/planning_cli.py" horizon "$@"
+          ;;
+      esac
       ;;
     deliverable)
       "$VNX_PYTHON" "$VNX_HOME/scripts/planning_cli.py" deliverable "$@"
@@ -2712,11 +2731,17 @@ main() {
     gate-profile)
       PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" exec "$VNX_PYTHON" "$VNX_HOME/scripts/gate_profile_cli.py" "$@"
       ;;
+    main-window)
+      PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" exec "$VNX_PYTHON" "$VNX_HOME/scripts/main_window_cli.py" "$@"
+      ;;
     gate-reanchor)
       "$VNX_PYTHON" "$VNX_HOME/scripts/gate_reanchor_cli.py" "$@"
       ;;
     review)
       "$VNX_PYTHON" "$VNX_HOME/scripts/review_rounds_cli.py" "$@"
+      ;;
+    impact)
+      "$VNX_PYTHON" "$VNX_HOME/scripts/impact_cli.py" "$@"
       ;;
     dispatch)
       cmd_dispatch "$@"
@@ -2780,6 +2805,9 @@ main() {
       ;;
     dream)
       PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" exec "$VNX_PYTHON" -m vnx_cli.main dream "$@"
+      ;;
+    daily-metrics)
+      PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" exec "$VNX_PYTHON" -m vnx_cli.main daily-metrics "$@"
       ;;
     rework-attribution)
       PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" exec "$VNX_PYTHON" -m vnx_cli.commands.rework_attribution "$@"

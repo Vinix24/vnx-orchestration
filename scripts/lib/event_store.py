@@ -299,14 +299,14 @@ def _events_dir() -> Path:
     ``~/.vnx-system/versions/<v>/.vnx-data`` — where the append then failed
     with a permission error.
 
-    Resolution order is now env-first and shared with
+    OI-1276: resolution is shared with receipts and with
     ``headless_dispatch_daemon._default_data_dir`` via
-    ``data_dir_resolution.resolve_data_dir_fail_loud``:
-    1. VNX_DATA_DIR set           → VNX_DATA_DIR/events
-    2. VNX_PROJECT_ID set         → $HOME/.vnx-data/<project_id>/events  (central ledger)
-    3. Fallback → canonical resolver (vnx_paths.resolve_paths()["VNX_DATA_DIR"])
+    ``data_dir_resolution.resolve_data_dir_fail_loud``, which returns
+    ``vnx_paths.resolve_paths()["VNX_DATA_DIR"]``: ``VNX_DATA_DIR`` counts only
+    with ``VNX_DATA_DIR_EXPLICIT=1`` (issue #225); a bare one is named on
+    stderr and ignored, so events never split from receipts.
 
-    Every step is refused with a ``DataDirResolutionError`` naming the chain if
+    Every result is refused with a ``DataDirResolutionError`` naming the chain if
     it would land under ``~/.vnx-system/versions/`` — a read-only version store
     is never a valid data dir.
     """

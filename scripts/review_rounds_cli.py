@@ -66,6 +66,10 @@ Usage:
   python3 scripts/review_rounds_cli.py rounds open --pr 2089 --reason "..." --data-dir /path/to/.vnx-data --json
   python3 scripts/review_rounds_cli.py rounds show --pr 2089 [--data-dir /path/to/.vnx-data] [--json]
   python3 scripts/review_rounds_cli.py cap-verdict --pr 2089 --for-dispatch 20261020-fix-x [--json]
+  python3 scripts/review_rounds_cli.py delta-compare --since 14d [--until ...] [--planted manifest.json] [--json]
+
+``delta-compare`` (deltareview DR-5) measures the shadow delta against the full codex round per pair; exit 0 pass,
+1 fail (a missed blocker or an unfound planted case), 3 insufficient, 2 usage error. See docs/operations/DELTAREVIEW_METING.md.
 """
 from __future__ import annotations
 
@@ -108,6 +112,12 @@ def _build_parser() -> argparse.ArgumentParser:
     verdict.add_argument("--for-dispatch", default="", help="the dispatch that carries out a verkleinen")
     verdict.add_argument("--data-dir", default=None, help="the project's .vnx-data (default: this project's)")
     verdict.add_argument("--json", action="store_true", help="machine-readable output")
+    compare = sub.add_parser("delta-compare", help="the shadow delta measured against the full round (deltareview DR-5)")
+    compare.add_argument("--since", required=True, help="start of the window: ISO time with a zone, or Nd")
+    compare.add_argument("--until", default=None, help="end of the window (default: now)")
+    compare.add_argument("--planted", default=None, help="a delta_planted/1 manifest of synthetic blockers")
+    compare.add_argument("--data-dir", default=None, help="the project's .vnx-data (default: this project's)")
+    compare.add_argument("--json", action="store_true", help="machine-readable output")
     return parser
 
 
@@ -141,6 +151,46 @@ def _state_dir(args, command: str) -> Optional[Path]:
     except review_rounds.StoreConflict as exc:
         print(f"vnx review {command}: refused: {exc}", file=sys.stderr)
         return None
+
+
+def _delta_compare(args) -> int:
+    """``delta-compare``: per pair the blockers the delta missed, and the outcome. Exit 0 pass, 1 fail, 3 insufficient."""
+    import review_delta_compare as rdc
+    import review_rounds
+    from project_root import resolve_project_root
+
+    state_dir = _state_dir(args, "delta-compare")
+    if state_dir is None:
+        return EXIT_ERROR
+    try:
+        planted = rdc.load_planted(Path(args.planted)) if args.planted else None
+        result = rdc.compare(state_dir, since=rdc.parse_time(args.since), source_of=rdc.git_source_of(resolve_project_root()),
+                             until=rdc.parse_time(args.until) if args.until else None, planted=planted)
+    except (rdc.CompareError, review_rounds.RoundLedgerError) as exc:
+        print(f"vnx review delta-compare: refused: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+    if args.json:
+        print(json.dumps(result.to_dict(), indent=2))
+    else:
+        _print_delta_compare(result)
+    return {rdc.PASS: EXIT_OK, rdc.FAIL: EXIT_RECEIPT_FAILED}.get(result.outcome, EXIT_AFTERMATH_INCOMPLETE)
+
+
+def _print_delta_compare(result) -> None:
+    for p in result.pairs:
+        print(f"PR #{p['pr_number']} {p['head'][:12]} depth {p['depth']}: {len(p['missed'])} missed of {p['full_blockers']} "
+              f"blockers, {p['extra_delta_blockers']} extra; delta {p['delta_duration_seconds']}s, "
+              f"full {p['full_duration_seconds']}s, tokens {p['tokens']}")
+    for u in result.unmeasurable:
+        print(f"unmeasurable: PR #{u['pr_number']} {str(u['head'])[:12]}: {u['reason']}")
+    for reason, lines in result.not_pairs.items():
+        print(f"not a pair ({reason}): {len(lines)}")
+    low, high = result.interval or (None, None)
+    print(f"pairs {len(result.pairs)}, missed blockers {result.missed_blockers} in {result.missed_pairs} pair(s), "
+          f"95% interval of missed pairs: {low}..{high}")
+    for case in result.planted or []:
+        print(f"planted {str(case['head'])[:12]} {case.get('file_path')}:{case.get('line')}: {'found' if case['found'] else 'NOT found'}")
+    print(f"outcome: {result.outcome}" + (f" ({'; '.join(result.reasons)})" if result.reasons else ""))
 
 
 def _cap_verdict(args) -> int:
@@ -301,6 +351,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     args = _build_parser().parse_args(argv)
     if args.noun == "cap-verdict":
         return _cap_verdict(args)
+    if args.noun == "delta-compare":
+        return _delta_compare(args)
     if args.verb == "show":
         return _show(args)
     reason = args.reason.strip()

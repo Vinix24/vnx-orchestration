@@ -239,6 +239,8 @@ def worktree_start(
         f"# Worktree: {ctx.worktree_root}\n"
         f"# Main repo: {ctx.main_root}\n"
         f"export VNX_DATA_DIR='{wt_data_str}'\n"
+        # OI-1276: the isolation is intended, so events follow it like receipts.
+        "export VNX_DATA_DIR_EXPLICIT=1\n"
     )
     details.append(".env_override written for VNX_DATA_DIR isolation")
 

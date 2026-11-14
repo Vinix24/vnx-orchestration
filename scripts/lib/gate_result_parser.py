@@ -338,21 +338,30 @@ class GateResultParserMixin:
         # NOTE: this per-gate (env_var, default) map is NOT the same data as
         # gate_recorder._GATE_ENV_FLAGS — it carries a DEFAULT per gate, which
         # that one does not. Left in place deliberately rather than half-merged
-        # into a shape that loses the defaults.
+        # into a shape that loses the defaults. ``ci_gate`` is not in this map:
+        # its flag is registered in config_registry and is resolved through
+        # config_runtime (OI-1456), the same resolver the availability check uses.
         env_flags = {
             "gemini_review": ("VNX_GEMINI_REVIEW_ENABLED", "1"),
             "codex_gate": ("VNX_CODEX_HEADLESS_ENABLED", "1"),
             "claude_github_optional": ("VNX_CLAUDE_GITHUB_REVIEW_ENABLED", "0"),
-            "ci_gate": ("VNX_CI_GATE_REQUIRED", "0"),
         }
-        env_var, default = env_flags.get(gate, ("", "0"))
-        disabled = env_var and os.environ.get(env_var, default) != "1" if gate == "ci_gate" else env_var and os.environ.get(env_var, default) == "0"
+        if gate == "ci_gate":
+            import config_runtime
+
+            env_var = "VNX_CI_GATE_REQUIRED"
+            disabled = not config_runtime.get_bool(env_var)
+            disabled_detail = f"{env_var} resolves to false (config_runtime)"
+        else:
+            env_var, default = env_flags.get(gate, ("", "0"))
+            disabled = bool(env_var) and os.environ.get(env_var, default) == "0"
+            disabled_detail = f"{env_var} is set to 0"
         binary_found = shutil.which(binary_name) is not None
 
         if disabled and not binary_found:
-            return ("provider_disabled", f"{binary_name} binary not found in PATH and {env_var}=0")
+            return ("provider_disabled", f"{binary_name} binary not found in PATH and {disabled_detail}")
         if disabled:
-            return ("provider_disabled", f"{env_var} is set to 0")
+            return ("provider_disabled", disabled_detail)
         if not binary_found:
             return ("provider_not_installed", f"{binary_name} binary not found in PATH")
         return ("provider_not_configured", f"{gate} provider is not configured")

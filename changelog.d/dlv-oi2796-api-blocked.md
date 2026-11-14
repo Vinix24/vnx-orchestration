@@ -1,0 +1,1 @@
+- Failure classes: a Cloudflare edge block ("Attention Required! | Cloudflare") is `api_blocked` (retry the same tier, notify the operator) instead of `auth_rejected`, and a paid-lane budget refusal is `paid_lane_budget_exceeded` (no climb, next step named) instead of `unknown` (OI-2796, OI-2783, dlv-oi2796-api-blocked).

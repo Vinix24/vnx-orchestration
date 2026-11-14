@@ -799,6 +799,13 @@
       "symbol": "_govern"
     },
     {
+      "file": "tests/test_dispatch_metadata_parent.py",
+      "line": 299,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "_stamp_headless_start"
+    },
+    {
       "file": "tests/test_envelope_claude_adapter_report_env.py",
       "line": 27,
       "mechanism": "direct-call",
@@ -808,6 +815,20 @@
     {
       "file": "tests/test_envelope_claude_adapter_report_env.py",
       "line": 28,
+      "mechanism": "direct-call",
+      "module_target": "envelope_types",
+      "symbol": "EnvelopeSpec"
+    },
+    {
+      "file": "tests/test_envelope_claude_adapter_setting_sources.py",
+      "line": 21,
+      "mechanism": "direct-call",
+      "module_target": "envelope_adapters_claude",
+      "symbol": "ClaudeSubprocessAdapter"
+    },
+    {
+      "file": "tests/test_envelope_claude_adapter_setting_sources.py",
+      "line": 22,
       "mechanism": "direct-call",
       "module_target": "envelope_types",
       "symbol": "EnvelopeSpec"
@@ -1961,6 +1982,97 @@
       "symbol": "_enforce_push_pr"
     },
     {
+      "file": "tests/test_oi1803_provider_lane_exit_code.py",
+      "line": 16,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "_envelope_outcome"
+    },
+    {
+      "file": "tests/test_oi1803_provider_lane_exit_code.py",
+      "line": 49,
+      "mechanism": "direct-call",
+      "module_target": "envelope_adapters_provider",
+      "symbol": "ProviderAdapter"
+    },
+    {
+      "file": "tests/test_oi1803_provider_lane_exit_code.py",
+      "line": 84,
+      "mechanism": "direct-call",
+      "module_target": "envelope_adapters_provider",
+      "symbol": "_map_generic_spawn_result"
+    },
+    {
+      "file": "tests/test_oi1803_provider_lane_exit_code.py",
+      "line": 86,
+      "mechanism": "direct-call",
+      "module_target": "envelope_adapters_provider",
+      "symbol": "_map_harness_spawn_result"
+    },
+    {
+      "file": "tests/test_oi1803_provider_lane_exit_code.py",
+      "line": 103,
+      "mechanism": "direct-call",
+      "module_target": "envelope_adapters_provider",
+      "symbol": "_map_generic_spawn_result"
+    },
+    {
+      "file": "tests/test_oi1803_provider_lane_exit_code.py",
+      "line": 108,
+      "mechanism": "direct-call",
+      "module_target": "envelope_adapters_provider",
+      "symbol": "_map_generic_spawn_result"
+    },
+    {
+      "file": "tests/test_oi1803_provider_lane_exit_code.py",
+      "line": 121,
+      "mechanism": "direct-call",
+      "module_target": "envelope_adapters_provider",
+      "symbol": "_map_generic_spawn_result"
+    },
+    {
+      "file": "tests/test_oi1803_provider_lane_exit_code.py",
+      "line": 139,
+      "mechanism": "direct-call",
+      "module_target": "envelope_adapters_provider",
+      "symbol": "_blocking_refusal_class"
+    },
+    {
+      "file": "tests/test_oi1803_provider_lane_exit_code.py",
+      "line": 143,
+      "mechanism": "direct-call",
+      "module_target": "envelope_adapters_provider",
+      "symbol": "_blocking_refusal_class"
+    },
+    {
+      "file": "tests/test_oi1803_provider_lane_exit_code.py",
+      "line": 144,
+      "mechanism": "direct-call",
+      "module_target": "envelope_adapters_provider",
+      "symbol": "_blocking_refusal_class"
+    },
+    {
+      "file": "tests/test_oi1803_provider_lane_exit_code.py",
+      "line": 155,
+      "mechanism": "direct-call",
+      "module_target": "envelope_adapters_provider",
+      "symbol": "_blocking_refusal_class"
+    },
+    {
+      "file": "tests/test_oi1803_provider_lane_exit_code.py",
+      "line": 162,
+      "mechanism": "direct-call",
+      "module_target": "envelope_adapters_provider",
+      "symbol": "_blocking_refusal_class"
+    },
+    {
+      "file": "tests/test_oi1803_provider_lane_exit_code.py",
+      "line": 170,
+      "mechanism": "direct-call",
+      "module_target": "envelope_adapters_provider",
+      "symbol": "_blocking_refusal_class"
+    },
+    {
       "file": "tests/test_oi1869_headless_stream_per_run.py",
       "line": 131,
       "mechanism": "direct-call",
@@ -2276,6 +2388,69 @@
       "symbol": "ProviderAdapter"
     },
     {
+      "file": "tests/test_receipt_token_usage_normalized.py",
+      "line": 24,
+      "mechanism": "direct-call",
+      "module_target": "envelope_adapters_claude",
+      "symbol": "ClaudeSubprocessAdapter"
+    },
+    {
+      "file": "tests/test_receipt_token_usage_normalized.py",
+      "line": 25,
+      "mechanism": "direct-call",
+      "module_target": "envelope_govern",
+      "symbol": "_govern"
+    },
+    {
+      "file": "tests/test_receipt_token_usage_normalized.py",
+      "line": 25,
+      "mechanism": "direct-call",
+      "module_target": "envelope_govern",
+      "symbol": "_run_phantom_guard"
+    },
+    {
+      "file": "tests/test_receipt_token_usage_normalized.py",
+      "line": 26,
+      "mechanism": "direct-call",
+      "module_target": "envelope_types",
+      "symbol": "EnvelopeSpec"
+    },
+    {
+      "file": "tests/test_receipt_token_usage_normalized.py",
+      "line": 26,
+      "mechanism": "direct-call",
+      "module_target": "envelope_types",
+      "symbol": "_AdapterResult"
+    },
+    {
+      "file": "tests/test_receipt_token_usage_normalized.py",
+      "line": 70,
+      "mechanism": "patch-string",
+      "module_target": "envelope_govern",
+      "symbol": "_book_ledger_run"
+    },
+    {
+      "file": "tests/test_receipt_token_usage_normalized.py",
+      "line": 71,
+      "mechanism": "patch-string",
+      "module_target": "envelope_govern",
+      "symbol": "_verify_role_application"
+    },
+    {
+      "file": "tests/test_receipt_token_usage_normalized.py",
+      "line": 213,
+      "mechanism": "patch-string",
+      "module_target": "envelope_govern",
+      "symbol": "_publish_phantom_verdict"
+    },
+    {
+      "file": "tests/test_receipt_token_usage_normalized.py",
+      "line": 214,
+      "mechanism": "patch-string",
+      "module_target": "envelope_govern",
+      "symbol": "_resolve_fix_forward_diff"
+    },
+    {
       "file": "tests/test_receipt_v2_pr4_wiring.py",
       "line": 398,
       "mechanism": "direct-call",
@@ -2567,18 +2742,24 @@
     "dispatch_envelope::run_envelope_plan",
     "envelope_adapters_claude.ClaudeSubprocessAdapter::run",
     "envelope_adapters_claude.CodexAdapter::run",
+    "envelope_adapters_claude::_builder_cli_args",
+    "envelope_adapters_claude::_carried_user_settings",
     "envelope_adapters_claude::_codex_skill_inputs",
     "envelope_adapters_claude::_materialize_shadow_skills",
+    "envelope_adapters_claude::_memory_excludes",
+    "envelope_adapters_claude::_setting_sources",
     "envelope_adapters_claude::_switch_stamps",
     "envelope_adapters_claude::_worker_extra_env",
     "envelope_adapters_provider.ProviderAdapter::_run_codex",
     "envelope_adapters_provider.ProviderAdapter::_run_kimi",
     "envelope_adapters_provider.ProviderAdapter::run",
+    "envelope_adapters_provider::_blocking_refusal_class",
     "envelope_adapters_provider::_codex_state_dir",
     "envelope_adapters_provider::_fail_loud_on_empty_success",
     "envelope_adapters_provider::_map_generic_spawn_result",
     "envelope_adapters_provider::_map_harness_spawn_result",
     "envelope_adapters_provider::_plan_worker_env",
+    "envelope_adapters_provider::_split_api_errors",
     "envelope_govern::_adopt_stray_report",
     "envelope_govern::_book_ledger_run",
     "envelope_govern::_check_report_contract",

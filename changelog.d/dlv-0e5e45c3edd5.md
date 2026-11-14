@@ -1,0 +1,1 @@
+- ADR-074 records the impact-selection-in-shadow contract (sets U/X/S/E/F, `scope: full|impact`, the evidence contract, activation threshold of 0 misses over at least 15 red runs) and registers the hook `VNX_CI_IMPACT_CMD` in config_registry; no code reads it yet (impactselectie-in-schaduw PR 1).

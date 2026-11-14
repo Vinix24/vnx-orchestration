@@ -197,8 +197,7 @@ def run_blame_edges(
         start = _start_point(wm_path, since)
         summary["watermark"] = start
         registry = _load_registry(rc_conn)
-        # _load_registry above already stopped the run on a missing connection, so None never reaches a real read
-        sources = _class_sources(rc_conn) if rc_conn is not None else frozenset()
+        sources = _class_sources(rc_conn)
         commits = git(repo_root, ["rev-list", "--reverse", "--first-parent", f"{start}..{ref}"]).split()
         for sha in commits:
             _process_commit(repo_root, sha, rc_conn, qi_conn, project_id, registry, summary, git, sources)

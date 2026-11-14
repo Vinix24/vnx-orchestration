@@ -842,6 +842,15 @@ def list_check_runs(
     return [run for run in collected if isinstance(run, dict) and run.get("name") == name]
 
 
+def get_check_run(check_run_id: int, *, project_root: Optional[Path] = None) -> Dict[str, Any]:
+    """GET one check-run by id; GitHub's object. A non-2xx or a non-object answer raises."""
+    if isinstance(check_run_id, bool) or not isinstance(check_run_id, int) or check_run_id <= 0:
+        raise ForgeCheckRunError(f"check_run_id moet een positief geheel getal zijn: {check_run_id!r}")
+    return _github_json(
+        "GET", f"/check-runs/{check_run_id}", None, f"check-run {check_run_id} lezen", project_root
+    )
+
+
 def patch_check_run(
     check_run_id: int,
     conclusion: str,

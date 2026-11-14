@@ -164,7 +164,7 @@ TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || echo "")
 PATTERN_IDS=$(echo "$INTELLIGENCE_JSON" | jq -c '.offered_pattern_hashes[:3]' 2>/dev/null || echo "[]")
 TOKEN_EST=$(( ${#FULL_OUTPUT} / 4 ))
 AUDIT_EVENT="{\"timestamp\":\"${TIMESTAMP}\",\"event_type\":\"injection\",\"terminal\":\"${TERMINAL_ID}\",\"dispatch_id\":\"${DISPATCH_ID}\",\"gate\":\"${GATE:-}\",\"pattern_ids\":${PATTERN_IDS},\"token_estimate\":${TOKEN_EST}}"
-echo "$AUDIT_EVENT" >> "$USAGE_LOG" 2>/dev/null || true
+printf '%s\n' "$AUDIT_EVENT" | python3 "$SCRIPT_DIR/append_usage_event.py" "$STATE_DIR" 2>/dev/null || true
 
 # Cache hash for change detection
 echo "$INTEL_HASH" > "$LAST_HASH_FILE" 2>/dev/null || true

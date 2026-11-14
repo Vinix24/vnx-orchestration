@@ -589,7 +589,9 @@ def _pr_size_thresholds(
 
     resolver = None
     if project_id and state_dir is not None:
-        resolver = config_store_db.make_db_resolver(lambda _pid: state_dir)
+        # raise_on_error: a non-raising resolver turns an unreadable store into "no row",
+        # which strict_resolver below could then never see.
+        resolver = config_store_db.make_db_resolver(lambda _pid: state_dir, raise_on_error=True)
     resolved = {}
     for key in (PR_SIZE_WARN_KEY, PR_SIZE_HOLD_KEY):
         raw, source = cr.resolve_with_source(
@@ -599,7 +601,11 @@ def _pr_size_thresholds(
     values, invalid = {}, []
     for key, (raw, source) in resolved.items():
         values[key] = _positive_int(raw)
-        if values[key] is None:
+        if source == "project_config_error":
+            invalid.append(
+                f"project_config_error {key}: the project store could not be read, "
+                f"default {defaults[key]}")
+        elif values[key] is None:
             invalid.append(f"invalid {key}: {raw!r}, default {defaults[key]}")
     warn_set = resolved[PR_SIZE_WARN_KEY][1] != "default"
     if not invalid and not warn_set and values[PR_SIZE_WARN_KEY] > values[PR_SIZE_HOLD_KEY]:

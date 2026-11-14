@@ -448,8 +448,8 @@ class TestDispatchPatternOfferedIsolation:
             dispatch_id="dispatch-BBB",
         )
 
-        selector._record_pattern_usage(result_a)
-        selector._record_pattern_usage(result_b)
+        selector.record_injection(result_a)
+        selector.record_injection(result_b)
 
         conn = sqlite3.connect(str(db_path))
         conn.row_factory = sqlite3.Row
@@ -494,9 +494,14 @@ class TestSourceGuards:
         )
 
     def test_no_git_stash_save_in_auto_stash(self):
-        src = (SCRIPTS_LIB / "subprocess_dispatch.py").read_text(encoding="utf-8")
+        # W1A split moved the stash code out of subprocess_dispatch.py: the entry point
+        # and the `git stash push` runner now live in subprocess_dispatch_internals/receipt_writer.py.
+        src = (SCRIPTS_LIB / "subprocess_dispatch_internals" / "receipt_writer.py").read_text(
+            encoding="utf-8"
+        )
         start = src.find("def _auto_stash_changes(")
-        end = src.find("\ndef ", start + 1)
+        assert start != -1, "_auto_stash_changes must exist in receipt_writer.py"
+        end = src.find("\ndef ", src.find("def _run_stash_push(", start) + 1)
         func_body = src[start:end] if end != -1 else src[start:]
         assert '"save"' not in func_body and "'save'" not in func_body, (
             "_auto_stash_changes must not use 'git stash save' — use 'git stash push'"
@@ -506,11 +511,12 @@ class TestSourceGuards:
         )
 
     def test_dispatch_pattern_offered_not_dispatch_id_in_conflict(self):
-        src = (SCRIPTS_LIB / "intelligence_selector.py").read_text(encoding="utf-8")
-        # Confirm 'dispatch_id = excluded.dispatch_id' is gone from ON CONFLICT block
-        assert "dispatch_id  = excluded.dispatch_id" not in src, (
-            "intelligence_selector: ON CONFLICT must not overwrite dispatch_id in pattern_usage"
+        # The pattern_usage / dispatch_pattern_offered writer moved to intelligence_sources/_recording.py.
+        src = (SCRIPTS_LIB / "intelligence_sources" / "_recording.py").read_text(encoding="utf-8")
+        code = "\n".join(l for l in src.splitlines() if not l.lstrip().startswith("#"))
+        assert "dispatch_id  = excluded.dispatch_id" not in code, (
+            "_recording: ON CONFLICT must not overwrite dispatch_id in pattern_usage"
         )
-        assert "dispatch_pattern_offered" in src, (
-            "intelligence_selector: must write to dispatch_pattern_offered junction table"
+        assert "dispatch_pattern_offered" in code, (
+            "_recording: must write to dispatch_pattern_offered junction table"
         )

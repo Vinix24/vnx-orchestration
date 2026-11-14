@@ -1,0 +1,1 @@
+- The quality digest parses an ISO timestamp without sub-seconds instead of silently dropping it, so it reads the whole ledger window again, and logs one WARNING with the count of lines it still cannot parse (OI-1687).

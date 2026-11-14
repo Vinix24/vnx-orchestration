@@ -125,6 +125,12 @@ _ESCALATION_ORDER = load_escalation_order()
 #                       fixed by picking a different model on the same host)
 #   local_key_missing -> no climb (a missing own key on this host is a local
 #                       config error, never fixed by another model)
+#   api_blocked      -> retry the same tier (a Cloudflare edge block in front of the
+#                       API is transient; the next fire on the same model works,
+#                       and a higher tier sits behind the same edge). OI-2796
+#   paid_lane_budget_exceeded -> no climb (the daily cap of the paid lane is spent;
+#                       another model on that lane is refused the same way — the
+#                       next step is another lane or a refire after 00:00Z). OI-2783
 #   unknown          -> no climb, report the unknown class loudly (the
 #                       vangnetklasse — kept as the catch-all; do not remove)
 _ESCALATION_TABLE = {
@@ -139,12 +145,18 @@ _ESCALATION_TABLE = {
     "local_key_missing": "no_climb",
     # The operator switched the family off: a climb would route around that decision.
     "provider_switched_off": "no_climb",
+    "api_blocked": "retry_same_tier",
+    "paid_lane_budget_exceeded": "no_climb",
     "unknown": "no_climb",
 }
 
 # Failure classes that must ALSO reach the operator, independent of whether a
 # climb is possible (credit_exhausted is actionable even at the top rung).
-_NOTIFY_OPERATOR_CLASSES = frozenset({"credit_exhausted"})
+# api_blocked is the signal for the T0 to lower the builder ceiling; a spent
+# paid-lane budget is an operator fact.
+_NOTIFY_OPERATOR_CLASSES = frozenset(
+    {"credit_exhausted", "api_blocked", "paid_lane_budget_exceeded"}
+)
 
 
 @dataclass(frozen=True)

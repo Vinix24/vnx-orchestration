@@ -33,7 +33,7 @@ from failure_classifier import (
 @pytest.fixture
 def classify_func():
     """Extract _classify_blocked_dispatch from the dispatcher for subprocess testing."""
-    dispatcher = SCRIPT_DIR / "dispatcher_minimal.sh"
+    dispatcher = SCRIPT_DIR / "lib" / "dispatch_logging.sh"
     content = dispatcher.read_text(encoding="utf-8")
     start = content.index("_classify_blocked_dispatch() {")
     brace_depth = 0

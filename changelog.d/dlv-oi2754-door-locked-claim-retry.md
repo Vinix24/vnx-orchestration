@@ -1,0 +1,1 @@
+- fix(dispatch): the door retries a locked runtime DB at the claim with backoff, and a refused start no longer blocks a plain refire (OI-2754)

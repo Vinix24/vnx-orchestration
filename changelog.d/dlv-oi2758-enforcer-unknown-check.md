@@ -1,0 +1,1 @@
+- fix(governance): a configured enforcer check without a `_check_<name>` implementation now fails closed at level 1 and up, named, and follows the normal override rule instead of passing silently (OI-2758)

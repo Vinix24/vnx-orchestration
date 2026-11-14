@@ -1,0 +1,1 @@
+- `LearningLoop.daily_learning_cycle` is split into private step helpers; its behaviour is unchanged (golf schoon R06).

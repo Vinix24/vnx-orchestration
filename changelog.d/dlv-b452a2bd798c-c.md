@@ -1,0 +1,1 @@
+- Headless claude builders run at the model's own effort again (no `--effort` carried from the user file) and exclude the user-level `CLAUDE.md` and rules that the walk-up still loads, through `claudeMdExcludes` in the `--settings` JSON (lean builder context, part c).

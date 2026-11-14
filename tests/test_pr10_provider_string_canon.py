@@ -88,11 +88,13 @@ class TestModelSentinelNotOverReject:
 
 class TestDeepseekHarnessRegistryKey:
 
-    def test_deepseek_harness_maps_to_deepseek(self):
-        assert _registry_key_for("deepseek-harness", None) == "deepseek"
+    # Since d93ccdb06 (#1530) the harness has its own registry key, distinct
+    # from the direct "deepseek" provider (OI-867 proxy/harness split).
+    def test_deepseek_harness_maps_to_deepseek_harness(self):
+        assert _registry_key_for("deepseek-harness", None) == "deepseek_harness"
 
-    def test_deepseek_harness_underscore_maps_to_deepseek(self):
-        assert _registry_key_for("deepseek_harness", None) == "deepseek"
+    def test_deepseek_harness_underscore_maps_to_deepseek_harness(self):
+        assert _registry_key_for("deepseek_harness", None) == "deepseek_harness"
 
     def test_deepseek_direct_maps_to_deepseek(self):
         assert _registry_key_for("deepseek", None) == "deepseek"

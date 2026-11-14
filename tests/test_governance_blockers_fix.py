@@ -247,14 +247,6 @@ class TestGovernanceEmitTimestamp:
             "emit_dispatch_receipt must delegate timestamping to receipt_schema.ReceiptV2"
         )
 
-    def test_recorded_ts_equals_now_ts(self):
-        """recorded_ts must be assigned from now_ts, not a separate call."""
-        mod = __import__("governance_emit")
-        source = inspect.getsource(mod.emit_dispatch_receipt)
-        assert "recorded_ts = now_ts" in source, (
-            "recorded_ts must be assigned from now_ts"
-        )
-
 
 # ---------------------------------------------------------------------------
 # H-2: audit_log_entry flock
@@ -326,7 +318,9 @@ class TestInitSchemaRace:
         for i, line in enumerate(lines):
             if "with get_connection(" in line:
                 with_line = i
-            if "SELECT MAX(version)" in line:
+            # 839df0c2d: the version gate is
+            # PRAGMA user_version behind schema_migration.apply_script_if_below.
+            if "apply_script_if_below(" in line and version_line is None:
                 version_line = i
         assert with_line is not None, "get_connection context not found"
         assert version_line is not None, "version check not found"

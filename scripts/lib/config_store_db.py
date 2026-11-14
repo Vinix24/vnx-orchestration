@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 import config_registry
+import review_scope
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS project_config (
@@ -73,11 +74,15 @@ def has_config_tables(conn: sqlite3.Connection) -> bool:
     return row is not None
 
 
-def read_config(conn: sqlite3.Connection, project_id: str, key: str) -> Optional[str]:
+def read_config(
+    conn: sqlite3.Connection, project_id: str, key: str, *, raise_on_error: bool = False,
+) -> Optional[str]:
     """Return the stored config_value for (project_id, key), or None when unset / table absent.
 
-    This is the DB layer (step 2) of config_registry's precedence chain. Fail-open: any sqlite
-    error (including a missing table) yields None so the runtime falls through to the env/default.
+    This is the DB layer (step 2) of config_registry's precedence chain. Default is fail-open:
+    any sqlite error (including a missing table) yields None so the runtime falls through to the
+    env/default. With ``raise_on_error=True`` a sqlite3.Error propagates (an unreadable store);
+    a missing project_config table and a missing row stay None, since that is "no value".
     """
     try:
         if not has_config_tables(conn):
@@ -87,6 +92,8 @@ def read_config(conn: sqlite3.Connection, project_id: str, key: str) -> Optional
             (project_id, key),
         ).fetchone()
     except sqlite3.Error:
+        if raise_on_error:
+            raise
         return None
     return row[0] if row else None
 
@@ -130,9 +137,16 @@ def _emit_config_event_best_effort(
             pass
 
 
+def _state_dir_of(conn: sqlite3.Connection) -> Path:
+    path = next((row[2] for row in conn.execute("PRAGMA database_list") if row[1] == "main"), "")
+    if not path:
+        raise PermissionError("the connection is not on a database file: the shadow measurement cannot be read")
+    return Path(path).parent
+
+
 def set_config(
     conn: sqlite3.Connection, project_id: str, key: str, value: Any, *,
-    actor: str, approval_id: Optional[str] = None,
+    actor: str, approval_id: Optional[str] = None, planted_manifest: Optional[Path] = None,
 ) -> dict:
     """Persist an operator config change, atomically writing the value + a mandatory audit row.
 
@@ -150,6 +164,14 @@ def set_config(
         raise PermissionError(f"{key} requires an approval_id")
 
     coerced = _coerce(entry.type, value)
+    if key == review_scope.SCOPE_KEY and coerced == review_scope.DELTA:
+        from project_root import resolve_project_root
+
+        try:
+            repo = resolve_project_root()  # CWD-first (OI-1145): the project being configured, not the installed fabric
+        except RuntimeError as exc:
+            raise PermissionError(f"review scope delta refused: the project root could not be resolved: {exc}") from exc
+        review_scope.require_activation(_state_dir_of(conn), planted_manifest, repo)
     ensure_config_tables(conn)  # DDL, idempotent — commits any pending txn, so BEGIN below is clean
     event_id = str(uuid.uuid4())
 
@@ -197,11 +219,17 @@ def set_config(
 
 def make_db_resolver(
     state_dir_for_project: Callable[[str], "Optional[Path | str]"],
+    *, raise_on_error: bool = False,
 ) -> config_registry.DbResolver:
     """Build a config_registry DB-resolver (step 2 of the precedence chain) backed by read_config.
 
     ``state_dir_for_project(project_id)`` returns the project's state dir (or None). The resolver
-    opens the per-project runtime_coordination.db READ-ONLY; any miss / error → None (fail-open)."""
+    opens the per-project runtime_coordination.db READ-ONLY; any miss / error → None (fail-open).
+
+    ``raise_on_error=True`` (opt-in) lets a database failure propagate: an error from
+    sqlite3.connect or from read_config. No project id, no state dir and a missing
+    runtime_coordination.db stay None in both modes: there is no store to read, so the key is
+    unset. The default stays fail-open for the existing callers."""
     def _resolver(project_id: Optional[str], key: str) -> Optional[str]:
         if not project_id:
             return None
@@ -214,9 +242,11 @@ def make_db_resolver(
         try:
             conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
         except sqlite3.Error:
+            if raise_on_error:
+                raise
             return None
         try:
-            return read_config(conn, project_id, key)
+            return read_config(conn, project_id, key, raise_on_error=raise_on_error)
         finally:
             conn.close()
     return _resolver

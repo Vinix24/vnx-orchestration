@@ -1,0 +1,1 @@
+- The subagent guard of this repo (`.claude/settings.json`, `pretooluse_block_subagent.sh`, `pretooluse_subagent_guard.py`) now denies the `Agent` tool as well as `Task`, so the block that went dead with the rename in Claude Code 2.1.63 holds again (OI-2798).

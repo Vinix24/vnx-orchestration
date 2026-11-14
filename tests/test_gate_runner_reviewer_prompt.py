@@ -12,7 +12,9 @@ Validates Wave 4.5 PR-2b redo:
 
 from __future__ import annotations
 
+import hashlib
 import sys
+from functools import partial
 from pathlib import Path
 from unittest import mock
 
@@ -24,6 +26,10 @@ sys.path.insert(0, str(SCRIPTS_DIR))
 sys.path.insert(0, str(SCRIPTS_DIR / "lib"))
 
 from gate_runner import GateRunner  # noqa: E402
+import gate_prompt  # noqa: E402
+import gate_runner  # noqa: E402
+import review_delta as rd  # noqa: E402
+from review_changekind import ChangeKindRecord, Interdiff  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -330,3 +336,34 @@ class TestUntrustedDiffSandwich:
             "a silent scan and a scan that found nothing must not read the "
             "same way to the reviewer"
         )
+
+
+# ---------------------------------------------------------------------------
+# One reviewer assembly for the full codex round and the shadow delta round
+# ---------------------------------------------------------------------------
+
+_OPEN_ID = "f" * 16
+
+
+def _delta_record() -> "rd.DeltaInput":
+    return rd.DeltaInput(7, "codex_gate", "a" * 40, "fail", "0.md", "b" * 40,
+                         ChangeKindRecord("NO_CODE_CHANGE", "p", "q", {}, "1", None), Interdiff(frozenset({"x.py"}), {}),
+                         (rd.OpenFinding(_OPEN_ID, "x.py", "f", "blocking", "broken"),), ())
+
+
+def test_the_full_codex_prompt_is_unchanged_by_the_shared_assembly(monkeypatch):
+    monkeypatch.setattr(GateRunner, "_fetch_gh_pr_diff", staticmethod(lambda n: "diff --git a/x.py b/x.py\n+++ b/x.py\n+print(1)\n"))
+    monkeypatch.setattr(gate_runner, "resolve_review_interpreter", lambda: "/usr/bin/python3")
+    full = GateRunner._build_codex_prompt({"branch": "feat/x", "risk_class": "medium", "pr_number": 7})
+    # sha256 of the prompt taken on origin/main cb5bf8ac8, before the helper; a deliberate change of the reviewer policy refreshes it
+    assert hashlib.sha256(full.encode()).hexdigest() == "ea25dd179cfd6daa510eb0a72ce928f7497a62aa0d7e5970d526a4a150dd2893"
+
+
+def test_the_shadow_delta_prompt_keeps_the_reviewer_policy_and_wraps_the_delta_as_untrusted(monkeypatch):
+    monkeypatch.setattr(gate_runner, "resolve_review_interpreter", lambda: "/usr/bin/python3")
+    prompt = rd.build_delta_prompt(_delta_record(), partial(gate_runner._assemble_reviewer_prompt, "7"))
+    begin, end = gate_prompt.BEGIN_DIFF_MARKER, gate_prompt.END_DIFF_MARKER
+    for trusted in ("# Role: Reviewer", "## ADR Compliance", gate_prompt._UNTRUSTED_DATA_RULE, "## Running the PR's tests"):
+        assert trusted in prompt
+    assert prompt.index(begin) < prompt.index(_OPEN_ID) < prompt.index(end) and rd.FENCE in prompt
+    assert gate_runner._REVIEWER_VERDICT_TEMPLATE not in prompt and prompt.count("```delta_verdict/1") == 2

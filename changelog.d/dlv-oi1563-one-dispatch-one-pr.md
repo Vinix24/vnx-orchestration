@@ -1,0 +1,1 @@
+- One dispatch is one PR: registering a second, different PR on a dispatch's review-gate obligation is refused loudly (the door blocks the fire), and the obligation runner finds the PR through the dispatch registration before the `dispatch/<id>` branch name (OI-1563, OI-1751).

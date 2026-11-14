@@ -831,7 +831,7 @@ def _handle_dirty_substantive(
                     dispatch_id=dispatch_id, branch=branch, receipts_file=receipts_file,
                     salvage_reason=reason, delivery=delivery,
                     tracked_paths=tracked_paths, untracked_paths=untracked_paths,
-                    provider=provider, terminal=terminal,
+                    provider=provider, terminal=terminal, wt_path=wt_path,
                 )
             reason = f"{reason}; worker delivery not established: {delivery.reason}"
 
@@ -877,7 +877,7 @@ def _handle_dirty_substantive(
             "salvaged_untracked_files": list(untracked_paths[:25]),
             "salvaged_untracked_count": len(untracked_paths),
             "salvaged": pushed,
-            "salvage_pr_number": pr_number,
+            "salvage_pr_number": pr_number, **_worktree_kept_fields(wt_path, pushed),
         },
     )
     return PrEnforcementResult(
@@ -993,6 +993,7 @@ def _delivered_despite_failed_salvage(
     untracked_paths: "tuple[str, ...]",
     provider: "Optional[str]" = None,
     terminal: "Optional[str]" = None,
+    wt_path: "Optional[Path]" = None,
 ) -> PrEnforcementResult:
     """The salvage push failed but the worker's work is on origin with a PR: stay
     loud, keep the outcome. Warning log + ``pr_enforcement_warning`` receipt; the
@@ -1020,6 +1021,7 @@ def _delivered_despite_failed_salvage(
             "salvaged_untracked_count": len(untracked_paths),
             "salvaged": False,
             "salvage_committed_locally": True,
+            **_worktree_kept_fields(wt_path, False),
         },
     )
     return PrEnforcementResult(
@@ -1030,10 +1032,104 @@ def _delivered_despite_failed_salvage(
     )
 
 
+def _worktree_kept_fields(wt_path: "Path | str", pushed: bool) -> dict:
+    """OI-2744: receipt fields saying the worktree stays because its HEAD
+    commit is on no remote branch (teardown honours the same test)."""
+    if pushed:
+        return {}
+    sha = unpublished_head_commit(wt_path)
+    if sha is None:
+        return {}
+    return {
+        "worktree_kept": str(wt_path),
+        "worktree_kept_reason": f"HEAD commit {sha[:12]} is not on origin; the worktree is the only checkout of it",
+    }
+
+
 @dataclass(frozen=True)
 class _PushOutcome:
     ok: bool
     reason: "Optional[str]" = None
+
+
+SALVAGE_PUSH_TIMEOUT_KEY = "VNX_SALVAGE_PUSH_TIMEOUT_S"
+_SALVAGE_PUSH_TIMEOUT_DEFAULT_S = 900
+SALVAGE_COMMIT_SUBJECT_PREFIX = "chore(salvage): unvouched auto-salvage"
+
+
+def _salvage_push_timeout_s() -> int:
+    """Seconds a push may take (OI-2744). A value that is not a positive int
+    falls back to the default with one WARNING."""
+    raw = None
+    try:
+        import config_runtime  # noqa: PLC0415
+        raw = config_runtime.get(SALVAGE_PUSH_TIMEOUT_KEY)
+    except Exception as exc:  # noqa: BLE001 — config trouble must not stop a push
+        logger.warning("pr_enforcement: reading %s failed: %s", SALVAGE_PUSH_TIMEOUT_KEY, exc)
+    if raw is None or not str(raw).strip():
+        return _SALVAGE_PUSH_TIMEOUT_DEFAULT_S
+    try:
+        value = int(str(raw).strip())
+    except ValueError:
+        value = 0
+    if value <= 0:
+        logger.warning(
+            "pr_enforcement: %s=%r is not a positive int — using %ds",
+            SALVAGE_PUSH_TIMEOUT_KEY, raw, _SALVAGE_PUSH_TIMEOUT_DEFAULT_S,
+        )
+        return _SALVAGE_PUSH_TIMEOUT_DEFAULT_S
+    return value
+
+
+def unpublished_head_commit(wt_path: "Path | str") -> "Optional[str]":
+    """SHA of the worktree's HEAD when no remote branch contains it (OI-2744,
+    OI-2811), whoever made the commit, else None. Fail-closed: when git cannot
+    say whether a remote branch contains HEAD, the SHA is returned, so the
+    worktree is kept; an unreadable HEAD returns None (normal classification)."""
+    try:
+        head = subprocess.run(
+            ["git", "-C", str(wt_path), "rev-parse", "HEAD"],
+            capture_output=True, text=True, timeout=30,
+        )
+        sha = head.stdout.strip()
+        if head.returncode != 0 or not sha:
+            return None
+    except Exception:  # noqa: BLE001
+        return None  # vnx-silent-except: HEAD unreadable means no unpublished commit is provable; the normal classification rules apply
+    try:
+        contains = subprocess.run(
+            ["git", "-C", str(wt_path), "branch", "-r", "--contains", sha],
+            capture_output=True, text=True, timeout=30,
+        )
+    except Exception:  # noqa: BLE001
+        return sha  # fail closed: the remote check could not be made, so keep the worktree
+    if contains.returncode == 0 and contains.stdout.strip():
+        return None
+    return sha
+
+
+def head_commit_subject(wt_path: "Path | str") -> str:
+    """First 60 characters of the worktree HEAD's subject, '' when unreadable (log display only)."""
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(wt_path), "log", "-1", "--format=%s"],
+            capture_output=True, text=True, timeout=30,
+        )
+        return out.stdout.strip()[:60] if out.returncode == 0 else ""
+    except Exception:  # noqa: BLE001
+        return ""  # vnx-silent-except: display-only subject for a log line
+
+
+def _is_detached_head(cwd: Path) -> bool:
+    """True only when git positively reports HEAD is not a symbolic ref."""
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(cwd), "symbolic-ref", "-q", "HEAD"],
+            capture_output=True, text=True, timeout=30,
+        )
+    except Exception:  # vnx-silent-except: unreadable HEAD keeps the attached push, which fails loudly if wrong
+        return False
+    return proc.returncode == 1
 
 
 def _push_branch(*, branch: str, cwd: Path) -> "_PushOutcome":
@@ -1047,10 +1143,25 @@ def _push_branch(*, branch: str, cwd: Path) -> "_PushOutcome":
     the caller records a corrective receipt, so a committed-but-not-pushed
     dispatch never silently resolves as 'done'.
     """
+    push_timeout = _salvage_push_timeout_s()
+    # OI-2716: a detached HEAD has nothing to track and ``push origin HEAD`` is
+    # not a full refname, so it pushes with an explicit refspec and no -u.
+    push_argv = (
+        ["git", "-C", str(cwd), "push", "origin", f"HEAD:refs/heads/{branch}"]
+        if _is_detached_head(cwd)
+        else ["git", "-C", str(cwd), "push", "-u", "origin", branch]
+    )
     try:
         proc = subprocess.run(
-            ["git", "-C", str(cwd), "push", "-u", "origin", branch],
-            capture_output=True, text=True, timeout=120,
+            push_argv, capture_output=True, text=True, timeout=push_timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return _PushOutcome(
+            ok=False,
+            reason=(
+                f"git push origin {branch} timed out after {push_timeout}s "
+                f"({SALVAGE_PUSH_TIMEOUT_KEY}; a slow pre-push hook needs a higher value)"
+            ),
         )
     except Exception as exc:  # noqa: BLE001 — a push error must never crash the lane
         return _PushOutcome(ok=False, reason=f"git push raised: {exc}")

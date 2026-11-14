@@ -84,3 +84,29 @@ def test_read_config_fail_open_when_table_absent(conn):
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
+
+
+@pytest.mark.parametrize("raise_on_error", [False, True])
+def test_a_corrupt_store_is_none_or_raises_by_mode(tmp_path, raise_on_error):
+    (tmp_path / "runtime_coordination.db").write_bytes(b"not a database" * 64)
+    resolver = cs.make_db_resolver(lambda _pid: tmp_path, raise_on_error=raise_on_error)
+    if raise_on_error:
+        with pytest.raises(sqlite3.DatabaseError):
+            resolver("vnx-test", "SOME_KEY")
+    else:
+        assert resolver("vnx-test", "SOME_KEY") is None
+
+
+@pytest.mark.parametrize("raise_on_error", [False, True])
+def test_no_store_and_no_tables_are_none_in_both_modes(tmp_path, raise_on_error):
+    resolver = cs.make_db_resolver(lambda _pid: tmp_path, raise_on_error=raise_on_error)
+    assert resolver("vnx-test", "SOME_KEY") is None  # no DB file
+    plain = sqlite3.connect(tmp_path / "runtime_coordination.db")
+    try:
+        plain.execute("CREATE TABLE other (x)")
+        plain.commit()
+        assert cs.read_config(plain, "vnx-test", "SOME_KEY", raise_on_error=raise_on_error) is None
+    finally:
+        plain.close()
+    assert resolver("vnx-test", "SOME_KEY") is None  # DB without config tables
+    assert resolver(None, "SOME_KEY") is None

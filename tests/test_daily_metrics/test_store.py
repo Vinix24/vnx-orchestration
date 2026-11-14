@@ -197,9 +197,11 @@ def test_failed_publish_leaves_no_temp_file(store_mod, tmp_path, monkeypatch, pu
         monkeypatch.setattr(store_mod.os, "link", refuse)
         with pytest.raises(OSError):
             store.write_final("2026-11-06", _day_doc())
+        assert not (tmp_path / "2026-11-06.json").exists()
+        store.write_incomplete("2026-11-06", _day_doc(status="incomplete"))
         with pytest.raises(OSError):
             store.write_revision("2026-11-06", _day_doc(), reason="boom")
-        assert not (tmp_path / "2026-11-06.json").exists()
+        assert not (tmp_path / "2026-11-06.r2.json").exists()
     else:
         store.write_incomplete("2026-11-06", _day_doc(status="incomplete"))
         monkeypatch.setattr(store_mod.os, "replace", refuse)

@@ -14,7 +14,7 @@ import re
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path, PurePosixPath
-from typing import Dict, Iterable, Optional
+from typing import Any, Dict, Iterable, Mapping, Optional
 
 import gate_lane_rows  # stdlib-only; the Gate members of the harness-lane gates come from its rows
 
@@ -286,6 +286,9 @@ class DispatchSpec:
     parent_dispatch: Optional[str] = None
     tier_from: Optional[str] = None
     tier_to: Optional[str] = None
+    # Staged dispatch difficulty (herwerk-per-model-en-reviewer): recorded at staging,
+    # carried to dispatch_metadata.difficulty_json at lane start. None = staged before it existed.
+    difficulty: Optional[Mapping[str, Any]] = None
     deadline_seconds: int = 3600
     base_ref: str = "origin/main"
     isolation: Isolation = Isolation.WORKTREE

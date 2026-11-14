@@ -39,7 +39,7 @@ if str(_FIXTURES) not in sys.path:
 
 from pool_manager import PoolManager, SpawnResult, _spawn_via_provider_dispatch  # noqa: E402
 from pool_state_repo import PoolStateRepository  # noqa: E402
-from pool_state_fixtures import create_test_db_file  # noqa: E402
+from pool_state_fixtures import create_test_db_file, seed_leases  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -223,6 +223,7 @@ class TestPoolManagerRealPidsInMembership:
 
         db_path = _setup_db(tmp_path, min_workers=0, max_workers=4)
         repo = PoolStateRepository(db_path, "vnx-dev")
+        seed_leases(db_path, "T-reap-real")
 
         proc = subprocess.Popen(_SLEEPER_CMD, start_new_session=True)
         pid = proc.pid

@@ -301,62 +301,77 @@ class TestSelectDispatchPathErrors:
 
 
 class TestSelectDispatchPathProductionPolicy:
-    """Exercises the real routing_policy.yaml to catch yaml drift."""
+    """Exercises the real routing_policy.yaml to catch yaml drift.
 
-    def test_code_review_routes_to_cheap_moonshot_lane(self):
-        """code-review → litellm:moonshot (cheap); must NOT produce Claude."""
+    Since a68b35beb (worker-provider-kimi-flip) every build-worker rule and the
+    default lane resolve to the ``kimi`` CLI lane; only deep research stays on Claude.
+    """
+
+    def test_code_review_routes_to_kimi_lane(self):
+        """code-review -> kimi lane; the Claude model is left unchanged."""
         cheap, model = _select_dispatch_path(
             task_class="code-review",
             complexity="medium",
             current_model="sonnet",
             env=_enabled(),
         )
-        assert cheap == "litellm:moonshot:kimi-k2-0905-default"
+        assert cheap == "kimi"
         assert model == "sonnet"  # unchanged
 
-    def test_refactor_medium_routes_to_claude_sonnet(self):
-        """refactor + medium → claude/sonnet-4-6 (cheap is None, model overridden)."""
+    def test_refactor_medium_routes_to_kimi_lane(self):
+        """refactor + medium -> kimi lane; current model is not overridden."""
         cheap, model = _select_dispatch_path(
             task_class="refactor",
             complexity="medium",
-            current_model="opus",  # should be overridden
+            current_model="opus",
             env=_enabled(),
         )
-        assert cheap is None
-        assert model == "sonnet"
+        assert cheap == "kimi"
+        assert model == "opus"
 
-    def test_lint_narrow_low_routes_to_claude_haiku(self):
-        """lint-narrow + low → claude/haiku-4-5 (cheap is None)."""
+    def test_lint_narrow_low_routes_to_kimi_lane(self):
+        """lint-narrow + low -> kimi lane (no separate haiku carve-out)."""
         cheap, model = _select_dispatch_path(
             task_class="lint-narrow",
             complexity="low",
             current_model="sonnet",
             env=_enabled(),
         )
-        assert cheap is None
-        assert model == "haiku"
+        assert cheap == "kimi"
+        assert model == "sonnet"
 
-    def test_analysis_routes_to_cheap_moonshot_lane(self):
-        """analysis → litellm:moonshot (cheap); must NOT produce Claude."""
+    def test_research_high_stays_on_claude_opus(self):
+        """research + high is the one rule that still names a Claude lane."""
+        cheap, model = _select_dispatch_path(
+            task_class="research",
+            complexity="high",
+            current_model="sonnet",
+            env=_enabled(),
+        )
+        assert cheap is None
+        assert model == "opus"
+
+    def test_analysis_routes_to_kimi_lane(self):
+        """analysis -> kimi lane; the Claude model is left unchanged."""
         cheap, model = _select_dispatch_path(
             task_class="analysis",
             complexity="medium",
             current_model="sonnet",
             env=_enabled(),
         )
-        assert cheap == "litellm:moonshot:kimi-k2-0905-default"
+        assert cheap == "kimi"
         assert model == "sonnet"
 
-    def test_unknown_task_class_returns_claude_default(self):
-        """Unknown task_class hits default lane (claude/sonnet-4-6)."""
+    def test_unknown_task_class_returns_default_kimi_lane(self):
+        """Unknown task_class hits default_lane (kimi); current model unchanged."""
         cheap, model = _select_dispatch_path(
             task_class="unknown-task-xyz",
             complexity="medium",
             current_model="haiku",
             env=_enabled(),
         )
-        assert cheap is None
-        assert model == "sonnet"  # default_lane mapped to sonnet
+        assert cheap == "kimi"
+        assert model == "haiku"
 
 
 # ---------------------------------------------------------------------------
