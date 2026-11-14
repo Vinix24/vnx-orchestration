@@ -1812,6 +1812,23 @@ def _emit_governance(
     # reported" without consulting the door log.
     _delivery_state = _derive_delivery_state(status, result)
 
+    _fail_reason, _fail_class = _emit_receipt_with_retry(
+        emit_dispatch_receipt, receipt_token_fields, args, provider, model_used, result, status,
+        duration, token_usage, cost_usd, cost_source, _run_ids, state_dir, report_path, events_path,
+        permission_posture, _integrity, _role, _role_app, _skill_app, _toolcall_signals, _delivery_state,
+    )
+    _finish_governance(
+        emit_unified_report, args, provider, model_used, result, status, duration, token_usage,
+        cost_usd, cost_source, state_dir, data_dir, report_path, event_store, _fail_reason, _fail_class,
+    )
+
+
+def _emit_receipt_with_retry(
+    emit_dispatch_receipt, receipt_token_fields, args, provider, model_used, result, status,
+    duration, token_usage, cost_usd, cost_source, _run_ids, state_dir, report_path, events_path,
+    permission_posture, _integrity, _role, _role_app, _skill_app, _toolcall_signals, _delivery_state,
+) -> tuple:
+    """The receipt step of ``_emit_governance``: classify, emit, retry; returns (failure_reason, failure_class)."""
     for attempt in range(_EMIT_MAX_RETRIES):
         try:
             # OI-866: classify failure so the receipt carries a distinguishable
@@ -1820,37 +1837,7 @@ def _emit_governance(
             # returns an empty failure_reason for a non-success status — a
             # classify_failure regression can no longer land a receipt with
             # the field silently unset.
-            _fail_reason: Optional[str] = None
-            _fail_class: Optional[str] = None
-            if status != "success":
-                try:
-                    from failure_classification import classify_failure_safe  # noqa: PLC0415
-                    _classification = classify_failure_safe(
-                        status=status,
-                        error=getattr(result, "error", None),
-                        completion_text=getattr(result, "completion_text", None),
-                        timed_out=getattr(result, "timed_out", False),
-                        provider=provider,
-                        duration_seconds=duration,
-                        returncode=getattr(result, "returncode", None),
-                        dispatch_id=getattr(args, "dispatch_id", "?"),
-                    )
-                    _fail_reason = _classification.get("failure_reason")
-                    _fail_class = _classification.get("failure_class")
-                except Exception as _classify_exc:  # noqa: BLE001 — the failure_classification
-                    # module itself failing to import is the one thing
-                    # classify_failure_safe cannot guard against from inside
-                    # itself; keep the same never-empty guarantee here.
-                    logger.debug(
-                        "_emit_governance: failure_classification unavailable dispatch=%s (non-fatal)",
-                        getattr(args, "dispatch_id", "?"),
-                        exc_info=True,
-                    )
-                    _fail_class = "unknown"
-                    _fail_reason = (
-                        f"failure_classification unavailable: {_classify_exc!r} "
-                        f"(dispatch={getattr(args, 'dispatch_id', '?')})"
-                    )
+            _fail_reason, _fail_class = _classify_emit_failure(args, provider, status, result, duration)
 
             receipt_path = emit_dispatch_receipt(
                 dispatch_id=args.dispatch_id,
@@ -1871,24 +1858,9 @@ def _emit_governance(
                 state_dir=state_dir,
                 report_path=str(report_path),
                 events_path=events_path,
-                permission_enforcement=(
-                    "enforced" if worker_permission_enforcement_enabled() else None
-                ),
-                permission_posture=(
-                    (permission_posture or {}).get("permission_posture")
-                ),
-                permission_profile=(
-                    (permission_posture or {}).get("permission_profile")
-                ),
-                permission_allow_pattern_count=(
-                    (permission_posture or {}).get("permission_allow_pattern_count")
-                ),
+                **_permission_receipt_fields(permission_posture),
                 mandate_id=getattr(args, "mandate_id", None),
-                final_prompt_path=getattr(_integrity, "final_prompt_path", None) if _integrity is not None else None,
-                final_prompt_sha256=getattr(_integrity, "final_prompt_sha256", None) if _integrity is not None else None,
-                injection_reconstructs=(
-                    getattr(_integrity, "injection_reconstructs", None) if _integrity is not None else None
-                ),
+                **_integrity_receipt_fields(_integrity),
                 # ADR-035 §3.1.1: multi-provider sub-path — this call runs
                 # BEFORE emit_unified_report below, so report_path is a
                 # precomputed string with no file behind it yet. Stamp
@@ -1899,18 +1871,7 @@ def _emit_governance(
                               "command": None, "pr_ref": None, "push_verified": None, "spec_deviation": None},
                 role=_role,
                 receipt_kind="dispatch",
-                role_applied=(
-                    getattr(_role_app, "role_applied", None) if _role_app is not None else None
-                ),
-                role_tier=(
-                    getattr(_role_app, "tier", None) if _role_app is not None else None
-                ),
-                role_not_applied_reason=(
-                    getattr(_role_app, "reason", None) if _role_app is not None else None
-                ),
-                role_source_path=(
-                    getattr(_role_app, "source_path", None) if _role_app is not None else None
-                ),
+                **_role_receipt_fields(_role_app),
                 **skill_receipt_fields(_skill_app),
                 # receipt-quality PR-B1: threaded through so the claude-lane
                 # benchmark exemption path (the only route that reaches this
@@ -1957,7 +1918,14 @@ def _emit_governance(
                 _EMIT_MAX_RETRIES, exc,
             )
             raise
+    return _fail_reason, _fail_class
 
+
+def _finish_governance(
+    emit_unified_report, args, provider, model_used, result, status, duration, token_usage,
+    cost_usd, cost_source, state_dir, data_dir, report_path, event_store, _fail_reason, _fail_class,
+) -> None:
+    """The steps of ``_emit_governance`` after the receipt: outcome records, then the unified report."""
     # OI-1263 + OI-1454 + OI-2115: cooldown, reachability and the live-stream
     # clear, all fail-open; see _record_dispatch_outcome.
     _record_dispatch_outcome(
@@ -2001,6 +1969,91 @@ def _emit_governance(
         )
 
     _emit_marked_report(_write_report, frontmatter, report_path)
+
+
+def _classify_emit_failure(
+    args: argparse.Namespace, provider: str, status: str, result: Any, duration: float,
+) -> tuple:
+    """(failure_reason, failure_class) for the receipt; both None on success, never empty otherwise."""
+    _fail_reason: Optional[str] = None
+    _fail_class: Optional[str] = None
+    if status != "success":
+        try:
+            from failure_classification import classify_failure_safe  # noqa: PLC0415
+            _classification = classify_failure_safe(
+                status=status,
+                error=getattr(result, "error", None),
+                completion_text=getattr(result, "completion_text", None),
+                timed_out=getattr(result, "timed_out", False),
+                provider=provider,
+                duration_seconds=duration,
+                returncode=getattr(result, "returncode", None),
+                dispatch_id=getattr(args, "dispatch_id", "?"),
+            )
+            _fail_reason = _classification.get("failure_reason")
+            _fail_class = _classification.get("failure_class")
+        except Exception as _classify_exc:  # noqa: BLE001 — the failure_classification
+            # module itself failing to import is the one thing
+            # classify_failure_safe cannot guard against from inside
+            # itself; keep the same never-empty guarantee here.
+            logger.debug(
+                "_emit_governance: failure_classification unavailable dispatch=%s (non-fatal)",
+                getattr(args, "dispatch_id", "?"),
+                exc_info=True,
+            )
+            _fail_class = "unknown"
+            _fail_reason = (
+                f"failure_classification unavailable: {_classify_exc!r} "
+                f"(dispatch={getattr(args, 'dispatch_id', '?')})"
+            )
+    return _fail_reason, _fail_class
+
+
+def _permission_receipt_fields(permission_posture: "Optional[Dict[str, Any]]") -> Dict[str, Any]:
+    """The permission marker and the OI-864 posture fields of the dispatch receipt."""
+    return dict(
+        permission_enforcement=(
+            "enforced" if worker_permission_enforcement_enabled() else None
+        ),
+        permission_posture=(
+            (permission_posture or {}).get("permission_posture")
+        ),
+        permission_profile=(
+            (permission_posture or {}).get("permission_profile")
+        ),
+        permission_allow_pattern_count=(
+            (permission_posture or {}).get("permission_allow_pattern_count")
+        ),
+    )
+
+
+def _integrity_receipt_fields(_integrity: Any) -> Dict[str, Any]:
+    """The final-prompt integrity fields of the dispatch receipt; all None when it was never computed."""
+    return dict(
+        final_prompt_path=getattr(_integrity, "final_prompt_path", None) if _integrity is not None else None,
+        final_prompt_sha256=getattr(_integrity, "final_prompt_sha256", None) if _integrity is not None else None,
+        injection_reconstructs=(
+            getattr(_integrity, "injection_reconstructs", None) if _integrity is not None else None
+        ),
+    )
+
+
+def _role_receipt_fields(_role_app: Any) -> Dict[str, Any]:
+    """The role-applied verdict fields of the dispatch receipt; all None when there is no verdict."""
+    return dict(
+        role_applied=(
+            getattr(_role_app, "role_applied", None) if _role_app is not None else None
+        ),
+        role_tier=(
+            getattr(_role_app, "tier", None) if _role_app is not None else None
+        ),
+        role_not_applied_reason=(
+            getattr(_role_app, "reason", None) if _role_app is not None else None
+        ),
+        role_source_path=(
+            getattr(_role_app, "source_path", None) if _role_app is not None else None
+        ),
+    )
 
 
 def _emit_marked_report(write_report: Any, frontmatter: Dict[str, Any], report_path: Path) -> None:
@@ -4165,6 +4218,11 @@ def main(argv: list[str] | None = None) -> int:
         print(f"provider_dispatch: constraint violation - {exc}", file=sys.stderr)
         return 1
 
+    return _gate_delegation_then_dispatch(args, provider, parser)
+
+
+def _gate_delegation_then_dispatch(args: argparse.Namespace, provider: str, parser: argparse.ArgumentParser) -> int:
+    """The signed-delegation step of ``main``: refuse with exit 1, or go on to the budget step."""
     # Signed-delegation mandate gate (VNX_SIGNED_DELEGATION, default OFF).
     # When the flag is off this block is skipped entirely.
     try:
@@ -4227,6 +4285,11 @@ def main(argv: list[str] | None = None) -> int:
                 args.dispatch_id, _recorded_mandate,
             )
 
+    return _gate_budget_then_dispatch(args, provider, parser)
+
+
+def _gate_budget_then_dispatch(args: argparse.Namespace, provider: str, parser: argparse.ArgumentParser) -> int:
+    """The paid-lane daily budget step of ``main``: refuse with exit 1, or route to the handler."""
     # PAID-LANE DAILY BUDGET (golf 2B) — the standalone-CLI side door onto the
     # provider lane (e.g. plan_gate_panel.py invokes this file as a subprocess
     # directly, bypassing dispatch_cli.py's door). run_envelope_plan carries
@@ -4254,6 +4317,11 @@ def main(argv: list[str] | None = None) -> int:
             )
         return 1
 
+    return _route_to_provider_handler(args, provider, parser)
+
+
+def _route_to_provider_handler(args: argparse.Namespace, provider: str, parser: argparse.ArgumentParser) -> int:
+    """The last step of ``main``: run the provider's handler; an uncaught spawn exception exits 1."""
     try:
         if provider == "claude":
             # Benchmark exemption: the measurement harness is exempt from the single-entry
