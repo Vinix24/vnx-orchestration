@@ -16,61 +16,55 @@ _CHARS = r"[A-Za-z0-9_+/=-]"
 # The only quote grammar in the module. A quote that never closes runs to the end of the
 # text (fail-closed): the second alternative of each quoted form takes the rest.
 #   $'...'  bash escapes, backslash takes any next char (so \' stays inside)
-#   "..."   backslash escapes
+#   "..."   read by ``_dq_end``: backslash escapes, a substitution inside is its own context
 #   '...'   no escapes
 # A value is one or more adjacent segments (bash glues them): a"b c"d is one word.
 # A command substitution ($(...) with nesting, or `...`) is one more segment, read by
 # ``_substitution_end``; one that never closes runs to the end of the line.
-_SEGMENT_SRC = (
-    r"(?:"
-    r"\$'(?:\\[\s\S]|[^'\\])*'|\$'[\s\S]*"
-    r"|\"(?:\\[\s\S]|[^\"\\])*\"|\"[\s\S]*"
-    r"|'[^']*'|'[\s\S]*"
-    r"|[^\s\"'\\$`]|\\[\s\S]|\$(?![('])"
-    r")"
-)
-_SEGMENT = re.compile(_SEGMENT_SRC)
-_QUOTED = re.compile(r"'[^']*'|\"(?:\\[\s\S]|[^\"\\])*\"")
+_SEGMENT = re.compile(r"\$'(?:\\[\s\S]|[^'\\])*'|\$'[\s\S]*|'[^']*'|'[\s\S]*|[^\s\"'\\$`]|\\[\s\S]|\$(?![('])")
+_BACKTICK = re.compile(r"`(?:\\[\s\S]|[^`\\\n])*`")
 
 def _line_end(text: str, i: int) -> int:
     n = text.find("\n", i)
     return len(text) if n < 0 else n
 
 
+def _dq_end(text: str, i: int) -> int:
+    """End of the double-quoted string opening at ``i``: backslash takes the next char,
+    ``$(`` and a backtick jump through ``_substitution_end``, only an unnested quote
+    closes; an unclosed one runs to the end of the text (fail-closed)."""
+    j = i + 1
+    while j < len(text):
+        if text[j] == '"':
+            return j + 1
+        if text.startswith("$(", j) or text[j] == "`":
+            j = max(_substitution_end(text, j), j + 1)
+        else:
+            j += 2 if text[j] == "\\" else 1
+    return len(text)
+
+
 def _substitution_end(text: str, i: int) -> int:
     """End of the substitution opening at ``i`` (``$(`` or a backtick); an unbalanced one
     ends at the end of the line (fail-closed)."""
     if text[i] == "`":
-        j = i + 1
-        while j < len(text) and text[j] != "\n":
-            if text[j] == "\\":
-                j += 2
-            elif text[j] == "`":
-                return j + 1
-            else:
-                j += 1
-        return _line_end(text, i)
+        b = _BACKTICK.match(text, i)
+        return b.end() if b else _line_end(text, i)
     depth, j = 0, i + 1  # text[i:i+2] == "$("; the "(" is at i+1
     while j < len(text) and text[j] != "\n":
         c = text[j]
-        if c == "\\":
-            j += 2
-            continue
-        if c in "'\"":
-            q = _QUOTED.match(text, j)
-            j = q.end() if q else _line_end(text, j)
-            continue
-        if c == "`":
+        if c == '"':
+            j = _dq_end(text, j)
+        elif c == "'" or text.startswith("$'", j):
+            j = _SEGMENT.match(text, j).end()
+        elif c == "`":
             j = _substitution_end(text, j)
-            continue
-        if c == "(":
-            depth += 1
-        elif c == ")":
-            depth -= 1
-            if depth == 0:
+        else:
+            depth += (c == "(") - (c == ")")
+            if c == ")" and depth == 0:
                 return j + 1
-        j += 1
-    return _line_end(text, i)
+            j += 2 if c == "\\" else 1
+    return _line_end(text, j)  # from j: a quote read inside may already span lines
 
 
 def shell_value_end(text: str, start: int = 0) -> Optional[int]:
@@ -83,11 +77,13 @@ def shell_value_end(text: str, start: int = 0) -> Optional[int]:
     while i < len(text):
         if text.startswith("$(", i) or text[i] == "`":
             i = max(_substitution_end(text, i), i + 1)
-            continue
-        m = _SEGMENT.match(text, i)
-        if not m:
-            break
-        i = m.end()
+        elif text[i] == '"':
+            i = _dq_end(text, i)
+        else:
+            m = _SEGMENT.match(text, i)
+            if not m:
+                break
+            i = m.end()
     return i if i > start else None
 
 
@@ -106,8 +102,10 @@ def _p(name: str, pattern: str, repl: _Repl = SECRET, flags: int = 0) -> SecretP
 
 
 PATTERNS: List[SecretPattern] = [
-    # First: the whole assignment value goes before a token pattern can cut it short.
-    # The name stays, only the value is masked.
+    # Two phases, fixed by _VALUE_AFTER_PREFIX, not by position: phase 1 runs every
+    # whole-value mask (secret_assignment, long_value, then any '=' value that holds a
+    # token fragment) on the text no fragment has touched; phase 2 runs the fragments.
+    # So a fragment can never cut a value short. The name stays, only the value goes.
     _p(
         "secret_assignment",
         r"([\w-]*(?:KEY|TOKEN|SECRET|PASSWORD)[\w-]*=)(?!<secret>)(?=\S)",
@@ -136,6 +134,10 @@ PATTERNS: List[SecretPattern] = [
 
 
 _VALUE_AFTER_PREFIX = {"secret_assignment", "long_value"}
+_WHOLE = [p for p in PATTERNS if p.name in _VALUE_AFTER_PREFIX]
+_FRAGMENTS = [p for p in PATTERNS if p.name not in _VALUE_AFTER_PREFIX]
+# Phase 1, last: an '=' value that holds a token fragment goes as a whole.
+_FRAGMENT_VALUE = SecretPattern("fragment_value", re.compile(r"(=)(?!<secret>)(?=\S)"), r"\1" + SECRET)
 
 
 def find(text: str) -> List[str]:
@@ -149,19 +151,24 @@ def mask(text: str) -> str:
     """Replace every match with ``<secret>``; raises TypeError on a non-str."""
     if not isinstance(text, str):
         raise TypeError("mask() needs str")
-    for p in PATTERNS:
-        text = _mask_one(p, text)
+    for p in _WHOLE:
+        text = _mask_one(p, text, True)
+    text = _mask_one(_FRAGMENT_VALUE, text, True, lambda v: any(p.regex.search(v) for p in _FRAGMENTS))
+    for p in _FRAGMENTS:
+        text = _mask_one(p, text, False)
     return text
 
 
-def _mask_one(p: SecretPattern, text: str) -> str:
+def _mask_one(p: SecretPattern, text: str, whole: bool, need: Optional[Callable[[str], bool]] = None) -> str:
     out, pos = [], 0
     for m in p.regex.finditer(text):
         if m.start() < pos:
             continue
         end = m.end()
-        if m.lastindex == 1 and p.name in _VALUE_AFTER_PREFIX:
+        if m.lastindex == 1 and whole:
             end = shell_value_end(text, end) or end
+            if need is not None and not need(text[m.end():end]):
+                continue
         out.append(text[pos:m.start()])
         out.append(m.expand(p.repl) if isinstance(p.repl, str) else p.repl(m))
         pos = end
