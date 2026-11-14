@@ -17,6 +17,7 @@ from typing import Any, Dict, Iterable, Iterator, List, Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import atomic_io
 from project_root import resolve_central_data_dir
 from secret_patterns import mask
 
@@ -206,8 +207,6 @@ def write_coverage(
         except (OSError, ValueError, KeyError, AttributeError):  # vnx-silent-except: a missing projection starts empty
             sources = {}
         sources[source] = entry
-        tmp = path.with_suffix(".json.tmp")
         doc = {"schema": COVERAGE_SCHEMA, "project_id": project_id, "sources": sources}
-        tmp.write_text(json.dumps(doc, sort_keys=True), encoding="utf-8")
-        os.replace(tmp, path)
+        atomic_io.atomic_write_text(path, json.dumps(doc, sort_keys=True))  # read-modify-write under _locked
     return entry
