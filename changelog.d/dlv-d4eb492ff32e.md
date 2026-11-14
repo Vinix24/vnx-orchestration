@@ -1,0 +1,1 @@
+- golf schoon R44: `log_dispatch_metadata.main` and `pre_merge_gate.check_ci_workflow` cut under 100 executable lines by extract-method, no behaviour change.
