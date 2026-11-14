@@ -119,3 +119,68 @@ class TestTheBuiltPromptUsesTheDiff:
         assert "-m pytest" not in prompt
         assert _no_command(".ts") in prompt
         assert NEVER_BLOCKING in prompt
+
+
+def _command_line(block: str) -> str:
+    lines = [ln for ln in block.splitlines() if ln.startswith("Run the PR's tests with `")]
+    assert len(lines) == 1, block
+    return lines[0]
+
+
+class TestUntrustedPathsNeverReachTheCommand:
+    """Round 2 on #2865: a PR-controlled test path is data, never shell (deepseek blocker)."""
+
+    def _assert_safe(self, command: str):
+        for bad in ("$(", "`" + "id", ";", "&", "|"):
+            assert bad not in command.split("`", 1)[1].rsplit("`", 1)[0], command
+
+    def test_command_substitution_path_is_refused(self):
+        block = gate_runner._review_tests_block(INTERP, _hunk("tests/test_$(id).py"))
+        command = _command_line(block)
+        self._assert_safe(command)
+        assert _pytest("<files>") in block
+        assert "left out of the command" in block
+        assert '"tests/test_$(id).py"' in block
+
+    def test_backtick_path_is_refused(self):
+        block = gate_runner._review_tests_block(INTERP, _hunk("tests/x`id`.py"))
+        self._assert_safe(_command_line(block))
+        assert "left out of the command" in block
+
+    def test_semicolon_path_is_refused(self):
+        diff = "diff --git a/tests/test_a;rm b/tests/test_a;rm\n@@ -1 +1 @@\n+x\n" + _hunk("tests/test_a;rm.py")
+        block = gate_runner._review_tests_block(INTERP, diff)
+        self._assert_safe(_command_line(block))
+        assert "left out of the command" in block
+
+    def test_path_with_spaces_never_reaches_the_command(self):
+        diff = "diff --git a/tests/test_a;rm -rf x.py b/tests/test_a;rm -rf x.py\n@@ -1 +1 @@\n+x\n"
+        block = gate_runner._review_tests_block(INTERP, diff)
+        command = _command_line(block)
+        assert ";" not in command and "rm -rf" not in command
+
+    def test_leading_dash_path_is_refused_as_a_pytest_option(self):
+        block = gate_runner._review_tests_block(INTERP, _hunk("-pevil_test.py"))
+        assert "-pevil" not in _command_line(block)
+        assert "left out of the command" in block
+
+    def test_mixed_diff_keeps_the_safe_path_quoted(self):
+        diff = _hunk("tests/test_ok.py") + _hunk("tests/test_$(id).py")
+        block = gate_runner._review_tests_block(INTERP, diff)
+        command = _command_line(block)
+        self._assert_safe(command)
+        assert _pytest("tests/test_ok.py") in block
+        assert "test_$(id)" not in command
+        assert '"tests/test_$(id).py"' in block
+
+    def test_safe_paths_go_through_shlex_quote(self, monkeypatch):
+        seen = []
+        real = gate_runner.shlex.quote
+        monkeypatch.setattr(gate_runner.shlex, "quote", lambda s: seen.append(s) or real(s))
+        gate_runner._review_tests_block(INTERP, _hunk("tests/test_a.py") + _hunk("tests/test_b.py"))
+        assert seen == ["tests/test_a.py", "tests/test_b.py"]
+
+    def test_no_interpreter_still_names_the_refused_path_as_text(self):
+        block = gate_runner._review_tests_block(None, _hunk("tests/test_$(id).py"))
+        assert "-m pytest" not in block
+        assert "left out of the command" in block

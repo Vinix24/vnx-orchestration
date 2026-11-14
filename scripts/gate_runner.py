@@ -14,6 +14,7 @@ import logging
 import os
 import re
 import select
+import shlex
 import shutil
 import signal
 import subprocess
@@ -240,11 +241,24 @@ def _changed_test_files(diff_text: str) -> List[str]:
     return files
 
 
+# A test path comes from the PR diff, so the PR author controls it. Only a path made of these
+# characters, and not starting with ``-`` (a pytest option), may enter the shell command the
+# reviewer runs; every shell metacharacter and all whitespace fall outside it (OI-2785 round 2).
+_SAFE_TEST_PATH_RE = re.compile(r"[A-Za-z0-9._/+@=,:%-]+")
+
+
+def _is_safe_test_path(path: str) -> bool:
+    return bool(_SAFE_TEST_PATH_RE.fullmatch(path)) and not path.startswith("-")
+
+
 def _review_tests_block(interpreter: Optional[str], diff_text: str = "") -> str:
     """The codex prompt block naming the test command per changed test type (OI-2591, OI-2785).
-    Only ``.py`` tests get a command (pytest); every other type gets a read-them line."""
-    tests = _changed_test_files(diff_text)
-    python = [p for p in tests if p.endswith(".py")]
+    Only ``.py`` tests get a command (pytest); every other type gets a read-them line. A path
+    with a shell metacharacter or whitespace never enters the command: it is named as text."""
+    changed = _changed_test_files(diff_text)
+    tests = [p for p in changed if _is_safe_test_path(p)]
+    refused = [p for p in changed if not _is_safe_test_path(p)]
+    python = [shlex.quote(p) for p in tests if p.endswith(".py")]
     others = sorted({os.path.splitext(p)[1] or "(no extension)" for p in tests if not p.endswith(".py")})
     body = ""
     if python or not tests:
@@ -258,6 +272,9 @@ def _review_tests_block(interpreter: Optional[str], diff_text: str = "") -> str:
     for ext in others:
         body += (f"- `{ext}` test files: there is no test command for this type on this host; "
                  "read those tests instead of running them.\n")
+    for path in refused:
+        body += ("- Test file left out of the command because its path holds a shell "
+                 f"metacharacter or whitespace; read it as text, never run it: {json.dumps(path)}\n")
     return "\n\n## Running the PR's tests\n\n" + body + _NEVER_BLOCKING
 
 
