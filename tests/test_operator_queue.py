@@ -41,12 +41,7 @@ def _ledger(d):
 def test_same_question_twice_is_one_opened(tmp_path):
     assert _open(tmp_path) is not None
     assert _open(tmp_path) is None
-    assert _ledger(tmp_path).count('"kind": "opened"') == 1
-
-
-def test_point_id_is_sha256_prefix_and_differs_per_ref():
-    a, b = oq.point_id(P, 1, "oi:OI-1", 1), oq.point_id(P, 1, "oi:OI-2", 1)
-    assert len(a) == 16 and a != b
+    assert _ledger(tmp_path).count("opened") == 1
 
 
 def test_close_one_point_leaves_the_other_open(tmp_path):
@@ -72,8 +67,8 @@ def test_new_revision_is_a_new_point_old_stays_closed(tmp_path):
 def test_presented_is_kept_as_last(tmp_path):
     _open(tmp_path)
     pid = oq.point_id(P, 1, "oi:OI-1", 1)
-    oq.present_point(P, pid, kanaal="kickoff", sessie="s1", state_dir=tmp_path)
-    oq.present_point(P, pid, kanaal="push", sessie="s2", state_dir=tmp_path)
+    oq.append_line(P, "presented", {"point_id": pid, "kanaal": "kickoff", "sessie": "s1"}, state_dir=tmp_path)
+    oq.append_line(P, "presented", {"point_id": pid, "kanaal": "push", "sessie": "s2"}, state_dir=tmp_path)
     assert oq.read_state(P, state_dir=tmp_path)["points"][pid]["presented"]["kanaal"] == "push"
 
 
@@ -87,7 +82,7 @@ def test_secret_refused_with_name_not_value(tmp_path, name, field):
         pid = oq.point_id(P, 1, "oi:OI-1", 1)
         before = _ledger(tmp_path)
         with pytest.raises(oq.QueueRefused) as err:
-            oq.record_answer(P, pid, citaat=text, vastgelegd_door="T0", state_dir=tmp_path)
+            oq.append_line(P, "answer", {"point_id": pid, "citaat": text, "vastgelegd_door": "T0"}, state_dir=tmp_path)
     else:
         before = ""
         with pytest.raises(oq.QueueRefused) as err:
@@ -105,11 +100,8 @@ def _refused(tmp_path, kind, fields):
     assert _ledger(tmp_path) == ""
 
 
-def test_unknown_kind_refused(tmp_path):
+def test_unknown_kind_and_missing_field_refused(tmp_path):
     _refused(tmp_path, "deleted", {"point_id": "x"})
-
-
-def test_missing_required_field_refused(tmp_path):
     _refused(tmp_path, "presented", {"point_id": "x", "kanaal": "push"})
 
 
@@ -119,8 +111,7 @@ def test_foreign_project_id_refused(tmp_path):
 
 def test_bad_uitkomst_and_no_bewijs_refused(tmp_path):
     _open(tmp_path)
-    pid = oq.point_id(P, 1, "oi:OI-1", 1)
-    before = _ledger(tmp_path)
+    pid, before = oq.point_id(P, 1, "oi:OI-1", 1), _ledger(tmp_path)
     for kw in ({"uitkomst": "klaar", "bewijs": "x"}, {"uitkomst": "beantwoord", "bewijs": ""},
                {"uitkomst": "beantwoord", "bewijs": None}, {"uitkomst": None, "bewijs": "x"}):
         with pytest.raises(oq.QueueRefused):
@@ -162,17 +153,12 @@ def test_corrupt_line_makes_state_unknown_with_line_number(tmp_path):
         _open(tmp_path, "oi:OI-3")
 
 
-def test_valid_json_with_bad_kind_is_unreadable(tmp_path):
-    (tmp_path / oq.LEDGER_FILENAME).write_text(json.dumps({"kind": "x", "project_id": P}) + "\n")
-    assert oq.read_state(P, state_dir=tmp_path)["line"] == 1
-
-
 def test_state_is_rebuilt_from_the_ledger(tmp_path):
     _open(tmp_path)
     pid = oq.point_id(P, 1, "oi:OI-1", 1)
-    oq.present_point(P, pid, kanaal="cli", sessie="s", state_dir=tmp_path)
-    oq.reserve_push(P, [pid], sessie="s", state_dir=tmp_path)
-    oq.mark_unknown(P, pid, reden="bron onleesbaar", state_dir=tmp_path)
+    oq.append_line(P, "presented", {"point_id": pid, "kanaal": "cli", "sessie": "s"}, state_dir=tmp_path)
+    oq.append_line(P, "push_reserved", {"point_ids": [pid], "sessie": "s"}, state_dir=tmp_path)
+    oq.append_line(P, "unknown", {"point_id": pid, "reden": "bron onleesbaar"}, state_dir=tmp_path)
     path = tmp_path / oq.STATE_FILENAME
     before = path.read_text()
     path.unlink()

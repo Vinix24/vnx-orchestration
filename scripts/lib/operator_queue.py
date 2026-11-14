@@ -38,13 +38,11 @@ KINDS: Dict[str, tuple] = {
     "answer": ("point_id", "citaat", "vastgelegd_door"),
     "push_reserved": ("point_ids", "sessie"),
 }
-OUTCOMES = ("beantwoord", "vervallen")
-CHANNELS = ("kickoff", "rotatie", "status", "push", "cli", "mc")
+OUTCOMES, CHANNELS = ("beantwoord", "vervallen"), ("kickoff", "rotatie", "status", "push", "cli", "mc")
 # Patterns 1 to 9 of ADR-076 decision 9; ``long_value`` is a heuristic of the masker, not a refusal name.
 REFUSED_PATTERNS = frozenset({"sk_key", "github_token", "aws_key_id", "slack_token", "bearer",
                               "secret_assignment", "authorization_header", "pem_block", "jwt"})
-_SECRET_FIELDS = ("vraag", "kopieerblok", "citaat")
-_LIMITS = {"vraag": 200, "citaat": 300}
+_LIMITS = {"vraag": 200, "kopieerblok": 10**6, "citaat": 300}  # the free-text fields and their length limit; all three are scanned for secrets
 
 
 class QueueRefused(ValueError):
@@ -70,12 +68,10 @@ def point_id(project_id: str, bron: int, ref: str, revisie: int) -> str:
 
 def _now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
 def _ts_ok(value: Any) -> bool:
     try:
         return datetime.fromisoformat(value.strip().replace("Z", "+00:00")).tzinfo is not None
-    except (ValueError, AttributeError):  # vnx-silent-except: absent or malformed is invalid, never a pass
+    except (ValueError, AttributeError):  # vnx-silent-except: absent or malformed is invalid
         return False
 
 
@@ -83,7 +79,7 @@ def _text(value: Any) -> bool:
     return isinstance(value, str) and bool(value.strip())
 
 
-def _int(value: Any, low: int, high: Optional[int] = None) -> bool:
+def _int(value: Any, low: int, high: Optional[int] = None) -> bool:  # bool is no integer here
     return isinstance(value, int) and not isinstance(value, bool) and value >= low and (high is None or value <= high)
 
 
@@ -94,7 +90,7 @@ def check_line(project_id: str, line: Any) -> Dict[str, Any]:
     kind = line.get("kind")
     if kind not in KINDS:
         raise ValueError("unknown kind")
-    if line.get("project_id") != project_id:
+    if not _text(project_id) or line.get("project_id") != project_id:
         raise ValueError("project_id is not this store's")
     if not _ts_ok(line.get("ts")):
         raise ValueError("ts is not an ISO timestamp with a timezone")
@@ -106,7 +102,7 @@ def check_line(project_id: str, line: Any) -> Dict[str, Any]:
 
 
 def _check_values(project_id: str, kind: str, line: Mapping[str, Any]) -> None:
-    texts = [n for n in KINDS[kind] if n not in ("bron", "revisie", "point_ids", "asked_at")]
+    texts = [n for n in KINDS[kind] if n not in ("bron", "revisie", "point_ids", "asked_at")]  # kopieerblok may be empty
     if kind == "opened":
         texts.remove("point_id")
         if not _int(line["bron"], 1, 8) or not _int(line["revisie"], 1) or not _ts_ok(line["asked_at"]):
@@ -123,17 +119,15 @@ def _check_values(project_id: str, kind: str, line: Mapping[str, Any]) -> None:
     if kind == "closed" and line["uitkomst"] not in OUTCOMES:
         raise ValueError("closed: uitkomst is beantwoord or vervallen")
     if kind == "presented" and line["kanaal"] not in CHANNELS:
-        raise ValueError("presented: kanaal is not a known channel")
-    for name, limit in _LIMITS.items():
-        if isinstance(line.get(name), str) and len(line[name]) > limit:
-            raise ValueError(f"{name} is longer than {limit} characters")
-    if "kopieerblok" in line and not isinstance(line["kopieerblok"], str):
-        raise ValueError("kopieerblok is text")
+        raise ValueError("presented: unknown kanaal")
+    for name in _LIMITS:
+        if name in line and (not isinstance(line[name], str) or len(line[name]) > _LIMITS[name]):
+            raise ValueError(f"{name} is not text or too long")
 
 
 def _secret_names(line: Mapping[str, Any]) -> List[str]:
     found: List[str] = []
-    for name in _SECRET_FIELDS:
+    for name in _LIMITS:
         value = line.get(name)
         if isinstance(value, str):
             found += [f"{p} in {name}" for p in secret_patterns.find(value) if p in REFUSED_PATTERNS]
@@ -169,8 +163,8 @@ def _fold(lines: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
                 "revisie": line["revisie"], "vraag": line["vraag"], "sluit_bij": line["sluit_bij"],
                 "asked_at": line["asked_at"], "presented": None, "bewijs": None, "unknown_reden": None})
             continue
-        point = points.get(line.get("point_id")) if kind != "push_reserved" else None
-        if kind == "push_reserved" or point is None:
+        point = points.get(line.get("point_id"))  # push_reserved has no point_id: None
+        if point is None:
             continue
         if kind == "presented":
             point["presented"] = {"ts": line["ts"], "kanaal": line["kanaal"], "sessie": line["sessie"]}
@@ -230,8 +224,7 @@ def rebuild_state(project_id: str, *, state_dir: Optional[Path] = None) -> Dict[
     """Rebuild ``operator_queue.json`` from the ledger alone and return it."""
     sdir = Path(state_dir) if state_dir is not None else state_dir_for(project_id)
     with _locked(sdir):
-        state = _read_state(sdir, project_id)
-        _write_state(sdir, state)
+        _write_state(sdir, state := _read_state(sdir, project_id))
         return state
 
 
@@ -245,8 +238,6 @@ def append_line(project_id: str, kind: str, fields: Mapping[str, Any], *, now: O
                 state_dir: Optional[Path] = None) -> Optional[Dict[str, Any]]:
     """Validate and append one line, then rebuild the state. Returns the line, or None for an ``opened``
     whose point_id exists. Raises QueueRefused (nothing written) or QueueUnreadable (ledger broken)."""
-    if not _text(project_id):
-        raise QueueRefused("project_id is required")
     line = {**fields, "kind": kind, "project_id": project_id, "ts": now or _now()}
     try:
         check_line(project_id, line)
@@ -274,7 +265,7 @@ def append_line(project_id: str, kind: str, fields: Mapping[str, Any], *, now: O
 def open_point(project_id: str, *, bron: int, ref: str, revisie: int = 1, vraag: str, sluit_bij: str,
                opened_by: str, kopieerblok: str = "", asked_at: Optional[str] = None, now: Optional[str] = None,
                state_dir: Optional[Path] = None) -> Optional[Dict[str, Any]]:
-    """Open a point; ``ref`` is taken as given. None when the point already exists."""
+    """Open a point; ``ref`` is taken as given. None when it exists. Other kinds: ``append_line``."""
     stamp = now or _now()
     return append_line(project_id, "opened", {
         "point_id": point_id(project_id, bron, ref, revisie), "bron": bron, "ref": ref, "revisie": revisie,
@@ -282,31 +273,8 @@ def open_point(project_id: str, *, bron: int, ref: str, revisie: int = 1, vraag:
         "opened_by": opened_by}, now=stamp, state_dir=state_dir)
 
 
-def present_point(project_id: str, pid: str, *, kanaal: str, sessie: str, now: Optional[str] = None,
-                  state_dir: Optional[Path] = None) -> Optional[Dict[str, Any]]:
-    return append_line(project_id, "presented", {"point_id": pid, "kanaal": kanaal, "sessie": sessie},
-                       now=now, state_dir=state_dir)
-
-
 def close_point(project_id: str, pid: str, *, uitkomst: str, bewijs: str, beantwoord_door: str = "onbekend",
                 now: Optional[str] = None, state_dir: Optional[Path] = None) -> Optional[Dict[str, Any]]:
     """Close on source state: ``bewijs`` is required and refused when empty."""
     return append_line(project_id, "closed", {"point_id": pid, "uitkomst": uitkomst, "bewijs": bewijs,
                                               "beantwoord_door": beantwoord_door}, now=now, state_dir=state_dir)
-
-
-def mark_unknown(project_id: str, pid: str, *, reden: str, now: Optional[str] = None,
-                 state_dir: Optional[Path] = None) -> Optional[Dict[str, Any]]:
-    return append_line(project_id, "unknown", {"point_id": pid, "reden": reden}, now=now, state_dir=state_dir)
-
-
-def record_answer(project_id: str, pid: str, *, citaat: str, vastgelegd_door: str, now: Optional[str] = None,
-                  state_dir: Optional[Path] = None) -> Optional[Dict[str, Any]]:
-    return append_line(project_id, "answer", {"point_id": pid, "citaat": citaat, "vastgelegd_door": vastgelegd_door},
-                       now=now, state_dir=state_dir)
-
-
-def reserve_push(project_id: str, point_ids: List[str], *, sessie: str, now: Optional[str] = None,
-                 state_dir: Optional[Path] = None) -> Optional[Dict[str, Any]]:
-    return append_line(project_id, "push_reserved", {"point_ids": list(point_ids), "sessie": sessie},
-                       now=now, state_dir=state_dir)
