@@ -1,0 +1,1 @@
+- fix(hooks): the worker-scope hook runs on a pinned interpreter with PyYAML (VNX_PYTHON, repo .venv, homebrew 3.12) instead of the bare python3 (OI-2819)
