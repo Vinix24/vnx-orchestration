@@ -254,21 +254,49 @@ pip2_env "$VENV/bin/vnx" init --project-dir "$CLEAN_PROJECT" >"$TMPROOT/pip2_ini
     || fail "clean-HOME vnx init created a project-local .vnx-data/ (expected none)"
 ok "vnx init created no project-local .vnx-data/"
 
-# Assertion 2: in-project footprint < 10 KB (tracked config only).
-FOOT_BYTES="$(pip2_env "$VENV/bin/python" - "$CLEAN_PROJECT" <<'PYEOF'
+# Assertion 2: in-project footprint is tracked config only. Every file init
+# wrote must be on the allowlist below (relative paths); anything else (state,
+# logs, caches, a copied payload) fails, and the total stays under a ceiling.
+# Measured 2026-11-14 on macOS: 13836 B (runner: 13524 B) across these 13
+# files; ceiling 16384 B = 16 KB (~18% margin). Writers: `vnx init` project
+# scaffold (.vnx-project-id, .vnx-version, .gitignore, CLAUDE.md, CODEOWNERS,
+# .github/workflows/attestation-gate.yml, .vnx-attest/*, agents/*), `--step
+# config` (.vnx/config.yml), `--step terminals` (.claude/terminals/T0/CLAUDE.md),
+# `--step hooks` (.claude/settings.json). `--step tri-files` (AGENTS.md,
+# GEMINI.md) and `--step agent-files` write nothing here (no VNX bootstrap block
+# in the fresh CLAUDE.md to mirror).
+FOOT_MAX_BYTES=16384
+FOOT_REPORT="$(pip2_env "$VENV/bin/python" - "$CLEAN_PROJECT" "$FOOT_MAX_BYTES" <<'PYEOF'
 import sys
 from pathlib import Path
 root = Path(sys.argv[1])
-total = sum(
-    f.stat().st_size for f in root.rglob("*")
-    if f.is_file() and ".git" not in f.parts
-)
+ceiling = int(sys.argv[2])
+ALLOWED = {
+    ".vnx-project-id", ".vnx-version", ".gitignore", "CLAUDE.md", "CODEOWNERS",
+    ".vnx/config.yml", ".claude/settings.json", ".claude/terminals/T0/CLAUDE.md",
+    ".github/workflows/attestation-gate.yml",
+    ".vnx-attest/README.md", ".vnx-attest/allowed_signers",
+    "agents/README.md", "agents/CLAUDE.md.template",
+}
+files = {
+    f.relative_to(root).as_posix(): f.stat().st_size
+    for f in root.rglob("*")
+    if f.is_file() and ".git" not in f.relative_to(root).parts
+}
+total = sum(files.values())
+extra = sorted(set(files) - ALLOWED)
+for rel, size in sorted(files.items(), key=lambda kv: -kv[1]):
+    print(f"  {size:>6}  {rel}", file=sys.stderr)
+if extra:
+    print(f"FAIL: files outside the allowlist: {extra}")
+    sys.exit(1)
+if total >= ceiling:
+    print(f"FAIL: footprint {total} bytes >= ceiling {ceiling} bytes")
+    sys.exit(1)
 print(total)
 PYEOF
-)"
-[ "$FOOT_BYTES" -lt 10240 ] \
-    || fail "in-project footprint ${FOOT_BYTES} bytes >= 10 KB (expected clean footprint)"
-ok "in-project footprint ${FOOT_BYTES} bytes (< 10 KB)"
+)" || fail "in-project footprint: ${FOOT_REPORT}"
+ok "in-project footprint ${FOOT_REPORT} bytes (allowlisted tracked config, < ${FOOT_MAX_BYTES})"
 
 # Resolve the project_id init wrote, derive the expected central state root.
 PID2="$(head -1 "$CLEAN_PROJECT/.vnx-project-id" 2>/dev/null | tr -d '[:space:]')"
