@@ -85,7 +85,11 @@ class TestDispatchDisablesCacheControlForDeepSeek:
         ]
 
         # spawn_litellm is a local import inside _dispatch_litellm — patch at module level
+        # The route-constraint gate in main() now forbids plain litellm:deepseek
+        # (OI-867 proxy/harness split); these tests cover what _dispatch_litellm
+        # passes to spawn_litellm once the gate is passed, so the gate is stubbed.
         with patch("provider_spawns.litellm_spawn.spawn_litellm", fake_spawn), \
+             patch("provider_dispatch._check_constraints"), \
              patch.dict("os.environ", {"DEEPSEEK_API_KEY": "test-key"}):
             provider_dispatch.main(argv)
 
@@ -111,7 +115,11 @@ class TestDispatchDisablesCacheControlForDeepSeek:
         ]
 
         # spawn_litellm is a local import inside _dispatch_litellm — patch at module level
+        # The route-constraint gate in main() now forbids plain litellm:deepseek
+        # (OI-867 proxy/harness split); these tests cover what _dispatch_litellm
+        # passes to spawn_litellm once the gate is passed, so the gate is stubbed.
         with patch("provider_spawns.litellm_spawn.spawn_litellm", fake_spawn), \
+             patch("provider_dispatch._check_constraints"), \
              patch.dict("os.environ", {"DEEPSEEK_API_KEY": "test-key"}):
             provider_dispatch.main(argv)
 
