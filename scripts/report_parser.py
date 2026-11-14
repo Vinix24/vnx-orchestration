@@ -299,19 +299,33 @@ class ReportParser:
     def extract_metadata(self, content: str) -> Dict[str, str]:
         """Extract all metadata fields from report header"""
         metadata = {}
+        _UNKNOWN_LIKE = {'unknown', 'none', 'null', 'n/a', 'na', 'unset', '-'}
+        self._metadata_from_frontmatter(content, metadata, _UNKNOWN_LIKE)
+        self._metadata_from_bold_fields(content, metadata)
+        self._metadata_from_plain_and_yaml(content, metadata, _UNKNOWN_LIKE)
+        self._metadata_from_dispatch_id_fallbacks(content, metadata)
+        self._metadata_from_identity_block(content, metadata)
+        self._metadata_session_title_confidence(content, metadata)
+        self._metadata_resolve_terminal(content, metadata)
+        self._metadata_apply_defaults(metadata)
+        return metadata
 
-        def _normalize_meta_key(key: str) -> str:
-            return key.strip().lower().replace("-", "_").replace(" ", "_")
+    @staticmethod
+    def _normalize_meta_key(key: str) -> str:
+        return key.strip().lower().replace("-", "_").replace(" ", "_")
 
-        def _clean_scalar(value: Any, default: str = "unknown") -> str:
-            if value is None:
-                return default
-            text = str(value).strip()
-            if not text:
-                return default
-            first_line = text.splitlines()[0].strip()
-            return first_line if first_line else default
+    @staticmethod
+    def _clean_scalar(value: Any, default: str = "unknown") -> str:
+        if value is None:
+            return default
+        text = str(value).strip()
+        if not text:
+            return default
+        first_line = text.splitlines()[0].strip()
+        return first_line if first_line else default
 
+    def _metadata_from_frontmatter(self, content: str, metadata: Dict[str, Any], _UNKNOWN_LIKE: set) -> None:
+        """extract_metadata step 1: top-level scalars of the `---` frontmatter."""
         # OI-1086: parse `---` YAML frontmatter FIRST (dispatch-envelope
         # reports stamp provider/model/role there — e.g. the headless
         # plan-gate seats carry `model: kimi-k3` in frontmatter and no
@@ -323,14 +337,13 @@ class ReportParser:
         # same reason: a placeholder must never shadow a real body value.
         # Only top-level scalars are read; nested blocks (route_decision,
         # token_usage) are not receipt metadata.
-        _UNKNOWN_LIKE = {'unknown', 'none', 'null', 'n/a', 'na', 'unset', '-'}
         fm_match = re.match(r'^---\s*\n(.*?)\n---\s*\n', content, re.DOTALL)
         if fm_match:
             for line in fm_match.group(1).split('\n'):
                 if ':' not in line or line[0] in (' ', '\t', '#'):
                     continue
                 key, value = line.split(':', 1)
-                key = _normalize_meta_key(key)
+                key = self._normalize_meta_key(key)
                 value = value.strip()
                 if not key or not value:
                     continue
@@ -343,6 +356,8 @@ class ReportParser:
                     continue
                 metadata[key] = value
 
+    def _metadata_from_bold_fields(self, content: str, metadata: Dict[str, Any]) -> None:
+        """extract_metadata step 2: `**Key**: value` in the header, then Model/Provider anywhere."""
         # Extract all metadata fields. OI-1101: skip matches inside inline
         # code spans (backtick-delimited) — a `**Model**: value` mention
         # inside prose or code is not a real identity declaration.
@@ -350,7 +365,7 @@ class ReportParser:
         for match in self.metadata_pattern.finditer(content[:2000]):  # Check first 2000 chars
             if _is_inside_inline_code(content, match.start()):
                 continue
-            key = _normalize_meta_key(match.group(1))
+            key = self._normalize_meta_key(match.group(1))
             value = match.group(2).strip()
             if key == 'model' and not _is_plausible_model_name(value):
                 continue
@@ -387,6 +402,8 @@ class ReportParser:
                     metadata[_key] = _value
                     break
 
+    def _metadata_from_plain_and_yaml(self, content: str, metadata: Dict[str, Any], _UNKNOWN_LIKE: set) -> None:
+        """extract_metadata step 3: plain-text `Model:`/`Provider:` header, then a ```yaml block."""
         # Plain-text header fallback (same convention as the Dispatch-ID
         # plain-text fallback below): reports like the 2026-08-04 triage/m-
         # series stamp a bare `Model: X` / `Provider: Y` block at the top.
@@ -416,7 +433,7 @@ class ReportParser:
             for line in yaml_content.split('\n'):
                 if ':' in line:
                     key, value = line.split(':', 1)
-                    key = _normalize_meta_key(key)
+                    key = self._normalize_meta_key(key)
                     value = value.strip()
                     if key == 'model':
                         # OI-1194: a ```yaml block can echo the dispatch
@@ -429,6 +446,8 @@ class ReportParser:
                             continue
                     metadata[key] = value
 
+    def _metadata_from_dispatch_id_fallbacks(self, content: str, metadata: Dict[str, Any]) -> None:
+        """extract_metadata step 4: Dispatch-ID from an assignment table or a plain-text line."""
         # Dispatch assignment table fallback:
         # | **Dispatch-ID** | 20260218-151417-... |
         if not metadata.get("dispatch_id"):
@@ -450,6 +469,8 @@ class ReportParser:
             if plain_dispatch_match:
                 metadata["dispatch_id"] = plain_dispatch_match.group(1).strip()
 
+    def _metadata_from_identity_block(self, content: str, metadata: Dict[str, Any]) -> None:
+        """extract_metadata step 5: identity block at either end, value cleaning, filename fallback."""
         # Identity block, every shape and either end of the report. The scans
         # above cover `**Key**: v` and `Key: v` in the head of the report and
         # miss two things: the colon INSIDE the bold markers (`**Dispatch-ID:**
@@ -462,7 +483,7 @@ class ReportParser:
         from report_body_contract import clean_identity_value, identity_windows
         for _window in identity_windows(content):
             for _im in _IDENTITY_LINE_RE.finditer(_window):
-                _ikey = _normalize_meta_key(_im.group('key'))
+                _ikey = self._normalize_meta_key(_im.group('key'))
                 if str(metadata.get(_ikey) or '').strip():
                     continue
                 if _is_inside_inline_code(_window, _im.start()):
@@ -501,6 +522,8 @@ class ReportParser:
             if _fn and _fn.lower() not in {'unknown', 'none', 'null', ''}:
                 metadata['dispatch_id'] = _fn
 
+    def _metadata_session_title_confidence(self, content: str, metadata: Dict[str, Any]) -> None:
+        """extract_metadata step 6: session_id, title/type from the first header, confidence."""
         # Phase 1B: Extract session_id (multiple patterns)
         # Pattern 1: **Session**: abc-def-123 (markdown bold) - accepts alphanumeric, hyphens, underscores
         session_match = re.search(r'\*\*Session\*\*:\s*([a-zA-Z0-9\-_]+)', content[:2000], re.IGNORECASE)
@@ -526,6 +549,8 @@ class ReportParser:
             except ValueError:
                 metadata['confidence'] = 0.50  # Default if invalid
 
+    def _metadata_resolve_terminal(self, content: str, metadata: Dict[str, Any]) -> None:
+        """extract_metadata step 7: terminal from values, a header scan or the filename."""
         # Track letter → terminal ID mapping
         _track_to_terminal = {'A': 'T1', 'B': 'T2', 'C': 'T3'}
 
@@ -575,6 +600,9 @@ class ReportParser:
                 if track_match:
                     metadata['terminal'] = _track_to_terminal[track_match.group(1)]
 
+    def _metadata_apply_defaults(self, metadata: Dict[str, Any]) -> None:
+        """extract_metadata step 8: defaults, one-line scalars and the terminal-to-track map."""
+        _clean_scalar = self._clean_scalar
         # Ensure required fields have defaults
         metadata.setdefault('terminal', 'unknown')
         metadata.setdefault('gate', 'unknown')
@@ -594,8 +622,6 @@ class ReportParser:
             terminal = metadata['terminal']
             track_map = {'T1': 'A', 'T2': 'B', 'T3': 'C'}
             metadata['track'] = track_map.get(terminal, terminal)
-
-        return metadata
 
     def extract_recommendations(self, content: str) -> Dict[str, List[str]]:
         """Extract recommendations and next steps"""
