@@ -2232,56 +2232,10 @@ def main():
             return EXIT_OK if result.get("valid") else EXIT_VALIDATION
 
         elif command == "gather":
-            if len(argv) < 3:
-                if human:
-                    emit_human("Usage: gather_intelligence.py gather <task> <terminal> [agent] [gate] [dispatch_id] [--human]")
-                else:
-                    emit_json({"error": "Missing required arguments", "usage": "gather <task> <terminal> [agent] [gate] [dispatch_id] [--human]"})
-                return EXIT_VALIDATION
-
-            task = argv[1]
-            terminal = argv[2]
-            agent = argv[3] if len(argv) > 3 else None
-            gate = argv[4] if len(argv) > 4 else None
-            dispatch_id_arg = argv[5] if len(argv) > 5 else None
-
-            result = gatherer.gather_for_dispatch(task, terminal, agent, gate, dispatch_id=dispatch_id_arg)
-            if human:
-                emit_human(f"Dispatch blocked: {result.get('dispatch_blocked', False)}")
-                if result.get("error"):
-                    emit_human(f"Error: {result.get('error')}")
-                emit_human(f"Pattern count: {result.get('pattern_count', 0)}")
-                emit_human(f"Prevention rules: {result.get('prevention_rule_count', 0)}")
-            else:
-                emit_json(result)
-            return EXIT_OK if not result.get("dispatch_blocked") else EXIT_VALIDATION
+            return _main_gather(gatherer, argv, human)
 
         elif command == "patterns":
-            if len(argv) < 2:
-                if human:
-                    emit_human("Usage: gather_intelligence.py patterns <task-description> [--human]")
-                else:
-                    emit_json({"error": "Missing task description", "usage": "patterns <task-description> [--human]"})
-                return EXIT_VALIDATION
-
-            task = ' '.join(argv[1:])
-            patterns = gatherer.query_relevant_patterns(task)
-
-            if human:
-                emit_human(f"\nFound {len(patterns)} relevant patterns for: '{task}'\n")
-                for i, pattern in enumerate(patterns):
-                    emit_human(f"Pattern {i+1}:")
-                    emit_human(f"  Title: {pattern.get('title', 'N/A')}")
-                    emit_human(f"  Quality: {pattern.get('quality_score', 0)}%")
-                    emit_human(f"  Relevance: {pattern.get('relevance_score', 0):.2f}")
-                    emit_human(f"  Tags: {pattern.get('tags', '')}")
-                    emit_human(f"  File: {pattern.get('file_path', '')}")
-                    if pattern.get('description'):
-                        emit_human(f"  Description: {pattern['description'][:100]}...")
-                    emit_human("")
-            else:
-                emit_json({"query": task, "patterns": patterns})
-            return EXIT_OK
+            return _main_patterns(gatherer, argv, human)
 
         elif command == "keywords":
             if len(argv) < 2:
@@ -2300,50 +2254,10 @@ def main():
             return EXIT_OK
 
         elif command == "tags":
-            if len(argv) < 2:
-                if human:
-                    emit_human("Usage: gather_intelligence.py tags <task-description> [--human]")
-                else:
-                    emit_json({"error": "Missing task description", "usage": "tags <task-description> [--human]"})
-                return EXIT_VALIDATION
-
-            task = ' '.join(argv[1:])
-            tags = gatherer.extract_tags_from_description(task)
-            if gatherer.tag_engine:
-                analysis = gatherer.analyze_tags_for_task(tags)
-            else:
-                analysis = None
-
-            if human:
-                emit_human(f"Tags extracted: {tags}")
-                if analysis is not None:
-                    emit_human("\nTag Analysis:")
-                    emit_human(json.dumps(analysis, indent=2))
-            else:
-                emit_json({"task": task, "tags": tags, "analysis": analysis})
-            return EXIT_OK
+            return _main_tags(gatherer, argv, human)
 
         elif command == "prevention":
-            if len(argv) < 2:
-                if human:
-                    emit_human("Usage: gather_intelligence.py prevention <task-description> [--human]")
-                else:
-                    emit_json({"error": "Missing task description", "usage": "prevention <task-description> [--human]"})
-                return EXIT_VALIDATION
-
-            task = ' '.join(argv[1:])
-            rules = gatherer.query_prevention_rules(task)
-            if human:
-                emit_human(f"\nFound {len(rules)} prevention rules:\n")
-                for rule in rules:
-                    emit_human(f"Tags: {', '.join(rule['tag_combination'])}")
-                    emit_human(f"Type: {rule['rule_type']}")
-                    emit_human(f"Confidence: {rule['confidence']:.2f}")
-                    emit_human(f"Recommendation: {rule['recommendation']}")
-                    emit_human("")
-            else:
-                emit_json({"task": task, "prevention_rules": rules})
-            return EXIT_OK
+            return _main_prevention(gatherer, argv, human)
 
         elif command == "record-adoption":
             # Called from receipt_processor.sh after task_complete
@@ -2373,41 +2287,147 @@ def main():
             return EXIT_VALIDATION
 
     else:
-        pattern_count = None
-        if gatherer.quality_db:
-            try:
-                pattern_count = gatherer.quality_db.execute("SELECT COUNT(*) FROM code_snippets").fetchone()[0]
-            except sqlite3.Error as e:
-                log.debug("Failed to query pattern count: %s", e)
-        stats = {}
-        if gatherer.tag_engine:
-            try:
-                stats = gatherer.tag_engine.get_statistics()
-            except Exception as e:
-                log.debug("Failed to get tag engine statistics: %s", e)
+        return _main_status(gatherer, human)
 
+
+def _main_gather(gatherer, argv, human):
+    if len(argv) < 3:
         if human:
-            emit_human("VNX Intelligence Gatherer v1.4.0")
-            emit_human(f"Loaded agents: {len(gatherer.agent_directory)}")
-            emit_human(f"Database connected: {gatherer.quality_db is not None}")
-            emit_human(f"Tag engine available: {gatherer.tag_engine is not None}")
-            if pattern_count is not None:
-                emit_human(f"Patterns available: {pattern_count}")
-            if stats:
-                emit_human(f"Tag combinations: {stats.get('total_combinations', 0)}")
-                emit_human(f"Prevention rules: {stats.get('total_rules', 0)}")
-            emit_human("\nCommands: list-agents, validate, gather, patterns, keywords, tags, prevention, record-adoption")
+            emit_human("Usage: gather_intelligence.py gather <task> <terminal> [agent] [gate] [dispatch_id] [--human]")
         else:
-            emit_json({
-                "version": "1.4.0",
-                "loaded_agents": len(gatherer.agent_directory),
-                "database_connected": gatherer.quality_db is not None,
-                "tag_engine_available": gatherer.tag_engine is not None,
-                "patterns_available": pattern_count,
-                "tag_statistics": stats or None,
-                "commands": ["list-agents", "validate", "gather", "patterns", "keywords", "tags", "prevention", "record-adoption"],
-            })
-        return EXIT_OK
+            emit_json({"error": "Missing required arguments", "usage": "gather <task> <terminal> [agent] [gate] [dispatch_id] [--human]"})
+        return EXIT_VALIDATION
+
+    task = argv[1]
+    terminal = argv[2]
+    agent = argv[3] if len(argv) > 3 else None
+    gate = argv[4] if len(argv) > 4 else None
+    dispatch_id_arg = argv[5] if len(argv) > 5 else None
+
+    result = gatherer.gather_for_dispatch(task, terminal, agent, gate, dispatch_id=dispatch_id_arg)
+    if human:
+        emit_human(f"Dispatch blocked: {result.get('dispatch_blocked', False)}")
+        if result.get("error"):
+            emit_human(f"Error: {result.get('error')}")
+        emit_human(f"Pattern count: {result.get('pattern_count', 0)}")
+        emit_human(f"Prevention rules: {result.get('prevention_rule_count', 0)}")
+    else:
+        emit_json(result)
+    return EXIT_OK if not result.get("dispatch_blocked") else EXIT_VALIDATION
+
+
+def _main_patterns(gatherer, argv, human):
+    if len(argv) < 2:
+        if human:
+            emit_human("Usage: gather_intelligence.py patterns <task-description> [--human]")
+        else:
+            emit_json({"error": "Missing task description", "usage": "patterns <task-description> [--human]"})
+        return EXIT_VALIDATION
+
+    task = ' '.join(argv[1:])
+    patterns = gatherer.query_relevant_patterns(task)
+
+    if human:
+        emit_human(f"\nFound {len(patterns)} relevant patterns for: '{task}'\n")
+        for i, pattern in enumerate(patterns):
+            emit_human(f"Pattern {i+1}:")
+            emit_human(f"  Title: {pattern.get('title', 'N/A')}")
+            emit_human(f"  Quality: {pattern.get('quality_score', 0)}%")
+            emit_human(f"  Relevance: {pattern.get('relevance_score', 0):.2f}")
+            emit_human(f"  Tags: {pattern.get('tags', '')}")
+            emit_human(f"  File: {pattern.get('file_path', '')}")
+            if pattern.get('description'):
+                emit_human(f"  Description: {pattern['description'][:100]}...")
+            emit_human("")
+    else:
+        emit_json({"query": task, "patterns": patterns})
+    return EXIT_OK
+
+
+def _main_tags(gatherer, argv, human):
+    if len(argv) < 2:
+        if human:
+            emit_human("Usage: gather_intelligence.py tags <task-description> [--human]")
+        else:
+            emit_json({"error": "Missing task description", "usage": "tags <task-description> [--human]"})
+        return EXIT_VALIDATION
+
+    task = ' '.join(argv[1:])
+    tags = gatherer.extract_tags_from_description(task)
+    if gatherer.tag_engine:
+        analysis = gatherer.analyze_tags_for_task(tags)
+    else:
+        analysis = None
+
+    if human:
+        emit_human(f"Tags extracted: {tags}")
+        if analysis is not None:
+            emit_human("\nTag Analysis:")
+            emit_human(json.dumps(analysis, indent=2))
+    else:
+        emit_json({"task": task, "tags": tags, "analysis": analysis})
+    return EXIT_OK
+
+
+def _main_prevention(gatherer, argv, human):
+    if len(argv) < 2:
+        if human:
+            emit_human("Usage: gather_intelligence.py prevention <task-description> [--human]")
+        else:
+            emit_json({"error": "Missing task description", "usage": "prevention <task-description> [--human]"})
+        return EXIT_VALIDATION
+
+    task = ' '.join(argv[1:])
+    rules = gatherer.query_prevention_rules(task)
+    if human:
+        emit_human(f"\nFound {len(rules)} prevention rules:\n")
+        for rule in rules:
+            emit_human(f"Tags: {', '.join(rule['tag_combination'])}")
+            emit_human(f"Type: {rule['rule_type']}")
+            emit_human(f"Confidence: {rule['confidence']:.2f}")
+            emit_human(f"Recommendation: {rule['recommendation']}")
+            emit_human("")
+    else:
+        emit_json({"task": task, "prevention_rules": rules})
+    return EXIT_OK
+
+
+def _main_status(gatherer, human):
+    pattern_count = None
+    if gatherer.quality_db:
+        try:
+            pattern_count = gatherer.quality_db.execute("SELECT COUNT(*) FROM code_snippets").fetchone()[0]
+        except sqlite3.Error as e:
+            log.debug("Failed to query pattern count: %s", e)
+    stats = {}
+    if gatherer.tag_engine:
+        try:
+            stats = gatherer.tag_engine.get_statistics()
+        except Exception as e:
+            log.debug("Failed to get tag engine statistics: %s", e)
+
+    if human:
+        emit_human("VNX Intelligence Gatherer v1.4.0")
+        emit_human(f"Loaded agents: {len(gatherer.agent_directory)}")
+        emit_human(f"Database connected: {gatherer.quality_db is not None}")
+        emit_human(f"Tag engine available: {gatherer.tag_engine is not None}")
+        if pattern_count is not None:
+            emit_human(f"Patterns available: {pattern_count}")
+        if stats:
+            emit_human(f"Tag combinations: {stats.get('total_combinations', 0)}")
+            emit_human(f"Prevention rules: {stats.get('total_rules', 0)}")
+        emit_human("\nCommands: list-agents, validate, gather, patterns, keywords, tags, prevention, record-adoption")
+    else:
+        emit_json({
+            "version": "1.4.0",
+            "loaded_agents": len(gatherer.agent_directory),
+            "database_connected": gatherer.quality_db is not None,
+            "tag_engine_available": gatherer.tag_engine is not None,
+            "patterns_available": pattern_count,
+            "tag_statistics": stats or None,
+            "commands": ["list-agents", "validate", "gather", "patterns", "keywords", "tags", "prevention", "record-adoption"],
+        })
+    return EXIT_OK
 
 
 if __name__ == "__main__":
