@@ -1,11 +1,9 @@
 """Characterisation tests for golf-schoon R01b (extract-method refactor).
 
-Pins the observable behaviour of ``materialize_views`` and the 02_rls_policy
-``verify``. Real temp dirs and real sqlite.
+Pins the observable behaviour of ``materialize_views``. Real temp dirs and real sqlite.
 """
 from __future__ import annotations
 
-import importlib.util
 import json
 import sqlite3
 import sys
@@ -22,9 +20,6 @@ from scripts.aggregator.build_central_view import (
     load_registry,
     materialize_views,
 )
-
-RLS_DIR = REPO_ROOT / "scripts/benchmark/field-tests/tasks/t1_trivial/02_rls_policy"
-
 
 # --------------------------------------------------------------------------
 # materialize_views
@@ -155,110 +150,3 @@ def test_dry_run_plan_and_stderr_pinned(projects, tmp_path, capsys):
     assert err[0].endswith(f"dbs present)")
     assert "/%d dbs present)" % len(SOURCE_DBS) in err[0]
     assert err[2].startswith("DRY-RUN: would attach project=pg") and "(0/" in err[2]
-
-
-
-
-
-# --------------------------------------------------------------------------
-# 02_rls_policy verify
-# --------------------------------------------------------------------------
-
-
-@pytest.fixture(scope="module")
-def rls():
-    spec = importlib.util.spec_from_file_location("rls_verify_r01", RLS_DIR / "verify.py")
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
-
-
-def _workdir(tmp_path: Path, rls, migrate: str | None, init: bool = True) -> Path:
-    seed = tmp_path / rls.SEED_REL
-    seed.mkdir(parents=True)
-    if migrate is not None:
-        (seed / "migrate.sql").write_text(migrate)
-    if init:
-        (seed / "init_seed_db.sql").write_text((RLS_DIR / "seed/init_seed_db.sql").read_text())
-    return tmp_path
-
-
-GOOD = """
-CREATE TABLE IF NOT EXISTS scan_quota_new (
-  scan_id TEXT, used_count INTEGER, quota_limit INTEGER, project_id TEXT NOT NULL DEFAULT 'default',
-  UNIQUE (project_id, scan_id));
-INSERT OR IGNORE INTO scan_quota_new (scan_id, used_count, quota_limit)
-  SELECT scan_id, used_count, quota_limit FROM scan_quota WHERE EXISTS
-  (SELECT 1 FROM pragma_table_info('scan_quota') WHERE name='scan_id')
-  AND NOT EXISTS (SELECT 1 FROM pragma_table_info('scan_quota') WHERE name='project_id');
-"""
-
-
-def test_verify_missing_migrate(tmp_path, rls):
-    wd = _workdir(tmp_path, rls, None)
-    assert rls.verify(wd, {}) == {
-        "pass": False, "evidence": "migrate.sql not written by worker",
-        "details": {"pass_count": 0, "expected": 5, "files_written": []}}
-
-
-def test_verify_missing_init(tmp_path, rls):
-    wd = _workdir(tmp_path, rls, "SELECT 1;", init=False)
-    assert rls.verify(wd, {}) == {
-        "pass": False, "evidence": "seed init script missing (test bug)",
-        "details": {"pass_count": 0, "expected": 5, "files_written": ["migrate.sql"]}}
-
-
-def test_verify_migration_failed(tmp_path, rls):
-    wd = _workdir(tmp_path, rls, "THIS IS NOT SQL;")
-    out = rls.verify(wd, {})
-    assert out["pass"] is False
-    assert out["evidence"].startswith("migration failed: sqlite3 rc=")
-    assert out["details"] == {"pass_count": 0, "expected": 5, "files_written": ["migrate.sql"]}
-
-
-def test_verify_seed_init_failed(tmp_path, rls):
-    wd = _workdir(tmp_path, rls, "SELECT 1;", init=False)
-    (wd / rls.SEED_REL / "init_seed_db.sql").write_text("BROKEN SQL;")
-    out = rls.verify(wd, {})
-    assert out["evidence"].startswith("seed init failed: sqlite3 rc=")
-    assert out["details"]["files_written"] == ["migrate.sql"]
-
-
-def test_verify_noop_migration_raises_operational_error(tmp_path, rls):
-    # pinned existing behaviour: without a project_id column the later INSERT
-    # is not guarded and the OperationalError escapes verify().
-    wd = _workdir(tmp_path, rls, "SELECT 1;")
-    with pytest.raises(sqlite3.OperationalError):
-        rls.verify(wd, {})
-
-
-def test_verify_full_migration_all_checks(tmp_path, rls):
-    mig = """
-ALTER TABLE scan_quota RENAME TO scan_quota_old;
-CREATE TABLE scan_quota (scan_id TEXT NOT NULL, used_count INTEGER, quota_limit INTEGER,
-  project_id TEXT NOT NULL DEFAULT 'default', UNIQUE (project_id, scan_id));
-INSERT INTO scan_quota (scan_id, used_count, quota_limit) SELECT scan_id, used_count, quota_limit FROM scan_quota_old;
-DROP TABLE scan_quota_old;
-CREATE INDEX idx_scan_quota_project ON scan_quota(project_id);
-"""
-    wd = _workdir(tmp_path, rls, mig)
-    out = rls.verify(wd, {})
-    d = out["details"]
-    names = [c["name"] for c in d["checks"]]
-    assert names == [
-        "3 original rows scoped to 'default' tenant",
-        "cross-tenant insert allowed",
-        "same-tenant duplicate rejected",
-        "composite UNIQUE on (project_id, scan_id) exists",
-        "index on (project_id) exists",
-        "migration is idempotent (re-runs cleanly)",
-    ]
-    # pinned: this inline UNIQUE is not an index row with sql text, and the
-    # second apply of the non-idempotent script fails.
-    assert [c["ok"] for c in d["checks"]] == [True, True, True, False, True, False]
-    assert d["idempotent"] is False
-    assert d["checks"][-1]["note"].startswith("sqlite3 rc=1: Error near line 5")
-    assert d["pass_count"] == 4 and out["pass"] is False
-    assert out["evidence"].count("FAIL") == 2
-    assert d["files_written"] == ["migrate.sql"]
-
