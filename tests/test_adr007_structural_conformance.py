@@ -39,47 +39,51 @@ _EXEMPT_TABLES = {
 
 
 def _apply_all_migrations(conn: sqlite3.Connection) -> None:
-    # Minimal pre-migration base: dispatches table required by 0022 (which rebuilds it).
+    """Bring ``conn`` (a file-backed DB) to head through the real runner.
+
+    Migrations from 0026 on carry their own BEGIN/COMMIT and need tables the
+    numbered walk creates, so ``apply_script_if_below`` per file no longer works
+    (SAVEPOINT cannot nest a BEGIN). ``migrate_future_system.run`` is the one
+    canonical chain (OI-1169, #1477).
+    """
+    db_file = conn.execute("PRAGMA database_list").fetchone()[2]
     conn.execute("""
         CREATE TABLE IF NOT EXISTS dispatches (
-            id              INTEGER PRIMARY KEY AUTOINCREMENT,
-            dispatch_id     TEXT    NOT NULL,
-            project_id      TEXT    NOT NULL DEFAULT 'vnx-dev',
-            state           TEXT    NOT NULL DEFAULT 'queued',
-            terminal_id     TEXT,
-            track           TEXT,
-            priority        TEXT    DEFAULT 'P2',
-            pr_ref          TEXT,
-            gate            TEXT,
-            attempt_count   INTEGER NOT NULL DEFAULT 0,
-            bundle_path     TEXT,
-            created_at      TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-            updated_at      TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-            expires_after   TEXT,
-            metadata_json   TEXT    DEFAULT '{}',
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            dispatch_id TEXT NOT NULL,
+            project_id TEXT NOT NULL DEFAULT 'vnx-dev',
+            state TEXT NOT NULL DEFAULT 'queued',
+            terminal_id TEXT, track TEXT, priority TEXT DEFAULT 'P2',
+            pr_ref TEXT, gate TEXT, attempt_count INTEGER NOT NULL DEFAULT 0,
+            bundle_path TEXT,
+            created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+            updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+            expires_after TEXT, metadata_json TEXT DEFAULT '{}',
             UNIQUE(dispatch_id, project_id)
         )
     """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS coordination_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT, event_type TEXT,
+            entity_type TEXT, entity_id TEXT, from_state TEXT, to_state TEXT,
+            actor TEXT, reason TEXT, metadata_json TEXT, occurred_at TEXT, project_id TEXT
+        )
+    """)
     conn.commit()
-    # Apply track-layer migrations (0022+) in version order; skip down migrations.
-    for path in sorted(_MIGRATIONS.glob("00[0-9][0-9]_*.sql")):
-        if "_down" in path.name:
-            continue
-        try:
-            version = int(path.name.split("_")[0])
-        except ValueError:
-            continue
-        if version < 22:
-            continue  # pre-track migrations require tables not present here
-        sql = path.read_text(encoding="utf-8")
-        schema_migration.apply_script_if_below(conn, version, sql)
-    conn.commit()
+    conn.close()
+    project_dir = Path(db_file).parent.parent.parent
+    migrate_future_system.run(project_dir)
 
 
-def test_every_multitenant_table_has_composite_constraint_over_project_id():
-    conn = sqlite3.connect(":memory:")
-    conn.execute("PRAGMA foreign_keys = ON")
+def test_every_multitenant_table_has_composite_constraint_over_project_id(tmp_path, monkeypatch):
+    state_dir = tmp_path / "proj" / ".vnx-data" / "state"
+    state_dir.mkdir(parents=True)
+    db_file = state_dir / "runtime_coordination.db"
+    monkeypatch.setenv("VNX_PROJECT_ID", "vnx-dev")
+    conn = sqlite3.connect(str(db_file))
     _apply_all_migrations(conn)
+    conn = sqlite3.connect(str(db_file))
+    conn.execute("PRAGMA foreign_keys = ON")
 
     tables = [r[0] for r in conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"

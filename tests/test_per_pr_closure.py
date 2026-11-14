@@ -57,6 +57,7 @@ def _make_contract(
     risk_class="high",
     deterministic_findings=None,
     content_hash="abcdef1234567890",
+    branch="feature/test",
 ):
     if review_stack is None:
         review_stack = ["gemini_review", "codex_gate"]
@@ -64,7 +65,7 @@ def _make_contract(
         pr_id=pr_id,
         pr_title="Test PR",
         feature_title="Test Feature",
-        branch="feature/test",
+        branch=branch,
         track="C",
         risk_class=risk_class,
         merge_policy="human",
@@ -85,7 +86,9 @@ def _write_gate_result(results_dir: Path, gate: str, pr_id: str, data: dict) -> 
     results_dir.mkdir(parents=True, exist_ok=True)
     pr_slug = pr_id.lower().replace("-", "")
     path = results_dir / f"{pr_slug}-{gate}-contract.json"
-    path.write_text(json.dumps(data), encoding="utf-8")
+    # A gate record without a branch is stale evidence (ADR-005): default to the
+    # contract's own branch, an explicit "branch" in `data` still wins.
+    path.write_text(json.dumps({"branch": "feature/test", **data}), encoding="utf-8")
     return path
 
 
@@ -600,7 +603,8 @@ class TestRound3BranchThreading:
         codex_report = reports_dir / "codex.md"
         codex_report.write_text("# Codex Gate\nAll clear.\n")
 
-        contract = _make_contract(pr_id="PR-0")
+        # Gate lookup is scoped to the contract's own branch (not the branch argument).
+        contract = _make_contract(pr_id="PR-0", branch="feat/current")
         results_dir = tmp_path / "results"
         _write_gate_result(results_dir, "gemini_review", "PR-0",
                            _passing_gate_payload("PR-0", "gemini_review", gemini_report,
@@ -714,7 +718,7 @@ class TestRound3MainCliWiring:
         assert captured["branch"] == "feat/current"
         assert captured["require_github_pr"] is True
 
-    def test_require_github_pr_only_active_in_pre_merge_mode(
+    def test_require_github_pr_defaults_on_only_in_pre_merge_mode(
         self, closure_env, tmp_path, monkeypatch
     ):
         _write_dispatch(
@@ -734,17 +738,23 @@ class TestRound3MainCliWiring:
 
         monkeypatch.setattr(cv, "verify_pr_closure", fake_verify)
 
-        rc = cv.main([
-            "--pr-id", "PR-0",
-            "--review-contract", str(contract_path),
-            "--branch", "feat/current",
-            "--mode", "post_merge",
-            "--require-github-pr",
-            "--json",
-        ])
-        assert rc == 0
-        # post_merge mode must downgrade --require-github-pr to False
-        assert captured["require_github_pr"] is False
+        def run_main(*extra):
+            captured.clear()
+            rc = cv.main([
+                "--pr-id", "PR-0",
+                "--review-contract", str(contract_path),
+                "--branch", "feat/current",
+                "--json",
+                *extra,
+            ])
+            assert rc == 0
+            return captured["require_github_pr"]
+
+        # pre_merge turns GitHub PR enforcement on by itself; post_merge does not,
+        # and only an explicit --require-github-pr forces it in any mode (CFX-2).
+        assert run_main("--mode", "pre_merge") is True
+        assert run_main("--mode", "post_merge") is False
+        assert run_main("--mode", "post_merge", "--require-github-pr") is True
 
     def test_main_infers_branch_when_not_supplied(
         self, closure_env, tmp_path, monkeypatch

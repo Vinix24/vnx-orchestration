@@ -143,11 +143,16 @@ def test_full_loop_writes_file_and_completes(monkeypatch, tmp_path):
             finish_reason="tool_calls",
             usage={"prompt_tokens": 100, "completion_tokens": 20},
         ),
-        _fake_response(
-            _fake_message(content="All set."),
-            finish_reason="stop",
-            usage={"prompt_tokens": 130, "completion_tokens": 5},
-        ),
+        # A text-only stop is nudged up to _MAX_TOOL_NUDGES times (21b6d5f04) before the
+        # runner accepts it, so a model that is genuinely finished answers 1 + 2 times.
+        *[
+            _fake_response(
+                _fake_message(content="All set."),
+                finish_reason="stop",
+                usage={"prompt_tokens": 130, "completion_tokens": 5},
+            )
+            for _ in range(ar._MAX_TOOL_NUDGES + 1)
+        ],
     ]
     payload = {"model": "openrouter/z-ai/glm-5.2", "prompt": "write out.txt",
                "cwd": str(tmp_path), "max_turns": 5}
@@ -163,10 +168,11 @@ def test_full_loop_writes_file_and_completes(monkeypatch, tmp_path):
     assert "complete" in etypes
 
     usage_evt = next(e for e in events if e.get("event_type") == "usage_complete")
-    assert usage_evt["usage"] == {"prompt_tokens": 230, "completion_tokens": 25}
+    assert [e["remaining"] for e in events if e.get("event_type") == "nudge"] == [1, 0]
+    assert usage_evt["usage"] == {"prompt_tokens": 100 + 3 * 130, "completion_tokens": 20 + 3 * 5}
     complete_evt = next(e for e in events if e.get("event_type") == "complete")
     assert complete_evt["stop_reason"] == "stop"
-    assert complete_evt["turns"] == 2
+    assert complete_evt["turns"] == 4
 
 
 def test_missing_cwd_errors(monkeypatch):

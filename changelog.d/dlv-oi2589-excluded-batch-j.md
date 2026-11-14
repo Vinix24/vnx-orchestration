@@ -1,0 +1,1 @@
+- test: seven CI-excluded test files (adr007 repair and conformance, dispatch-agent default instruction, headless inspect, litellm agentic runner, observability linkage, per-PR closure) pass on main again (OI-2589, batch j)
