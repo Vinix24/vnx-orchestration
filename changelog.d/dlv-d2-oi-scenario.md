@@ -1,0 +1,1 @@
+- The T0 role Open items policy now files an OI outside the diff only with a concrete failure scenario (D2) and defers `warn`/`info` OIs without recurrence (D3).
