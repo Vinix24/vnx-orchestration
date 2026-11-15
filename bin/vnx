@@ -337,6 +337,10 @@ Intelligence commands (git-tracked project knowledge):
   analyze-sessions     Mine Claude Code session logs → session_analytics DB
                        Options: --dry-run, --max-sessions N, --deep-budget N,
                                 --project-filter STR, --terminal-filter T0..T3
+  dream <run|status|review|history|install-scheduler|uninstall-scheduler>
+                       Auto-dream memory consolidation (ADR-019); run takes --dry-run, review --approve|--reject
+  learning <run|status|review|...>  Operator-gated proposal tier for the self-learning loop
+                       run [--from-history] queues proposals; status counts pending; review shows them
 
 Worktree commands:
   new-worktree <name>  Create fully bootstrapped feature worktree (one command)
@@ -411,6 +415,11 @@ Planning commands (strategic-layer read surface):
   objective drift     Advisory: report tracks whose declared phase != derived status
   objective close <id> Close-the-loop: advance declared phase to a terminal derived
                         status (human-gated: dry-run default; --apply --approval-id to write)
+  queue-status        Queued deliverables per track: state, delivering PR, dependencies
+                        (same as objective queue; options: --objective <id>, --all, --json)
+  deliverable add|list|promote|close|set  Deliverables of a track (proposed dispatch rows)
+                        add --objective <id> --output-kind <kind> --title "..."; list [--objective <id>] [--json]
+                        promote <dispatch_id> is the human gate; close <dispatch_id> --evidence <pr>
 
 Process commands (visibility and control):
   status             Show terminal health, dispatch queue, and gate results
@@ -426,12 +435,16 @@ Process commands (visibility and control):
   restart <process>  Restart a managed VNX process
   jump <terminal>    Switch tmux focus to T0/T1/T2/T3 pane
   jump --attention   Jump to highest-priority terminal needing attention
+  slot doctor        Check the host capacity slot store (exit 0 valid, 78 invalid store, policy or state)
+  inbox [--json] [--present]  Operator queue: open points to answer; also ask, answer, push-due
+                     (exit 0 done, 2 refused, 78 ledger unreadable)
 
 Dispatch commands (one-liner delivery):
   dispatch <file.md>              Auto-detect terminal and deliver dispatch
   dispatch <file.md> --terminal T1  Override terminal
   dispatch <file.md> --model opus   Override model
   dispatch <file.md> --dry-run      Preview without delivering
+  staging-list [--json]           List staged spec bundles (pending/<id>/dispatch-spec.json), oldest first
 
 Gate commands (pre-merge verification):
   gate <pr>                Run all required gates (from governance_enforcement.yaml)
@@ -444,6 +457,8 @@ Snapshot commands (W0):
   restore <tarball>         Restore .vnx-data/ from snapshot tarball
                             Options: --target <path>, --force
   quiesce-check [<path>]    Verify project is safe to migrate (read-only)
+  migrate [--project-dir DIR]  Apply runtime DB migrations (tracks, pool, dispatch tables)
+                            Option: --relocate-legacy --legacy-path DIR --project-id ID
 
 Runtime commands:
   pause [reason]     Gracefully stop dispatcher + receipt_processor + queue_watcher
@@ -460,6 +475,8 @@ Project registry:
 Shell helper:
   install-shell-helper    Add vnx() function to shell RC (~/.zshrc or ~/.bashrc)
                      Options: --print, --uninstall, --shell bash|zsh
+  install-git-hooks  Install VNX git hooks (prepare-commit-msg, commit-msg, pre-push) for trace token enforcement
+  uninstall-git-hooks  Remove the VNX git hooks and restore backed-up originals
 
   setup              One-command project setup (init + doctor + register)
                      Options: --starter (default), --operator, --skip-doctor
