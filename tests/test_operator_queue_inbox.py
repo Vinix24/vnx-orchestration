@@ -438,3 +438,28 @@ def test_project_coverage_malformed_source_is_unknown(coverage):
 @pytest.mark.parametrize("status", [None, "weird", "unknown"])
 def test_project_coverage_queue_not_ok_is_unknown(status):
     assert inbox.project_coverage({"status": status, "reason": None, "coverage": []})[0] == "unknown"
+
+
+def test_all_needs_no_current_project(tmp_path, monkeypatch, capsys):
+    home, registry, _ = _home(tmp_path)
+    monkeypatch.setattr(inbox_cli, "resolve_project_id", lambda: 1 / 0)  # --all must not resolve a project
+    assert inbox_cli.main(["--all", "--home", str(home), "--registry", str(registry)]) == 0
+    assert "alpha: gelezen, open 2" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("flag", ["--project-id", "--state-dir", "--data-root"])
+def test_all_with_project_scope_is_refused(tmp_path, monkeypatch, capsys, flag):
+    home, registry, _ = _home(tmp_path)
+    _no_project(monkeypatch)  # raises if main resolves a project
+    scope = str(tmp_path / "s") if flag != "--project-id" else "x"
+    assert inbox_cli.main(["--all", "--home", str(home), "--registry", str(registry), flag, scope]) == 2
+    assert "--all" in capsys.readouterr().err and not (tmp_path / "s").exists()
+
+
+def test_source_text_line_reason_is_capped_json_keeps_source(tmp_path, monkeypatch, capsys):
+    home, registry, _ = _home(tmp_path)
+    monkeypatch.setattr(inbox, "_MODULES", (_fake({"bron": 3, "dekking": "unknown", "reden": "x" * 500,
+                                                   "unknown": []}),))
+    text, by_id = _all_text_and_json(home, registry, capsys)
+    assert "  bron 3: unknown (" + "x" * inbox.REDEN_MAX + ")" in _text_block(text, "alpha")
+    assert by_id["alpha"]["sources"][0]["bron"] == 3 and by_id["alpha"]["sources"][0]["reden"] == "x" * 500

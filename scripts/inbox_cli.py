@@ -54,7 +54,7 @@ def _point_lines(points: list, more: int) -> list:
 
 
 def _source_lines(coverage) -> list:
-    return [f"  bron {name}: unknown ({reden})" for name, reden in inbox.unknown_sources(coverage)]
+    return [f"  bron {name}: unknown ({str(reden)[:inbox.REDEN_MAX]})" for name, reden in inbox.unknown_sources(coverage)]
 
 
 def _render(data: dict) -> str:
@@ -91,9 +91,11 @@ def _show(args, project_id: str, sdir, root) -> int:
 
 def main(argv: list) -> int:
     args = _parser().parse_args(argv)
-    if args.all and (args.present or args.cmd):
-        print("vnx inbox: --all only shows; presenting, asking and pushing stay per project", file=sys.stderr)
+    if args.all and (args.present or args.cmd or args.project_id or args.state_dir or args.data_root):
+        print("vnx inbox: --all only shows; ask, answer, push-due, --present and a project scope are per project", file=sys.stderr)
         return 2
+    if args.all:  # lists every project itself: needs no current project
+        return _show_all(args)
     project_id, sdir = args.project_id or resolve_project_id(), Path(args.state_dir) if args.state_dir else None
     root = Path(args.data_root) if args.data_root else (sdir.parent if sdir is not None else None)
     try:
@@ -108,8 +110,6 @@ def main(argv: list) -> int:
             due = inbox.push_due(project_id, sessie=args.push_sessie, state_dir=sdir, data_root=root)
             if due:
                 print(json.dumps(due, indent=2, ensure_ascii=False, sort_keys=True))
-        elif args.all:
-            return _show_all(args)
         else:
             return _show(args, project_id, sdir, root)
     except (qa.RefRefused, oq.QueueRefused) as exc:
