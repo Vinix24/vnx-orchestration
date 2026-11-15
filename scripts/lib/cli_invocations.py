@@ -1,6 +1,5 @@
 """CLI ledger B4b (ADR-075 decisions 1, 2, 7, 8, 10): one ``cli_invocation/1`` line per vnx call,
-with the subcommand path, the flag names and placeholders, never an argument value; and the
-pairing of an ``asked`` event (B4a) with the operator call that followed it (``executed``)."""
+with the subcommand path, the flag names and placeholders, never an argument value."""
 
 from __future__ import annotations
 
@@ -10,7 +9,7 @@ import re
 import sys
 import tempfile
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
@@ -27,30 +26,23 @@ FIELDS = "schema ts invocation_id project_id vorm actor_class exit_code duration
 #: pinned by tests/test_cli_invocations.py. Any other word is a positional and becomes a placeholder.
 KNOWN_SUBCOMMANDS = tuple("""
 activate add analyze-sessions approve attest backfill backfill-reason batch bootstrap-hooks bootstrap-skills
-bootstrap-terminals check cleanup close context-manifest cost-report costs daily-metrics decide-rule
-decide-steering deliverable dismiss dispatch dispatch-agent dispatch-cleanup doctor done dream drift
-fabric-audit finish-worktree gate gate-check gate-profile gate-reanchor grounding-shadow guard handoff help
-history horizon impact inbox init init-db insights install install-check install-git-hooks install-scheduler
-install-shell-helper install-validate intelligence-export intelligence-import issue jump learning link-pr list
-list-projects main-window mandate mark-ready memory merge-preflight migrate missing-reasons new new-worktree
-objective observe oi-close override package-check park patch-agent-files pause plan-gate pool pr-ready
-preflight promote providers ps publish queue queue-status quiesce-check reblock reconcile reconcile-review
-reconcile-streak recover regen-settings regen-worker-permissions register release remove-dependency reopen
-replay report restart restore resume retarget review revoke rework-attribution roadmap role run seed set
-set-autonomous-promotion set-goal set-horizon set-lane-hint set-plan-scope setup show sign skill-refine
-skill-review skills slot smoke snapshot staging-list start status steering stop subsystems suggest sync
-tagger-ab track uninstall-git-hooks uninstall-scheduler unlink-pr unmark-delivery unpark unregister update
-verify verify-pr version withdraw worktree-refresh worktree-release worktree-start worktree-status worktree-stop
-write""".split())
+bootstrap-terminals check cleanup close context-manifest cost-report costs daily-metrics decide-rule decide-steering
+deliverable dismiss dispatch dispatch-agent dispatch-cleanup doctor done dream drift fabric-audit finish-worktree gate
+gate-check gate-profile gate-reanchor grounding-shadow guard handoff help history horizon impact inbox init init-db
+insights install install-check install-git-hooks install-scheduler install-shell-helper install-validate
+intelligence-export intelligence-import issue jump learning link-pr list list-projects main-window mandate mark-ready
+memory merge-preflight migrate missing-reasons new new-worktree objective observe oi-close override package-check park
+patch-agent-files pause plan-gate pool pr-ready preflight promote providers ps publish queue queue-status
+quiesce-check reblock reconcile reconcile-review reconcile-streak recover regen-settings regen-worker-permissions
+register release remove-dependency reopen replay report restart restore resume retarget review revoke
+rework-attribution roadmap role run seed set set-autonomous-promotion set-goal set-horizon set-lane-hint
+set-plan-scope setup show sign skill-refine skill-review skills slot smoke snapshot staging-list start status steering
+stop subsystems suggest sync tagger-ab track uninstall-git-hooks uninstall-scheduler unlink-pr unmark-delivery unpark
+unregister update verify verify-pr version withdraw worktree-refresh worktree-release worktree-start worktree-status
+worktree-stop write""".split())
 _KNOWN = frozenset(KNOWN_SUBCOMMANDS)
 _PLACEHOLDERS = frozenset("<dlv> <dispatch> <pr> <sha> <n> <tmp> <scratchpad> <vnx-data>".split())
 _FLAG_NAME = re.compile(r"--?[A-Za-z][A-Za-z0-9_-]{0,40}")
-
-
-def _placeholder(token: str) -> str:
-    """Decision 4 placeholder when the whole token is one, otherwise ``<arg>``."""
-    form = pe.normalise(token)
-    return form if form in _PLACEHOLDERS else "<arg>"
 
 
 def build_vorm(argv: Sequence[str]) -> str:
@@ -70,13 +62,9 @@ def build_vorm(argv: Sequence[str]) -> str:
         elif after_flag:
             after_flag = False
         else:
-            path_open = False
-            words.append(_placeholder(token))
+            path_open, form = False, pe.normalise(token)  # a decision 4 placeholder, else <arg>
+            words.append(form if form in _PLACEHOLDERS else "<arg>")
     return " ".join(words + sorted(flags))
-
-
-def _now() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
 def record(argv: Sequence[str], exit_code: Optional[int], duration_ms: Optional[int],
@@ -85,7 +73,8 @@ def record(argv: Sequence[str], exit_code: Optional[int], duration_ms: Optional[
     try:
         project_id = resolve_project_id()
         line = {
-            "schema": SCHEMA, "ts": _now(), "invocation_id": uuid.uuid4().hex[:16], "project_id": project_id,
+            "schema": SCHEMA, "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+            "invocation_id": uuid.uuid4().hex[:16], "project_id": project_id,
             "vorm": build_vorm(list(argv)), "actor_class": actor_class.derive(env, isatty),
             "exit_code": exit_code if isinstance(exit_code, int) else None,
             "duration_ms": duration_ms if isinstance(duration_ms, int) and duration_ms >= 0 else None,
@@ -101,76 +90,19 @@ def record(argv: Sequence[str], exit_code: Optional[int], duration_ms: Optional[
         return None
 
 
-def _ts(value: Any) -> Optional[datetime]:
-    try:
-        when = datetime.fromisoformat(value.replace("Z", "+00:00"))
-        return when if when.tzinfo else None  # a naive ts cannot be placed in the window
-    except (AttributeError, TypeError, ValueError):  # vnx-silent-except: an unreadable ts never pairs
-        return None
-
-
-def command_key(vorm: Any) -> Optional[tuple]:
-    """Subcommand path plus leading placeholders, without the binary and the flags; None if not vnx."""
-    words = vorm.split() if isinstance(vorm, str) else []
-    if not words or not (os.path.basename(words[0]) == "vnx" or words[0] == "~/..."):
-        return None
-    key: List[str] = []
-    for word in words[1:]:
-        if word.startswith("-"):
-            break
-        key.append(word if word in _KNOWN or word in _PLACEHOLDERS or not key else "<arg>")
-    return tuple(key) if key and key[0] in _KNOWN else None
-
-
-def _read_ndjson(path: Path) -> List[Dict[str, Any]]:
-    rows = []
-    for raw in path.read_text(encoding="utf-8").splitlines():
-        try:
-            row = json.loads(raw)
-        except ValueError:  # vnx-silent-except: a damaged line is skipped, never paired
-            continue
-        if isinstance(row, dict):
-            rows.append(row)
-    return rows
-
-
-def pair(project_id: str, state_dir: Optional[Path] = None, window_minutes: int = 30) -> Optional[int]:
-    """Write one ``executed`` (B4b) per ``asked`` (B4a) with an operator call of the same command
-    within the window; returns the pairs found, None when the CLI ledger is missing or unreadable."""
+def coverage(project_id: str, state_dir: Optional[Path] = None) -> Dict[str, Any]:
+    """Coverage of B4b (decision 8): ``ok`` with the line count only for a readable ledger,
+    ``unknown`` with a reason when it is missing or unreadable, never a 0."""
     state = pe._state_dir(project_id, state_dir)
-    window = f"{window_minutes}m"
     try:
-        calls = _read_ndjson(state / LEDGER)
+        count = sum(1 for raw in (state / LEDGER).read_text(encoding="utf-8").splitlines() if raw.strip())
     except (OSError, UnicodeDecodeError) as exc:
         missing = isinstance(exc, FileNotFoundError)
-        pe.write_coverage(project_id, "B4b", state="unknown", files_read=0, window=window,
-                          files_unreadable=0 if missing else 1,
-                          unreadable_reason=f"{LEDGER} missing" if missing else type(exc).__name__,
-                          state_dir=state_dir)
-        return None
-    events_path = state / "permission_events.ndjson"
-    asked = [e for e in (_read_ndjson(events_path) if events_path.exists() else [])
-             if e.get("bron") == "B4a" and e.get("besluit") == "asked" and _ts(e.get("ts"))]
-    calls = [c for c in calls if c.get("project_id") == project_id and c.get("actor_class") == "operator"
-             and _ts(c.get("ts")) and command_key(c.get("vorm"))]
-    used: set = set()
-    out = []
-    for ask in sorted(asked, key=lambda e: _ts(e["ts"])):
-        start, key = _ts(ask["ts"]), command_key(ask.get("vorm"))
-        for call in sorted(calls, key=lambda c: _ts(c["ts"])):
-            when = _ts(call["ts"])
-            if (key and call.get("invocation_id") not in used and command_key(call["vorm"]) == key
-                    and start <= when <= start + timedelta(minutes=window_minutes)):
-                used.add(call.get("invocation_id"))
-                out.append(pe.build_event(
-                    project_id=project_id, session_id=ask.get("session_id") or "", ts=call["ts"],
-                    account="unknown", origin="operator", bron="B4b", besluit="executed", command=call["vorm"],
-                    reason_code=f"asked:{ask.get('event_id')}", dispatch_id=ask.get("dispatch_id") or None))
-                break
-    pe.write_events(out, project_id, state_dir)
-    pe.write_coverage(project_id, "B4b", state="ok", files_read=1, window=window, count=len(out),
-                      state_dir=state_dir)
-    return len(out)
+        return pe.write_coverage(project_id, "B4b", state="unknown", files_read=0, window="all",
+                                 files_unreadable=0 if missing else 1, state_dir=state_dir,
+                                 unreadable_reason=f"{LEDGER} missing" if missing else type(exc).__name__)
+    return pe.write_coverage(project_id, "B4b", state="ok", files_read=1, window="all", count=count,
+                             state_dir=state_dir)
 
 
 def _cli(argv: List[str]) -> int:

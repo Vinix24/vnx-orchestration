@@ -2,7 +2,11 @@
 """VNX CLI — governance-first multi-agent orchestration."""
 
 import argparse
+import os
+import subprocess
 import sys
+import time
+from pathlib import Path
 
 from vnx_cli import __version__
 
@@ -1986,38 +1990,26 @@ def _dispatch_command(args: argparse.Namespace, parser: argparse.ArgumentParser)
 
 
 def _record_cli_call(argv: list, exit_code: int, started: float) -> None:
-    """CLI ledger B4b (ADR-075 decision 7): start scripts/lib/cli_invocations.py detached; a call
-    exec'd from bin/vnx (VNX_CLI_RECORDED is our parent) is already recorded there. Never raises."""
+    """CLI ledger B4b (ADR-075 decision 7): start scripts/lib/cli_invocations.py detached, unless
+    bin/vnx exec'd us (it set VNX_CLI_RECORDED to its pid, our parent) and records itself."""
     try:
-        import os
-        import subprocess
-        import time
-        from pathlib import Path
-
-        if os.environ.get("VNX_CLI_RECORDED") == str(os.getppid()):
-            return
         recorder = Path(__file__).resolve().parents[1] / "scripts" / "lib" / "cli_invocations.py"
-        if not recorder.is_file():
-            return
-        tty = "1" if sys.stdin is not None and sys.stdin.isatty() else "0"
-        ms = str(int((time.monotonic() - started) * 1000))
-        subprocess.Popen(
-            [sys.executable, str(recorder), "record", str(exit_code), ms, tty, "--", *argv],
-            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            start_new_session=True, close_fds=True)
+        if os.environ.get("VNX_CLI_RECORDED") != str(os.getppid()) and recorder.is_file():
+            tty, ms = "1" if sys.stdin and sys.stdin.isatty() else "0", int((time.monotonic() - started) * 1000)
+            subprocess.Popen([sys.executable, str(recorder), "record", str(exit_code), str(ms), tty, "--", *argv],
+                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                             start_new_session=True, close_fds=True)
     except Exception:  # vnx-silent-except: decision 7, recording never changes the command
         return
 
 
 def main() -> None:
-    import time
-
     started, exit_code = time.monotonic(), 1
     try:
         _main()
         exit_code = 0
     except SystemExit as exc:
-        exit_code = exc.code if isinstance(exc.code, int) else (0 if exc.code is None else 1)
+        exit_code = exc.code if isinstance(exc.code, int) else int(exc.code is not None)
         raise
     finally:
         _record_cli_call(sys.argv[1:], exit_code, started)
