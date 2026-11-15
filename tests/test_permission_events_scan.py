@@ -71,7 +71,7 @@ def test_scan_reads_b1_b2_b4a_and_writes_coverage(tmp_path, monkeypatch, capsys)
         ("B1", "refused_config"), ("B2", "approved_once"), ("B4a", "asked")]
     cov = env.coverage()
     assert {k: (v["state"], v["count"], v["files_read"]) for k, v in cov.items()} == {
-        "B1": ("ok", 1, 1), "B2": ("ok", 1, 1), "B4a": ("ok", 1, 1)}
+        "B1": ("ok", 1, 1), "B2": ("ok", 1, 1), "B3": ("ok", 0, 1), "B4a": ("ok", 1, 1)}
     out = capsys.readouterr().out
     assert "B1 refused_config 1" in out and "pytest" not in out and "vnx release" not in out
 
