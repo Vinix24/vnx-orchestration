@@ -66,7 +66,7 @@ The LLM receives a constrained prompt with 5 structured rules and is required to
 
 ## 3. Gate Locks
 
-**Correction (2026-09-27): this section describes a design that was never wired in.** `scripts/f39/gate_locks.py` implements `create_lock`/`release_lock`/`get_pending_locks`/`has_pending_locks` exactly as below, but nothing in the codebase calls it — there is no T0 pre-filter step that checks `.vnx-data/state/gate_locks/` before deciding `WAIT` vs `COMPLETE`. Sections 1 and 4 of this document describe "gate lock present → WAIT" as a hard, code-enforced pre-filter check; that check does not exist at runtime. Treat the mechanism below as designed, not shipped, until a caller is added.
+**Correction (2026-09-27): this section describes a design that was never wired in.** `scripts/f39/gate_locks.py` keeps only `release_lock`; `create_lock`, `get_pending_locks` and `has_pending_locks` were removed as dead code in golf schoon W3 (2026-11-14), and nothing in the codebase calls the module — there is no T0 pre-filter step that checks `.vnx-data/state/gate_locks/` before deciding `WAIT` vs `COMPLETE`. Sections 1 and 4 of this document describe "gate lock present → WAIT" as a hard, code-enforced pre-filter check; that check does not exist at runtime. Treat the mechanism below as designed, not shipped, until a caller is added.
 
 What actually blocks a merge today is `scripts/pr_merge.py`, described in §10: five preflights in a fixed order, a merge pinned to the approved head, and a binding `pr_merged` receipt. This is a third, independent mechanism from both the (unwired) gate-lock design below and the D1-D5 attestation pipeline described next.
 

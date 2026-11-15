@@ -7,7 +7,7 @@ from pathlib import Path
 from . import identiteit
 from .geheimpatronen import PATTERNS
 from .lezer import lees
-from .schema import SCHEMA, valideer
+from .schema import EXTRA, GEMEEN, SCHEMA, valideer
 
 Uitkomst = namedtuple("Uitkomst", "besluit_id geschreven")  # geschreven: aantal regels dat erbij kwam
 # ADR-077 § 3 zonder `nu` (geldig en te_herzien zijn hier beide "open"): per stand de gebeurtenissen die mogen
@@ -21,11 +21,18 @@ class HerkomstBotsing(Geweigerd): pass
 
 class GeheimGeweigerd(Geweigerd): pass
 
+_NAMEN = GEMEEN.union(*EXTRA.values(), ("soort", "ref", "citaat", "optie", "waarom_niet"))
+
 def _teksten(w, pad=""):
+    """(pad, tekst) voor elke waarde en elke sleutel; een sleutel buiten het schema heet <veldnaam> in het pad."""
     if isinstance(w, str):
         yield pad, w
     for k, v in w.items() if isinstance(w, dict) else enumerate(w) if isinstance(w, list) else ():
-        yield from _teksten(v, f"{pad}.{k}" if pad else str(k))
+        naam = k if isinstance(k, int) or k in _NAMEN else "<veldnaam>"
+        sub = f"{pad}.{naam}" if pad else str(naam)
+        if isinstance(k, str):
+            yield sub, k
+        yield from _teksten(v, sub)
 
 def weiger_geheimen(regel):
     for pad, tekst in _teksten(regel):
@@ -90,6 +97,7 @@ class Register:
     def _maak(self, velden, regels):
         """Een regel uit de velden van de aanroeper; (None, besluit_id) als hij al bestaat."""
         r = dict(velden, schema=SCHEMA, vastgelegd_op=self.klok().strftime("%Y-%m-%dT%H:%M:%SZ"))
+        weiger_geheimen(r)  # vóór elke andere weigering: die mag daarna een veld of id noemen (ADR-077 besluit 6)
         if regels and regels[0]["context"] != r.get("context"):
             raise Geweigerd("context wijkt af van de eerste regel in het bestand")
         if r.get("event") == "vastgelegd":
@@ -109,7 +117,6 @@ class Register:
         weiger_overgang(r, regels)
         if fouten := valideer(r):
             raise Geweigerd("; ".join(fouten))
-        weiger_geheimen(r)
         return r, r["betreft"]
 
     def schrijf(self, *velden):

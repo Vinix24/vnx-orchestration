@@ -26,6 +26,9 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--channel", default="cli", choices=oq.CHANNELS)
     parser.add_argument("--sessie", default="cli")
     parser.add_argument("--limit", type=int, default=5)
+    parser.add_argument("--all", action="store_true", help="every project: one coverage line, then its points")
+    parser.add_argument("--home", default="", help=argparse.SUPPRESS)
+    parser.add_argument("--registry", default="", help=argparse.SUPPRESS)
     sub = parser.add_subparsers(dest="cmd")
     ask = sub.add_parser("ask", help="open a point")
     ask.add_argument("--bron", required=True, choices=sorted(qa.BRON))
@@ -50,9 +53,31 @@ def _point_lines(points: list, more: int) -> list:
     return out + ([f"  +{more} more"] if more else [])
 
 
+def _source_lines(coverage) -> list:
+    return [f"  bron {name}: unknown ({str(reden)[:inbox.REDEN_MAX]})" for name, reden in inbox.unknown_sources(coverage)]
+
+
 def _render(data: dict) -> str:
     head = f"{data['project_id']}: {data['status']}" + (f" ({data['reason']})" if data["reason"] else "")
-    return "\n".join([head] + _point_lines(data["points"], data["more"]))
+    return "\n".join([head] + _source_lines(data["coverage"]) + _point_lines(data["points"], data["more"]))
+
+
+def _show_all(args) -> int:
+    home = Path(args.home) if args.home else Path.home()
+    data = inbox.show_all(home=home, registry_path=Path(args.registry) if args.registry else None, limit=args.limit)
+    if args.json:
+        print(json.dumps(data, indent=2, ensure_ascii=False, sort_keys=True))
+        return 0
+    reg = data["registry"]
+    lines = [f"registry: {reg['dekking']}" + (f" ({reg['reden']})" if reg["reden"] else "")]
+    sto = data["store"]
+    lines.append(f"store: {sto['dekking']}" + (f" ({sto['reden']})" if sto["reden"] else ""))
+    for p in data["projects"]:
+        total = "?" if p["open_total"] is None else p["open_total"]
+        lines.append(f"{p['project_id']}: {p['dekking']}" + (f" ({p['reden']})" if p["reden"] else "") + f", open {total}")
+        lines += _source_lines(p["sources"]) + _point_lines(p["points"], p["more"])
+    print("\n".join(lines))
+    return 0
 
 
 def _show(args, project_id: str, sdir, root) -> int:
@@ -66,6 +91,11 @@ def _show(args, project_id: str, sdir, root) -> int:
 
 def main(argv: list) -> int:
     args = _parser().parse_args(argv)
+    if args.all and (args.present or args.cmd or args.project_id or args.state_dir or args.data_root):
+        print("vnx inbox: --all only shows; ask, answer, push-due, --present and a project scope are per project", file=sys.stderr)
+        return 2
+    if args.all:  # lists every project itself: needs no current project
+        return _show_all(args)
     project_id, sdir = args.project_id or resolve_project_id(), Path(args.state_dir) if args.state_dir else None
     root = Path(args.data_root) if args.data_root else (sdir.parent if sdir is not None else None)
     try:

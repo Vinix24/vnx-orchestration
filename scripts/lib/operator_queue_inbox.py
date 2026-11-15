@@ -17,12 +17,16 @@ try:
     import operator_queue_dream_analyzer
     import operator_queue_steering_verdict
     from project_root import resolve_central_data_dir
+    from dashboard_read_model import _load_json as _registry_json
+    from fabric_audit import SHARED_ROOT_DIRS
 except ImportError:  # vnx-silent-except: imported as scripts.lib.operator_queue_inbox
     from scripts.lib import operator_queue as oq
     from scripts.lib import operator_queue_ask
     from scripts.lib import operator_queue_dream_analyzer
     from scripts.lib import operator_queue_steering_verdict
     from scripts.lib.project_root import resolve_central_data_dir
+    from scripts.lib.dashboard_read_model import _load_json as _registry_json
+    from scripts.fabric_audit import SHARED_ROOT_DIRS
 
 _MODULES = (operator_queue_dream_analyzer, operator_queue_steering_verdict, operator_queue_ask)
 PUSH_MAX_POINTS = 5
@@ -179,3 +183,123 @@ def push_due(project_id: str, *, sessie: str, now: Any = None, state_dir: Option
     blocks = {line["point_id"]: line.get("kopieerblok", "") for line in _ledger(project_id, sdir) if line["kind"] == "opened"}
     counts = _presented(_ledger(project_id, sdir))
     return [_view(state["points"][pid], counts, blocks, set(), set(), _parse(stamp)) for pid in ids]
+
+
+# Folders under <home>/.vnx-data/ that are not a project. Sources: SHARED_ROOT_DIRS (state, events, locks) from
+# scripts/fabric_audit.py; the subdirs that vnx_worktree._ensure_worktree_layout creates (logs, pids, database,
+# unified_reports, receipts, profiles, dispatches, startup_presets; state and locks are already above);
+# business-panels (a panel store, not a project). Names starting with "_" are skipped separately.
+NON_PROJECT_DIRS = frozenset(SHARED_ROOT_DIRS) | {
+    "logs", "pids", "database", "unified_reports", "receipts", "profiles", "dispatches", "startup_presets",
+    "business-panels"}
+
+
+def _registry_projects(registry_path: Path) -> tuple:
+    """(registry coverage, [project names]). Absent, unreadable or malformed is `unknown` with its reason."""
+    try:
+        present = registry_path.exists()
+    except OSError as exc:  # vnx-silent-except: recorded as unknown registry coverage with the error as reason
+        return {"dekking": "unknown", "reden": f"{registry_path}: registry unreadable: {type(exc).__name__}: {exc}"}, []
+    if not present:
+        return {"dekking": "unknown", "reden": f"{registry_path}: registry file absent"}, []
+    data = _registry_json(registry_path)  # the loader load_project_registry uses; None = unreadable or invalid JSON
+    projects = data.get("projects") if isinstance(data, dict) else None
+    if not isinstance(projects, list):
+        return {"dekking": "unknown", "reden": f"{registry_path}: registry unreadable or has no projects list"}, []
+    names = [p["name"] for p in projects if isinstance(p, dict) and isinstance(p.get("name"), str) and p["name"]]
+    return {"dekking": "gelezen", "reden": None}, names
+
+
+def _list_store(base: Path) -> tuple:
+    """(store coverage, {name: None | reason}). A name maps to a reason when its own check failed; a failed
+    listing is `unknown` with the reason and no names, never an empty successful listing."""
+    try:
+        if not base.is_dir():
+            return {"dekking": "gelezen", "reden": None}, {}
+        entries = list(base.iterdir())
+    except OSError as exc:  # vnx-silent-except: recorded as unknown store coverage with the error as reason
+        return {"dekking": "unknown", "reden": f"{base}: {type(exc).__name__}: {exc}"}, {}
+    found: Dict[str, Optional[str]] = {}
+    for entry in entries:
+        try:
+            if entry.is_dir():
+                found[entry.name] = None
+        except OSError as exc:  # vnx-silent-except: this entry is listed as its own unknown project with the reason
+            found[entry.name] = f"{entry}: {type(exc).__name__}: {exc}"
+    return {"dekking": "gelezen", "reden": None}, found
+
+
+def discover_projects(*, home: Path, registry_path: Optional[Path] = None) -> Dict[str, Any]:
+    """``{registry, store: {dekking, reden}, projects: [{project_id, in_store, in_registry, reden}]}``, sorted.
+
+    ``in_store`` is None when the store (or this one entry) could not be read: unknown, never "not in the store"."""
+    home = Path(home)
+    registry, names = _registry_projects(Path(registry_path) if registry_path is not None else home / ".vnx" / "projects.json")
+    store, stored = _list_store(home / ".vnx-data")
+    keep = lambda n: not n.startswith("_") and n not in NON_PROJECT_DIRS  # skip non-project folders
+    stored = {n: r for n, r in stored.items() if keep(n)}
+    names = [n for n in names if keep(n)]
+    unreadable = store["dekking"] != "gelezen"
+    projects = []
+    for n in sorted(set(stored) | set(names)):
+        if unreadable:
+            in_store, reden = None, f"store listing unreadable: {store['reden']}"
+        elif n in stored:
+            in_store, reden = (True, None) if stored[n] is None else (None, stored[n])
+        else:
+            in_store, reden = False, None
+        projects.append({"project_id": n, "in_store": in_store, "in_registry": n in names, "reden": reden})
+    return {"registry": registry, "store": store, "projects": projects}
+
+
+REDEN_MAX = 200
+
+
+def unknown_sources(coverage: Any) -> List[tuple]:
+    """[(name, reden)] for every source that is not positively read: `unknown`, malformed, or a coverage that is
+    not a list. `niet_gebonden` is not unknown. The name is the source's bron, else its reader name."""
+    if not isinstance(coverage, list):
+        return [("coverage", "coverage malformed")]
+    out = []
+    for s in coverage:
+        if not isinstance(s, dict) or s.get("dekking") not in ("gelezen", "niet_gebonden"):
+            src = s if isinstance(s, dict) else {}
+            name = src.get("bron") if src.get("bron") is not None else src.get("reader") or "?"
+            out.append((str(name), src.get("reden") or ("dekking unknown" if src.get("dekking") == "unknown"
+                                                        else "source entry malformed")))
+    return out
+
+
+def project_coverage(data: Mapping[str, Any]) -> tuple:
+    """(dekking, reden) of one project from show(): `gelezen` only when the queue is ok AND no source is unknown."""
+    parts = [] if data.get("status") == "ok" else [data.get("reason") or f"queue status {data.get('status')!r}"]
+    parts += [f"bron {name}: {reden}" for name, reden in unknown_sources(data.get("coverage"))]
+    return ("unknown", "; ".join(parts)[:REDEN_MAX]) if parts else ("gelezen", None)
+
+
+def _project_entry(home: Path, found: Dict[str, Any], limit: int, now: Any) -> Dict[str, Any]:
+    pid = found["project_id"]
+    out = {"project_id": pid, "dekking": "unknown", "reden": None, "open_total": None, "points": [], "more": 0,
+           "sources": []}
+    root = home / ".vnx-data" / pid
+    if found["in_store"] is None:
+        return {**out, "reden": found.get("reden") or "store state unknown"}
+    if not found["in_store"]:
+        return {**out, "dekking": "niet_gebonden", "reden": "registry only: no store under .vnx-data"}
+    try:
+        if not (root / "state").is_dir():
+            return {**out, "reden": "geen state/"}
+        data = show(pid, limit=limit, now=now, state_dir=root / "state", data_root=root)
+    except Exception as exc:  # vnx-silent-except: one project that raises is unknown with the exception type, not a crash of the fleet
+        return {**out, "reden": f"{type(exc).__name__}: {exc}"}
+    dekking, reden = project_coverage(data)
+    total = data["open_total"] if dekking == "gelezen" else None  # unknown never counts as zero (decision 11)
+    return {**out, "dekking": dekking, "reden": reden, "open_total": total, "points": data["points"],
+            "more": data["more"], "sources": data["coverage"]}
+
+
+def show_all(*, home: Path, registry_path: Optional[Path] = None, limit: int = 5, now: Any = None) -> Dict[str, Any]:
+    """Decision 11: one coverage per project. `unknown` never counts as zero (open_total is None)."""
+    found = discover_projects(home=home, registry_path=registry_path)
+    return {"registry": found["registry"], "store": found["store"],
+            "projects": [_project_entry(Path(home), f, limit, now) for f in found["projects"]]}

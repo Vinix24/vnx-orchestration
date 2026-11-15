@@ -136,3 +136,19 @@ def test_overgang_na_eindstand_of_zonder_besluit_geweigerd(reg, opzet, poging):
     with pytest.raises(Geweigerd, match="overgang"):
         POGING[poging](reg, "B-20261114-deadbeef" if opzet == "geen" else a, z)
     assert reg.pad.read_bytes() == voor
+
+TOKEN = "ghp_" + "A" * 36  # pas tijdens de test opgebouwd: het testbestand draagt geen letterlijk geheim
+
+@pytest.mark.parametrize("velden", [  # elk pad dat de scan eerder pas na een andere weigering bereikte
+    lambda: besluit(besluit=f"{TOKEN} gebruiken."),  # herkomst bestaat al met andere tekst
+    lambda: ev(TOKEN, "B-20261114-deadbeef"),  # overgang noemde het event
+    lambda: besluit(**{TOKEN: "x"}),  # onbekend veld noemde de sleutel
+    lambda: besluit(bron={"soort": "adr", "ref": "ADR-077", "citaat": "", TOKEN: "x"}),  # geneste sleutel
+    lambda: besluit(vervangt=TOKEN), lambda: besluit(context=TOKEN.lower(), titel="Ander")],
+    ids=["herkomst", "overgang", "sleutel", "geneste-sleutel", "vervangt", "context"])
+def test_geheim_gaat_voor_elke_andere_weigering(reg, velden):
+    reg.schrijf(besluit())
+    voor = reg.pad.read_bytes()
+    with pytest.raises(GeheimGeweigerd, match="geheimpatroon github_token") as e:
+        reg.schrijf(velden())
+    assert TOKEN not in str(e.value) and TOKEN.lower() not in str(e.value) and reg.pad.read_bytes() == voor

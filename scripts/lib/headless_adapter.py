@@ -154,15 +154,6 @@ def headless_cli_binary() -> str:
     return os.environ.get("VNX_HEADLESS_CLI", "claude").strip()
 
 
-def headless_config_from_env() -> Dict[str, Any]:
-    """Return headless adapter config from environment."""
-    return {
-        "enabled": headless_enabled(),
-        "timeout": headless_timeout(),
-        "cli_binary": headless_cli_binary(),
-    }
-
-
 # ---------------------------------------------------------------------------
 # Exceptions
 # ---------------------------------------------------------------------------
@@ -177,14 +168,6 @@ class HeadlessDisabledError(HeadlessAdapterError):
 
 class HeadlessIneligibleError(HeadlessAdapterError):
     """Raised when a dispatch's task class is not eligible for headless execution."""
-
-
-class HeadlessTimeoutError(HeadlessAdapterError):
-    """Raised when a headless subprocess exceeds its timeout."""
-
-
-class HeadlessBinaryNotFoundError(HeadlessAdapterError):
-    """Raised when the CLI binary is not found in PATH."""
 
 
 # ---------------------------------------------------------------------------

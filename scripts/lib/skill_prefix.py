@@ -193,23 +193,6 @@ def build_skill_prefix(
     return "\n\n---\n\n".join(sections) + "\n\n# USER INSTRUCTION:\n\n"
 
 
-def inject_skill_prefix_into_instruction(
-    instruction: str,
-    skill_names: Iterable[str],
-    skills_root: Path,
-) -> str:
-    """Convenience wrapper: prepend skill-prefix to an instruction string.
-
-    Legacy entry point — kept for back-compat. New code should use
-    build_structured_prompt() which places the instruction in the middle of
-    a role/instruction/SOP/deliverables structure (per Vincent 2026-06-05).
-    """
-    prefix = build_skill_prefix(skill_names, skills_root)
-    if not prefix:
-        return instruction
-    return prefix + instruction
-
-
 def build_structured_prompt(
     skill_names: Iterable[str],
     instruction: str,
