@@ -4391,36 +4391,6 @@
                 "choices": null,
                 "class": "_StoreAction",
                 "const": null,
-                "default": "",
-                "dest": "state_dir",
-                "help": null,
-                "metavar": null,
-                "nargs": null,
-                "option_strings": [
-                  "--state-dir"
-                ],
-                "required": false,
-                "type": null
-              },
-              {
-                "choices": null,
-                "class": "_StoreTrueAction",
-                "const": true,
-                "default": false,
-                "dest": "json",
-                "help": "emit JSON instead of a table",
-                "metavar": null,
-                "nargs": 0,
-                "option_strings": [
-                  "--json"
-                ],
-                "required": false,
-                "type": null
-              },
-              {
-                "choices": null,
-                "class": "_StoreAction",
-                "const": null,
                 "default": null,
                 "dest": "track_id",
                 "help": null,

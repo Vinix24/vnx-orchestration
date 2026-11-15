@@ -6785,7 +6785,7 @@ def _add_plan_gate_attest_parser(pg_sub: Any, common: Callable[[Any], None]) -> 
 def _add_plan_gate_sign_parser(pg_sub: Any, common: Callable[[Any], None]) -> None:
     """`plan-gate sign`: the operator signs the latest plan-gate pass of a track (OI-2849)."""
     p_sign = pg_sub.add_parser("sign", help="operator only: sign the latest plan-gate pass so a T0 may promote (ADR-056)")
-    common(p_sign)
+    p_sign.add_argument("--project-id", default=os.environ.get("VNX_PROJECT_ID", "vnx-dev"))  # no --state-dir/--json: unused
     p_sign.add_argument("track_id")
     p_sign.add_argument("--key", required=True, help="the operator's SSH private key path")
     p_sign.add_argument("--identity", required=True, help="signer identity, as in allowed_signers")
