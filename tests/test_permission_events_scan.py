@@ -190,3 +190,32 @@ def test_event_with_a_timestamp_without_timezone_does_not_abort_the_scan(tmp_pat
     assert env.run() == 0
     cov = env.coverage()
     assert cov["B1"]["state"] == "ok" and cov["B1"]["skipped"].get("bad_timestamp", 0) >= 1
+
+
+def test_b3_enters_the_scan_idempotently_without_secrets(tmp_path, monkeypatch):
+    env = Env(tmp_path, monkeypatch)
+    cmd = "TOKEN=abc123def456 bin/vnx deliverable promote dlv-0123456789ab sk-ABCDEFGHIJKLMNOPQRSTUVWX"
+    env.transcript([{"type": "session-owner", "accountUuid": UUID, "sessionId": "sess-1"},
+                    {"type": "user", "timestamp": NOW, "message": {"content": f"<bash-input>{cmd}</bash-input>"}},
+                    {"type": "user", "timestamp": NOW, "message": {"content": "<bash-stdout>out</bash-stdout>"}}])
+    assert env.run() == 0
+    first = env.ledger()
+    events = [json.loads(line) for line in first.splitlines()]
+    assert [(e["bron"], e["besluit"], e["account"]) for e in events] == [("B3", "executed", "vnx")]
+    assert env.coverage()["B3"]["state"] == "ok" and env.coverage()["B3"]["count"] == 1
+    blob = first + (env.state / "permission_coverage.json").read_bytes()
+    assert b"abc123def456" not in blob and b"sk-ABCDEF" not in blob
+    assert env.run() == 0 and env.ledger() == first
+
+
+def test_b3_unreadable_file_is_unknown_not_zero(tmp_path, monkeypatch):
+    env = Env(tmp_path, monkeypatch)
+    env.transcript(FULL)
+    (env.dir / "locked.jsonl").write_text("{}\n")
+    (env.dir / "locked.jsonl").chmod(0)
+    try:
+        assert env.run() == 0
+    finally:
+        (env.dir / "locked.jsonl").chmod(0o600)
+    cov = env.coverage()["B3"]
+    assert cov["state"] == "unknown" and cov["count"] is None and cov["files_unreadable"] == 1

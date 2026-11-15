@@ -27,6 +27,7 @@ LEDGER_FILE = "steering_sources.ndjson"
 LOCK_FILE = "steering_sources.lock"
 DEFAULT_PROJECTS_ROOT = Path.home() / ".claude" / "projects"
 FORBIDDEN_SLUG_PARTS = ("clients", "business", "salesminds")
+BASH_INPUT = "<bash-input>"
 SYSTEM_TAGS = (("<task-notification", "task_notification"), ("<system-reminder", "system_reminder"),
                ("<command-", "system_tag"), ("<local-command-", "system_tag"), ("<bash-", "system_tag"))
 # Typed by scripts/t0_rotate_spawn.sh (FIRST_MESSAGE) and t0_rotation_state.goal_followup_text.
@@ -263,7 +264,7 @@ def classify_line(obj: object) -> Tuple[Optional[str], str]:
     if not own:
         return "pasted_content", ""
     for tag, reason in SYSTEM_TAGS:
-        if own.startswith(tag):
+        if own.startswith(tag) and not own.startswith(BASH_INPUT):  # a typed `!` command is the operator's own action
             return reason, ""
     return ("automatic", "") if _automatic(own) else (None, own)
 

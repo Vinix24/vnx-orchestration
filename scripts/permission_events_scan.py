@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Permission-event scan (ADR-075, L2): B1, B2 and B4a from the bound transcripts into ``permission_events.ndjson``.
+"""Permission-event scan (ADR-075, L2): B1, B2, B3 and B4a from the bound transcripts into ``permission_events.ndjson``.
 
 Exit codes: 0 a completed scan (also when a source is unbound, absent, error or unknown: that is its coverage),
 2 a refused binding, a foreign store or invalid arguments. Prints counts per source and besluit, never a command.
@@ -22,7 +22,7 @@ import permission_events as pe
 import permission_events_sources as sources
 from vnx_paths import project_id_from_state_dir
 
-BRONNEN = ("B1", "B2", "B4a")
+BRONNEN = ("B1", "B2", "B3", "B4a")
 
 
 def parse_since(text: str) -> timedelta:
@@ -51,7 +51,7 @@ def _refused_binding(state: Path) -> bool:
 
 
 def _coverage_args(result: source.SourceResult, read: int, unreadable: int) -> Dict[str, object]:
-    """state, files_read, files_unreadable and reason for the three sources; a reason is a fixed code, never a slug."""
+    """state, files_read, files_unreadable and reason for the four sources; a reason is a fixed code, never a slug."""
     if result.state == "ok":
         if unreadable:
             return dict(state="unknown", files_read=read, files_unreadable=unreadable, unreadable_reason="unreadable_file")

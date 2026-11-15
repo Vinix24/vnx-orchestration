@@ -26,6 +26,7 @@ ASK_PHRASES = ("draai dit", "draai deze", "draai het", "plak dit", "in een termi
 USER_SOURCES = {"user_temporary": "approved_once", "user_permanent": "approved_permanent", "user_reject": "refused_user"}
 KNOWN_SOURCES = frozenset(("", "config", "hook", "classifier"))
 _FENCE = re.compile(r"```[^\n]*\n(.*?)```", re.DOTALL)
+_BASH_INPUT = re.compile(r"<bash-input>(.*?)</bash-input>", re.DOTALL)
 _DISPATCH = re.compile(r"\bdlv-[0-9a-f]{6,}(?:-[a-z0-9]+)*|\b\d{8}-\d{6}-[\w-]+")
 _CACHE: Dict[Tuple[str, int, int], Tuple[Optional[str], Optional[str]]] = {}
 
@@ -227,9 +228,29 @@ def read_b4a(objs: Sequence[Dict[str, Any]], ctx: Ctx, skipped: Counter) -> Iter
                     yield ev
 
 
+def read_b3(objs: Sequence[Dict[str, Any]], ctx: Ctx, skipped: Counter) -> Iterator[Dict[str, str]]:
+    """One ``executed`` event per ``<bash-input>`` user line: a command the operator typed with `!`."""
+    for obj in objs:
+        if obj.get("type") != "user":
+            continue
+        msg = obj.get("message")
+        content = msg.get("content") if isinstance(msg, dict) else None
+        texts = [content] if isinstance(content, str) else list(_texts(obj))
+        for text in texts:
+            m = _BASH_INPUT.match(text.strip())
+            if not m:
+                continue
+            if not m.group(1).strip():
+                skipped["no_command_line"] += 1
+                continue
+            ev = _emit(skipped, ctx, obj.get("timestamp"), "B3", "executed", m.group(1).strip())
+            if ev:
+                yield ev
+
+
 def scan_transcript(lines: Iterable[str], *, project_id: str, slug: str, stem: str,
                     account_configs: Sequence[Any] = DEFAULT_ACCOUNT_CONFIGS) -> TranscriptScan:
-    """All B1, B2 and B4a events of one transcript; ``skipped`` maps a source to its skip reasons."""
+    """All B1, B2, B3 and B4a events of one transcript; ``skipped`` maps a source to its skip reasons."""
     out, objs = TranscriptScan(), []
     for raw in lines:
         try:
@@ -239,7 +260,7 @@ def scan_transcript(lines: Iterable[str], *, project_id: str, slug: str, stem: s
         if isinstance(obj, dict):
             objs.append(obj)
         elif raw.strip():
-            for bron in ("B1", "B2", "B4a"):
+            for bron in ("B1", "B2", "B3", "B4a"):
                 out.skipped[bron]["malformed_json"] += 1
     owner = next((o for o in objs if o.get("type") == "session-owner"), {})
     sid = owner.get("sessionId")
@@ -247,6 +268,6 @@ def scan_transcript(lines: Iterable[str], *, project_id: str, slug: str, stem: s
     for reason in reasons:
         out.skipped["B1"][reason] += 1  # under B1 like the unmapped reasons: a broken config never reads as 0
     ctx = Ctx(project_id, sid if isinstance(sid, str) and sid else stem, account, origin_of(slug), find_dispatch_id(slug))
-    for bron, reader in (("B1", read_b1), ("B2", read_b2), ("B4a", read_b4a)):
+    for bron, reader in (("B1", read_b1), ("B2", read_b2), ("B3", read_b3), ("B4a", read_b4a)):
         out.events.extend(reader(objs, ctx, out.skipped[bron]))
     return out
