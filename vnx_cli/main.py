@@ -4,6 +4,7 @@
 import argparse
 import functools
 import os
+import runpy
 import subprocess
 import sys
 import time
@@ -2008,8 +2009,11 @@ def _recorded(main):
                     subprocess.Popen([sys.executable, str(recorder), "record", str(exit_code), str(ms), tty, "--",
                                       *sys.argv[1:]], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                                      stderr=subprocess.DEVNULL, start_new_session=True, close_fds=True)
-            except Exception:  # vnx-silent-except: decision 7, recording never changes the command
-                pass
+            except Exception as exc:  # decision 7, recording never changes the command; the failure goes to B4b
+                try:
+                    runpy.run_path(str(recorder))["note_failure"]("launch", exc)
+                except Exception:  # vnx-silent-except: a broken recorder never reaches the command
+                    pass
     return recorded
 
 

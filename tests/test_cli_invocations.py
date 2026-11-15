@@ -48,10 +48,30 @@ def test_actor_class_is_derived(store, env, tty, expected):
     assert ci.record(["status"], 0, 1, env=env, isatty=tty)["actor_class"] == expected
 
 
-def test_recorder_failure_is_swallowed(store, monkeypatch):
-    monkeypatch.setattr(ci.pe, "_append_all", lambda *a: (_ for _ in ()).throw(OSError("disk")))
+def test_recorder_failure_leaves_an_error_in_the_coverage(store, monkeypatch):
+    append, write, cov = ci.pe._append_all, ci.pe.write_coverage, store / "permission_coverage.json"
+    monkeypatch.setattr(ci.pe, "_append_all", lambda *a: (_ for _ in ()).throw(OSError("/Users/x/secret-arg")))
     assert ci.record(["status"], 0, 1, env={}, isatty=True) is None
-    assert not (store / ci.LEDGER).exists()
+    assert not (store / ci.LEDGER).exists() and "secret-arg" not in cov.read_text()  # class name only
+    entry = ci.pe._load_coverage(cov)[0]["B4b"]
+    assert (entry["state"], entry["unreadable_reason"], ci.coverage(PID)) == ("error", "record failed: OSError", entry)
+    monkeypatch.setattr(ci.pe, "write_coverage", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("cov")))
+    assert ci.record(["status"], 0, 1, env={}, isatty=True) is None  # a failing trace raises nothing either
+    monkeypatch.setattr(ci.pe, "_append_all", append)
+    monkeypatch.setattr(ci.pe, "write_coverage", write)
+    assert ci.record(["status"], 0, 1, env={}, isatty=True)  # a later line: only now ok with the count
+    assert (ci.coverage(PID)["state"], ci.coverage(PID)["count"]) == ("ok", 1)
+
+
+def test_a_failed_launch_keeps_the_exit_code_and_leaves_an_error(store, monkeypatch):
+    import vnx_cli.main as m
+    monkeypatch.delenv("VNX_CLI_RECORDED", raising=False)
+    real = subprocess.Popen  # only the recorder's launch fails; git under the path resolver still runs
+    monkeypatch.setattr(m.subprocess, "Popen", lambda a, *r, **k: (_ for _ in ()).throw(PermissionError("x"))
+                        if "record" in a else real(a, *r, **k))
+    with pytest.raises(SystemExit) as raised:
+        m._recorded(lambda: sys.exit(4))()
+    assert (raised.value.code, ci.coverage(PID)["unreadable_reason"]) == (4, "launch failed: PermissionError")
 
 
 def _run(tmp_path, *args, recorder_body=None, **extra_env):

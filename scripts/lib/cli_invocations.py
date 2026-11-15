@@ -67,38 +67,69 @@ def build_vorm(argv: Sequence[str]) -> str:
     return " ".join(words + sorted(flags))
 
 
+def _store(project_id: str, state_dir: Optional[Path] = None) -> Path:
+    state = pe._state_dir(project_id, state_dir or Path(vnx_paths.resolve_paths()["VNX_STATE_DIR"]))  # the call's
+    if os.environ.get("PYTEST_CURRENT_TEST") and Path(tempfile.gettempdir()).resolve() not in state.resolve().parents:
+        raise ValueError("a test run writes only a store under the temp dir, never the real store")
+    return state
+
+
+def note_failure(stage: str, exc: BaseException, state_dir: Optional[Path] = None) -> None:
+    """A lost line leaves ``error`` in B4b (decision 8), with the class name only (decision 10); never raises."""
+    try:
+        project_id, reason = resolve_project_id(), {"record": "record failed: ", "launch": "launch failed: "}[stage]
+        pe.write_coverage(project_id, "B4b", state="error", files_read=0, files_unreadable=1, window="all",
+                          unreadable_reason=reason + type(exc).__name__, state_dir=_store(project_id, state_dir))
+    except Exception:  # vnx-silent-except: last resort, a broken trace never changes the command (decision 7)
+        pass
+
+
 def record(argv: Sequence[str], exit_code: Optional[int], duration_ms: Optional[int],
            env: Optional[Mapping[str, str]] = None, isatty: Optional[bool] = None) -> Optional[Dict[str, Any]]:
-    """Write one line; never raises (decision 7): on any failure the line stays away."""
+    """Write one line; never raises (decision 7): on any failure the line stays away and B4b says error."""
+    state = None
     try:
         project_id = resolve_project_id()
         line = {"schema": SCHEMA, "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
                 "invocation_id": uuid.uuid4().hex[:16], "project_id": project_id, "vorm": build_vorm(list(argv)),
                 "actor_class": actor_class.derive(env, isatty), "exit_code": exit_code if isinstance(exit_code, int)
                 else None, "duration_ms": duration_ms if isinstance(duration_ms, int) and duration_ms >= 0 else None}
-        state = pe._state_dir(project_id, Path(vnx_paths.resolve_paths()["VNX_STATE_DIR"]))  # the call's store
-        scratch = Path(tempfile.gettempdir()).resolve()
-        if os.environ.get("PYTEST_CURRENT_TEST") and scratch not in state.resolve().parents:
-            return None  # a test run never writes the real store, only a store under the temp dir
+        state = _store(project_id)
         with pe._locked(state):
             pe._append_all(state / LEDGER, (json.dumps(line, sort_keys=True) + "\n").encode("utf-8"))
         return line
-    except Exception:  # vnx-silent-except: decision 7, the hook never changes the command; no line is written
+    except Exception as exc:  # decision 7, the hook never changes the command; no line is written
+        if state is not None:  # no project id or no store resolved: there is no place for the trace either
+            note_failure("record", exc, state)
         return None
+
+
+def _later(raw: str, since: Any) -> bool:
+    try:
+        return datetime.fromisoformat(json.loads(raw)["ts"]) > datetime.fromisoformat(since)
+    except (ValueError, KeyError, TypeError):  # vnx-silent-except: no readable later ts is no proof, the error stays
+        return False
 
 
 def coverage(project_id: str, state_dir: Optional[Path] = None) -> Dict[str, Any]:
     """Coverage of B4b (decision 8): ``ok`` with the line count only for a readable ledger,
     ``unknown`` with a reason when it is missing or unreadable, never a 0."""
     state = pe._state_dir(project_id, state_dir)
+    prior = pe._load_coverage(state / "permission_coverage.json")[0].get("B4b") or {}  # a record/launch error stays
+    failed = prior.get("state") == "error" and str(prior.get("unreadable_reason"))[:14] in ("record failed:",
+                                                                                           "launch failed:")
     try:
-        count = sum(1 for raw in (state / LEDGER).read_text(encoding="utf-8").splitlines() if raw.strip())
+        lines = [raw for raw in (state / LEDGER).read_text(encoding="utf-8").splitlines() if raw.strip()]
     except (OSError, UnicodeDecodeError) as exc:
+        if failed:  # until the ledger holds a line written after it
+            return prior
         missing = isinstance(exc, FileNotFoundError)
         return pe.write_coverage(project_id, "B4b", state="unknown", files_read=0, window="all",
                                  files_unreadable=0 if missing else 1, state_dir=state_dir,
                                  unreadable_reason=f"{LEDGER} missing" if missing else type(exc).__name__)
-    return pe.write_coverage(project_id, "B4b", state="ok", files_read=1, window="all", count=count,
+    if failed and not any(_later(raw, prior.get("updated")) for raw in lines):
+        return prior
+    return pe.write_coverage(project_id, "B4b", state="ok", files_read=1, window="all", count=len(lines),
                              state_dir=state_dir)
 
 
