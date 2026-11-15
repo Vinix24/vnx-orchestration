@@ -836,9 +836,6 @@ def _check_reachability(
     pre-check exists, never a silent skip. Never raises: an absent/corrupt
     ledger or a probe failure degrades to the advisory WARN path, never a crash.
     """
-    import urllib.request
-    import urllib.error
-
     provider_val = plan.provider.value
     lane = plan.lane
 
@@ -865,138 +862,164 @@ def _check_reachability(
         provider_val.startswith("litellm:")
         or provider_val in ("litellm",)
     ):
-        proxy_url = os.environ.get(
-            "LITELLM_PROXY_BASE",
-            "http://127.0.0.1:4141",
-        )
-        models_url = f"{proxy_url.rstrip('/')}/v1/models"
-        # OI-893: the probe must carry the proxy's Authorization header — an
-        # unauthenticated GET to an auth-gated /v1/models returns HTTP 401 by
-        # construction, so the OK branch would be unreachable whenever the proxy
-        # enforces a key. Add the header when LITELLM_API_KEY is present; when it
-        # is absent, the 401 the proxy returns is genuine and is reported as
-        # AUTH REJECTED with a "key not set" hint, never as an OK.
-        litellm_key = os.environ.get("LITELLM_API_KEY", "").strip()
-        try:
-            req = urllib.request.Request(models_url)
-            if litellm_key:
-                req.add_header("Authorization", f"Bearer {litellm_key}")
-            resp = urllib.request.urlopen(req, timeout=5)
-            body = resp.read().decode("utf-8", errors="replace")
-            # A 200 with an empty model list is suspicious but not a hard
-            # failure — the proxy may be warming up.
-            if resp.status == 200:
-                try:
-                    data = json.loads(body)
-                    model_count = len(data.get("data", []))
-                    if model_count == 0:
-                        print(
-                            f"[dispatch_cli] [WARN] litellm proxy returned 0 models "
-                            f"from {models_url} — the lane may be stale. Evidence: "
-                            f"empty model list.",
-                            file=sys.stderr,
-                        )
-                    else:
-                        print(
-                            f"[dispatch_cli] [reachability] litellm proxy OK: "
-                            f"{model_count} models at {models_url}",
-                            file=sys.stderr,
-                        )
-                except json.JSONDecodeError:
-                    print(
-                        f"[dispatch_cli] [WARN] litellm proxy response is not valid "
-                        f"JSON from {models_url} — response: {body[:200]}",
-                        file=sys.stderr,
-                    )
-        except urllib.error.HTTPError as exc:
-            status = exc.code
-            body = ""
-            try:
-                body = exc.read().decode("utf-8", errors="replace")[:200]
-            except Exception:  # vnx-silent-except: body read is best-effort; empty case caught by `body or str(exc)` below
-                pass
-            if status in (401, 403):
-                if not litellm_key:
-                    auth_hint = (
-                        "LITELLM_API_KEY is not set — ANY dispatch on this "
-                        "lane will fail silently."
-                    )
-                else:
-                    auth_hint = (
-                        "The proxy API key (LITELLM_API_KEY) is missing or "
-                        "invalid — ANY dispatch on this lane will fail silently."
-                    )
-                print(
-                    f"[dispatch_cli] [WARN] litellm proxy AUTH REJECTED "
-                    f"(HTTP {status}) at {models_url}. Evidence: {body or str(exc)}. "
-                    f"{auth_hint}",
-                    file=sys.stderr,
-                )
-            else:
-                print(
-                    f"[dispatch_cli] [WARN] litellm proxy returned HTTP {status} "
-                    f"from {models_url}. Evidence: {body or str(exc)}",
-                    file=sys.stderr,
-                )
-        except (urllib.error.URLError, OSError) as exc:
-            print(
-                f"[dispatch_cli] [WARN] litellm proxy unreachable at "
-                f"{models_url} ({exc}). The lane may be down — dispatch will "
-                f"likely fail.",
-                file=sys.stderr,
-            )
+        _probe_litellm_proxy()
         return ReachabilityVerdict(block=False)
 
     # ── deepseek-harness lane ──
     if lane == "provider" and provider_val in (
         "deepseek-harness", "deepseek_harness",
     ):
-        ds_url = "https://api.deepseek.com/v1/models"
-        # OI-893: the probe must carry the API key. An unauthenticated GET to
-        # api.deepseek.com/v1/models returns HTTP 401 by construction, so the
-        # OK branch was unreachable. With DEEPSEEK_API_KEY set the probe now
-        # exercises the same auth the lane uses; when it is absent the 401 is
-        # genuine and is reported as AUTH REJECTED with a "key not set" hint.
-        ds_key = os.environ.get("DEEPSEEK_API_KEY", "").strip()
-        try:
-            req = urllib.request.Request(ds_url)
-            if ds_key:
-                req.add_header("Authorization", f"Bearer {ds_key}")
-            urllib.request.urlopen(req, timeout=5)
-            print(
-                f"[dispatch_cli] [reachability] deepseek API OK: {ds_url}",
-                file=sys.stderr,
-            )
-        except urllib.error.HTTPError as exc:
-            if exc.code in (401, 403):
-                if not ds_key:
-                    auth_hint = "DEEPSEEK_API_KEY is not set."
-                elif exc.code == 403:
-                    auth_hint = "the API key is missing permissions."
-                else:
-                    auth_hint = "the API key is missing, invalid, or expired."
-                print(
-                    f"[dispatch_cli] [WARN] deepseek API AUTH REJECTED "
-                    f"(HTTP {exc.code}) at {ds_url}. {auth_hint}",
-                    file=sys.stderr,
-                )
-            else:
-                print(
-                    f"[dispatch_cli] [WARN] deepseek API returned HTTP "
-                    f"{exc.code} from {ds_url}.",
-                    file=sys.stderr,
-                )
-        except (urllib.error.URLError, OSError) as exc:
-            print(
-                f"[dispatch_cli] [WARN] deepseek API unreachable at "
-                f"{ds_url} ({exc}).",
-                file=sys.stderr,
-            )
+        _probe_deepseek_api()
         return ReachabilityVerdict(block=False)
 
     # ── Every other lane — explicit "not checkable", never silence ─────────
     print(_not_checkable_note(lane, provider_val, state_dir), file=sys.stderr)
     return ReachabilityVerdict(block=False)
+
+
+def _probe_litellm_proxy() -> None:
+    """``_check_reachability``'s advisory litellm proxy probe: prints one OK/WARN line, never raises."""
+    import urllib.request
+    import urllib.error
+
+    proxy_url = os.environ.get(
+        "LITELLM_PROXY_BASE",
+        "http://127.0.0.1:4141",
+    )
+    models_url = f"{proxy_url.rstrip('/')}/v1/models"
+    # OI-893: the probe must carry the proxy's Authorization header — an
+    # unauthenticated GET to an auth-gated /v1/models returns HTTP 401 by
+    # construction, so the OK branch would be unreachable whenever the proxy
+    # enforces a key. Add the header when LITELLM_API_KEY is present; when it
+    # is absent, the 401 the proxy returns is genuine and is reported as
+    # AUTH REJECTED with a "key not set" hint, never as an OK.
+    litellm_key = os.environ.get("LITELLM_API_KEY", "").strip()
+    try:
+        req = urllib.request.Request(models_url)
+        if litellm_key:
+            req.add_header("Authorization", f"Bearer {litellm_key}")
+        resp = urllib.request.urlopen(req, timeout=5)
+        _report_litellm_models(resp, models_url)
+    except urllib.error.HTTPError as exc:
+        _warn_litellm_http_error(exc, models_url, litellm_key)
+    except (urllib.error.URLError, OSError) as exc:
+        print(
+            f"[dispatch_cli] [WARN] litellm proxy unreachable at "
+            f"{models_url} ({exc}). The lane may be down — dispatch will "
+            f"likely fail.",
+            file=sys.stderr,
+        )
+
+
+def _report_litellm_models(resp, models_url: str) -> None:
+    """Read a litellm ``/v1/models`` response and print the OK or WARN line for its model list."""
+    body = resp.read().decode("utf-8", errors="replace")
+    # A 200 with an empty model list is suspicious but not a hard
+    # failure — the proxy may be warming up.
+    if resp.status == 200:
+        try:
+            data = json.loads(body)
+            model_count = len(data.get("data", []))
+            if model_count == 0:
+                print(
+                    f"[dispatch_cli] [WARN] litellm proxy returned 0 models "
+                    f"from {models_url} — the lane may be stale. Evidence: "
+                    f"empty model list.",
+                    file=sys.stderr,
+                )
+            else:
+                print(
+                    f"[dispatch_cli] [reachability] litellm proxy OK: "
+                    f"{model_count} models at {models_url}",
+                    file=sys.stderr,
+                )
+        except json.JSONDecodeError:
+            print(
+                f"[dispatch_cli] [WARN] litellm proxy response is not valid "
+                f"JSON from {models_url} — response: {body[:200]}",
+                file=sys.stderr,
+            )
+
+
+def _warn_litellm_http_error(exc, models_url: str, litellm_key: str) -> None:
+    """Print the WARN line for an HTTP error from the litellm proxy probe (auth or other status)."""
+    status = exc.code
+    body = ""
+    try:
+        body = exc.read().decode("utf-8", errors="replace")[:200]
+    except Exception:  # vnx-silent-except: body read is best-effort; empty case caught by `body or str(exc)` below
+        pass
+    if status in (401, 403):
+        if not litellm_key:
+            auth_hint = (
+                "LITELLM_API_KEY is not set — ANY dispatch on this "
+                "lane will fail silently."
+            )
+        else:
+            auth_hint = (
+                "The proxy API key (LITELLM_API_KEY) is missing or "
+                "invalid — ANY dispatch on this lane will fail silently."
+            )
+        print(
+            f"[dispatch_cli] [WARN] litellm proxy AUTH REJECTED "
+            f"(HTTP {status}) at {models_url}. Evidence: {body or str(exc)}. "
+            f"{auth_hint}",
+            file=sys.stderr,
+        )
+    else:
+        print(
+            f"[dispatch_cli] [WARN] litellm proxy returned HTTP {status} "
+            f"from {models_url}. Evidence: {body or str(exc)}",
+            file=sys.stderr,
+        )
+
+
+def _probe_deepseek_api() -> None:
+    """``_check_reachability``'s advisory deepseek API probe: prints one OK/WARN line, never raises."""
+    import urllib.request
+    import urllib.error
+
+    ds_url = "https://api.deepseek.com/v1/models"
+    # OI-893: the probe must carry the API key. An unauthenticated GET to
+    # api.deepseek.com/v1/models returns HTTP 401 by construction, so the
+    # OK branch was unreachable. With DEEPSEEK_API_KEY set the probe now
+    # exercises the same auth the lane uses; when it is absent the 401 is
+    # genuine and is reported as AUTH REJECTED with a "key not set" hint.
+    ds_key = os.environ.get("DEEPSEEK_API_KEY", "").strip()
+    try:
+        req = urllib.request.Request(ds_url)
+        if ds_key:
+            req.add_header("Authorization", f"Bearer {ds_key}")
+        urllib.request.urlopen(req, timeout=5)
+        print(
+            f"[dispatch_cli] [reachability] deepseek API OK: {ds_url}",
+            file=sys.stderr,
+        )
+    except urllib.error.HTTPError as exc:
+        if exc.code in (401, 403):
+            if not ds_key:
+                auth_hint = "DEEPSEEK_API_KEY is not set."
+            elif exc.code == 403:
+                auth_hint = "the API key is missing permissions."
+            else:
+                auth_hint = "the API key is missing, invalid, or expired."
+            print(
+                f"[dispatch_cli] [WARN] deepseek API AUTH REJECTED "
+                f"(HTTP {exc.code}) at {ds_url}. {auth_hint}",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                f"[dispatch_cli] [WARN] deepseek API returned HTTP "
+                f"{exc.code} from {ds_url}.",
+                file=sys.stderr,
+            )
+    except (urllib.error.URLError, OSError) as exc:
+        print(
+            f"[dispatch_cli] [WARN] deepseek API unreachable at "
+            f"{ds_url} ({exc}).",
+            file=sys.stderr,
+        )
 
 
 # ---------------------------------------------------------------------------

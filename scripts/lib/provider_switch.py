@@ -1153,7 +1153,9 @@ EXEMPT: Dict[str, str] = {
     "scripts/lib/adapters/codex_adapter.py:CodexAdapter.stream_events": "codex launch (decision 2b)",
     "scripts/conversation_analyzer/deep_analyzer.py:DeepAnalyzer._try_claude_max":
         "claude launch on the subscription (decision 2b)",
-    "scripts/lib/dispatch_cli.py:_check_reachability":
+    "scripts/lib/dispatch_cli.py:_probe_litellm_proxy":
+        "reachability probe (GET /v1/models): no model call",
+    "scripts/lib/dispatch_cli.py:_probe_deepseek_api":
         "reachability probe (GET /v1/models): no model call",
     "scripts/lib/adapters/ollama_adapter.py:OllamaAdapter.reachability":
         "reachability probe (GET /api/tags): no model call",
