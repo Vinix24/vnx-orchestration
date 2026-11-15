@@ -12,9 +12,10 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "packages" / "besluitenregister"))
-from besluitenregister.cli import _besluiten, _stand
+from besluitenregister.cli import _besluiten
 from besluitenregister.lezer import lees
 from besluitenregister.schrijver import Geweigerd, Register
+from besluitenregister.stand import stand
 
 import operator_queue as oq
 
@@ -80,7 +81,7 @@ def index_block(project_id: str, logdir, *, state_dir: Optional[Path] = None, nu
         uit = lees(pad)
         regels = [r for _, r in uit.regels]
         besl = _besluiten(regels)
-        standen = {bid: _stand(b, nu) for bid, b in besl.items()}
+        standen = {bid: stand(regels, bid, nu).naam for bid in besl}
         gedekt = {b["v"]["bron"]["ref"] for b in besl.values()
                   if b["v"]["bron"]["soort"] == "chat" and b["v"]["vastgelegd_door"] == "agent:operator-queue"}
         gat = [a["point_id"] for a in oq.answers(project_id, state_dir=state_dir) if a["point_id"] not in gedekt]
