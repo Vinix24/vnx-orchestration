@@ -17,12 +17,16 @@ try:
     import operator_queue_dream_analyzer
     import operator_queue_steering_verdict
     from project_root import resolve_central_data_dir
+    from dashboard_read_model import _load_json as _registry_json
+    from fabric_audit import SHARED_ROOT_DIRS
 except ImportError:  # vnx-silent-except: imported as scripts.lib.operator_queue_inbox
     from scripts.lib import operator_queue as oq
     from scripts.lib import operator_queue_ask
     from scripts.lib import operator_queue_dream_analyzer
     from scripts.lib import operator_queue_steering_verdict
     from scripts.lib.project_root import resolve_central_data_dir
+    from scripts.lib.dashboard_read_model import _load_json as _registry_json
+    from scripts.fabric_audit import SHARED_ROOT_DIRS
 
 _MODULES = (operator_queue_dream_analyzer, operator_queue_steering_verdict, operator_queue_ask)
 PUSH_MAX_POINTS = 5
@@ -179,3 +183,62 @@ def push_due(project_id: str, *, sessie: str, now: Any = None, state_dir: Option
     blocks = {line["point_id"]: line.get("kopieerblok", "") for line in _ledger(project_id, sdir) if line["kind"] == "opened"}
     counts = _presented(_ledger(project_id, sdir))
     return [_view(state["points"][pid], counts, blocks, set(), set(), _parse(stamp)) for pid in ids]
+
+
+# Folders under <home>/.vnx-data/ that are not a project. Sources: SHARED_ROOT_DIRS (state, events, locks) from
+# scripts/fabric_audit.py; the subdirs that vnx_worktree._ensure_worktree_layout creates (logs, pids, database,
+# unified_reports, receipts, profiles, dispatches, startup_presets; state and locks are already above);
+# business-panels (a panel store, not a project). Names starting with "_" are skipped separately.
+NON_PROJECT_DIRS = frozenset(SHARED_ROOT_DIRS) | {
+    "logs", "pids", "database", "unified_reports", "receipts", "profiles", "dispatches", "startup_presets",
+    "business-panels"}
+
+
+def _registry_projects(registry_path: Path) -> tuple:
+    """(registry coverage, [project names]). Absent, unreadable or malformed is `unknown` with its reason."""
+    if not registry_path.exists():
+        return {"dekking": "unknown", "reden": f"{registry_path}: registry file absent"}, []
+    data = _registry_json(registry_path)  # the loader load_project_registry uses; None = unreadable or invalid JSON
+    projects = data.get("projects") if isinstance(data, dict) else None
+    if not isinstance(projects, list):
+        return {"dekking": "unknown", "reden": f"{registry_path}: registry unreadable or has no projects list"}, []
+    names = [p["name"] for p in projects if isinstance(p, dict) and isinstance(p.get("name"), str) and p["name"]]
+    return {"dekking": "gelezen", "reden": None}, names
+
+
+def discover_projects(*, home: Path, registry_path: Optional[Path] = None) -> Dict[str, Any]:
+    """``{registry: {dekking, reden}, projects: [{project_id, in_store, in_registry}]}``, sorted by project_id."""
+    home = Path(home)
+    registry, names = _registry_projects(Path(registry_path) if registry_path is not None else home / ".vnx" / "projects.json")
+    base = home / ".vnx-data"
+    try:
+        stored = [d.name for d in base.iterdir() if d.is_dir()] if base.is_dir() else []
+    except OSError:  # vnx-silent-except: an unreadable data home lists no stores; the registry names still count
+        stored = []
+    stored = [n for n in stored if not n.startswith("_") and n not in NON_PROJECT_DIRS]
+    names = [n for n in names if not n.startswith("_") and n not in NON_PROJECT_DIRS]
+    return {"registry": registry, "projects": [
+        {"project_id": n, "in_store": n in stored, "in_registry": n in names} for n in sorted(set(stored) | set(names))]}
+
+
+def _project_entry(home: Path, found: Dict[str, Any], limit: int, now: Any) -> Dict[str, Any]:
+    pid = found["project_id"]
+    out = {"project_id": pid, "dekking": "unknown", "reden": None, "open_total": None, "points": [], "more": 0,
+           "sources": []}
+    root = home / ".vnx-data" / pid
+    if not found["in_store"]:
+        return {**out, "dekking": "niet_gebonden", "reden": "registry only: no store under .vnx-data"}
+    if not (root / "state").is_dir():
+        return {**out, "reden": "geen state/"}
+    data = show(pid, limit=limit, now=now, state_dir=root / "state", data_root=root)
+    if data["status"] != "ok":
+        return {**out, "reden": data["reason"], "sources": data["coverage"]}
+    return {**out, "dekking": "gelezen", "open_total": data["open_total"], "points": data["points"],
+            "more": data["more"], "sources": data["coverage"]}
+
+
+def show_all(*, home: Path, registry_path: Optional[Path] = None, limit: int = 5, now: Any = None) -> Dict[str, Any]:
+    """Decision 11: one coverage per project. `unknown` never counts as zero (open_total is None)."""
+    found = discover_projects(home=home, registry_path=registry_path)
+    return {"registry": found["registry"],
+            "projects": [_project_entry(Path(home), f, limit, now) for f in found["projects"]]}

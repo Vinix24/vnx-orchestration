@@ -1,0 +1,1 @@
+- `vnx inbox --all` lists every project found under `~/.vnx-data/` and in `~/.vnx/projects.json` with one coverage line each (`gelezen`, `niet_gebonden`, or `unknown` with its reason, never counted as zero open points); `--json` prints the same (operator-vragen-tot-antwoord Q4 part b).

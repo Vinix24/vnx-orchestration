@@ -174,3 +174,84 @@ def test_cli_json_and_push_due_with_temp_store(sdir, capsys):
     assert json.loads(capsys.readouterr().out)[0]["point_id"] == pid
     assert inbox_cli.main(base + ["push-due"]) == 0 and capsys.readouterr().out == ""
     assert inbox_cli.main(base) == 0 and pid in capsys.readouterr().out
+
+
+def _home(tmp_path):
+    home = tmp_path / "home"
+    data = home / ".vnx-data"
+    healthy = data / "alpha" / "state"
+    healthy.mkdir(parents=True)
+    (data / "beta").mkdir()  # a project without state/
+    for skipped in ("state", "events", "unified_reports", "business-panels", "_scratch"):
+        (data / skipped).mkdir()
+    registry = home / ".vnx" / "projects.json"
+    registry.parent.mkdir(parents=True)
+    registry.write_text(json.dumps({"schema_version": 1, "projects": [
+        {"name": "alpha", "path": "/x"}, {"name": "gamma", "path": "/y"}, {"name": "state", "path": "/z"}]}))
+    pids = [_open(healthy, r, a, project="alpha") for r, a in (("p", "2026-11-10T00:00:00Z"), ("q", "2026-11-11T00:00:00Z"))]
+    return home, registry, pids
+
+
+def test_all_three_coverages_and_json_equals_text(tmp_path, capsys):
+    home, registry, pids = _home(tmp_path)
+    base = ["--all", "--home", str(home), "--registry", str(registry)]
+    assert inbox_cli.main(base) == 0
+    text = capsys.readouterr().out
+    assert inbox_cli.main(base + ["--json"]) == 0
+    data = json.loads(capsys.readouterr().out)
+    by_id = {p["project_id"]: p for p in data["projects"]}
+    assert list(by_id) == ["alpha", "beta", "gamma"]
+    assert by_id["alpha"]["dekking"] == "gelezen" and by_id["alpha"]["open_total"] == 2
+    assert by_id["beta"]["dekking"] == "unknown" and by_id["beta"]["reden"] == "geen state/"
+    assert by_id["beta"]["open_total"] is None
+    assert by_id["gamma"]["dekking"] == "niet_gebonden"
+    assert data["registry"] == {"dekking": "gelezen", "reden": None}
+    coverage_lines = [ln for ln in text.splitlines() if not ln.startswith(" ") and not ln.startswith("registry")]
+    assert [ln.split(":")[0] for ln in coverage_lines] == ["alpha", "beta", "gamma"]
+    assert "unknown (geen state/)" in text and "niet_gebonden" in text
+    assert [p["point_id"] for p in by_id["alpha"]["points"]] == pids  # oldest first, same ids as the text
+    assert all(pid in text for pid in pids) and text.index(pids[0]) < text.index(pids[1])
+
+
+def test_all_skips_non_project_folders(tmp_path):
+    home, registry, _ = _home(tmp_path)
+    ids = [p["project_id"] for p in inbox.discover_projects(home=home, registry_path=registry)["projects"]]
+    assert ids == ["alpha", "beta", "gamma"]  # not state, events, unified_reports, business-panels, _scratch
+
+
+@pytest.mark.parametrize("content", ["{broken", json.dumps({"projects": "x"}), None])
+def test_all_unreadable_registry_still_lists_stores(tmp_path, content):
+    home, registry, _ = _home(tmp_path)
+    registry.unlink() if content is None else registry.write_text(content)
+    data = inbox.show_all(home=home, registry_path=registry)
+    assert data["registry"]["dekking"] == "unknown" and data["registry"]["reden"]
+    assert [p["project_id"] for p in data["projects"]] == ["alpha", "beta"]
+
+
+def test_all_with_present_or_push_due_is_refused(tmp_path, capsys):
+    home, registry, _ = _home(tmp_path)
+    base = ["--all", "--home", str(home), "--registry", str(registry)]
+    assert inbox_cli.main(base + ["--present"]) == 2
+    assert inbox_cli.main(base + ["push-due"]) == 2
+    ledger = (home / ".vnx-data" / "alpha" / "state" / oq.LEDGER_FILENAME).read_text()
+    assert '"presented"' not in ledger and '"push_reserved"' not in ledger
+
+
+def test_all_ledger_for_other_project_is_unknown_not_zero(tmp_path):
+    home, registry, _ = _home(tmp_path)
+    ledger = home / ".vnx-data" / "alpha" / "state" / oq.LEDGER_FILENAME
+    ledger.write_text(ledger.read_text().replace('"project_id": "alpha"', '"project_id": "other"'))
+    entry = {p["project_id"]: p for p in inbox.show_all(home=home, registry_path=registry)["projects"]}["alpha"]
+    assert entry["dekking"] == "unknown" and entry["open_total"] is None and entry["reden"]
+
+
+def test_show_unknown_reden_follows_source_coverage(sdir, monkeypatch):
+    pid = _open(sdir, "p", "2026-11-10T00:00:00Z")
+    oq.append_line(PID, "unknown", {"point_id": pid, "reden": "bron onleesbaar"}, now=NOW, state_dir=sdir)
+    monkeypatch.setattr(inbox, "_MODULES", (_fake(result={"bron": 3, "dekking": "unknown", "reden": "stuk",
+                                                           "unknown": []}),))
+    first = inbox.show(PID, now=NOW, state_dir=sdir)
+    monkeypatch.setattr(inbox, "_MODULES", (_fake(),))
+    second = inbox.show(PID, now=NOW, state_dir=sdir)
+    assert second["points"][0]["unknown_reden"] is None
+    assert first["points"][0]["unknown_reden"] == "bron onleesbaar"
