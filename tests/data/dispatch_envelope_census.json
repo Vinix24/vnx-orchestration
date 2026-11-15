@@ -1338,6 +1338,76 @@
       "symbol": "ProviderAdapter"
     },
     {
+      "file": "tests/test_golf_schoon_r31_characterisation.py",
+      "line": 51,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "_AdapterResult"
+    },
+    {
+      "file": "tests/test_golf_schoon_r31_characterisation.py",
+      "line": 53,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "_AdapterResult"
+    },
+    {
+      "file": "tests/test_golf_schoon_r31_characterisation.py",
+      "line": 83,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "ClaudeSubprocessAdapter"
+    },
+    {
+      "file": "tests/test_golf_schoon_r31_characterisation.py",
+      "line": 83,
+      "mechanism": "patch.object-attr",
+      "module_target": "dispatch_envelope",
+      "symbol": "ClaudeSubprocessAdapter.run"
+    },
+    {
+      "file": "tests/test_golf_schoon_r31_characterisation.py",
+      "line": 104,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "run_envelope_headless_plan"
+    },
+    {
+      "file": "tests/test_golf_schoon_r31_characterisation.py",
+      "line": 127,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "_receipts_file_for"
+    },
+    {
+      "file": "tests/test_golf_schoon_r31_characterisation.py",
+      "line": 151,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "REASON_PRE_SPAWN_ERROR"
+    },
+    {
+      "file": "tests/test_golf_schoon_r31_characterisation.py",
+      "line": 159,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "logger"
+    },
+    {
+      "file": "tests/test_golf_schoon_r31_characterisation.py",
+      "line": 175,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "logger"
+    },
+    {
+      "file": "tests/test_golf_schoon_r31_characterisation.py",
+      "line": 199,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "_AdapterResult"
+    },
+    {
       "file": "tests/test_golf_schoon_r34_characterisation.py",
       "line": 23,
       "mechanism": "direct-call",
