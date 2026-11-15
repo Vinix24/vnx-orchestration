@@ -335,3 +335,39 @@ def test_geen_melding_herhaalt_een_geheim_van_de_aanroeper(capsys, tmp_path, pad
     code, out, err = run(capsys, *argv)
     assert code == verwacht and "github_token" in out + err and TOKEN not in out + err
     assert (tmp_path / "besluiten.ndjson").read_bytes() == voor
+
+NIEUW = [*KOP, *VELDEN, "--titel", "t", "--besluit", "b", "--vertrouwelijkheid", "intern"]
+VOLLEDIG = {  # elk subcommando met al zijn verplichte vlaggen; "A" wordt het id van een bestaand besluit
+    "add": ["add", *NIEUW], "vervang": ["vervang", "A", *NIEUW, "--reden", "r"],
+    "trek-in": ["trek-in", "A", *KOP, "--reden", "r", "--bron-soort", "adr", "--bron-ref", "r"],
+    "herzien": ["herzien", "A", *KOP, "--waarom", "w", "--herzien-op", "geen"],
+    "bevestig": ["bevestig", "A", *KOP, "--bron-soort", "chat", "--bron-ref", "c", "--herzien-op", "geen"],
+    "export": ["export", "--voor", "intern"]}
+WEGLATEN = [(s, v) for s, argv in VOLLEDIG.items() for v in ["--context", *(x for x in argv if x.startswith("--"))]]
+
+def _argv(ctx, sub, bid, zonder=None):
+    argv = [bid if x == "A" else x for x in VOLLEDIG[sub]] + ["--context", ctx]
+    if zonder:
+        del argv[argv.index(zonder):argv.index(zonder) + 2]
+    return argv
+
+@pytest.mark.parametrize("sub", VOLLEDIG)
+def test_volledige_aanroep_per_subcommando_werkt(capsys, tmp_path, sub):
+    code, _, err = run(capsys, *_argv(tmp_path, sub, add(capsys, tmp_path, "Kies A")))
+    assert code == 0, err
+
+@pytest.mark.parametrize("sub,vlag", WEGLATEN)
+def test_ontbrekende_verplichte_vlag_exit_2_niets_geschreven(capsys, tmp_path, sub, vlag):
+    bid = add(capsys, tmp_path, "Kies A")
+    voor = (tmp_path / "besluiten.ndjson").read_bytes()
+    code, out, err = run(capsys, *_argv(tmp_path, sub, bid, vlag))
+    assert code == 2 and vlag in err and out == "", err
+    assert (tmp_path / "besluiten.ndjson").read_bytes() == voor
+
+def test_add_deelt_geen_action_met_een_ander_subcommando(capsys, tmp_path):
+    keuzes = next(x for x in cli._parser()._actions if x.dest == "sub").choices
+    van_add = {id(x) for x in keuzes["add"]._actions}
+    assert all(not van_add & {id(x) for x in sp._actions} for naam, sp in keuzes.items() if naam != "add")
+    argv = [x for x in _argv(tmp_path, "add", "") if x not in ("--titel", "t", "--besluit", "b")]
+    code, _, err = run(capsys, *argv)
+    assert code == 2 and "verplicht: --titel, --besluit" in err and not (tmp_path / "besluiten.ndjson").exists()

@@ -283,13 +283,17 @@ def _uitvoeren(a):
     _schrijf_atomair(doel, tekst) if doel else sys.stdout.write(tekst)
     return 0
 
-def _parser():
-    p = _Parser(prog="besluitenregister", description="Besluitenregister per context (ADR-077).")
-    ouders = {}
+def _ouders(streng):
+    """De ouderparsers; argparse deelt hun Action-objecten met elk subcommando dat ze erft, dus wie een vlag
+    niet verplicht wil (add, om --from-daily-log), bouwt een eigen stel met streng=False in plaats van te muteren.
+    Geeft (ouders, de dest van elke daardoor niet verplichte vlag): main() eist die zelf zonder --from-daily-log."""
+    ouders, los = {}, []
     def ouder(naam, *verplicht, basis=()):
         o = ouders[naam] = argparse.ArgumentParser(add_help=False, parents=[ouders[x] for x in basis])
         for veld in verplicht:
-            o.add_argument(f"--{veld}", required=True)
+            vast = streng or veld == "context"
+            o.add_argument(f"--{veld}", required=vast, help=None if vast else "verplicht zonder --from-daily-log")
+            los.extend([] if vast else [veld.replace("-", "_")])
         return o
     ouder("ctx", "context")
     ouder("mut", "besloten-op", "vastgelegd-door", basis=("ctx",)).add_argument("--slug")
@@ -300,8 +304,14 @@ def _parser():
         nieuw.add_argument(f"--{veld}", action="append", default=[])
     nieuw.add_argument("--alternatief", nargs=2, action="append", default=[], metavar=("OPTIE", "WAAROM_NIET"))
     nieuw.add_argument("--herzien-op", type=_dag_of_geen)
+    return ouders, los
+
+def _parser():
+    p = _Parser(prog="besluitenregister", description="Besluitenregister per context (ADR-077).")
+    (ouders, _), (eigen, vereist) = _ouders(True), _ouders(False)
     sub = p.add_subparsers(dest="sub", required=True)
-    sp = {naam: sub.add_parser(naam, parents=[ouders[x] for x in basis]) for naam, basis in {
+    sp = {naam: sub.add_parser(naam, parents=[(eigen if naam == "add" else ouders)[x] for x in basis])
+          for naam, basis in {
         "add": ("nieuw",), "vervang": ("nieuw",), "trek-in": ("mut", "bron"), "herzien": ("mut",),
         "bevestig": ("mut", "bron"), "list": ("ctx",), "show": ("ctx",), "check": ("ctx",), "render": ("ctx",),
         "export": ("ctx",)}.items()}
@@ -313,10 +323,7 @@ def _parser():
                            ("export", "voor", {"type": _voor}), ("show", "?nu", dag), ("export", "?uit", {}),
                            ("export", "?van", dag), ("export", "?tot", dag), ("export", "?reikwijdte", rw)):
         sp[naam].add_argument(f"--{vlag.lstrip('?')}", required=not vlag.startswith("?"), **kw)
-    vereist = [x for x in sp["add"]._actions if x.required and x.dest != "context"]
-    for x in vereist:  # verplicht, behalve bij --from-daily-log: main() controleert ze dan zelf
-        x.required = False
-    sp["add"].set_defaults(vereist=[x.dest for x in vereist])
+    sp["add"].set_defaults(vereist=vereist)  # per parser (_defaults); geen Action heeft dest "vereist"
     sp["add"].add_argument("--from-daily-log", metavar="LOG.md",
                            help="importeer elk punt onder Beslissingen uit deze daily-log")
     return p
