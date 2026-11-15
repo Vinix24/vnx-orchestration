@@ -1,4 +1,4 @@
-"""ADR-076 Q6: `vnx inbox audit` (both kinds of late, ledger_since, unknown never clean)."""
+"""ADR-076 Q6: `vnx inbox audit` (both kinds of late, ledger_since, unknown never clean) and `vnx inbox compact`."""
 from __future__ import annotations
 
 import json
@@ -187,3 +187,88 @@ def test_exit_code_unknown_values_stay_blocking():
     assert inbox_cli.audit.exit_code([]) == 3
     assert inbox_cli.audit.exit_code([{"status": "weird", "late": []}]) == 3
     assert inbox_cli.audit.exit_code([{"status": "schoon", "late": []}]) == 0
+
+
+# ---- compact -------------------------------------------------------------------------------------------------
+
+def _compact(sdir, capsys, *extra):
+    return _run(sdir, "compact", *extra, capsys=capsys)
+
+
+def _ledger_ids(sdir):
+    return {ln.get("point_id") for ln in oq._ledger_lines(sdir, PID)}
+
+
+def test_closed_181_days_removed_with_all_lines_179_stays(sdir, capsys):
+    old, young = _open(sdir, "old", _t(days=300)), _open(sdir, "young", _t(days=300))
+    for pid in (old, young):
+        _present(sdir, pid, _t(days=299))
+    _close(sdir, old, _t(days=181))
+    _close(sdir, young, _t(days=179))
+    code, out = _compact(sdir, capsys)
+    assert code == 0 and "removed 1 points, 3 lines" in out
+    assert _ledger_ids(sdir) == {young}
+    assert oq.read_state(PID, state_dir=sdir)["points"].keys() == {young}
+    assert json.loads((sdir / oq.STATE_FILENAME).read_text())["points"].keys() == {young}
+
+
+def test_open_point_of_400_days_stays_whole_also_unknown(sdir, capsys):
+    pid = _open(sdir, "a", _t(days=400))
+    _present(sdir, pid, _t(days=399))
+    oq.append_line(PID, "unknown", {"point_id": pid, "reden": "bron weg"}, now=_t(days=398), state_dir=sdir)
+    before = (sdir / oq.LEDGER_FILENAME).read_bytes()
+    assert _compact(sdir, capsys)[0] == 0
+    assert (sdir / oq.LEDGER_FILENAME).read_bytes() == before
+
+
+def test_push_reserved_goes_only_when_all_ids_gone(sdir, capsys):
+    a, b = _open(sdir, "a", _t(days=300)), _open(sdir, "b", _t(days=300))
+    oq.append_line(PID, "push_reserved", {"point_ids": [a, b], "sessie": "s"}, now=_t(days=290), state_dir=sdir)
+    _close(sdir, a, _t(days=200))
+    _compact(sdir, capsys)
+    assert any(ln["kind"] == "push_reserved" for ln in oq._ledger_lines(sdir, PID))
+    _close(sdir, b, _t(days=190))
+    _compact(sdir, capsys)
+    assert oq._ledger_lines(sdir, PID) == []
+
+
+def test_unreadable_ledger_refused_with_line_number_and_untouched(sdir, capsys):
+    pid = _open(sdir, "a", _t(days=300))
+    _close(sdir, pid, _t(days=200))
+    with open(sdir / oq.LEDGER_FILENAME, "a") as fh:
+        fh.write("{broken\n")
+    path = sdir / oq.LEDGER_FILENAME
+    before, mtime = path.read_bytes(), path.stat().st_mtime_ns
+    code, out = _compact(sdir, capsys)
+    assert code == 3 and "unknown (" in out and ":3:" in out
+    assert path.read_bytes() == before and path.stat().st_mtime_ns == mtime
+
+
+def test_dry_run_writes_nothing(sdir, capsys):
+    pid = _open(sdir, "a", _t(days=300))
+    _close(sdir, pid, _t(days=200))
+    path = sdir / oq.LEDGER_FILENAME
+    before, mtime, state = path.read_bytes(), path.stat().st_mtime_ns, (sdir / oq.STATE_FILENAME).stat().st_mtime_ns
+    code, out = _compact(sdir, capsys, "--dry-run")
+    assert code == 0 and "would remove 1 points, 2 lines" in out
+    assert path.read_bytes() == before and path.stat().st_mtime_ns == mtime
+    assert (sdir / oq.STATE_FILENAME).stat().st_mtime_ns == state
+    assert not list(sdir.glob("*.tmp"))
+
+
+def test_ledger_since_moves_after_compact(sdir, capsys):
+    old = _open(sdir, "old", _t(days=300))
+    _close(sdir, old, _t(days=200))
+    _open(sdir, "keep", _t(days=20))
+    assert json.loads(_audit(sdir, capsys, "--json")[1])["projects"][0]["ledger_since"] == _t(days=300)
+    _compact(sdir, capsys)
+    data = json.loads(_audit(sdir, capsys, "--json")[1])["projects"][0]
+    assert data["ledger_since"] == _t(days=20)
+
+
+def test_compact_all_reports_missing_state_as_unknown(tmp_path, capsys):
+    home = _fleet(tmp_path, late=False)
+    (home / ".vnx-data" / "nostate").mkdir()
+    code = inbox_cli.main(["--all", "--home", str(home), "--registry", str(home / "none.json"), "compact", "--dry-run"])
+    out = capsys.readouterr().out
+    assert code == 3 and "nostate: unknown (geen state/)" in out and "bad: unknown (" in out and "good: would remove 0" in out
