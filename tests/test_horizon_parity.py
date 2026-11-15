@@ -343,6 +343,7 @@ _PLAN_GATE_ARGV = {
     "run": ["delegate-track", "--doc", "some/plan-doc.md"],
     "status": ["delegate-track"],
     "attest": ["delegate-track", "--reason", "operator override", "--approval-id", "token-xyz"],
+    "sign": ["delegate-track", "--key", "/nonexistent/k", "--identity", "op@example.invalid"],
     "missing-reasons": [],
     "backfill-reason": ["delegate-track", "--reason", "operator backfill", "--approval-id", "token-xyz"],
     "reblock": ["delegate-track", "--reason", "operator reblock", "--approval-id", "token-xyz"],

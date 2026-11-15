@@ -402,6 +402,7 @@ Gate commands (pre-merge verification):
 Planning commands (strategic-layer read surface):
   horizon <verb>     Planning layer: objectives, deliverables, plan-gate
                         (canonical spelling; objective is a backward-compat alias)
+  horizon plan-gate sign <track> --key <k> --identity <id>  Operator only: sign the latest plan-gate pass (ADR-056)
   objective list      List objectives (tracks) grouped by horizon (now/next/later)
                         Options: --horizon, --phase, --json
   objective show <id> Show one objective: phase/horizon/deps/pr_ref

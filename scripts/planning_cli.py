@@ -3407,6 +3407,61 @@ def _promote_grant_view(
     }
 
 
+def _sign_refusal(signers: Optional[Path], identity: str) -> Optional[str]:
+    """Why ``plan-gate sign`` must not write, checked before any append; ``None`` when it may sign."""
+    if signers is None:
+        return "no allowed_signers file found (VNX_ALLOWED_SIGNERS, .vnx-attest/ or .vnx/allowed_signers)"
+    try:
+        lines = Path(signers).read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        return f"allowed_signers file {signers} is unreadable: {exc}"
+    principals = {p for ln in lines if ln.split() and not ln.lstrip().startswith("#") for p in ln.split()[0].split(",")}
+    return None if identity in principals else f"identity {identity!r} is not in allowed_signers file {signers}"
+
+
+def cmd_plan_gate_sign(args: argparse.Namespace) -> int:
+    """`plan-gate sign`: the operator (never a T0) signs a copy of the latest pass of a track (OI-2849, ADR-056).
+
+    Exit 2: not the operator; 3: no pass; 4: no trust anchor, identity not in it, or not verified.
+    """
+    import delegation_mandate  # lazy, like _promotion_grant
+    import plan_gate_evidence  # lazy, like _emit_plan_gate_pass_record
+    from ndjson_hash_chain import compute_entry_hash  # the chain hash walk_chain gives an entry
+    cls = actor_class.derive()
+    if cls != actor_class.OPERATOR:
+        print(f"plan-gate sign: actor class {cls!r} may not sign, only the operator. Nothing written.", file=sys.stderr)
+        return 2
+    track_id, project_id = args.track_id, args.project_id  # root: vnx_cli's --repo-root (from --project-dir) first
+    repo_root = Path(getattr(args, "repo_root", "") or os.environ.get("VNX_PROJECT_ROOT", os.getcwd()))
+    _state, record = plan_gate_evidence.verify_plan_gate_pass(repo_root, track_id, project_id)
+    if record is None:
+        print(f"plan-gate sign: no plan_gate_pass for {track_id!r} ({project_id!r}). Nothing written.", file=sys.stderr)
+        return 3
+    signers = delegation_mandate.resolve_allowed_signers_for_runtime(repo_root)
+    reason = _sign_refusal(signers, args.identity)
+    if reason is None:
+        skip = {"type", "prev_hash", "signature", "signer_identity", "track_id", "project_id", "resolver", "resolved_at"}
+        fields = {k: v for k, v in record.items() if k not in skip}
+        fields.update(signed_by_operator_at=_now_utc(), signs_record_hash=compute_entry_hash(record))
+        try:
+            if plan_gate_evidence.emit_plan_gate_pass(
+                repo_root=repo_root, track_id=track_id, project_id=project_id,
+                resolver=str(record.get("resolver") or ""), timestamp=str(record.get("resolved_at") or ""),
+                signer_identity=args.identity, key_path=args.key, extra_fields=fields, verify_with=signers,
+                expect_latest_hash=fields["signs_record_hash"],
+            ) is None:
+                reason = f"signing with {args.key} failed or does not verify against {signers}"
+        except plan_gate_evidence.LatestPassChanged:
+            reason = "the latest plan-gate pass changed while signing; nothing written, sign again"
+    grant = plan_gate_enforcement.verify_promotion_grant(track_id, project_id, repo_root, signers)
+    print(f"plan-gate sign: {track_id} (project {project_id!r}) grant {grant.value}")
+    reason = reason or (None if grant == plan_gate_enforcement.PromotionGrant.VERIFIED else f"grant reads {grant.value}")
+    if reason is not None:
+        print(f"plan-gate sign: not verified: {reason}", file=sys.stderr)
+        return 4
+    return 0
+
+
 def _promotion_grant(project_id: str, track_id: str) -> "plan_gate_enforcement.PromotionGrant":
     """The grant state of a track; a failing verifier or missing trust anchor is never VERIFIED."""
     absent = plan_gate_enforcement.PromotionGrant.ABSENT
@@ -6727,6 +6782,16 @@ def _add_plan_gate_attest_parser(pg_sub: Any, common: Callable[[Any], None]) -> 
     p_attest.set_defaults(func=cmd_plan_gate_attest)
 
 
+def _add_plan_gate_sign_parser(pg_sub: Any, common: Callable[[Any], None]) -> None:
+    """`plan-gate sign`: the operator signs the latest plan-gate pass of a track (OI-2849)."""
+    p_sign = pg_sub.add_parser("sign", help="operator only: sign the latest plan-gate pass so a T0 may promote (ADR-056)")
+    p_sign.add_argument("--project-id", default=os.environ.get("VNX_PROJECT_ID", "vnx-dev"))  # no --state-dir/--json: unused
+    p_sign.add_argument("track_id")
+    p_sign.add_argument("--key", required=True, help="the operator's SSH private key path")
+    p_sign.add_argument("--identity", required=True, help="signer identity, as in allowed_signers")
+    p_sign.set_defaults(func=cmd_plan_gate_sign)
+
+
 def _add_plan_gate_missing_reasons_parser(
     pg_sub: Any, common: Callable[[Any], None],
 ) -> None:
@@ -6856,6 +6921,7 @@ def _add_plan_gate_parsers(sub: Any, common: Callable[[Any], None]) -> None:
     _add_plan_gate_run_parser(pg_sub, common)
     _add_plan_gate_status_parser(pg_sub, common)
     _add_plan_gate_attest_parser(pg_sub, common)
+    _add_plan_gate_sign_parser(pg_sub, common)
     _add_plan_gate_missing_reasons_parser(pg_sub, common)
     _add_plan_gate_backfill_reason_parser(pg_sub, common)
     _add_plan_gate_reblock_parser(pg_sub, common)
