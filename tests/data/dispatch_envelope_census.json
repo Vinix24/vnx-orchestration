@@ -100,28 +100,28 @@
     },
     {
       "file": "tests/test_dispatch_cli.py",
-      "line": 760,
+      "line": 769,
       "mechanism": "direct-call",
       "module_target": "dispatch_envelope",
       "symbol": "run_envelope_headless_plan"
     },
     {
       "file": "tests/test_dispatch_cli.py",
-      "line": 763,
+      "line": 772,
       "mechanism": "patch-string",
       "module_target": "dispatch_envelope",
       "symbol": "ClaudeSubprocessAdapter.run"
     },
     {
       "file": "tests/test_dispatch_cli.py",
-      "line": 773,
+      "line": 782,
       "mechanism": "direct-call",
       "module_target": "dispatch_envelope",
       "symbol": "run_envelope_plan"
     },
     {
       "file": "tests/test_dispatch_cli.py",
-      "line": 776,
+      "line": 785,
       "mechanism": "patch-string",
       "module_target": "dispatch_envelope",
       "symbol": "ProviderAdapter.run"
@@ -1493,49 +1493,49 @@
     },
     {
       "file": "tests/test_golf_schoon_r35_characterisation.py",
-      "line": 18,
+      "line": 13,
       "mechanism": "direct-call",
       "module_target": "envelope_govern",
       "symbol": "_govern"
     },
     {
       "file": "tests/test_golf_schoon_r35_characterisation.py",
-      "line": 19,
+      "line": 14,
       "mechanism": "direct-call",
       "module_target": "envelope_types",
       "symbol": "EnvelopeSpec"
     },
     {
       "file": "tests/test_golf_schoon_r35_characterisation.py",
-      "line": 19,
+      "line": 14,
       "mechanism": "direct-call",
       "module_target": "envelope_types",
       "symbol": "_AdapterResult"
     },
     {
       "file": "tests/test_golf_schoon_r35_characterisation.py",
-      "line": 47,
+      "line": 42,
       "mechanism": "patch-string",
       "module_target": "envelope_govern",
       "symbol": "_archive_dispatch_events"
     },
     {
       "file": "tests/test_golf_schoon_r35_characterisation.py",
-      "line": 48,
+      "line": 43,
       "mechanism": "patch-string",
       "module_target": "envelope_govern",
       "symbol": "_clear_dispatch_events"
     },
     {
       "file": "tests/test_golf_schoon_r35_characterisation.py",
-      "line": 49,
+      "line": 44,
       "mechanism": "patch-string",
       "module_target": "envelope_govern",
       "symbol": "_book_ledger_run"
     },
     {
       "file": "tests/test_golf_schoon_r35_characterisation.py",
-      "line": 50,
+      "line": 45,
       "mechanism": "patch-string",
       "module_target": "envelope_govern",
       "symbol": "_receipt_exists_for_dispatch"
@@ -3027,13 +3027,17 @@
     "envelope_adapters_provider::_split_api_errors",
     "envelope_govern::_adopt_stray_report",
     "envelope_govern::_book_ledger_run",
+    "envelope_govern::_check_emitted_receipt",
     "envelope_govern::_check_report_contract",
+    "envelope_govern::_classify_receipt_failure",
     "envelope_govern::_clear_archived_event_stream",
+    "envelope_govern::_emit_govern_receipt",
     "envelope_govern::_emit_govern_report",
     "envelope_govern::_govern",
     "envelope_govern::_log_govern_outcome",
     "envelope_govern::_receipt_cost",
     "envelope_govern::_record_receipt_emit_failure",
+    "envelope_govern::_resolve_receipt_role",
     "envelope_govern::_run_phantom_guard",
     "envelope_govern_support::_archive_dispatch_events",
     "envelope_govern_support::_archive_late_dispatch_events",
