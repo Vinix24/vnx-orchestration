@@ -1,0 +1,1 @@
+- refactor: `parse_protection_config` in `scripts/lib/forge_protection_drift.py` under 100 executable lines by extract-method (golf schoon R45), no behaviour change.
