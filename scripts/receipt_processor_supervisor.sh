@@ -71,6 +71,19 @@ done
 # ---
 
 mkdir -p "$(dirname "$LOG_FILE")" "$VNX_PIDS_DIR" "$VNX_LOCKS_DIR"
+
+# OI-2903: keep at most one old copy. A log above VNX_SUPERVISOR_LOG_MAX_MB
+# (default 50) is renamed to <log>.1, replacing an older .1.
+_rotate_supervisor_log() {
+    local file="$1" max_mb="${VNX_SUPERVISOR_LOG_MAX_MB:-50}" size
+    case "$max_mb" in ''|*[!0-9]*) max_mb=50 ;; esac
+    [ -f "$file" ] || return 0
+    size=$(stat -f %z "$file" 2>/dev/null || stat -c %s "$file" 2>/dev/null || echo 0)
+    if [ "$size" -gt $(( max_mb * 1024 * 1024 )) ]; then
+        mv -f "$file" "$file.1"
+    fi
+}
+_rotate_supervisor_log "$LOG_FILE"
 exec >> "$LOG_FILE" 2>&1
 
 _log() {
