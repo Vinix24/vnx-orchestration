@@ -1492,6 +1492,55 @@
       "symbol": "ProviderAdapter"
     },
     {
+      "file": "tests/test_golf_schoon_r35_characterisation.py",
+      "line": 18,
+      "mechanism": "direct-call",
+      "module_target": "envelope_govern",
+      "symbol": "_govern"
+    },
+    {
+      "file": "tests/test_golf_schoon_r35_characterisation.py",
+      "line": 19,
+      "mechanism": "direct-call",
+      "module_target": "envelope_types",
+      "symbol": "EnvelopeSpec"
+    },
+    {
+      "file": "tests/test_golf_schoon_r35_characterisation.py",
+      "line": 19,
+      "mechanism": "direct-call",
+      "module_target": "envelope_types",
+      "symbol": "_AdapterResult"
+    },
+    {
+      "file": "tests/test_golf_schoon_r35_characterisation.py",
+      "line": 47,
+      "mechanism": "patch-string",
+      "module_target": "envelope_govern",
+      "symbol": "_archive_dispatch_events"
+    },
+    {
+      "file": "tests/test_golf_schoon_r35_characterisation.py",
+      "line": 48,
+      "mechanism": "patch-string",
+      "module_target": "envelope_govern",
+      "symbol": "_clear_dispatch_events"
+    },
+    {
+      "file": "tests/test_golf_schoon_r35_characterisation.py",
+      "line": 49,
+      "mechanism": "patch-string",
+      "module_target": "envelope_govern",
+      "symbol": "_book_ledger_run"
+    },
+    {
+      "file": "tests/test_golf_schoon_r35_characterisation.py",
+      "line": 50,
+      "mechanism": "patch-string",
+      "module_target": "envelope_govern",
+      "symbol": "_receipt_exists_for_dispatch"
+    },
+    {
       "file": "tests/test_govern_wrapper_never_success.py",
       "line": 44,
       "mechanism": "direct-call",
@@ -2948,6 +2997,7 @@
     "dispatch_envelope::_resolve_base_sha",
     "dispatch_envelope::_spawn_marker",
     "dispatch_envelope::_stamp_headless_start",
+    "dispatch_envelope::_verified_instruction",
     "dispatch_envelope::_work_then_govern",
     "dispatch_envelope::run_envelope",
     "dispatch_envelope::run_envelope_headless_plan",
