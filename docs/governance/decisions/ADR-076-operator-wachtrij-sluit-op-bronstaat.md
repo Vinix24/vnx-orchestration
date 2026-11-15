@@ -1,6 +1,6 @@
 # ADR-076 - De operator-wachtrij: een punt sluit op de staat van zijn bron, nooit op een vinkje
 
-**Status:** Voorgesteld 14-11-2026 (T0, track operator-vragen-tot-antwoord, Q0); aangenomen zodra de T0 Q0 merget.
+**Status:** Aangenomen 2026-11-14 (PR #2851, 2f36245ba). Voorgesteld 14-11-2026 (T0, track operator-vragen-tot-antwoord, Q0).
 **Datum:** 2026-11-14
 **Besloten door:** de operator, 14-11-2026 (alles wat op Vincent wacht staat op één plek, wordt opnieuw voorgelegd tot hij antwoordt en verdwijnt zodra het beantwoord is); het plan `claudedocs/specs/operator-vragen-tot-antwoord/plan.md` (versie 2, plan-gate van 14-11-2026, tiebreaker START, deepseek-v4-pro, ronde 2, met de verplichte wijziging dat `push-due` de push zelf reserveert). Het nummer 076 is door de T0 toegewezen; ADR-075 gaat naar een parallelle levering.
 **Cross-refs:** ADR-005 (append-only NDJSON als waarheid), ADR-007 (composite sleutel over `project_id` voor elke centrale tabel), ADR-056 (wie mag promoveren, `actor_class`; de promote-poort verandert niet), ADR-063 (onbekend is nooit 0, nooit een geslaagde meting), ADR-065 (leren is voorstellen), ADR-066 (dream-liveness, `read_reviews`), ADR-072 (de steering-store en zijn besluitmodel; deze wachtrij leest hem alleen), het vooronderzoek `dlv-operator-vragen-oppervlak` (gemeten 14-11-2026 ~09:30 tot 09:40Z, read-only).

@@ -1,6 +1,6 @@
 # ADR-078 - Geheugen in de store: een waargenomen grootboek en geldigheid zonder wissen
 
-**Status:** Voorgesteld 14-11-2026 (T0, track `geheugen-in-de-store`, levering M1). Aangenomen zodra de T0 M1 merget.
+**Status:** Aangenomen 2026-11-14 (PR #2882, 87987b1be). Voorgesteld 14-11-2026 (T0, track `geheugen-in-de-store`, levering M1).
 **Datum:** 2026-11-14
 **Besloten door:** de operator voor de track (14-11-2026 ~15:58Z: "geheugenlaag: ja"; ~19:14Z: deel van 2.0). De T0 voor de uitwerking, op het plan `claudedocs/specs/geheugen-in-de-store/plan.md` (versie 2) en de plan-gate van 14-11-2026 (codex REVISE, tiebreaker START, deepseek-v4-pro, ronde 2). De verplichte wijziging van de tiebreaker is dat dit ADR de binding- en geldigheidscontracten normatief vastlegt. De meting M0 (`dlv-a65f469a2ee3`, 14-11 19:03Z tot 19:06Z) gaf de cijfers. Het nummer 078 is het eerste vrije op `origin/main` (ADR-077 is het hoogste).
 **Cross-refs:** ADR-005 (append-only NDJSON als waarheid), ADR-026 (store per project), ADR-063 (onbekend is nooit 0), ADR-065 (leren is voorstellen), ADR-067 (vangst en routering van lessen), ADR-072 (geen tekst bewaren, gebonden bron), ADR-077 (afgescheurde staart).

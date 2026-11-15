@@ -1,6 +1,6 @@
 # ADR-067 - De leer-routering: vier bakken met elk één home, twee verwijzingsdoelen, een vensterverdrag en een audit die voorstelt en niet beslist
 
-**Status:** Voorgesteld 10-11-2026 (T0, track `learning-capture-fragmentation`, rij PR-0); aangenomen zodra de T0 PR-0 merget.
+**Status:** Aangenomen 2026-11-10 (PR #2608, 109279acc). Voorgesteld 10-11-2026 (T0, track `learning-capture-fragmentation`, rij PR-0).
 **Datum:** 2026-11-10
 **Besloten door:** de operator voor besluit 2 van de 1.9-sprint (07-11-2026, letterlijk hieronder); het plan `claudedocs/2026-11-07-naar-1-9/plannen/learning-capture-fragmentation.md` (revisie 2, 08-11-2026, plan-gate van 08-11 en de tiebreaker-reden) voor de besluiten 1 tot en met 3, 7, 8 en 13 tot en met 20 van dat plan. Het nummer 067 is door de T0 toegewezen: 064 is `deltareview` DR-0, 065 is loop D0, 066 is dream PR-1 en 068 is reattr L1. ADR-067 was vrij op `origin/main` `beef78644` (10-11-2026).
 **Cross-refs:** ADR-007 (samengestelde sleutel over `project_id`; hier gelezen als bindingsplicht, zie besluit 9), ADR-056 (zelfstandigheid als meetbaar begrip), ADR-063 (onbekend is nooit 0), ADR-065 (leren is voorstellen), ADR-066 (dream-liveness: het schema `dream_liveness/1` en zijn drempel; geen overlap met dit spoor).

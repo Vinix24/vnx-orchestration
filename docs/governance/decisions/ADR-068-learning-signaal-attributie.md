@@ -1,6 +1,6 @@
 # ADR-068 - Learning-signaal-attributie: eigendom uit drie signalen, overdracht van hele rijen, goedkeuring gebonden aan de wijziging
 
-**Status:** Voorgesteld 10-11-2026 (T0, track `learning-signal-reattribution`, levering L1); aangenomen zodra de T0 L1 merget.
+**Status:** Aangenomen 2026-11-10 (PR #2613, a41c7a2d8). Voorgesteld 10-11-2026 (T0, track `learning-signal-reattribution`, levering L1).
 **Datum:** 2026-11-10
 **Besloten door:** de operator voor besluit 2 en 3 van de 1.9-sprint (07-11-2026, letterlijk hieronder); het plan `claudedocs/2026-11-07-naar-1-9/plannen/learning-signal-reattribution.md` (revisie 2, 08-11-2026, plan-gate van 08-11 en de tiebreaker-voorwaarden) voor de besluiten 1 tot en met 20. ADR-068 was vrij op `origin/main` `46d6305e7` (10-11-2026): de hoogste is ADR-069 en 068 is door de T0 aan deze track toegewezen (064 deltareview, 065 loop, 066 dream, 067 capture).
 **Cross-refs:** ADR-005 (NDJSON-grootboek en de afgeleide SQLite), ADR-007 (samengestelde sleutel over `project_id`), ADR-056 (zelfstandigheid als meetbaar begrip), ADR-063 (onbekend is nooit 0), ADR-065 (leren is voorstellen), ADR-067 (learning-capture-routing).

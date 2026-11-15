@@ -1,6 +1,6 @@
 # ADR-064 - De deltareview: een vers oordeel op de exacte kop, de ouderketen in het grootboek, schaduw eerst en één profielschakelaar terug
 
-**Status:** Voorgesteld 10-11-2026 (T0, track `deltareview-met-ouderketen`, levering DR-0); aangenomen zodra de T0 DR-0 merget.
+**Status:** Aangenomen 2026-11-10 (PR #2604, d3c285690). Voorgesteld 10-11-2026 (T0, track `deltareview-met-ouderketen`, levering DR-0).
 **Datum:** 2026-11-10
 **Besloten door:** de operator ("zo snel mogelijk, want daar profiteren alle volgende tracks van", 09-11-2026); het plan `claudedocs/2026-11-07-naar-1-9/plannen/deltareview-met-ouderketen.md` (revisie 2) voor de besluiten 1 tot en met 6 en de tien eisen; de plan-gate van 09-11 (codex REVISE, tiebreaker deepseek-v4-pro START) voor de eisen V en C1 tot en met C8. ADR-064 was vrij op `origin/main` (10-11-2026): ADR-065 en ADR-066 bestaan al, 064 was overgeslagen.
 **Cross-refs:** ADR-060 (poortprofiel; dit ADR voegt daar de sleutel `VNX_REVIEW_SCOPE` aan toe, zie het amendement in dat ADR), ADR-007 (project_id in elke sleutel), ADR-046 (één poortmotor), ADR-061 (de deur is afgedwongen), ADR-065 (leren is voorstellen).

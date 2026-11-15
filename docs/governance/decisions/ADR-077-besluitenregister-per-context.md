@@ -1,6 +1,6 @@
 # ADR-077 - Het besluitenregister: één append-only register per context, schema `besluit/1` met een stabiel id per besluit
 
-**Status:** Voorgesteld 14-11-2026 (T0, track besluitenregister, B0); aangenomen zodra de T0 B0 merget.
+**Status:** Aangenomen 2026-11-14 (PR #2864, 46bbd0946). Voorgesteld 14-11-2026 (T0, track besluitenregister, B0).
 **Datum:** 2026-11-14
 **Besloten door:** de operator voor de track (besluit van 14-11-2026: per context één plek waar besluiten staan, los van de voortgang, generiek genoeg voor zakelijk gebruik en niet gebonden aan VNX); de T0 voor de rest, op het plan `claudedocs/specs/besluitenregister/plan.md` (versie 2) en de plan-gate van 14-11-2026 (codex REVISE, tiebreaker START, deepseek-v4-pro, ronde 2) met de verplichte wijziging: een stabiel `besluit_id` per besluit en een veld `betreft` op elke gebeurtenis. Het nummer 077 is het eerste vrije op `origin/main` (ADR-076 is het hoogste).
 **Cross-refs:** ADR-005 (append-only NDJSON als waarheid), ADR-007 (composite sleutel voor een centrale tabel), ADR-063 (onbekend is nooit 0), ADR-075 besluit 3 (de gedeelde geheimpatronen), ADR-076 besluit 6 en 9 (een antwoord legt een besluit vast; weigeren, niet maskeren).

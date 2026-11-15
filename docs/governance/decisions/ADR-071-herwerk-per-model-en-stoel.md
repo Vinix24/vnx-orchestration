@@ -1,6 +1,6 @@
 # ADR-071 - Herwerk per bouwermodel en per reviewstoel: een randtabel als waarheid, vier randsoorten, drie maten met een rijpheidsregel en een rapport dat alleen voorstelt
 
-**Status:** Voorgesteld 11-11-2026 (T0, track `herwerk-per-model-en-reviewer`, rij H0); aangenomen zodra de T0 H0 merget.
+**Status:** Aangenomen 2026-11-11 (PR #2683, e6f0fe7a2). Voorgesteld 11-11-2026 (T0, track `herwerk-per-model-en-reviewer`, rij H0).
 **Datum:** 2026-11-11
 **Besloten door:** de operator op 10-11-2026 (herwerk terug naar de oorspronkelijke dispatch, per bouwermodel en per reviewstoel) en het plan `claudedocs/2026-11-07-naar-1-9/plannen/herwerk-per-model-en-reviewer.md` (revisie 2, plan-gate van 10-11) voor besluit 1 tot en met 14. Het nummer 071 is door de T0 toegewezen.
 **Cross-refs:** ADR-007 (samengestelde sleutel over `project_id`), ADR-063 (dezelfde scheiding tussen meten, voorstel en oordeel), ADR-065 (leren is voorstellen), ADR-069 (effectmeting: het patroon van n-regel en rijpheid).
