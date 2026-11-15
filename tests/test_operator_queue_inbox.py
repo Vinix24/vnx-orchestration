@@ -206,7 +206,8 @@ def test_all_three_coverages_and_json_equals_text(tmp_path, capsys):
     assert by_id["beta"]["open_total"] is None
     assert by_id["gamma"]["dekking"] == "niet_gebonden"
     assert data["registry"] == {"dekking": "gelezen", "reden": None}
-    coverage_lines = [ln for ln in text.splitlines() if not ln.startswith(" ") and not ln.startswith("registry")]
+    assert data["store"] == {"dekking": "gelezen", "reden": None}
+    coverage_lines = [ln for ln in text.splitlines() if not ln.startswith(" ") and not ln.startswith(("registry", "store"))]
     assert [ln.split(":")[0] for ln in coverage_lines] == ["alpha", "beta", "gamma"]
     assert "unknown (geen state/)" in text and "niet_gebonden" in text
     assert [p["point_id"] for p in by_id["alpha"]["points"]] == pids  # oldest first, same ids as the text
@@ -255,3 +256,88 @@ def test_show_unknown_reden_follows_source_coverage(sdir, monkeypatch):
     second = inbox.show(PID, now=NOW, state_dir=sdir)
     assert second["points"][0]["unknown_reden"] is None
     assert first["points"][0]["unknown_reden"] == "bron onleesbaar"
+
+
+def _raise_for(monkeypatch, name, target):
+    """Make Path.<name> raise PermissionError for the one path `target`; every other path behaves normally."""
+    real = getattr(Path, name)
+
+    def patched(self, *a, **k):
+        if self == target:
+            raise PermissionError(13, "Permission denied", str(self))
+        return real(self, *a, **k)
+    monkeypatch.setattr(Path, name, patched)
+
+
+def _by_id(data):
+    return {p["project_id"]: p for p in data["projects"]}
+
+
+def test_all_store_listing_raises_is_unknown_not_empty_fleet(tmp_path, monkeypatch, capsys):
+    home, registry, _ = _home(tmp_path)
+    _raise_for(monkeypatch, "iterdir", home / ".vnx-data")
+    data = inbox.show_all(home=home, registry_path=registry)
+    assert data["store"]["dekking"] == "unknown"
+    assert str(home / ".vnx-data") in data["store"]["reden"] and "PermissionError" in data["store"]["reden"]
+    alpha = _by_id(data)["alpha"]
+    assert alpha["dekking"] == "unknown" and alpha["open_total"] is None
+    assert "store listing unreadable" in alpha["reden"]
+    assert all(p["dekking"] != "niet_gebonden" for p in data["projects"])
+    base = ["--all", "--home", str(home), "--registry", str(registry)]
+    assert inbox_cli.main(base) == 0
+    assert "store: unknown (" in capsys.readouterr().out
+    assert inbox_cli.main(base + ["--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["store"] == data["store"]
+
+
+def test_all_one_entry_is_dir_raises_keeps_the_rest(tmp_path, monkeypatch):
+    home, registry, _ = _home(tmp_path)
+    _raise_for(monkeypatch, "is_dir", home / ".vnx-data" / "beta")
+    by_id = _by_id(inbox.show_all(home=home, registry_path=registry))
+    assert by_id["alpha"]["dekking"] == "gelezen" and by_id["alpha"]["open_total"] == 2
+    assert by_id["beta"]["dekking"] == "unknown" and "PermissionError" in by_id["beta"]["reden"]
+    assert by_id["gamma"]["dekking"] == "niet_gebonden"
+
+
+def test_all_registry_exists_raises_is_unknown_stores_still_listed(tmp_path, monkeypatch):
+    home, registry, _ = _home(tmp_path)
+    _raise_for(monkeypatch, "exists", registry)
+    data = inbox.show_all(home=home, registry_path=registry)
+    assert data["registry"]["dekking"] == "unknown" and "PermissionError" in data["registry"]["reden"]
+    assert [p["project_id"] for p in data["projects"]] == ["alpha", "beta"]
+    assert inbox_cli.main(["--all", "--home", str(home), "--registry", str(registry)]) == 0
+
+
+def test_all_one_project_state_check_raises_is_unknown_others_read(tmp_path, monkeypatch):
+    home, registry, _ = _home(tmp_path)
+    _raise_for(monkeypatch, "is_dir", home / ".vnx-data" / "alpha" / "state")
+    by_id = _by_id(inbox.show_all(home=home, registry_path=registry))
+    assert by_id["alpha"]["dekking"] == "unknown" and by_id["alpha"]["open_total"] is None
+    assert "PermissionError" in by_id["alpha"]["reden"]
+    assert by_id["gamma"]["dekking"] == "niet_gebonden"
+
+
+def test_all_one_project_show_raises_is_unknown_others_read(tmp_path, monkeypatch):
+    home, registry, _ = _home(tmp_path)
+    (home / ".vnx-data" / "beta" / "state").mkdir()
+    real = inbox.show
+
+    def show(pid, **kw):
+        if pid == "alpha":
+            raise RuntimeError("boom")
+        return real(pid, **kw)
+    monkeypatch.setattr(inbox, "show", show)
+    by_id = _by_id(inbox.show_all(home=home, registry_path=registry))
+    assert by_id["alpha"]["dekking"] == "unknown" and by_id["alpha"]["reden"].startswith("RuntimeError")
+    assert by_id["beta"]["dekking"] == "gelezen"
+
+
+def test_all_absent_store_is_no_store_not_unknown(tmp_path):
+    home, registry, _ = _home(tmp_path)
+    for child in sorted((home / ".vnx-data").rglob("*"), reverse=True):
+        child.rmdir() if child.is_dir() else child.unlink()
+    (home / ".vnx-data").rmdir()
+    data = inbox.show_all(home=home, registry_path=registry)
+    assert data["store"] == {"dekking": "gelezen", "reden": None}
+    assert [(p["project_id"], p["dekking"]) for p in data["projects"]] == [
+        ("alpha", "niet_gebonden"), ("gamma", "niet_gebonden")]

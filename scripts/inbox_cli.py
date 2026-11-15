@@ -66,6 +66,8 @@ def _show_all(args) -> int:
         return 0
     reg = data["registry"]
     lines = [f"registry: {reg['dekking']}" + (f" ({reg['reden']})" if reg["reden"] else "")]
+    sto = data["store"]
+    lines.append(f"store: {sto['dekking']}" + (f" ({sto['reden']})" if sto["reden"] else ""))
     for p in data["projects"]:
         total = "?" if p["open_total"] is None else p["open_total"]
         lines.append(f"{p['project_id']}: {p['dekking']}" + (f" ({p['reden']})" if p["reden"] else "") + f", open {total}")
