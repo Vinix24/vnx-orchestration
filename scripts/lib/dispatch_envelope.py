@@ -36,6 +36,7 @@ EventStore wiring and cost emission are open items for later PRs (PR-1 scope: fl
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
 import logging
@@ -1077,24 +1078,8 @@ def run_envelope_headless_plan(
 
     enriched_instruction = _prepare_with_data_dir(spec)
     _stamp_headless_start(plan, spec, state_dir)
-    enriched_spec = EnvelopeSpec(
-        dispatch_id=spec.dispatch_id,
-        terminal_id=spec.terminal_id,
-        provider=spec.provider,
-        model=spec.model,
-        instruction=enriched_instruction,
-        role=spec.role,
-        pr_id=spec.pr_id,
-        state_dir=spec.state_dir,
-        data_dir=spec.data_dir,
-        deadline_seconds=spec.deadline_seconds,
-        parent_dispatch=spec.parent_dispatch,
-        task_class=spec.task_class,
-        tier_from=spec.tier_from,
-        tier_to=spec.tier_to,
-        work_ref=spec.work_ref, requires_mcp=spec.requires_mcp, skill=spec.skill,
-        dispatch_paths=spec.dispatch_paths,
-    )
+    # Every EnvelopeSpec field carried over, only the instruction enriched.
+    enriched_spec = dataclasses.replace(spec, instruction=enriched_instruction)
 
     # INTEGRITY — persist the enriched final prompt + verify reconstruction
     integrity = _record_integrity(
@@ -1104,42 +1089,17 @@ def run_envelope_headless_plan(
         bundle_dir=Path(plan.instruction_file).parent,
     )
 
-    from dispatch_worktree_isolation import (  # noqa: PLC0415
-        create_dispatch_worktree,
-        resolve_consumer_project_root,
-    )
-
     # Resolved BEFORE worktree creation so create_dispatch_worktree honors the
     # plan's actual base_ref instead of silently defaulting to origin/main —
     # the headless-lane blocker this dispatch fixes.
     _base_ref = plan.base_ref or "origin/main"
 
-    wt_path: Optional[Path] = None
-    try:
-        _consumer_project_root = resolve_consumer_project_root()
-        wt_path = create_dispatch_worktree(
-            plan.dispatch_id, project_root=_consumer_project_root, base_ref=(base_sha or "").strip() or _base_ref)
-
-    except Exception as _wt_exc:
-        _isolation_error = (
-            f"isolation required but worktree creation failed "
-            f"for {plan.dispatch_id}: {_wt_exc} — aborting; no shared-checkout fallback"
-        )
-        logger.error("run_envelope_headless_plan: %s", _isolation_error)
-        _fail_result = _AdapterResult(
-            returncode=1,
-            completion_text="",
-            status="failure",
-            error=_isolation_error, spawn_refused="worktree_creation_failed",
-        )
-        _fail_start = _fail_end = datetime.now(timezone.utc)
-        report_path, receipt_path = _govern(
-            enriched_spec, _fail_result, _fail_start, _fail_end, integrity=integrity,
-            lifecycle_v3=getattr(handover, "is_v3", False))
-        return _pre_spawn_failure(
-            handover, state_dir, reason=REASON_PRE_SPAWN_ERROR, error=_isolation_error,
-            report_path=report_path, receipt_path=receipt_path,
-        )
+    wt_path, _consumer_project_root, _refused = _isolated_worktree(
+        plan, enriched_spec, base_ref=(base_sha or "").strip() or _base_ref, integrity=integrity,
+        handover=handover, state_dir=state_dir, lane_fn="run_envelope_headless_plan",
+        requirement="isolation required")
+    if _refused is not None:
+        return _refused
 
     # ── OI-1113 pre-measurement: capture remote HEAD of the target branch ──
     # BEFORE the worker runs, so we can verify after the push that the new HEAD
@@ -1173,26 +1133,72 @@ def run_envelope_headless_plan(
     # close-out failed" is better than no receipt: silence is the failure
     # mode we remove here. The net (vangnet) stays the second line, not the
     # first.
-    _phantom_diff: Optional[str] = None
-    _prior_result: "Optional[_AdapterResult]" = None  # worker output before any close-out stumble
-    result: "Optional[_AdapterResult]" = None  # bound for the exit's end line, even if the block raises
     _spawn_marks: Dict[str, str] = {}  # ADR-045 §8 spawned_at, stamped by the spawn hook
     _exit = _LaneExit(handover, state_dir=state_dir, wt_path=wt_path,
                       dispatch_id=plan.dispatch_id, project_root=_consumer_project_root,
                       terminal_id=plan.target_id, spawn_marks=_spawn_marks)
+    return _work_then_govern(
+        _exit, plan, enriched_spec,
+        lambda: ClaudeSubprocessAdapter().run(
+            enriched_spec, cwd=wt_path, on_spawn=_spawn_marker(handover, on_spawn, _spawn_marks)),
+        lane_word="headless", state_dir=state_dir, wt_path=wt_path,
+        project_root=_consumer_project_root, base_ref=_base_ref, target_branch=_target_branch,
+        target_remote_head=_target_remote_head, skip_pr=_skip_pr, integrity=integrity)
+
+
+def _isolated_worktree(plan, spec, *, base_ref, integrity, handover, state_dir, lane_fn, requirement):
+    """Build the dispatch worktree, or govern the fail-loud refusal: ``(wt, root, refusal)``."""
+    from dispatch_worktree_isolation import (  # noqa: PLC0415
+        create_dispatch_worktree,
+        resolve_consumer_project_root,
+    )
+
+    try:
+        _consumer_project_root = resolve_consumer_project_root()
+        wt_path = create_dispatch_worktree(
+            plan.dispatch_id, project_root=_consumer_project_root, base_ref=base_ref)
+    except Exception as _wt_exc:
+        _isolation_error = (
+            f"{requirement} but worktree creation failed "
+            f"for {plan.dispatch_id}: {_wt_exc} — aborting; no shared-checkout fallback"
+        )
+        logger.error(lane_fn + ": %s", _isolation_error)
+        _fail_result = _AdapterResult(
+            returncode=1,
+            completion_text="",
+            status="failure",
+            error=_isolation_error, spawn_refused="worktree_creation_failed",
+        )
+        _fail_start = _fail_end = datetime.now(timezone.utc)
+        report_path, receipt_path = _govern(
+            spec, _fail_result, _fail_start, _fail_end, integrity=integrity,
+            lifecycle_v3=getattr(handover, "is_v3", False))
+        return None, None, _pre_spawn_failure(
+            handover, state_dir, reason=REASON_PRE_SPAWN_ERROR, error=_isolation_error,
+            report_path=report_path, receipt_path=receipt_path,
+        )
+    return wt_path, _consumer_project_root, None
+
+
+def _work_then_govern(_exit, plan, enriched_spec, run_worker, *, lane_word, state_dir, wt_path,
+                      project_root, base_ref, target_branch, target_remote_head, skip_pr,
+                      integrity) -> EnvelopeResult:
+    """The lane's work block: worker, phantom diff, push+PR, then GOVERN on every exit (OI-1743)."""
+    _phantom_diff: Optional[str] = None
+    _prior_result: "Optional[_AdapterResult]" = None  # worker output before any close-out stumble
+    result: "Optional[_AdapterResult]" = None  # bound for the exit's end line, even if the block raises
     start = datetime.now(timezone.utc)
     end = start
     try:
-        result = ClaudeSubprocessAdapter().run(
-            enriched_spec, cwd=wt_path, on_spawn=_spawn_marker(handover, on_spawn, _spawn_marks))
+        result = run_worker()
         _prior_result = result
         end = datetime.now(timezone.utc)
         try:
             _phantom_diff = _resolve_phantom_diff(
                 plan.dispatch_id,
-                base_ref=_base_ref,
+                base_ref=base_ref,
                 wt_path=wt_path,
-                repo=_consumer_project_root,
+                repo=project_root,
             )
         except Exception:  # noqa: BLE001 — best-effort; None -> guard abstains, never false-rejects
             _phantom_diff = None
@@ -1203,21 +1209,21 @@ def run_envelope_headless_plan(
         if result.status == "success":
             result = _enforce_push_pr(
                 dispatch_id=plan.dispatch_id,
-                branch=_target_branch,
+                branch=target_branch,
                 wt_path=wt_path,
-                repo_root=_consumer_project_root,
+                repo_root=project_root,
                 receipts_file=_receipts_file_for(state_dir),
                 result=result,
-                base_ref=_base_ref,
-                target_remote_head=_target_remote_head,
-                skip_pr=_skip_pr,
+                base_ref=base_ref,
+                target_remote_head=target_remote_head,
+                skip_pr=skip_pr,
                 work_ref=plan.work_ref,
                 provider=enriched_spec.provider,
                 terminal=enriched_spec.terminal_id,
             )
     except Exception as _work_exc:  # noqa: BLE001 — never let a close-out error skip GOVERN
         logger.exception(
-            "envelope: headless work block raised dispatch=%s — building failure "
+            "envelope: " + lane_word + " work block raised dispatch=%s — building failure "
             "result so _govern still emits a report+receipt (OI-1743)",
             plan.dispatch_id,
         )
@@ -1231,20 +1237,20 @@ def run_envelope_headless_plan(
             status="failure",
             token_usage=_prior_result.token_usage if _prior_result is not None else {},
             error=(
-                f"headless dispatch close-out raised: {_work_exc!r} — "
+                f"{lane_word} dispatch close-out raised: {_work_exc!r} — "
                 f"worker status was "
                 f"{_prior_result.status!r} before the failure (OI-1743)"
                 if _prior_result is not None
-                else f"headless dispatch raised before any worker result: {_work_exc!r} (OI-1743)"
+                else f"{lane_word} dispatch raised before any worker result: {_work_exc!r} (OI-1743)"
             ),
             session_id=_prior_result.session_id if _prior_result is not None else None,
             model=_prior_result.model if _prior_result is not None else None,
         )
         return _exit.govern(enriched_spec, result, start, end,
-                            phantom_diff=_phantom_diff, integrity=integrity, base_ref=_base_ref)
+                            phantom_diff=_phantom_diff, integrity=integrity, base_ref=base_ref)
     else:
         return _exit.govern(enriched_spec, result, start, end,
-                            phantom_diff=_phantom_diff, integrity=integrity, base_ref=_base_ref)
+                            phantom_diff=_phantom_diff, integrity=integrity, base_ref=base_ref)
     finally:
         # A BaseException (KeyboardInterrupt/SystemExit) skipped both exits above.
         _exit.close(result)
