@@ -1,0 +1,1 @@
+- `vnx memory bind`, `scan` and `doctor` now use the central per-project store that `build_t0_state` reads, not the repo-local `.vnx-data/state`; `bind` prints the state dir it wrote (OI-2907).
