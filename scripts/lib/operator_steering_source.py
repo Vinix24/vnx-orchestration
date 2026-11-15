@@ -185,8 +185,10 @@ def open_contained(path: Path, root: Path):
         raise
 
 
-def read_sources(state_dir: Path, projects_root: Path, consume: Callable[[TextIO, str], None]) -> SourceResult:
+def read_sources(state_dir: Path, projects_root: Path, consume: Callable[..., None], with_slug: bool = False) -> SourceResult:
     """Hand every contained transcript file to ``consume(handle, filename)``; nothing without a binding.
+
+    ``with_slug=True`` calls ``consume(handle, filename, slug)`` for a reader that needs the dir slug (origin).
 
     A containment refusal makes the whole source `error` (ADR-072 besluit 2).
     """
@@ -209,7 +211,7 @@ def read_sources(state_dir: Path, projects_root: Path, consume: Callable[[TextIO
         for path in sorted(directory.glob("*.jsonl")):
             try:
                 with open_contained(path, directory) as handle:
-                    consume(handle, path.name)
+                    consume(handle, path.name, slug) if with_slug else consume(handle, path.name)
             except Refused as exc:
                 refused[exc.args[0]] += 1
                 refused_files.append(path.name)
