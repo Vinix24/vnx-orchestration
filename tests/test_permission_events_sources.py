@@ -191,3 +191,29 @@ def test_ledger_and_coverage_hold_no_uuid_email_or_home_path(tmp_path):
     assert cov["sources"]["B1"]["skipped"] == {"config_unparseable_sm": 1}
     text = "".join(p.read_text() for p in state.rglob("*") if p.is_file())
     assert text and UUID not in text and "example.invalid" not in text and str(tmp_path) not in text
+
+
+def bash_input(cmd, ts=TS, tag="bash-input"):
+    return {"type": "user", "timestamp": ts, "message": {"content": f"<{tag}>{cmd}</{tag}>"}}
+
+
+def test_b3_one_executed_event_per_bash_input_line() -> None:
+    got = scan([bash_input("bin/vnx deliverable promote dlv-0123456789ab"), bash_input("ok", tag="bash-stdout"),
+                bash_input("boom", tag="bash-stderr")])
+    b3 = [e for e in got.events if e["bron"] == "B3"]
+    assert len(b3) == 1
+    assert (b3[0]["besluit"], b3[0]["ts"], b3[0]["dispatch_id"]) == ("executed", TS, "dlv-0123456789ab")
+    assert b3[0]["vorm"] == "bin/vnx deliverable promote <dlv>"
+
+
+def test_b3_masks_a_secret_and_skips_an_empty_command() -> None:
+    got = scan([bash_input("TOKEN=abc123def456 bin/vnx doctor sk-ABCDEFGHIJKLMNOPQRSTUVWX"), bash_input("  ")])
+    blob = json.dumps(got.events)
+    assert "abc123def456" not in blob and "sk-ABCDEF" not in blob
+    assert len([e for e in got.events if e["bron"] == "B3"]) == 1
+    assert got.skipped["B3"]["no_command_line"] == 1
+
+
+def test_b3_bad_timestamp_is_counted_not_raised() -> None:
+    got = scan([bash_input("ls", ts="not-a-time")])
+    assert [e for e in got.events if e["bron"] == "B3"] == [] and got.skipped["B3"]["bad_timestamp"] == 1

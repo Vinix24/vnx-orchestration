@@ -29,6 +29,8 @@ EXPECTED_ORDER = (
 PARAPHRASES = [
     ("!git status", ("handmatige_actie",)),
     ("  ! bin/vnx doctor", ("handmatige_actie",)),
+    ("<bash-input>bin/vnx deliverable promote dlv-0123456789ab</bash-input>", ("handmatige_actie",)),
+    ("<bash-stdout>ok</bash-stdout>", ()),
     ("[Request interrupted by user for tool use]", ("onderbreking",)),
     ("[Request interrupted by user]", ("onderbreking",)),
     ("Dat klopt niet, de teller staat op nul.", ("correctie",)),

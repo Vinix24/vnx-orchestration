@@ -205,3 +205,15 @@ def test_cli_bind_and_show_never_prints_an_excluded_line(env, capsys):
     assert _cli(env, "show", "--prompt", excluded_id) == 1
     out = capsys.readouterr()
     assert "klaar" not in out.out + out.err and out.out == ""
+
+
+def test_bash_input_is_a_prompt_and_other_bash_tags_stay_excluded(env):
+    state, projects, tdir = env
+    _bind(state, projects)
+    cmd = "<bash-input>bin/vnx deliverable promote dlv-0123456789ab</bash-input>"
+    lines = [_line("b1", cmd), _line("b2", "<bash-stdout>ok</bash-stdout>"),
+             _line("b3", "<bash-stderr>boom</bash-stderr>"), _line("b4", "<bash-other>x</bash-other>")]
+    (tdir / "s1.jsonl").write_text("\n".join(lines) + "\n")
+    result = src.read_prompts(state, projects)
+    assert [p.text for p in result.prompts] == [cmd]
+    assert result.excluded == {"system_tag": 3}

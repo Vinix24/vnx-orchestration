@@ -59,8 +59,9 @@ def _m(kind: str, lang: str, *values: str) -> tuple[Marker, ...]:
 STEERING_CLASSES: tuple[SteeringClass, ...] = (
     SteeringClass(
         "handmatige_actie",
-        "The operator runs a command by hand: the prompt begins with an exclamation mark.",
-        _m(RAW_PREFIX, "any", "!"),
+        "The operator runs a command by hand: the transcript line begins with the bash-input tag "
+        "(or, for a typed prompt, an exclamation mark).",
+        _m(RAW_PREFIX, "any", "<bash-input>", "!"),  # "!" stays: typed prompts of other callers and the paraphrase tests
     ),
     SteeringClass(
         "onderbreking",
