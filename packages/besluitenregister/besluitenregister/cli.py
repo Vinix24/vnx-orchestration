@@ -9,13 +9,25 @@ import argparse, os, re, sys, tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .dagboek import lees_log, titel
+from .geheimpatronen import PATTERNS
 from .lezer import lees
-from .schrijver import Geweigerd, Register, stand
+from .schrijver import Geweigerd, HerkomstBotsing, Register, stand
 
 MD, NDJSON = "BESLUITEN.md", "besluiten.ndjson"
 _VOOR = re.compile(r"intern|publiek|klant:[a-z0-9][a-z0-9._-]*")
 
 class Gebruik(Exception): pass  # exit 2
+
+def _veilig(tekst):
+    """Tekst van de aanroeper in een melding: met een geheimpatroon erin alleen de patroonnaam (ADR-077 besluit 6)."""
+    tekst = str(tekst)
+    p = next((p for p in PATTERNS if p.regex.search(tekst)), None)
+    return f"<weggelaten: geheimpatroon {p.name}>" if p else tekst
+
+class _Parser(argparse.ArgumentParser):
+    def error(self, message):  # argparse herhaalt een onbekende vlag of keuze letterlijk
+        super().error(_veilig(message))
 
 def _voor(w):
     if not _VOOR.fullmatch(w):
@@ -172,7 +184,7 @@ def _schrijf_atomair(pad, tekst):
 def _uit_pad(uit, logdir):
     pad = Path(uit).resolve()  # volgt symlinks en haalt .. weg
     if pad.is_dir() or pad in {(logdir / n).resolve() for n in (NDJSON, NDJSON + ".afgescheurd", MD)}:
-        raise Gebruik(f"--uit: weigert {uit}: dat is een bestand van het register zelf of een map")
+        raise Gebruik(f"--uit: weigert {_veilig(uit)}: dat is een bestand van het register zelf of een map")
     return pad
 
 def _kop(a, regels):
@@ -196,12 +208,49 @@ GEBEURTENIS = {
     "herzien": lambda a, k: dict(k, event="herzien", betreft=a.id, waarom=a.waarom, herzien_op=a.herzien_op),
     "bevestig": lambda a, k: dict(k, event="bevestigd", betreft=a.id, bron=_bronvelden(a), herzien_op=a.herzien_op)}
 
+def _import_log(a, logdir):
+    """add --from-daily-log (ADR-077 § 7): elk besluitpunt via Register.schrijf; gestopt bij de eerste weigering."""
+    log = Path(a.from_daily_log)
+    if not log.is_file():
+        raise Gebruik(f"--from-daily-log: bestand bestaat niet: {_veilig(log)}")
+    dag, gezien, punten = lees_log(log)
+    if dag is None:
+        raise Gebruik(f"{_veilig(log.name)}: geen datum in de frontmatter (date:) of in de bestandsnaam, niets geschreven")
+    if not punten:
+        print(f"{_veilig(log.name)}: " + ("geen besluitpunten onder Beslissingen" if gezien else "geen sectie Beslissingen")
+              + ", 0 besluiten geschreven")
+        return 0
+    reg, slug = Register(logdir), a.slug or next(iter(r["context"] for _, r in lees(logdir / NDJSON).regels), None)
+    if not slug:
+        raise Gebruik("--slug ontbreekt: het register heeft nog geen regels")
+    ids, geschreven = [], 0
+    for nr, (pos, tekst) in enumerate(punten, 1):
+        v = {"context": slug, "besloten_op": dag, "vastgelegd_door": a.vastgelegd_door or "skill:daily-log",
+             "event": "vastgelegd", "titel": titel(tekst), "besluit": tekst, "alternatieven": [],
+             "waarom": f"Overgenomen uit daily-log {log.name}", "besloten_door": a.besloten_door or "operator",
+             "bron": {"soort": "daily-log", "ref": f"{log.name}#{pos}", "citaat": ""}, "reikwijdte": "context",
+             "vertrouwelijkheid": "intern", "terugweg": "geen: overgenomen uit de daily-log", "links": [], "tags": []}
+        try:
+            res = reg.schrijf(v)
+        except Geweigerd as e:
+            # de positie, nooit de tekst; alleen bij een botsing, die de kern pas na de geheimscan meldt
+            wie = f" ({v['bron']['ref']})" if isinstance(e, HerkomstBotsing) else ""
+            print(f"geweigerd bij punt {nr} van {len(punten)}{wie}: {e}; {geschreven} geschreven vóór dit punt",
+                  file=sys.stderr)
+            return 3
+        ids.append(res.besluit_id)
+        geschreven += res.geschreven
+    print(*ids, f"{len(punten)} punt(en), {geschreven} geschreven", sep="\n")
+    return 0
+
 def _uitvoeren(a):
     logdir = Path(a.context)
     if not logdir.is_dir():
-        raise Gebruik(f"--context: map bestaat niet: {logdir}")
+        raise Gebruik(f"--context: map bestaat niet: {_veilig(logdir)}")
     uit = lees(logdir / NDJSON)
     regels = [r for _, r in uit.regels]
+    if a.sub == "add" and a.from_daily_log:
+        return _import_log(a, logdir)
     if a.sub in ("add", "vervang", *GEBEURTENIS):
         reg, kop = Register(logdir), _kop(a, regels)
         res = (reg.schrijf(_nieuw(a, kop)) if a.sub == "add" else reg.vervang(a.id, _nieuw(a, kop), a.reden)
@@ -211,7 +260,7 @@ def _uitvoeren(a):
     if a.sub in ("list", "show"):
         alle, nu = _besluiten(regels), a.nu or datetime.now(timezone.utc).strftime("%Y-%m-%d")
         if a.sub == "show" and a.id not in alle:
-            print(f"onbekend besluit: {a.id}", file=sys.stderr)
+            print(f"onbekend besluit: {_veilig(a.id)}", file=sys.stderr)
             return 1
         print(*([f"{bid}  {_stand(b, nu)}  {b['v']['besloten_op']}  {b['v']['titel']}" for bid, b in alle.items()]
                 if a.sub == "list" else _blok(alle[a.id], set(alle), nu)), _tellingen(uit), sep="\n")
@@ -234,13 +283,17 @@ def _uitvoeren(a):
     _schrijf_atomair(doel, tekst) if doel else sys.stdout.write(tekst)
     return 0
 
-def _parser():
-    p = argparse.ArgumentParser(prog="besluitenregister", description="Besluitenregister per context (ADR-077).")
-    ouders = {}
+def _ouders(streng):
+    """De ouderparsers; argparse deelt hun Action-objecten met elk subcommando dat ze erft, dus wie een vlag
+    niet verplicht wil (add, om --from-daily-log), bouwt een eigen stel met streng=False in plaats van te muteren.
+    Geeft (ouders, de dest van elke daardoor niet verplichte vlag): main() eist die zelf zonder --from-daily-log."""
+    ouders, los = {}, []
     def ouder(naam, *verplicht, basis=()):
         o = ouders[naam] = argparse.ArgumentParser(add_help=False, parents=[ouders[x] for x in basis])
         for veld in verplicht:
-            o.add_argument(f"--{veld}", required=True)
+            vast = streng or veld == "context"
+            o.add_argument(f"--{veld}", required=vast, help=None if vast else "verplicht zonder --from-daily-log")
+            los.extend([] if vast else [veld.replace("-", "_")])
         return o
     ouder("ctx", "context")
     ouder("mut", "besloten-op", "vastgelegd-door", basis=("ctx",)).add_argument("--slug")
@@ -251,8 +304,14 @@ def _parser():
         nieuw.add_argument(f"--{veld}", action="append", default=[])
     nieuw.add_argument("--alternatief", nargs=2, action="append", default=[], metavar=("OPTIE", "WAAROM_NIET"))
     nieuw.add_argument("--herzien-op", type=_dag_of_geen)
+    return ouders, los
+
+def _parser():
+    p = _Parser(prog="besluitenregister", description="Besluitenregister per context (ADR-077).")
+    (ouders, _), (eigen, vereist) = _ouders(True), _ouders(False)
     sub = p.add_subparsers(dest="sub", required=True)
-    sp = {naam: sub.add_parser(naam, parents=[ouders[x] for x in basis]) for naam, basis in {
+    sp = {naam: sub.add_parser(naam, parents=[(eigen if naam == "add" else ouders)[x] for x in basis])
+          for naam, basis in {
         "add": ("nieuw",), "vervang": ("nieuw",), "trek-in": ("mut", "bron"), "herzien": ("mut",),
         "bevestig": ("mut", "bron"), "list": ("ctx",), "show": ("ctx",), "check": ("ctx",), "render": ("ctx",),
         "export": ("ctx",)}.items()}
@@ -264,11 +323,17 @@ def _parser():
                            ("export", "voor", {"type": _voor}), ("show", "?nu", dag), ("export", "?uit", {}),
                            ("export", "?van", dag), ("export", "?tot", dag), ("export", "?reikwijdte", rw)):
         sp[naam].add_argument(f"--{vlag.lstrip('?')}", required=not vlag.startswith("?"), **kw)
+    sp["add"].set_defaults(vereist=vereist)  # per parser (_defaults); geen Action heeft dest "vereist"
+    sp["add"].add_argument("--from-daily-log", metavar="LOG.md",
+                           help="importeer elk punt onder Beslissingen uit deze daily-log")
     return p
 
 def main(argv=None):
     try:
-        return _uitvoeren(_parser().parse_args(argv))
+        a = _parser().parse_args(argv)
+        if a.sub == "add" and not a.from_daily_log and (mist := [d for d in a.vereist if getattr(a, d) is None]):
+            raise Gebruik("verplicht: " + ", ".join("--" + d.replace("_", "-") for d in mist))
+        return _uitvoeren(a)
     except SystemExit as e:  # argparse: gebruik (2) of --help (0)
         return e.code if isinstance(e.code, int) else 2
     except Gebruik as e:
