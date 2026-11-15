@@ -1,0 +1,1 @@
+- plan-gate: `emit_plan_gate_pass` takes `extra_fields`, `verify_with` and `expect_latest_hash`; the latest-pass recheck and the append share one ledger lock (OI-2849, preceding part).
