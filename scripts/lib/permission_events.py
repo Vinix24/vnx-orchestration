@@ -105,8 +105,10 @@ def _sub_paths(pattern: "re.Pattern[str]", repl: str, text: str) -> str:
         if not m:
             return "".join(t for _, _, t, _ in out) + text[pos:]
         start, end = m.start(), m.end()
-        if "/" in m.group():  # a bare "~" is no path
-            q = _open_quote(text, start)
+        q = _open_quote(text, start)
+        # A path, or a bare "~" inside a quote, replaces the whole quoted word at once, so the
+        # first pass gives the form a second pass would. A bare "~" outside a quote stays as is.
+        if "/" in m.group() or q is not None:
             if q is not None:
                 start, end = q, _quote_end(text, q)
             end = _word_tail(text, end)

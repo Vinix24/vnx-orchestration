@@ -1,4 +1,5 @@
 """OI-2870: a path is masked as one whole shell word, quotes and escapes included."""
+import itertools
 import sys
 from pathlib import Path
 
@@ -89,3 +90,35 @@ def test_replacement_never_overlaps_emitted_text(raw, tail):
 def test_existing_cases_are_idempotent_after_two_passes(raw):
     once = pe.normalise(raw)
     assert pe.normalise(once) == once
+
+
+# OI-2870 round 3: a bare "~" inside a quote normalises once, not twice.
+BARE_TILDE_CASES = [
+    "echo '~' && ls",
+    'echo "~" && ls',
+    "echo $'~' && ls",
+    'echo "~" "/Users/alice/AcmeCorp/x" && ls /etc',
+    "echo '~' '~' && ls",
+]
+_WORDS = ["~", '"~"', "'~'", "/Users/alice/AcmeCorp/x", '"/Users/alice/My AcmeCorp/x"',
+          "'/tmp/acme dir/y'", '"~ /Users/alice/AcmeCorp/z"']
+COMBOS = [" ".join(c) for n in (1, 2, 3) for c in itertools.product(_WORDS, repeat=n)]
+
+
+@pytest.mark.parametrize("raw", BARE_TILDE_CASES)
+def test_bare_tilde_in_quote_normalises_once(raw):
+    once = pe.normalise(raw)
+    assert pe.normalise(once) == once
+    assert "ls" in once
+
+
+def test_generated_word_combinations_are_stable_and_leak_nothing():
+    for combo in COMBOS:
+        raw = f"echo {combo} && ls /etc"
+        once = pe.normalise(raw)
+        twice = pe.normalise(once)
+        assert twice == once, (raw, once, twice)
+        for text in (once, twice):
+            assert "&& ls /etc" in text, (raw, text)
+            assert not [x for x in ("alice", "AcmeCorp", "acme") if x in text], (raw, text)
+            assert _balanced(text), (raw, text)
