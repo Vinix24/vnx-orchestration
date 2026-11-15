@@ -19,3 +19,17 @@ br export --voor klant:acme --van 2026-11-01 --tot 2026-12-31 --reikwijdte klant
 ```
 
 `export --voor` is required: `publiek` shows public decisions only, `klant:<slug>` adds client decisions of exactly that context, `intern` shows all. Exit codes: 0 ok, 1 check or read error, 2 usage, 3 refused by the core (secret, origin collision, transition, schema).
+
+## Importing a daily-log
+
+`add --from-daily-log <log.md>` writes every top-level bullet under a `## Beslissingen` or `### Beslissingen (...)` heading (level 2 or 3, any suffix; the section ends at the next heading of the same or a higher level) as one decision. A nested bullet belongs to its parent; empty bullets and `geen`, `-`, `n.v.t.` are skipped; no other section is read. `besloten_op` is the `date:` of the frontmatter, else the `YYYY-MM-DD` in the file name (neither: exit 2, nothing written). The source is `{"soort": "daily-log", "ref": "<file name>"}`, `vastgelegd_door` is `skill:daily-log` and `besloten_door` is `operator` (override with `--besloten-door`).
+
+```sh
+br add --from-daily-log "$HOME/work/acme/daily-log/2026-11-14.md" --slug klant:acme
+```
+
+Importing the same log again writes nothing and prints the existing ids. A bullet whose text changed is refused by the core (exit 3); the import stops there and says which bullet and how many were written before it. A log without the section exits 0 with "0 besluiten geschreven".
+
+## Activating the skills
+
+The `daily-log` skill runs `python3 -m besluitenregister add --context <LOGDIR> --from-daily-log <log>` after it wrote the log and shows the count (a non-zero exit is shown, never swallowed). The `kickoff` skill runs `python3 -m besluitenregister list --context <LOGDIR>` and shows the recent decisions and those in state `te_herzien`. Both skip silently when `<LOGDIR>` has no `besluiten.ndjson` and the package is not installed. The skill text lives outside this repo, in `~/.claude/skills`, and is placed by the operator.

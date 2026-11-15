@@ -175,3 +175,94 @@ def test_export_uit_naar_ander_bestand_in_de_context_werkt(capsys, tmp_path):
     assert run(capsys, "export", "--context", tmp_path, "--voor", "intern", "--uit", tmp_path / "export-intern.md")[0] == 0
     assert "Kies A" in (tmp_path / "export-intern.md").read_text()
     assert (tmp_path / "besluiten.ndjson").read_bytes() == voor
+
+# --- B3: add --from-daily-log (ADR-077 § 7, plan § Lezers en schrijvers) ---
+LOG = """---
+type: dev_daily_log
+date: 2026-11-14
+---
+
+## Gedaan
+
+- Dit is geen besluit.
+
+## Beslissingen
+
+- Eerste punt. Met uitleg.
+  - Genest punt hoort bij de ouder.
+- geen
+- Tweede punt zonder punt aan het eind
+
+## Open vragen
+
+- Ook geen besluit.
+
+### Beslissingen (achtste T0)
+
+- Derde punt.
+
+### Beslissingen (negende T0)
+
+- n.v.t.
+"""
+
+def importeer(capsys, ctx, log, *extra):
+    return run(capsys, "add", "--context", ctx, "--from-daily-log", log, "--slug", "vnx-orchestration", *extra)
+
+def schrijf_log(tmp_path, tekst=LOG, naam="2026-11-14.md"):
+    ctx = tmp_path / "ctx"
+    ctx.mkdir(exist_ok=True)
+    (ctx / naam).write_text(tekst, encoding="utf-8")
+    return ctx, ctx / naam
+
+def test_from_daily_log_drie_besluiten_tweede_import_schrijft_niets(capsys, tmp_path):
+    ctx, log = schrijf_log(tmp_path)
+    code, out, err = importeer(capsys, ctx, log)
+    assert code == 0, err
+    regels = [r for _, r in lees(ctx / "besluiten.ndjson").regels]
+    assert [r["titel"] for r in regels] == ["Eerste punt.", "Tweede punt zonder punt aan het eind", "Derde punt."]
+    assert all(r["bron"] == {"soort": "daily-log", "ref": "2026-11-14.md", "citaat": ""} for r in regels)
+    assert all(r["besloten_op"] == "2026-11-14" and r["vastgelegd_door"] == "skill:daily-log"
+               and r["besloten_door"] == "operator" for r in regels)
+    assert "Genest punt hoort bij de ouder." in regels[0]["besluit"] and "Dit is geen" not in str(regels)
+    voor = (ctx / "besluiten.ndjson").read_bytes()
+    code, out2, _ = importeer(capsys, ctx, log)
+    assert code == 0 and (ctx / "besluiten.ndjson").read_bytes() == voor
+    assert all(r["besluit_id"] in out2 for r in regels) and "0 geschreven" in out2
+
+def test_from_daily_log_gewijzigd_punt_exit_3_en_stopt(capsys, tmp_path):
+    ctx, log = schrijf_log(tmp_path)
+    importeer(capsys, ctx, log)
+    voor = (ctx / "besluiten.ndjson").read_bytes()
+    log.write_text(LOG.replace("- Derde punt.", "- Derde punt. Nu anders."))
+    code, _, err = importeer(capsys, ctx, log)
+    assert code == 3 and "punt 3 van 3" in err and "Derde punt." in err and "0 geschreven" in err
+    assert (ctx / "besluiten.ndjson").read_bytes() == voor
+
+def test_from_daily_log_zonder_sectie_exit_0_niets_geschreven(capsys, tmp_path):
+    ctx, log = schrijf_log(tmp_path, "---\ndate: 2026-11-14\n---\n\nBeslissingen:\n\n- geen sectie\n\n## Gedaan\n\n- x\n")
+    code, out, _ = importeer(capsys, ctx, log)
+    assert code == 0 and "0 besluiten" in out and not (ctx / "besluiten.ndjson").exists()
+
+def test_from_daily_log_datum_uit_bestandsnaam_en_zonder_datum_exit_2(capsys, tmp_path):
+    ctx, log = schrijf_log(tmp_path, "## Beslissingen\n\n- Een punt.\n", "2026-11-13.md")
+    assert importeer(capsys, ctx, log)[0] == 0
+    assert next(r for _, r in lees(ctx / "besluiten.ndjson").regels)["besloten_op"] == "2026-11-13"
+    ctx2, log2 = schrijf_log(tmp_path / "x", "## Beslissingen\n\n- Een punt.\n", "notities.md") if (tmp_path / "x").mkdir() is None else None
+    code, _, err = importeer(capsys, ctx2, log2)
+    assert code == 2 and "datum" in err and not (ctx2 / "besluiten.ndjson").exists()
+
+def test_from_daily_log_geheim_exit_3_zonder_waarde(capsys, tmp_path):
+    geheim = "ghp_" + "a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8"
+    ctx, log = schrijf_log(tmp_path, f"---\ndate: 2026-11-14\n---\n## Beslissingen\n\n- Token {geheim} gebruiken.\n")
+    code, out, err = importeer(capsys, ctx, log)
+    assert code == 3 and geheim not in out + err and not (ctx / "besluiten.ndjson").exists()
+
+def test_from_daily_log_check_schoon_na_render(capsys, tmp_path):
+    ctx, log = schrijf_log(tmp_path)
+    importeer(capsys, ctx, log)
+    code, out = render_check(capsys, ctx)  # check eist een BESLUITEN.md gelijk aan render
+    assert code == 0 and "check: ok" in out
+
+def test_add_zonder_from_daily_log_mist_verplichte_vlag_exit_2(capsys, tmp_path):
+    assert run(capsys, "add", "--context", tmp_path, "--titel", "x")[0] == 2
