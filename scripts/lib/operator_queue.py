@@ -234,6 +234,12 @@ def read_state(project_id: str, *, state_dir: Optional[Path] = None) -> Dict[str
     return _read_state(sdir, project_id)
 
 
+def answers(project_id: str, *, state_dir: Optional[Path] = None) -> List[Dict[str, Any]]:
+    """The ``answer`` lines of the ledger in file order. Raises QueueUnreadable on a bad ledger line."""
+    sdir = Path(state_dir) if state_dir is not None else state_dir_for(project_id)
+    return [line for line in _ledger_lines(sdir, project_id) if line["kind"] == "answer"]
+
+
 def append_line(project_id: str, kind: str, fields: Mapping[str, Any], *, now: Optional[str] = None,
                 state_dir: Optional[Path] = None) -> Optional[Dict[str, Any]]:
     """Validate and append one line, then rebuild the state. Returns the line, or None for an ``opened``
