@@ -154,3 +154,13 @@ def test_vervangt_naar_onbekend_of_later_id_geweigerd_en_cirkel_gemeld(reg, caps
     plak_regel(ctx, besluit(titel="Y", vervangt="B-20261114-0000000a"), "B-20261114-0000000b")
     soorten = [x.split(":")[1].strip() for x in fouten(capsys, ctx)]
     assert "cirkel in vervangt" in soorten and "gebeurtenis vóór de vastlegging" in soorten
+
+def test_stand_module_nu_als_date_tekst_of_geen():  # direct op de module van B1b
+    from datetime import date
+    from besluitenregister.stand import bevindingen, mag, stand
+    v = {"event": "vastgelegd", "betreft": "A", "besluit_id": "A", "herzien_op": "2026-11-20"}
+    assert [stand([v], "A", nu).naam for nu in (None, "", "2026-11-19", date(2026, 11, 19))] == ["geldig"] * 4
+    assert [stand([v], "A", nu).naam for nu in ("2026-11-20", date(2026, 11, 20), "2026-11-20T01:00:00Z")] == ["te_herzien"] * 3
+    assert stand([v], "Z").naam == "geen" and mag({"event": "herzien", "betreft": "Z"}, [v]) == ("herzien", "geen")
+    assert mag({"event": "vastgelegd", "vervangt": None}, [v]) is None and mag({"event": 7, "betreft": "A"}, [v]) == (7, "open")
+    assert bevindingen([v, dict(v, event="herzien", betreft="Z")], {"A"}) == []
