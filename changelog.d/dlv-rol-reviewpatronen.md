@@ -1,0 +1,2 @@
+- The backend-developer, security-engineer and quality-engineer role files now carry a `## What review finds most` section: the six patterns codex review returns most, each with the proof the report must show.
+- The same section now also sits in the `scripts/lib/prompts/roles/` prompts for backend-developer and security-engineer, the files the headless lane loads; a test reads the role text through `PromptAssembler._load_role`.
