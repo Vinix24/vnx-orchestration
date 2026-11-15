@@ -27,7 +27,7 @@ USER_SOURCES = {"user_temporary": "approved_once", "user_permanent": "approved_p
 KNOWN_SOURCES = frozenset(("", "config", "hook", "classifier"))
 _FENCE = re.compile(r"```[^\n]*\n(.*?)```", re.DOTALL)
 _DISPATCH = re.compile(r"\bdlv-[0-9a-f]{6,}(?:-[a-z0-9]+)*|\b\d{8}-\d{6}-[\w-]+")
-_CACHE: Dict[Tuple[str, int, int], Optional[str]] = {}
+_CACHE: Dict[Tuple[str, int, int], Tuple[Optional[str], Optional[str]]] = {}
 
 
 @dataclass
@@ -54,27 +54,54 @@ def origin_of(slug: str) -> str:
     return "unknown" if any(m in slug for m in ("-vnx-data-", "-claude-", "worktrees")) else "operator"
 
 
-def _config_uuid(path: Any) -> Optional[str]:
+def _config_uuid(path: Any) -> Tuple[Optional[str], Optional[str]]:
+    """(uuid, failure class). The class is ``unreadable``, ``unparseable`` or ``wrong_type``; both None is "no uuid in it"."""
     try:
         p = Path(path).expanduser()
         st = p.stat()
         key = (str(p), st.st_mtime_ns, st.st_size)
         if key not in _CACHE:
-            uuid = json.loads(p.read_text(encoding="utf-8"))["oauthAccount"]["accountUuid"]
-            _CACHE[key] = uuid if isinstance(uuid, str) and uuid else None
+            _CACHE[key] = _parse_config(p.read_text(encoding="utf-8"))
         return _CACHE[key]
-    except Exception:  # vnx-silent-except: an unreadable config is "no match"; no message may carry a uuid or e-mail
-        return None
+    except (OSError, UnicodeDecodeError):  # a message may carry the path: only the class is kept
+        return None, "unreadable"
+
+
+def _parse_config(text: str) -> Tuple[Optional[str], Optional[str]]:
+    try:
+        data = json.loads(text)
+    except ValueError:  # JSONDecodeError; its message may quote config content, so only the class is kept
+        return None, "unparseable"
+    if not isinstance(data, dict):
+        return None, "wrong_type"
+    if "oauthAccount" not in data:
+        return None, None
+    acct = data["oauthAccount"]
+    if not isinstance(acct, dict):
+        return None, "wrong_type"
+    uuid = acct.get("accountUuid")
+    if uuid is None:
+        return None, None
+    return (uuid, None) if isinstance(uuid, str) and uuid else (None, "wrong_type")
+
+
+def resolve_account_checked(owner_uuid: Any, config_paths: Sequence[Any] = DEFAULT_ACCOUNT_CONFIGS) -> Tuple[str, List[str]]:
+    """(account, reasons). A reason is ``config_<class>_<slot>``: never a path, uuid or e-mail; empty when all configs read."""
+    reasons: List[str] = []
+    account = "unknown"
+    valid = isinstance(owner_uuid, str) and bool(owner_uuid)
+    for slot, path in zip(ACCOUNT_SLOTS, config_paths):
+        uuid, failure = _config_uuid(path)
+        if failure:
+            reasons.append(f"config_{failure}_{slot}")
+        elif valid and account == "unknown" and uuid == owner_uuid:
+            account = slot
+    return account, reasons
 
 
 def resolve_account(owner_uuid: Any, config_paths: Sequence[Any] = DEFAULT_ACCOUNT_CONFIGS) -> str:
     """``vnx`` or ``sm`` when the uuid matches the first or second config, else ``unknown``. The uuid never leaves."""
-    if not isinstance(owner_uuid, str) or not owner_uuid:
-        return "unknown"
-    for slot, path in zip(ACCOUNT_SLOTS, config_paths):
-        if _config_uuid(path) == owner_uuid:
-            return slot
-    return "unknown"
+    return resolve_account_checked(owner_uuid, config_paths)[0]
 
 
 def _texts(obj: Dict[str, Any], kinds: Tuple[str, ...] = ("text",)) -> Iterator[str]:
@@ -152,7 +179,12 @@ def _decisions(objs: Sequence[Dict[str, Any]]) -> Iterator[Tuple[Dict[str, Any],
 
 def _read_decisions(objs: Sequence[Dict[str, Any]], ctx: Ctx, skipped: Counter, want: str) -> Iterator[Dict[str, str]]:
     for obj, block, command in _decisions(objs):
-        verdict = classify(_field("permissionDecision", block, obj), _field("toolDenialKind", block, obj))
+        decision, kind = _field("permissionDecision", block, obj), _field("toolDenialKind", block, obj)
+        if (decision is not None and not isinstance(decision, dict)) or (kind is not None and not isinstance(kind, str)):
+            if want == "B1":  # a malformed line is counted once, under B1
+                skipped["malformed_permission_metadata"] += 1
+            continue
+        verdict = classify(decision, kind)
         if verdict is None or (verdict[0] is not None and verdict[0] != want):
             continue
         if verdict[0] is None:
@@ -162,7 +194,7 @@ def _read_decisions(objs: Sequence[Dict[str, Any]], ctx: Ctx, skipped: Counter, 
         if not command:
             skipped["no_matching_tool_use"] += 1
             continue
-        code = (_field("permissionDecision", block, obj) or {}).get("reasonCode")
+        code = (decision or {}).get("reasonCode")  # decision is a dict or None here (checked above); None has no code
         refused = verdict[1].startswith("refused")
         ev = _emit(skipped, ctx, obj.get("timestamp"), want, verdict[1], command, reason_code=code if isinstance(code, str) else None,
                    reason_text=_result_text(block) if refused else None)  # an approval's text is tool output: never kept
@@ -215,8 +247,10 @@ def scan_transcript(lines: Iterable[str], *, project_id: str, slug: str, stem: s
                 out.skipped[bron]["malformed_json"] += 1
     owner = next((o for o in objs if o.get("type") == "session-owner"), {})
     sid = owner.get("sessionId")
-    ctx = Ctx(project_id, sid if isinstance(sid, str) and sid else stem, resolve_account(owner.get("accountUuid"), account_configs),
-              origin_of(slug), find_dispatch_id(slug))
+    account, reasons = resolve_account_checked(owner.get("accountUuid"), account_configs)
+    for reason in reasons:
+        out.skipped["B1"][reason] += 1  # counted once, under B1 (the unmapped reasons live there too): a broken config never reads as 0
+    ctx = Ctx(project_id, sid if isinstance(sid, str) and sid else stem, account, origin_of(slug), find_dispatch_id(slug))
     for bron, reader in (("B1", read_b1), ("B2", read_b2), ("B4a", read_b4a)):
         out.events.extend(reader(objs, ctx, out.skipped[bron]))
     return out
