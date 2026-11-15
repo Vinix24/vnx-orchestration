@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Characterisation tests for golf-schoon R20b (Dispatch-ID: dlv-ae7aaaff65a5).
 
-Pins the observable behaviour of ``update_confidence_from_outcome`` so the extract-method refactor stays
+Pins the observable behaviour of ``update_confidence_from_outcome`` (and, from R20c,
+``shadow_grounding_compare``, Dispatch-ID: dlv-ae7aaaff65a5-c) so the extract-method refactor stays
 behaviour-preserving. Real SQLite files in tmp dirs; nothing is patched except
 env vars. Carried over from R20's tests (commit 56bc98966) and extended.
 """
@@ -32,6 +33,7 @@ def _load_persist():
 
 _persist = _load_persist()
 update_confidence_from_outcome = _persist.update_confidence_from_outcome
+shadow_grounding_compare = _persist.shadow_grounding_compare
 
 
 # ---------------------------------------------------------------------------
@@ -258,3 +260,107 @@ def test_update_project_scoped_pu_without_ce_project(tmp_path, monkeypatch):
     update_confidence_from_outcome(db, "d1", "T1", "success")
     ev = _q(db, "SELECT * FROM confidence_events")[0]
     assert "grounding_source" not in ev and "project_id" not in ev
+
+
+# ---------------------------------------------------------------------------
+# shadow_grounding_compare (R20c; the first four carried over from 56bc98966)
+# ---------------------------------------------------------------------------
+
+def _offer(db, dispatch_id, sp_id):
+    con = sqlite3.connect(db)
+    con.execute("INSERT INTO dispatch_pattern_offered VALUES (?, ?, 't', 'now')",
+                (dispatch_id, f"intel_sp_{sp_id}"))
+    con.commit()
+    con.close()
+
+
+def test_shadow_missing_db(tmp_path):
+    assert shadow_grounding_compare(tmp_path / "no.db", [{"dispatch_id": "x"}]) == {
+        "dispatches": [],
+        "summary": {"total_dispatches": 0, "diverged_dispatches": 0,
+                    "v2_only_grounded": 0, "v1_only_grounded": 0,
+                    "junction_available": False},
+    }
+
+
+def test_shadow_full_report_and_read_only(tmp_path):
+    db = _pdb(tmp_path)
+    both = _add_sp(db, ["d1"], conf=0.6, title="Both")
+    v1 = _add_sp(db, ["d1"], conf=0.4, title="OnlyV1")
+    v2 = _add_sp(db, [], conf=0.7, title="OnlyV2")
+    _offer(db, "d1", both)
+    _offer(db, "d1", v2)
+    con = sqlite3.connect(db)
+    con.execute("INSERT INTO pattern_usage (pattern_id,pattern_title,pattern_hash,success_count,"
+                "failure_count) VALUES (?, 't','h',2,1)", (f"intel_sp_{both}",))
+    con.commit()
+    con.close()
+    before = db.read_bytes()
+    out = shadow_grounding_compare(db, [{"dispatch_id": " d1 ", "status": "SUCCESS"},
+                                        {"dispatch_id": "none", "status": None}])
+    assert db.read_bytes() == before
+    assert out["summary"] == {"total_dispatches": 2, "diverged_dispatches": 1,
+                              "v2_only_grounded": 1, "v1_only_grounded": 1,
+                              "junction_available": True}
+    d1, none = out["dispatches"]
+    assert (d1["dispatch_id"], d1["status"]) == ("d1", "success")
+    assert d1["v1_pattern_ids"] == sorted([both, v1])
+    assert d1["v2_pattern_ids"] == sorted([both, v2])
+    assert (d1["v1_only"], d1["v2_only"], d1["agreement"]) == ([v1], [v2], [both])
+    assert d1["has_divergence"] is True
+    det = d1["pattern_details"]
+    assert set(det) == {both, v1, v2}
+    assert det[both] == {"title": "Both", "current_conf": 0.6,
+                         "v1_new_conf": round(beta_score(3, 1), 6),
+                         "v2_new_conf": round(beta_score(3, 1), 6),
+                         "in_v1": True, "in_v2": True}
+    assert det[v1]["in_v1"] and not det[v1]["in_v2"]
+    assert det[v1]["v1_new_conf"] == round(beta_score(1, 0), 6)
+    assert det[v1]["v2_new_conf"] == 0.4
+    assert det[v2]["v1_new_conf"] == 0.7
+    assert det[v2]["v2_new_conf"] == round(beta_score(1, 0), 6)
+    assert (none["status"], none["has_divergence"], none["pattern_details"]) == ("", False, {})
+
+
+def test_shadow_failure_status_and_no_junction(tmp_path):
+    db = _pdb(tmp_path)
+    con = sqlite3.connect(db)
+    con.execute("DROP TABLE dispatch_pattern_offered")
+    con.execute("DROP TABLE pattern_usage")
+    con.commit()
+    con.close()
+    sp = _add_sp(db, ["d1"], conf=0.5)
+    out = shadow_grounding_compare(db, [{"dispatch_id": "d1", "status": "failure"}])
+    assert out["summary"]["junction_available"] is False
+    assert out["summary"]["v1_only_grounded"] == 1
+    entry = out["dispatches"][0]
+    assert entry["v2_pattern_ids"] == []
+    assert entry["pattern_details"][sp]["v1_new_conf"] == round(beta_score(0, 1), 6)
+    assert entry["pattern_details"][sp]["v2_new_conf"] == 0.5
+
+
+def test_shadow_empty_dispatch_list(tmp_path):
+    db = _pdb(tmp_path)
+    out = shadow_grounding_compare(db, [])
+    assert out["dispatches"] == []
+    assert out["summary"]["total_dispatches"] == 0
+    assert out["summary"]["junction_available"] is True
+
+
+def test_shadow_unreadable_pattern_usage_counts_as_zero(tmp_path):
+    # pattern_usage exists but lacks the count columns: the read raises
+    # OperationalError, which the report swallows and treats as 0/0 counts.
+    db = _pdb(tmp_path)
+    con = sqlite3.connect(db)
+    con.execute("DROP TABLE pattern_usage")
+    con.execute("CREATE TABLE pattern_usage (pattern_id TEXT PRIMARY KEY)")
+    con.execute("INSERT INTO pattern_usage VALUES ('intel_sp_1')")
+    con.commit()
+    con.close()
+    sp = _add_sp(db, ["d1"], conf=0.5, title="T")
+    assert sp == 1
+    out = shadow_grounding_compare(db, [{"dispatch_id": "d1", "status": "success"}])
+    det = out["dispatches"][0]["pattern_details"][sp]
+    assert det == {"title": "T", "current_conf": 0.5,
+                   "v1_new_conf": round(beta_score(1, 0), 6), "v2_new_conf": 0.5,
+                   "in_v1": True, "in_v2": False}
