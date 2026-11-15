@@ -40,3 +40,52 @@ def test_masked_form_is_unquoted_and_keeps_the_rest():
 
 def test_unbalanced_quote_leaves_no_tail():
     assert pe.normalise('cat "/Users/alice/My Projects/AcmeCorp') == "cat ~/..."
+
+
+# OI-2870 round 2: a replacement never covers text that was already emitted.
+OVERLAP_CASES = [
+    ('echo "~ /Users/alice/report.txt" && ls /etc', "&& ls /etc"),
+    ("echo '~ /Users/alice/AcmeCorp/x' && ls /etc", "&& ls /etc"),
+    ('echo "/Users/alice/x ~" && ls /etc', "&& ls /etc"),
+    ('cp "/Users/alice/a /tmp/b" && ls /etc', "&& ls /etc"),
+    ("cp $'/Users/alice/a /tmp/b' && ls /etc", "&& ls /etc"),
+    ("echo $'~ /Users/alice/AcmeCorp/x' && ls /etc", "&& ls /etc"),
+    ('echo "a ~ b /tmp/acme dir/x" && rm -rf /x', "&& rm -rf /x"),
+    ('cat "/Users/alice/My Projects/AcmeCorp/notes.txt" && ls /etc', "&& ls /etc"),
+]
+OVERLAP_LEAKS = ("alice", "AcmeCorp", "report", "acme")
+
+
+def _balanced(text):
+    """Even count of unescaped ``"`` and, outside double quotes, of ``'``."""
+    dq = sq = 0
+    in_dq = False
+    i = 0
+    while i < len(text):
+        c = text[i]
+        if c == "\\":
+            i += 2
+            continue
+        if c == '"':
+            dq += 1
+            in_dq = not in_dq
+        elif c == "'" and not in_dq:
+            sq += 1
+        i += 1
+    return dq % 2 == 0 and sq % 2 == 0
+
+
+@pytest.mark.parametrize("raw,tail", OVERLAP_CASES)
+def test_replacement_never_overlaps_emitted_text(raw, tail):
+    once = pe.normalise(raw)
+    twice = pe.normalise(once)
+    assert twice == once
+    assert tail in once and tail in twice
+    assert _balanced(once), once
+    assert not [leak for leak in OVERLAP_LEAKS if leak in once], once
+
+
+@pytest.mark.parametrize("raw", CASES)
+def test_existing_cases_are_idempotent_after_two_passes(raw):
+    once = pe.normalise(raw)
+    assert pe.normalise(once) == once

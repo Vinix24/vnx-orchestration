@@ -1,1 +1,2 @@
 - Permission-event normalisation now masks a home, scratchpad, tmp or vnx-data path as one whole shell word, so a quoted or backslash-escaped path with a space no longer leaks the part after the space into the ledger (OI-2870).
+- Permission-event normalisation no longer emits a replacement twice when a bare `~` precedes a quoted path in the same quote, so a following command (`&& ls /etc`) survives the ledger's second normalise pass (OI-2870, round 2).

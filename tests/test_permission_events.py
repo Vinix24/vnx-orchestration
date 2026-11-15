@@ -170,3 +170,14 @@ def test_central_dir_must_stay_under_the_central_root(tmp_path, home, entry):
     with pytest.raises(ValueError, match="outside the central store"):
         ENTRY_POINTS[entry]("sales-copilot", None)
     assert list((tmp_path / "outside").iterdir()) == []
+
+
+@pytest.mark.parametrize("raw", [
+    "cd /tmp/x && pytest tests/", "cd '/a b/c' && FOO=1 BAR=\"x y\" make test",
+    "cat <<'EOF' > f\nhello 42\nEOF", "git show dlv-3833c5ee7e0f-r2",
+    "ls /private/tmp/claude-501/scratchpad/out", "cp x /tmp/work/y",
+    "tail ~/.vnx-data/vnx-dev/state/a.json", "cd 'a && b' && ls", "X='a b' ls",
+    "see PR 2863 and pulls/12",
+])
+def test_normalisation_forms_are_idempotent(raw):
+    assert pe.normalise(pe.normalise(raw)) == pe.normalise(raw)

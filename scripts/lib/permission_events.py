@@ -99,18 +99,28 @@ def _word_tail(text: str, end: int) -> int:
 def _sub_paths(pattern: "re.Pattern[str]", repl: str, text: str) -> str:
     """Replace each path as one whole shell word: from the opening quote it sits in (if any)
     to the end of the word; a quote that never closes masks to the end of the text."""
-    out, pos = [], 0
+    out, pos = [], 0  # out: (source start, source end, text, literal) in source order
     while True:
         m = pattern.search(text, pos)
         if not m:
-            return "".join(out) + text[pos:]
+            return "".join(t for _, _, t, _ in out) + text[pos:]
         start, end = m.start(), m.end()
         if "/" in m.group():  # a bare "~" is no path
             q = _open_quote(text, start)
             if q is not None:
                 start, end = q, _quote_end(text, q)
             end = _word_tail(text, end)
-        out.append(text[pos:start] + repl)
+        # A replacement never covers text already emitted: when the rewind to the opening quote
+        # lands before pos, cut the output back to start so the quoted word is replaced once.
+        while out and out[-1][0] >= start:
+            out.pop()
+        if out and out[-1][1] > start:  # only a literal piece can straddle: replacements end at a quote or word edge
+            o_start, _, _, _ = out.pop()
+            out.append((o_start, start, text[o_start:start], True))
+        elif start > out[-1][1] if out else start > 0:
+            gap = out[-1][1] if out else 0
+            out.append((gap, start, text[gap:start], True))
+        out.append((start, end, repl, False))
         pos = max(end, start + 1)
 
 def _strip_lead(text: str) -> str:
