@@ -372,6 +372,7 @@ Main window (read-only probe, ADR-073):
 
 Memory ledger (ADR-078):
   memory bind --dir <path>           Bind one memory folder under ~/.claude/projects/ (operator only)
+  memory scan                        Observe the bound folders into state/memory_ledger.ndjson (hashes and labels, never note text)
 
 Gate commands (pre-merge verification):
   gate-check --pr <ID>  Run deterministic pre-merge gate checks (GO/HOLD verdict)
