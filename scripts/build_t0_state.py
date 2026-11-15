@@ -2739,6 +2739,47 @@ def _lifecycle_count_index_summary(state_dir: Path) -> Dict[str, Any]:
             "counted_at": details.get("counted_at")}
 
 
+def _memory_ledger_counts(state_dir: Path, now: datetime) -> Dict[str, int]:
+    """Notes in the ledger's last state and how many are out of force (M3's rule)."""
+    import memory_ledger as ml
+    from operator_memory_indexer import OperatorMemory, filter_valid_memories
+
+    last: Dict[Tuple[str, str], dict] = {}
+    for rec in ml.read_ledger(state_dir / ml.LEDGER_FILE)[0]:
+        if rec["event"] in ml._STATE_EVENTS:
+            last[(rec["source"], rec["note"])] = rec  # later lines win
+    live = [r for r in last.values() if r["event"] != "removed"]
+    mems = [
+        OperatorMemory(
+            name=r["note"], description="", type="", file_path=Path(r["note"]), body="",
+            tags=frozenset(), referenced_files=frozenset(), valid_from=r["valid_from"],
+            invalid_at=r["invalid_at"], superseded_by=r["superseded_by"],
+        )
+        for r in live
+    ]
+    return {"notes": len(live), "out_of_force": len(live) - len(filter_valid_memories(mems, now))}
+
+
+def _build_memory_ledger(state_dir: Path) -> Dict[str, Any]:
+    """ADR-078 section 7: scan within 2 s; a failure becomes status=error, never a raise."""
+    try:
+        import memory_ledger as ml
+
+        res = ml.scan(state_dir, budget=2.0)
+        block: Dict[str, Any] = {"status": res["status"], "reason": res["reason"]}
+        if res["status"] == "unbound":
+            return block
+        counts = _memory_ledger_counts(state_dir, _now_utc())
+        block.update(
+            notes=counts["notes"], written=res["written"], unknown=res["unreadable"],
+            out_of_force=counts["out_of_force"],
+        )
+        return block
+    except Exception as exc:  # ADR-078 section 7: an error never breaks SessionStart
+        # reason = class + message only; the message of a scan error holds no note text
+        return {"status": "error", "reason": f"{type(exc).__name__}: {exc}"[:200]}
+
+
 def build_t0_state(
     state_dir: Path,
     dispatch_dir: Path,
@@ -2783,6 +2824,7 @@ def build_t0_state(
     strategic_state_heavy = _build_strategic_state_heavy(state_dir)
     lifecycle_sweep = _lifecycle_sweep_section(state_dir)
     lifecycle_count = _lifecycle_count_index_summary(state_dir)
+    memory_ledger = _build_memory_ledger(state_dir)  # geheugen-in-de-store M4
     elapsed = time.monotonic() - start
     system_health = _build_system_health(
         state_dir, db_ok, db_health=db_health,
@@ -2812,6 +2854,7 @@ def build_t0_state(
         "strategic_state": strategic_state,
         "lifecycle_sweep": lifecycle_sweep,
         "lifecycle_count": lifecycle_count,
+        "memory_ledger": memory_ledger,
         "_strategic_state_heavy": strategic_state_heavy,
         "_build_seconds": round(elapsed, 2),
     }
