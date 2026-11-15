@@ -1,6 +1,6 @@
 # ADR-065 - Leren is voorstellen: faalklassen, telcontract, besluitrecord, activering en verdict
 
-**Status:** Voorgesteld 10-11-2026 (T0, track `self-learning-loop-reactivate`, rij D0); aangenomen zodra de T0 PR-D0 merget.
+**Status:** Aangenomen 2026-11-10 (PR #2599, b0bbe3da7). Voorgesteld 10-11-2026 (T0, track `self-learning-loop-reactivate`, rij D0).
 **Datum:** 2026-11-10
 **Besloten door:** de operator op 07-11-2026 (besluit 2 en 3, hieronder letterlijk) en het plan `claudedocs/2026-11-07-naar-1-9/plannen/self-learning-loop-reactivate.md` (revisie 2, 08-11-2026, plan-gate van 08-11 en de bindende voorwaarde van de tiebreaker) voor de uitwerking. ADR-065 was vrij op `origin/main` `2656026d9` (10-11-2026): de hoogste bestaande is ADR-063, ADR-064 is gereserveerd voor deltareview DR-0 en 066 tot en met 070 voor andere G3-ADR's.
 **Cross-refs:** ADR-007 (samengestelde sleutel over `project_id`), ADR-045 (één startregel, één eindregel, één sweep), ADR-046 (één poortmotor), ADR-052 (geen functie boven 200 uitvoerbare regels), ADR-054 (het governance-record van de envelope is geen eindregel), ADR-056 (zelfstandigheid als meetbaar begrip), ADR-063 (dagelijkse doorloopmeting: dezelfde scheiding tussen voorstel, goedkeuring en oordeel).

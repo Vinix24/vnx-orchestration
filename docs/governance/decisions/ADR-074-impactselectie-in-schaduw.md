@@ -1,6 +1,6 @@
 # ADR-074 - Impactselectie in schaduw: de verzamelingen, het bewijscontract en de haak VNX_CI_IMPACT_CMD
 
-**Status:** Voorgesteld 13-11-2026 (T0, track `impactselectie-in-schaduw`, PR 1 van 6); aangenomen zodra de T0 deze PR merget.
+**Status:** Aangenomen 2026-11-13 (PR #2748, 0ca60f7bf). Voorgesteld 13-11-2026 (T0, track `impactselectie-in-schaduw`, PR 1 van 6).
 **Datum:** 2026-11-13
 **Besloten door:** de operator, 13-11-2026 ~05:50Z (de open vragen van het plan, langs het T0-advies); het plan `claudedocs/specs/impactselectie-in-schaduw/plan.md` (plan-gate 13-11-2026, versie 85525c3187ea, met de verplichte wijziging van de tiebreaker). Het nummer 074 is door de T0 toegewezen.
 **Cross-refs:** ADR-007 (bindingsplicht per project; zie het slot van Context), ADR-053 (dezelfde controle in dezelfde blokkerende job op dezelfde boom), ADR-064 (deltareview, dezelfde schaduw-eerst-volgorde), ADR-073 (vensterpoort `main`, het vangnet bij activering), `docs/governance/decisions/ADR-072-operator-bijsturing-leert.md` (opmaak), `claudedocs/2026-11-08-graafpoorten-en-audittrail.md` (uitgangspunten), het panelrapport ontwikkelflow van 08-11-2026 (fase 7, vraag 3).
