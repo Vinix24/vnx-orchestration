@@ -27,7 +27,7 @@ Architecture:
 from __future__ import annotations
 
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -98,31 +98,6 @@ class SupervisionDecision:
             "cooldown_seconds": self.cooldown_seconds,
             "reason": self.reason,
         }
-
-
-@dataclass
-class SupervisionSummary:
-    """Summary of a workflow supervision pass."""
-    run_at: str
-    incidents_recorded: int = 0
-    escalations_emitted: int = 0
-    dead_lettered: int = 0
-    retries_permitted: int = 0
-    halted: int = 0
-    decisions: List[SupervisionDecision] = field(default_factory=list)
-    errors: List[str] = field(default_factory=list)
-
-    def summary(self) -> str:
-        lines = [
-            f"Workflow supervision at {self.run_at}",
-            f"  Incidents recorded:  {self.incidents_recorded}",
-            f"  Escalations emitted: {self.escalations_emitted}",
-            f"  Dead-lettered:       {self.dead_lettered}",
-            f"  Retries permitted:   {self.retries_permitted}",
-            f"  Halted:              {self.halted}",
-            f"  Errors:              {len(self.errors)}",
-        ]
-        return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------

@@ -626,11 +626,3 @@ def _save_open_items(data: Dict[str, Any], path: Path) -> None:
         json.dump(data, f, indent=2)
         f.write("\n")
 
-
-# ---------------------------------------------------------------------------
-# Module-level factory
-# ---------------------------------------------------------------------------
-
-def load_supervisor(state_dir: str | Path, **kwargs) -> RuntimeSupervisor:
-    """Return a RuntimeSupervisor for state_dir, auto-initializing the schema."""
-    return RuntimeSupervisor(state_dir, auto_init=True, **kwargs)
