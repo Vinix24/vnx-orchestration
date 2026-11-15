@@ -1,4 +1,4 @@
-"""ADR-076 Q6: `vnx inbox audit` (both kinds of late, ledger_since, unknown never clean) and `vnx inbox compact`."""
+"""ADR-076 Q6: `vnx inbox audit` (both kinds of late, ledger_since, unknown never clean)."""
 from __future__ import annotations
 
 import json
