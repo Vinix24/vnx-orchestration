@@ -162,3 +162,31 @@ def test_parse_since(since, hours):
     assert scan.parse_since(since).total_seconds() == hours * 3600
     with pytest.raises(ValueError):
         scan.parse_since("soon")
+
+
+def test_unreadable_vnx_config_is_counted_in_the_b1_coverage_without_a_path(tmp_path, monkeypatch):
+    env = Env(tmp_path, monkeypatch)
+    env.transcript(FULL)
+    env.vnx.unlink()
+    env.vnx.mkdir()  # a directory where the config should be: reading it fails
+    assert env.run() == 0
+    assert env.coverage()["B1"]["skipped"]["config_unreadable_vnx"] >= 1
+    raw = (env.state / "permission_coverage.json").read_text()
+    assert str(tmp_path) not in raw and UUID not in raw and EMAIL not in raw
+
+
+def test_unparseable_vnx_config_is_counted_not_zero(tmp_path, monkeypatch):
+    env = Env(tmp_path, monkeypatch)
+    env.transcript(FULL)
+    env.vnx.write_text("{not json")
+    assert env.run() == 0
+    assert env.coverage()["B1"]["skipped"]["config_unparseable_vnx"] >= 1
+
+
+def test_event_with_a_timestamp_without_timezone_does_not_abort_the_scan(tmp_path, monkeypatch):
+    env = Env(tmp_path, monkeypatch)
+    env.transcript([use("t1", ts="2026-11-15T10:00:00"), result("t1", "config", "permission-rule", ts="2026-11-15T10:00:00"),
+                    *FULL])
+    assert env.run() == 0
+    cov = env.coverage()
+    assert cov["B1"]["state"] == "ok" and cov["B1"]["skipped"].get("bad_timestamp", 0) >= 1

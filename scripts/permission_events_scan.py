@@ -32,6 +32,15 @@ def parse_since(text: str) -> timedelta:
     return timedelta(**{"days" if m.group(2) == "d" else "hours": int(m.group(1))})
 
 
+def _aware(ts: object) -> Optional[datetime]:
+    """The timestamp as an aware datetime, or None when it is malformed or carries no timezone."""
+    try:
+        when = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return when if when.tzinfo is not None else None
+
+
 def _refused_binding(state: Path) -> bool:
     """A binding file naming a forbidden slug (ADR-075 decision 5), judged with ADR-072's own list."""
     try:
@@ -85,7 +94,13 @@ def run_scan(project_id: str, since: str, projects_root: Path, state_dir: Option
             skipped[bron].update(counts)
 
     result = source.read_sources(state, projects_root, consume, with_slug=True)
-    kept = [e for e in events if datetime.fromisoformat(e["ts"].replace("Z", "+00:00")) >= cutoff] if result.state == "ok" else []
+    kept = []
+    for e in events if result.state == "ok" else []:
+        when = _aware(e["ts"])
+        if when is None:  # no timezone or unparseable: counted, never compared (fail-closed, not a crash)
+            skipped[e["bron"]]["bad_timestamp"] += 1
+        elif when >= cutoff:
+            kept.append(e)
     if kept:
         pe.write_events(kept, project_id, state)
     cov = _coverage_args(result, files, unreadable)
