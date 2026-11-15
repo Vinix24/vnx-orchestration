@@ -2847,4 +2847,13 @@ main() {
   esac
 }
 
-main "$@"
+# CLI ledger B4b (ADR-075 decisions 7, 10): main runs in a subshell so exec branches return here; cli_invocations.py
+# then writes one line, detached, into the store this call resolved (VNX_STATE_DIR), exit code and output unchanged.
+# The door (`dispatch`) stays out, its process tree unchanged; VNX_CLI_RECORDED=$$ stops vnx_cli.main recording twice.
+if [ "${1:-help}" = dispatch ]; then main "$@"; exit $?; fi
+_vnx_t0="${EPOCHREALTIME:-}" _vnx_ms=- _vnx_tty=0; [ -t 0 ] && _vnx_tty=1; export VNX_CLI_RECORDED="$$"
+set +e; (set -e; main "$@"); _vnx_rc=$?; set -e
+[ -n "$_vnx_t0" ] && _vnx_ms=$(( (${EPOCHREALTIME//[!0-9]/} - ${_vnx_t0//[!0-9]/}) / 1000 ))
+("$VNX_PYTHON" "$VNX_HOME/scripts/lib/cli_invocations.py" record "$_vnx_rc" "$_vnx_ms" "$_vnx_tty" -- "$@" \
+  </dev/null >/dev/null 2>&1 &) >/dev/null 2>&1 || true
+exit "$_vnx_rc"

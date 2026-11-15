@@ -2,7 +2,13 @@
 """VNX CLI — governance-first multi-agent orchestration."""
 
 import argparse
+import functools
+import os
+import runpy
+import subprocess
 import sys
+import time
+from pathlib import Path
 
 from vnx_cli import __version__
 
@@ -1985,6 +1991,33 @@ def _dispatch_command(args: argparse.Namespace, parser: argparse.ArgumentParser)
         sys.exit(0)
 
 
+def _recorded(main):
+    """CLI ledger B4b (ADR-075 decision 7): ``main`` keeps its body; a finally records the call (see bin/vnx)."""
+    @functools.wraps(main)
+    def recorded() -> None:
+        started, exit_code = time.monotonic(), 1
+        try:
+            exit_code = main() or 0
+        except SystemExit as exc:
+            exit_code = exc.code if isinstance(exc.code, int) else int(exc.code is not None)
+            raise
+        finally:
+            try:
+                recorder = Path(__file__).resolve().parents[1] / "scripts" / "lib" / "cli_invocations.py"
+                if os.environ.get("VNX_CLI_RECORDED") != str(os.getppid()) and recorder.is_file():
+                    tty, ms = "1" if sys.stdin and sys.stdin.isatty() else "0", int((time.monotonic() - started) * 1000)
+                    subprocess.Popen([sys.executable, str(recorder), "record", str(exit_code), str(ms), tty, "--",
+                                      *sys.argv[1:]], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                     stderr=subprocess.DEVNULL, start_new_session=True, close_fds=True)
+            except Exception as exc:  # decision 7, recording never changes the command; the failure goes to B4b
+                try:
+                    runpy.run_path(str(recorder))["note_failure"]("launch", exc)
+                except Exception:  # vnx-silent-except: a broken recorder never reaches the command
+                    pass
+    return recorded
+
+
+@_recorded
 def main() -> None:
     # FIRST: honor a project's .vnx-version pin by re-exec'ing the pinned
     # central install (vnx_cli + engine stay version-consistent). No-op for

@@ -417,8 +417,12 @@ class TestTheJobRuns:
 
     def test_writes_nothing_under_state_health(self, central: SimpleNamespace) -> None:
         """The reader looks in <data_dir>/health. A beacon under state/health would
-        be one nobody reads."""
-        assert not (central.data_dir / "state").exists()
+        be one nobody reads. state/ itself may exist: since L4 every bin/vnx call
+        records one line in the CLI ledger there (ADR-075, decisions 7 and 10)."""
+        state = central.data_dir / "state"
+        assert not (state / "health").exists()
+        recorder_files = {"cli_invocations.ndjson", "permission_events.lock", "permission_coverage.json"}  # the recorder is detached: maybe not landed yet
+        assert not state.exists() or {entry.name for entry in state.iterdir()} <= recorder_files
 
     def test_writes_nothing_into_the_engine_checkout(self, central: SimpleNamespace, engine: Path) -> None:
         assert not (engine / ".vnx-data").exists()
