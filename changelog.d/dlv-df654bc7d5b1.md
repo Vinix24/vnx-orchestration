@@ -1,1 +1,2 @@
 - Operator queue readers for dream reviews (source 3) and analyzer proposals (source 4), with revisions and close-on-source-state (operator-vragen-tot-antwoord Q2a).
+- An analyzer proposal closes only on a recognised decision status (accepted, rejected, applied, approved, dismissed); any other status is `unknown` with the status named.

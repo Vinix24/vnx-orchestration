@@ -1,6 +1,8 @@
 """operator_queue_dream_analyzer: readers for source 3 and 4 on tmp_path stores (ADR-076 decisions 3, 5, 7)."""
 
 import json
+
+import pytest
 import sys
 from pathlib import Path
 
@@ -177,6 +179,27 @@ def test_edit_with_missing_or_unknown_status_never_closes(tmp_path):
         s.edits(row)
         assert qa.read_analyzer(P, **s.kw())["closed"] == []
     assert s.points()[0]["state"] == "open"
+
+
+@pytest.mark.parametrize("kind", ["edit", "archival"])
+@pytest.mark.parametrize("status,closes", [("unknown", False), ("weird", False), ("PENDING ", False), ("Rejected", False),
+                                           ("stale", False), ("accepted", True), ("approved", True)])
+def test_only_a_recognised_decision_status_closes(tmp_path, kind, status, closes):
+    s = Store(tmp_path)
+    if kind == "edit":
+        s.edits({"id": 9, "status": "pending", "category": "rule"})
+    else:
+        s.edits()
+        s.put("pending_archival.json", {"pending_archival": [{"pattern_id": "p9", "status": "pending"}]})
+    qa.read_analyzer(P, **s.kw())
+    if kind == "edit":
+        s.edits({"id": 9, "status": status})
+    else:
+        s.put("pending_archival.json", {"pending_archival": [{"pattern_id": "p9", "status": status}]})
+    out = qa.read_analyzer(P, **s.kw())
+    assert bool(out["closed"]) is closes
+    if not closes:
+        assert s.points()[0]["state"] == "open" and repr(status) in s.points()[0]["unknown_reden"]
 
 
 def test_no_pending_edits_file_is_unknown_coverage_not_gelezen(tmp_path):

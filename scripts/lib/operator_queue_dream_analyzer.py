@@ -171,10 +171,17 @@ def read_dream(project_id: str, *, data_root: Optional[Path] = None, now: Any = 
 
 # --- source 4: analyzer proposals --------------------------------------------------------------------------
 
+# Decision statuses the writers set (apply_suggested_edits.py:273,299,449; learning_loop.py:2236). Exact match:
+# stale, superseded, "unknown" and case/whitespace variants are no decision.
+_DECISION_STATUSES = frozenset({"accepted", "rejected", "applied", "approved", "dismissed"})
+
+
 def _decided(entry: dict) -> _Verdict:
     status = entry.get("status")
     if not isinstance(status, str) or not status.strip():
         return ("unknown", "status ontbreekt of is geen tekst")
+    if status not in _DECISION_STATUSES:
+        return ("unknown", f"status={status!r} is geen besluit")
     when = next((f"{k}={entry[k]}" for k in _TIME_KEYS if isinstance(entry.get(k), str) and entry[k].strip()), "")
     return ("closed", f"status={status}" + (f" {when}" if when else ""), "onbekend")
 
