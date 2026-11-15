@@ -6,7 +6,6 @@ source shows the answer is never in the result. ``push_due`` decides and reserve
 
 from __future__ import annotations
 
-import json
 import os
 from datetime import datetime, timezone
 from pathlib import Path
@@ -28,10 +27,6 @@ except ImportError:  # vnx-silent-except: imported as scripts.lib.operator_queue
 _MODULES = (operator_queue_dream_analyzer, operator_queue_steering_verdict, operator_queue_ask)
 PUSH_MAX_POINTS = 5
 PUSH_PROJECT_GAP_MIN = 30
-# Names at the data-home root that are never a project id: SHARED_ROOT_DIRS of scripts/fabric_audit.py, the
-# worktree layout of scripts/lib/vnx_worktree.py::_ensure_worktree_layout, and the report/panel stores.
-NON_PROJECT_DIRS = frozenset({"state", "events", "locks", "logs", "pids", "database", "unified_reports", "receipts",
-                              "profiles", "dispatches", "startup_presets", "business-panels"})
 
 
 def _parse(value: Any) -> Optional[datetime]:
@@ -184,62 +179,3 @@ def push_due(project_id: str, *, sessie: str, now: Any = None, state_dir: Option
     blocks = {line["point_id"]: line.get("kopieerblok", "") for line in _ledger(project_id, sdir) if line["kind"] == "opened"}
     counts = _presented(_ledger(project_id, sdir))
     return [_view(state["points"][pid], counts, blocks, set(), set(), _parse(stamp)) for pid in ids]
-
-
-def _registry_projects(registry_path: Optional[Path]) -> tuple:
-    """(names, reason): the project names in ``~/.vnx/projects.json``; reason is set when the file is unreadable."""
-    try:
-        from dashboard_read_model import DEFAULT_REGISTRY_PATH, load_project_registry
-    except ImportError:  # vnx-silent-except: imported as scripts.lib.operator_queue_inbox
-        from scripts.lib.dashboard_read_model import DEFAULT_REGISTRY_PATH, load_project_registry
-    path = Path(registry_path) if registry_path is not None else DEFAULT_REGISTRY_PATH
-    if not path.exists():
-        return [], None
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-        ok = isinstance(raw, dict) and isinstance(raw.get("projects"), list)
-    except (OSError, ValueError):  # vnx-silent-except: reported as the reason below
-        ok = False
-    if not ok:
-        return [], f"{path.name} onleesbaar of zonder projects-lijst"
-    names = [e.get("name") for e in load_project_registry(path)["projects"] if isinstance(e, dict)]
-    return [n for n in names if isinstance(n, str) and n.strip()], None
-
-
-def discover(home: Path, registry_path: Optional[Path] = None) -> Dict[str, Any]:
-    """Every directory under ``<home>/.vnx-data`` (not ``_``-prefixed, not in NON_PROJECT_DIRS) plus every registry project."""
-    root, found = Path(home) / ".vnx-data", set()
-    if root.is_dir():
-        found = {d.name for d in root.iterdir() if d.is_dir() and not d.name.startswith(("_", "."))
-                 and d.name not in NON_PROJECT_DIRS}
-    names, reason = _registry_projects(registry_path)
-    return {"projects": sorted(found | set(names)), "registry": {"dekking": "unknown" if reason else "gelezen", "reden": reason}}
-
-
-def _coverage(view: Dict[str, Any]) -> Dict[str, Any]:
-    bad = [s for s in view["coverage"] if s["dekking"] == "unknown"]
-    if view["status"] != "ok":
-        return {"dekking": "unknown", "reden": view["reason"]}
-    if bad:
-        return {"dekking": "unknown", "reden": "; ".join(f"bron {s['bron']}: {s['reden']}" for s in bad)}
-    if any(s["dekking"] == "niet_gebonden" for s in view["coverage"]):
-        return {"dekking": "niet_gebonden", "reden": None}
-    return {"dekking": "gelezen", "reden": None}
-
-
-def show_all(*, home: Optional[Path] = None, registry_path: Optional[Path] = None, limit: int = 5,
-             now: Any = None) -> Dict[str, Any]:
-    """Fleet view: ``{registry, projects: [{project_id, dekking, reden, open_total, points, more, sources}]}``."""
-    home = Path(home) if home is not None else Path.home()
-    found = discover(home, registry_path)
-    projects = []
-    for pid in found["projects"]:
-        root = home / ".vnx-data" / pid
-        if not (root / "state").is_dir():  # nothing to read, and a read must not create a store
-            projects.append({"project_id": pid, "dekking": "unknown", "reden": "geen state/", "open_total": None,
-                             "points": [], "more": 0, "sources": []})
-            continue
-        view = show(pid, limit=limit, now=now, state_dir=root / "state", data_root=root)
-        projects.append({"project_id": pid, **_coverage(view), "open_total": view["open_total"],
-                         "points": view["points"], "more": view["more"], "sources": view["coverage"]})
-    return {"registry": found["registry"], "projects": projects}

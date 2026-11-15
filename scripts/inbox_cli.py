@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""vnx inbox [--all] [--json] [--present] | ask | answer | push-due.
+"""vnx inbox [--json] [--present] | ask | answer | push-due.
 Exit 0 done, 2 refused (bad ref, secret, bad field; nothing written), 78 ledger unreadable."""
 from __future__ import annotations
 
@@ -21,9 +21,6 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--project-id", default="")
     parser.add_argument("--state-dir", default="", help="queue state dir (tests)")
     parser.add_argument("--data-root", default="", help="project data root the readers use (tests)")
-    parser.add_argument("--all", action="store_true", help="every project under ~/.vnx-data and in the registry")
-    parser.add_argument("--home", default="", help="home directory for --all (tests)")
-    parser.add_argument("--registry", default="", help="project registry file for --all (tests)")
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--present", action="store_true", help="write a presented line per shown point")
     parser.add_argument("--channel", default="cli", choices=oq.CHANNELS)
@@ -54,33 +51,15 @@ def _point_lines(points: list, more: int) -> list:
 
 
 def _render(data: dict) -> str:
-    if "projects" not in data:
-        head = f"{data['project_id']}: {data['status']}" + (f" ({data['reason']})" if data["reason"] else "")
-        return "\n".join([head] + _point_lines(data["points"], data["more"]))
-    reg = data["registry"]
-    lines = [f"registry: {reg['dekking']}" + (f" ({reg['reden']})" if reg["reden"] else "")]
-    for proj in data["projects"]:
-        lines.append(f"{proj['project_id']}: {proj['dekking']}" + (f" ({proj['reden']})" if proj["reden"] else "")
-                     + (f", {proj['open_total']} open" if proj["open_total"] is not None else ""))
-        lines += _point_lines(proj["points"], proj["more"])
-    return "\n".join(lines)
+    head = f"{data['project_id']}: {data['status']}" + (f" ({data['reason']})" if data["reason"] else "")
+    return "\n".join([head] + _point_lines(data["points"], data["more"]))
 
 
 def _show(args, project_id: str, sdir, root) -> int:
-    if args.all:
-        data = inbox.show_all(home=Path(args.home) if args.home else None,
-                              registry_path=Path(args.registry) if args.registry else None, limit=args.limit)
-        if args.present:  # per project, into that project's own store
-            home = Path(args.home) if args.home else Path.home()
-            for proj in data["projects"]:
-                if proj["points"]:
-                    inbox.present(proj["project_id"], [p["point_id"] for p in proj["points"]], kanaal=args.channel,
-                                  sessie=args.sessie, state_dir=home / ".vnx-data" / proj["project_id"] / "state")
-    else:
-        data = inbox.show(project_id, limit=args.limit, state_dir=sdir, data_root=root)
-        if args.present and data["points"]:
-            inbox.present(project_id, [p["point_id"] for p in data["points"]], kanaal=args.channel, sessie=args.sessie,
-                          state_dir=sdir)
+    data = inbox.show(project_id, limit=args.limit, state_dir=sdir, data_root=root)
+    if args.present and data["points"]:
+        inbox.present(project_id, [p["point_id"] for p in data["points"]], kanaal=args.channel, sessie=args.sessie,
+                      state_dir=sdir)
     print(json.dumps(data, indent=2, ensure_ascii=False, sort_keys=True) if args.json else _render(data))
     return 0
 

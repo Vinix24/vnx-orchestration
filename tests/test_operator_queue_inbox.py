@@ -165,37 +165,6 @@ def test_reserve_choose_nothing_writes_nothing_and_bad_ids_refused(sdir):
     assert (sdir / oq.LEDGER_FILENAME).read_bytes() == before
 
 
-def test_all_three_coverage_lines_and_json_equals_text(tmp_path, capsys):
-    home, registry = tmp_path / "home", tmp_path / "projects.json"
-    data = home / ".vnx-data"
-    (data / "healthy" / "state").mkdir(parents=True)
-    (data / "nostate").mkdir()
-    for skip in ("state", "logs", "_scratch", "business-panels", "unified_reports"):
-        (data / skip).mkdir()
-    pid = _open(data / "healthy" / "state", "p", "2026-11-10T00:00:00Z", project="healthy")
-    registry.write_text(json.dumps({"schema_version": 1, "projects": [{"name": "regonly", "path": "/x"}]}))
-    args = ["--all", "--home", str(home), "--registry", str(registry)]
-    assert inbox_cli.main(args + ["--json"]) == 0
-    data_json = json.loads(capsys.readouterr().out)
-    cov = {p["project_id"]: (p["dekking"], p["reden"]) for p in data_json["projects"]}
-    assert cov == {"healthy": ("gelezen", None), "nostate": ("unknown", "geen state/"), "regonly": ("unknown", "geen state/")}
-    assert [p["open_total"] for p in data_json["projects"]] == [1, None, None]  # unknown is never 0
-    assert inbox_cli.main(args) == 0
-    text = capsys.readouterr().out
-    for name, (dekking, reden) in cov.items():
-        assert f"{name}: {dekking}" + (f" ({reden})" if reden else "") in text
-    assert pid in text and data_json["projects"][0]["points"][0]["point_id"] == pid
-
-
-def test_all_unreadable_registry_and_niet_gebonden(tmp_path, monkeypatch):
-    home, registry = tmp_path / "home", tmp_path / "projects.json"
-    (home / ".vnx-data" / "p" / "state").mkdir(parents=True)
-    registry.write_text("{broken")
-    monkeypatch.setattr(inbox, "_MODULES", (_fake({"bron": 5, "dekking": "niet_gebonden", "reden": "no store", "unknown": []}),))
-    out = inbox.show_all(home=home, registry_path=registry, now=NOW)
-    assert out["registry"]["dekking"] == "unknown" and out["projects"][0]["dekking"] == "niet_gebonden"
-
-
 def test_cli_json_and_push_due_with_temp_store(sdir, capsys):
     pid = _open(sdir, "p", "2026-11-10T00:00:00Z")
     base = ["--project-id", PID, "--state-dir", str(sdir)]
