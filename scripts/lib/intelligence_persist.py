@@ -678,40 +678,10 @@ def shadow_grounding_compare(
             total_v2_only += len(v2_only)
             total_v1_only += len(v1_only)
 
-            pattern_details: Dict[int, Dict[str, Any]] = {}
-            for sp_id in all_ids:
-                source_row = v1_by_id.get(sp_id) or v2_by_id.get(sp_id)
-                current_conf = float(source_row["confidence_score"] or 0.0) if source_row else 0.0
-                title = str(source_row["title"] or f"pattern_{sp_id}")[:120] if source_row else f"pattern_{sp_id}"
-
-                cur_succ = 0
-                cur_fail = 0
-                if pu_table_exists:
-                    pid = f"{SUCCESS_PATTERN_PREFIX}{sp_id}"
-                    try:
-                        pu_row = conn.execute(
-                            "SELECT success_count, failure_count FROM pattern_usage "
-                            "WHERE pattern_id = ?",
-                            (pid,),
-                        ).fetchone()
-                        if pu_row:
-                            cur_succ = int(pu_row["success_count"] or 0)
-                            cur_fail = int(pu_row["failure_count"] or 0)
-                    except sqlite3.OperationalError:
-                        pass
-
-                pattern_details[sp_id] = {
-                    "title": title,
-                    "current_conf": current_conf,
-                    "v1_new_conf": _projected_conf(
-                        sp_id in v1_ids, current_conf, cur_succ, cur_fail, is_success
-                    ),
-                    "v2_new_conf": _projected_conf(
-                        sp_id in v2_ids, current_conf, cur_succ, cur_fail, is_success
-                    ),
-                    "in_v1": sp_id in v1_ids,
-                    "in_v2": sp_id in v2_ids,
-                }
+            pattern_details = _shadow_pattern_details(
+                conn, all_ids, v1_by_id, v2_by_id, v1_ids, v2_ids, pu_table_exists, is_success,
+                SUCCESS_PATTERN_PREFIX,
+            )
 
             dispatch_results.append({
                 "dispatch_id": dispatch_id,
@@ -737,3 +707,52 @@ def shadow_grounding_compare(
         }
     finally:
         conn.close()
+
+
+def _shadow_pattern_details(
+    conn: sqlite3.Connection,
+    all_ids: set,
+    v1_by_id: Dict[int, Any],
+    v2_by_id: Dict[int, Any],
+    v1_ids: set,
+    v2_ids: set,
+    pu_table_exists: bool,
+    is_success: bool,
+    prefix: str,
+) -> Dict[int, Dict[str, Any]]:
+    """Per-pattern projected V1/V2 confidence for one dispatch (read-only)."""
+    pattern_details: Dict[int, Dict[str, Any]] = {}
+    for sp_id in all_ids:
+        source_row = v1_by_id.get(sp_id) or v2_by_id.get(sp_id)
+        current_conf = float(source_row["confidence_score"] or 0.0) if source_row else 0.0
+        title = str(source_row["title"] or f"pattern_{sp_id}")[:120] if source_row else f"pattern_{sp_id}"
+
+        cur_succ = 0
+        cur_fail = 0
+        if pu_table_exists:
+            pid = f"{prefix}{sp_id}"
+            try:
+                pu_row = conn.execute(
+                    "SELECT success_count, failure_count FROM pattern_usage "
+                    "WHERE pattern_id = ?",
+                    (pid,),
+                ).fetchone()
+                if pu_row:
+                    cur_succ = int(pu_row["success_count"] or 0)
+                    cur_fail = int(pu_row["failure_count"] or 0)
+            except sqlite3.OperationalError:
+                pass
+
+        pattern_details[sp_id] = {
+            "title": title,
+            "current_conf": current_conf,
+            "v1_new_conf": _projected_conf(
+                sp_id in v1_ids, current_conf, cur_succ, cur_fail, is_success
+            ),
+            "v2_new_conf": _projected_conf(
+                sp_id in v2_ids, current_conf, cur_succ, cur_fail, is_success
+            ),
+            "in_v1": sp_id in v1_ids,
+            "in_v2": sp_id in v2_ids,
+        }
+    return pattern_details
