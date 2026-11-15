@@ -90,14 +90,6 @@ class RoutingError(Exception):
     """Base error for routing failures."""
 
 
-class NoEligibleTargetError(RoutingError):
-    """Raised when no target matches the routing criteria."""
-
-
-class RoutingInvariantViolation(RoutingError):
-    """Raised when a routing decision would violate a hard invariant."""
-
-
 # ---------------------------------------------------------------------------
 # Result dataclass
 # ---------------------------------------------------------------------------

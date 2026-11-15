@@ -83,10 +83,6 @@ class BrokerError(Exception):
     """Raised for broker-specific errors distinct from coordination errors."""
 
 
-class BrokerDisabledError(BrokerError):
-    """Raised when the broker is accessed but VNX_BROKER_ENABLED=0."""
-
-
 # ---------------------------------------------------------------------------
 # Result dataclasses
 # ---------------------------------------------------------------------------
