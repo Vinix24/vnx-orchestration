@@ -370,6 +370,9 @@ Provider switch (turn model providers on and off, ~/.vnx/providers.json):
 Main window (read-only probe, ADR-073):
   main-window status [--json]        The merges since the last green heavy main run and GO/NO-GO for one more (exit 0 GO, 1 NO-GO, 2 could not run)
 
+Memory ledger (ADR-078):
+  memory bind --dir <path>           Bind one memory folder under ~/.claude/projects/ (operator only)
+
 Gate commands (pre-merge verification):
   gate-check --pr <ID>  Run deterministic pre-merge gate checks (GO/HOLD verdict)
   pr-ready <N> [<N>..]  Merge readiness: required contexts + gate evidence on the
@@ -2733,6 +2736,9 @@ main() {
       ;;
     main-window)
       PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" exec "$VNX_PYTHON" "$VNX_HOME/scripts/main_window_cli.py" "$@"
+      ;;
+    memory)
+      PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" exec "$VNX_PYTHON" "$VNX_HOME/scripts/memory_cli.py" "$@"
       ;;
     gate-reanchor)
       "$VNX_PYTHON" "$VNX_HOME/scripts/gate_reanchor_cli.py" "$@"
