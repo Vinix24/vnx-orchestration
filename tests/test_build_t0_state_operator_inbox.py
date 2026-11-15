@@ -96,7 +96,7 @@ def test_raising_show_gives_error_and_rest_of_index_is_built(env, monkeypatch):
     index = bts._build_t0_index(doc)
     assert doc["operator_inbox"] == {"status": "error", "reason": "RuntimeError: ledger exploded"}
     assert index["operator_inbox"]["status"] == "error"
-    assert index["schema"] == "t0_index/1.4" and index["queue"] and "health" in index
+    assert index["schema"] == "t0_index/1.5" and index["queue"] and "health" in index
 
 
 def test_show_that_runs_over_the_budget_is_an_error(env, monkeypatch):

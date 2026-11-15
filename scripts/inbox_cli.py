@@ -29,6 +29,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--limit", type=int, default=5)
     parser.add_argument("--all", action="store_true", help="every project: one coverage line, then its points")
     parser.add_argument("--now", default="", help=argparse.SUPPRESS)
+    parser.add_argument("--logdir", default="", help="besluiten register dir (tests); default <project root>/daily-log")
     parser.add_argument("--home", default="", help=argparse.SUPPRESS)
     parser.add_argument("--registry", default="", help=argparse.SUPPRESS)
     sub = parser.add_subparsers(dest="cmd")
@@ -112,6 +113,22 @@ def _show(args, project_id: str, sdir, root) -> int:
     return 0
 
 
+def _sync_decision(args, project_id: str, sdir, point_id: str) -> None:
+    """Decision for the answer just recorded; a failure is named on stderr and never undoes the answer."""
+    try:
+        import besluiten_adapter
+        from project_root import resolve_project_root
+        logdir = Path(args.logdir) if args.logdir else resolve_project_root(__file__) / "daily-log"
+        res = besluiten_adapter.sync_answers(project_id, logdir, state_dir=sdir)
+    except Exception as exc:  # vnx-silent-except: the answer is recorded; the failure is named on stderr and in the index
+        print(f"vnx inbox: decision not recorded: {type(exc).__name__}", file=sys.stderr)
+        return
+    if point_id in res["ids"]:
+        print(f"decision {res['ids'][point_id]} in {logdir}/besluiten.ndjson")
+    for pid, reason in res["refused"]:
+        print(f"vnx inbox: decision refused for {pid}: {reason}", file=sys.stderr)
+
+
 def main(argv: list) -> int:
     args = _parser().parse_args(argv)
     if args.all and (args.present or args.cmd not in (None, "audit") or args.project_id or args.state_dir or args.data_root):
@@ -133,6 +150,7 @@ def main(argv: list) -> int:
         elif args.cmd == "answer":
             line = qa.answer(project_id, args.point_id, quote=args.quote, vastgelegd_door=args.by, state_dir=sdir)
             print(f"answer recorded for {line['point_id']}; the reader closes the point")
+            _sync_decision(args, project_id, sdir, line["point_id"])
         elif args.cmd == "push-due":
             due = inbox.push_due(project_id, sessie=args.push_sessie, state_dir=sdir, data_root=root)
             if due:

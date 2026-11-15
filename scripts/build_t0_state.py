@@ -60,6 +60,8 @@ Schema 2.2 change (D5 fabric-state-herstel, live work):
     ``conflicts/`` directory that exists but cannot be listed is not zero:
     its count is ``null`` with a ``*_unmeasured_reason`` and it degrades
     system_health, so the dispatch guard reads WAIT, never GO.
+  - t0_index.json schema ``t0_index/1.5`` (besluitenregister B4) adds ``besluiten``: counts and
+    ids from ``daily-log/besluiten.ndjson`` plus the queue answers without a decision. Read-only.
   - t0_index.json schema ``t0_index/1.4`` (operator-vragen-tot-antwoord Q5) adds
     ``operator_inbox``: the open points of the operator queue, at most 5 plus
     ``more``. Building it never writes a ``presented`` line.
@@ -2885,6 +2887,18 @@ def _build_operator_inbox(project_id: str, state_dir: Path) -> Dict[str, Any]:
     return _inbox_block(run["data"])
 
 
+_BESLUITEN_LOGDIR = _PROJECT_ROOT / "daily-log"
+
+
+def _build_besluiten(project_id: str, state_dir: Path) -> Dict[str, Any]:
+    """besluitenregister B4: the register block, read-only; an error becomes status=error, never a raise."""
+    try:
+        import besluiten_adapter
+        return besluiten_adapter.index_block(project_id, _BESLUITEN_LOGDIR, state_dir=state_dir)
+    except Exception as exc:  # vnx-silent-except: reported as status=error in the block itself
+        return {"status": "error", "reason": f"{type(exc).__name__}: {exc}"[:200]}
+
+
 def build_t0_state(
     state_dir: Path,
     dispatch_dir: Path,
@@ -2931,6 +2945,7 @@ def build_t0_state(
     lifecycle_count = _lifecycle_count_index_summary(state_dir)
     memory_ledger = _build_memory_ledger(state_dir)  # geheugen-in-de-store M4
     operator_inbox = _build_operator_inbox(project_id, state_dir)  # operator-vragen-tot-antwoord Q5
+    besluiten = _build_besluiten(project_id, state_dir)  # besluitenregister B4
     elapsed = time.monotonic() - start
     system_health = _build_system_health(
         state_dir, db_ok, db_health=db_health,
@@ -2962,6 +2977,7 @@ def build_t0_state(
         "lifecycle_count": lifecycle_count,
         "memory_ledger": memory_ledger,
         "operator_inbox": operator_inbox,
+        "besluiten": besluiten,
         "_strategic_state_heavy": strategic_state_heavy,
         "_build_seconds": round(elapsed, 2),
     }
@@ -3117,7 +3133,7 @@ def _build_t0_index(state: Dict[str, Any]) -> Dict[str, Any]:
     pr_queue = state.get("pr_queue") or {}
     pr_unavailable = pr_queue.get("available") is False
     index = {
-        "schema": "t0_index/1.4",
+        "schema": "t0_index/1.5",
         "timestamp": state.get("generated_at", ""),
         "git_branch": git_ctx.get("branch", ""),
         "git_head": raw_head[:7],
@@ -3140,6 +3156,7 @@ def _build_t0_index(state: Dict[str, Any]) -> Dict[str, Any]:
         "last_rebuild_seconds": state.get("_build_seconds"),
         "operator_inbox": state.get("operator_inbox")
         or {"status": "error", "reason": "operator_inbox missing from the state"},
+        "besluiten": state.get("besluiten") or {"status": "error", "reason": "besluiten missing from the state"},
     }
     if pr_unavailable:
         index["pr_queue_unavailable"] = pr_queue.get("reason") or "unknown"
