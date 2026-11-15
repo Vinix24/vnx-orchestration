@@ -1,0 +1,1 @@
+- The operator-queue readers for steering and permission proposals (operator-vragen-tot-antwoord Q2b): a pending proposal becomes an open point that closes on an `approved`, `rejected` or `applied` record bound to its revision; an unbound steering store is `niet_gebonden`, never zero points read.
