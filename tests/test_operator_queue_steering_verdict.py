@@ -1,6 +1,8 @@
-"""operator_queue_steering_verdict: the readers for sources 5 and 6 (ADR-076 decisions 2, 3, 5, 7) on tmp_path stores."""
+"""operator_queue_steering_verdict: the readers for sources 5, 6 and 7 (ADR-076 decisions 2, 3, 5, 7) on tmp_path stores."""
 
 import json
+import sqlite3
+import subprocess
 import sys
 from pathlib import Path
 
@@ -10,9 +12,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts" / "lib
 
 import operator_queue as oq
 import operator_queue_steering_verdict as rd
+import review_cap_verdicts as rcv
 import steering_proposal_store as sps
 
 P = "proj-q2b"
+HEAD, MOVED = "a" * 40, "b" * 40
+DDL = """CREATE TABLE review_cap_verdicts (
+    project_id TEXT NOT NULL, pr_number INTEGER NOT NULL, verdict_id TEXT NOT NULL, head_sha TEXT NOT NULL,
+    cap_rule TEXT NOT NULL, outcome TEXT NOT NULL, chosen_outcome TEXT NOT NULL, intervention TEXT NOT NULL DEFAULT '',
+    oi_ids TEXT NOT NULL DEFAULT '[]', granted_dispatch_id TEXT NOT NULL DEFAULT '', tiebreaker_model TEXT NOT NULL DEFAULT '',
+    rationale TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, PRIMARY KEY (project_id, pr_number, verdict_id))"""
 
 
 @pytest.fixture
@@ -126,3 +135,152 @@ def test_an_unreadable_store_is_unknown_not_zero(env):
 
 def test_readers_registry():
     assert [name for name, _ in rd.READERS] == ["steering"]
+
+
+def _verdict(state, vid, pr=7, head=HEAD, created="2026-11-15T07:00:00Z", outcome="mergen-met-OI"):
+    conn = sqlite3.connect(str(state / "runtime_coordination.db"))
+    try:
+        conn.execute(DDL) if not conn.execute("SELECT 1 FROM sqlite_master WHERE name='review_cap_verdicts'").fetchone() else None
+        conn.execute("INSERT INTO review_cap_verdicts (project_id, pr_number, verdict_id, head_sha, cap_rule, outcome, "
+                     "chosen_outcome, created_at) VALUES (?,?,?,?,'B3.2',?,?,?)", (P, pr, vid, head, outcome, outcome, created))
+        conn.commit()
+    finally:
+        conn.close()
+    return rcv.CapVerdict(P, pr, vid, head, "B3.2", outcome, outcome, created_at=created)
+
+
+def _heads(head=HEAD, state="open"):
+    return {"head_of": lambda pr: head, "pr_state_of": lambda pr: state}
+
+
+def test_verdict_without_approval_opens_and_an_approval_closes_it(env):
+    _, state, queue = env
+    v = _verdict(state, "cap-pr7-a")
+    res = _read(rd.read_cap_verdict, env, **_heads())
+    assert res["bron"] == 7 and res["dekking"] == "gelezen" and len(res["opened"]) == 1
+    assert _points(queue)[res["opened"][0]]["ref"] == "verdict:cap-pr7-a"
+    assert _read(rd.read_cap_verdict, env, **_heads())["opened"] == [] and len(_lines(queue)) == 1
+    rcv.record_merge_approval(state, v, "vincent")
+    res = _read(rd.read_cap_verdict, env, **_heads())
+    closed = _lines(queue, "closed")
+    assert res["closed"] == [closed[0]["point_id"]] and closed[0]["uitkomst"] == "beantwoord"
+    assert closed[0]["beantwoord_door"] == "onbekend" and "cap-pr7-a" in closed[0]["bewijs"]
+
+
+def test_head_moved_keeps_the_point_open_even_with_an_approval_on_the_old_head(env):
+    _, state, queue = env
+    v = _verdict(state, "cap-pr7-a")
+    rcv.record_merge_approval(state, v, "vincent")
+    res = _read(rd.read_cap_verdict, env, **_heads(head=MOVED))
+    assert len(res["opened"]) == 1 and res["unknown"] == res["opened"] and res["closed"] == []
+    assert [u["reden"] for u in _lines(queue, "unknown")] == ["kop_verschoven"]
+    assert _points(queue)[res["opened"][0]]["state"] == "open"
+    _read(rd.read_cap_verdict, env, **_heads(head=MOVED))
+    assert len(_lines(queue, "unknown")) == 1 and _lines(queue, "closed") == []
+
+
+def test_a_newer_verdict_on_the_same_pr_makes_the_point_vervallen(env):
+    _, state, queue = env
+    _verdict(state, "cap-pr7-a")
+    _read(rd.read_cap_verdict, env, **_heads())
+    _verdict(state, "cap-pr7-b", head=MOVED, created="2026-11-15T09:00:00Z")
+    res = _read(rd.read_cap_verdict, env, **_heads(head=MOVED))
+    closed = _lines(queue, "closed")
+    assert len(closed) == 1 and closed[0]["uitkomst"] == "vervallen" and "cap-pr7-b" in closed[0]["bewijs"]
+    assert len(res["closed"]) == 1 and len(_lines(queue, "opened")) == 2  # the newer verdict is its own open point
+
+
+@pytest.mark.parametrize("pr_state", ["merged", "closed"])
+def test_a_merged_or_closed_pr_makes_the_point_vervallen_never_beantwoord(env, pr_state):
+    _, state, queue = env
+    v = _verdict(state, "cap-pr7-a")
+    _read(rd.read_cap_verdict, env, **_heads())
+    rcv.record_merge_approval(state, v, "vincent")
+    _verdict(state, "cap-pr8-z", pr=8)
+    read = _read(rd.read_cap_verdict, env, head_of=lambda pr: HEAD, pr_state_of=lambda pr: pr_state if pr == 7 else "open")
+    closed = _lines(queue, "closed")
+    assert [c["uitkomst"] for c in closed] == ["vervallen"] and len(read["closed"]) == 1
+
+
+def test_a_merged_pr_without_a_point_opens_nothing(env):
+    _, state, queue = env
+    _verdict(state, "cap-pr7-a")
+    res = _read(rd.read_cap_verdict, env, **_heads(state="merged"))
+    assert res["opened"] == [] and _lines(queue) == []
+
+
+@pytest.mark.parametrize("head,state,reden", [(None, "open", "kop_onleesbaar"), (HEAD, None, "pr_staat_onleesbaar"),
+                                              (HEAD, "weird", "pr_staat_onbekend")])
+def test_an_unreadable_head_or_state_closes_nothing(env, head, state, reden):
+    _, state_dir, queue = env
+    v = _verdict(state_dir, "cap-pr7-a")
+    rcv.record_merge_approval(state_dir, v, "vincent")
+    res = _read(rd.read_cap_verdict, env, head_of=lambda pr: head, pr_state_of=lambda pr: state)
+    assert res["closed"] == [] and len(res["unknown"]) == 1 and _lines(queue, "closed") == []
+    assert _lines(queue, "unknown")[0]["reden"].startswith(reden)
+
+
+def test_no_runtime_store_is_unknown_not_zero(env):
+    res = _read(rd.read_cap_verdict, env, **_heads())
+    assert res["dekking"] == "unknown" and res["reden"] and res["opened"] == []
+
+
+def test_only_mergen_met_oi_opens_a_point(env):
+    _, state, queue = env
+    _verdict(state, "cap-pr7-a", outcome="verkleinen")
+    assert _read(rd.read_cap_verdict, env, **_heads())["opened"] == []
+
+
+def test_default_pr_state_reads_the_merge_receipt_and_never_the_network(env):
+    root, state, queue = env
+    assert rd.default_pr_state_of(state)(7) is None  # no receipt ledger: unreadable, not open
+    ledger = state / "t0_receipts.ndjson"
+    ledger.write_text(json.dumps({"event_type": "pr_merged", "pr_number": 8}) + "\nnot json\n", encoding="utf-8")
+    assert rd.default_pr_state_of(state)(7) == "open"
+    ledger.write_text(ledger.read_text() + json.dumps({"event_type": "pr_merged", "pr_number": 7}) + "\n", encoding="utf-8")
+    assert rd.default_pr_state_of(state)(7) == "merged"
+
+
+def test_default_head_reads_the_local_remote_tracking_ref(env, tmp_path):
+    root, state, queue = env
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    git = lambda *a: subprocess.run(["git", "-C", str(repo), *a], check=True, capture_output=True, text=True).stdout.strip()
+    git("init", "-q")
+    git("-c", "user.email=t@e.invalid", "-c", "user.name=t", "-c", "commit.gpgsign=false", "commit", "-q", "--allow-empty", "-m", "x")
+    sha = git("rev-parse", "HEAD")
+    git("update-ref", "refs/remotes/origin/feat-x", sha)
+    rounds = state / "review_gates"
+    rounds.mkdir()
+    (rounds / "rounds.ndjson").write_text(json.dumps({"pr_number": 7, "branch": "feat-x"}) + "\n", encoding="utf-8")
+    head_of = rd.default_head_of(state, repo)
+    assert head_of(7) == sha and head_of(9) is None
+    (rounds / "rounds.ndjson").write_text(json.dumps({"pr_number": 7, "branch": "nope"}) + "\n", encoding="utf-8")
+    assert head_of(7) is None
+
+
+def test_readers_registry():
+    assert [name for name, _ in rd.READERS] == ["steering", "cap_verdict"]
+
+
+def test_read_steering_leaves_a_stale_or_absent_projection_and_the_lock_untouched(env):
+    _, state, queue = env
+    _bind(state)
+    _propose(state)
+    projection, lock = state / sps.PROJECTION_FILENAME, state / sps.LOCK_FILENAME
+    projection.write_text("{}", encoding="utf-8")  # stale: differs from the replay
+    lock.unlink()
+    _read(rd.read_steering, env)
+    assert projection.read_bytes() == b"{}" and not lock.exists()
+    projection.unlink()
+    assert len(_read(rd.read_steering, env)[0]["opened"]) == 0 and not projection.exists() and not lock.exists()
+
+
+def test_without_a_registered_repo_the_default_head_is_none_and_the_point_stays_open(env, monkeypatch):
+    _, state, queue = env
+    v = _verdict(state, "cap-pr7-a")
+    rcv.record_merge_approval(state, v, "vincent")
+    monkeypatch.setattr(rd, "project_checkout_path", lambda project_id: None)
+    res = _read(rd.read_cap_verdict, env, pr_state_of=lambda pr: "open")
+    assert res["closed"] == [] and len(res["unknown"]) == 1
+    assert _lines(queue, "unknown")[0]["reden"] == "kop_onleesbaar"

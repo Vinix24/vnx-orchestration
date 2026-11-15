@@ -1,0 +1,1 @@
+- The operator queue reads cap-verdict points (source 7, `mergen-met-OI`) and reads the steering store without writing its projection or lock (operator-vragen-tot-antwoord Q2b part b, OI-2885).
