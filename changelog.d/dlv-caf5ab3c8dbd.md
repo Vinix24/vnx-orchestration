@@ -1,0 +1,1 @@
+- `bin/vnx` usage() now lists the ten commands it hid (deliverable, install-git-hooks, uninstall-git-hooks, migrate, dream, learning, staging-list, queue-status, slot, inbox), and a test keeps usage() and the case block in step.

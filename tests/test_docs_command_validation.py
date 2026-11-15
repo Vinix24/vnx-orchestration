@@ -485,3 +485,72 @@ class TestInstallHelpConsistency:
         text = install_sh.read_text()
         assert "starter" in text.lower(), \
             "install.sh help should mention starter mode"
+
+
+# ---------------------------------------------------------------------------
+# usage() names every command the main case block handles (K6)
+# ---------------------------------------------------------------------------
+
+# Labels of the main `case "$cmd" in` block that are deliberately absent from
+# usage(). Empty today: `help|-h|--help)` is a multi-label branch that the
+# extractor's single-label pattern never returns, so nothing needs excusing.
+# Add a label here only with a one-line reason.
+_USAGE_EXEMPT_LABELS: dict = {}
+
+_USAGE_OPEN_RE = re.compile(r"^\s*usage\(\)\s*\{\s*$")
+_USAGE_HEREDOC_RE = re.compile(r"cat\s+<<\s*'?USAGE'?\s*$")
+_USAGE_ENTRY_RE = re.compile(r"^  ([a-z][a-z0-9_-]*)(?:\s|$)")
+
+
+def _extract_usage_commands(vnx_path: Path) -> set:
+    """First word of every top-level entry in the usage() heredoc of bin/vnx.
+
+    Entries sit at two-space indent; continuation lines are indented deeper and
+    section headings start in column 0, so neither is returned.
+    """
+    lines = vnx_path.read_text().splitlines()
+    in_usage = False
+    in_heredoc = False
+    commands = set()
+    for line in lines:
+        if not in_usage:
+            in_usage = bool(_USAGE_OPEN_RE.match(line))
+            continue
+        if not in_heredoc:
+            in_heredoc = bool(_USAGE_HEREDOC_RE.search(line))
+            continue
+        if line == "USAGE":
+            return commands
+        entry = _USAGE_ENTRY_RE.match(line)
+        if entry:
+            commands.add(entry.group(1))
+    raise AssertionError("usage() heredoc in bin/vnx not found or not terminated")
+
+
+class TestUsageNamesEveryCommand:
+    def test_every_case_label_appears_in_usage(self):
+        vnx_path = REPO_ROOT / "bin" / "vnx"
+        assert vnx_path.exists(), "bin/vnx must exist"
+        labels = _extract_bin_vnx_commands(vnx_path)
+        assert labels, "no case labels extracted from bin/vnx"
+        usage = _extract_usage_commands(vnx_path)
+        assert usage, "no commands extracted from usage()"
+        missing = sorted(labels - usage - set(_USAGE_EXEMPT_LABELS))
+        assert not missing, f"bin/vnx commands missing from usage(): {missing}"
+
+    def test_usage_extractor_fails_closed_without_usage(self, tmp_path):
+        vnx = tmp_path / "vnx"
+        vnx.write_text('case "$cmd" in\n  real)\n    x\n    ;;\nesac\n')
+        with pytest.raises(AssertionError):
+            _extract_usage_commands(vnx)
+
+    def test_usage_extractor_reads_entries_only(self, tmp_path):
+        vnx = tmp_path / "vnx"
+        vnx.write_text(
+            "  usage() {\n    cat <<USAGE\nUsage: vnx <command>\n\nCommands:\n"
+            "  init               Create layout\n"
+            "  role sync          Refresh\n"
+            "                     continuation line\n"
+            "USAGE\n  }\n"
+        )
+        assert _extract_usage_commands(vnx) == {"init", "role"}
