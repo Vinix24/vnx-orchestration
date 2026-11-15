@@ -324,6 +324,7 @@ def write_coverage(
     project_id: str, source: str, *, state: str, files_read: int, window: str,
     count: Optional[int] = None, files_unreadable: int = 0,
     unreadable_reason: Optional[str] = None, state_dir: Optional[Path] = None,
+    skipped: Optional[Dict[str, int]] = None,
 ) -> Dict[str, Any]:
     """Replace the coverage line of one source (ADR-075 decision 8), atomically."""
     _check_closed("source", source, BRONNEN)
@@ -339,6 +340,8 @@ def write_coverage(
         "unreadable_reason": _safe_text(unreadable_reason or "", normalised=False),
         "updated": datetime.now(timezone.utc).isoformat(),
     }
+    if skipped:  # lines left out, per fixed reason code (no content)
+        entry["skipped"] = {k: int(v) for k, v in sorted(skipped.items()) if re.fullmatch(r"[a-z0-9_]+", k)}
     sdir = _state_dir(project_id, state_dir)
     path = sdir / "permission_coverage.json"
     with _locked(sdir):
