@@ -1,0 +1,1 @@
+- `vnx horizon plan-gate sign <track> --key <k> --identity <id>`: the operator signs the latest plan-gate pass of a track, so a T0 may promote on an opted-in track (ADR-056); a T0 is refused (exit 2), no pass is exit 3, a signature that does not verify against `VNX_ALLOWED_SIGNERS` writes nothing (exit 4), and a newer plan-gate run drops the grant back to unsigned (OI-2849).

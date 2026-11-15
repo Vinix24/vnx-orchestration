@@ -67,6 +67,8 @@ def emit_plan_gate_pass(
     scope: Optional[str] = None,
     governance_variant: Optional[str] = None,
     gov_trace: Optional[str] = None,
+    extra_fields: Optional[Dict[str, Any]] = None,
+    verify_with: "str | Path | None" = None,
 ) -> Optional[Dict[str, Any]]:
     """Append a ``plan_gate_pass`` record for a track to the repo-committed ledger.
 
@@ -84,7 +86,8 @@ def emit_plan_gate_pass(
     always present with an empty-string default — there an empty value means
     "no derivation for this round"; here absence means "no derivation at all".
     Signed when ``key_path`` + ``signer_identity`` are provided (tamper-proof);
-    otherwise appended unsigned but hash-chained (tamper-evident). Best-effort:
+    otherwise appended unsigned but hash-chained (tamper-evident). ``extra_fields`` are copied
+    on before signing; a signed record failing ``verify_with`` is not appended (OI-2849). Best-effort:
     returns the appended record on success, ``None`` on any failure (never raises).
     """
     try:
@@ -112,10 +115,15 @@ def emit_plan_gate_pass(
             label = profile_label_from_trace(gov_trace)
             if label:
                 record["gate_profile"] = label
+        for key, value in (extra_fields or {}).items():
+            if key not in ("type", "prev_hash", "signature", "signer_identity"):
+                record[key] = value
         if key_path and signer_identity:
-            from attestation import sign_manifest  # noqa: PLC0415
+            from attestation import sign_manifest, verify_attestation  # lazy: ssh-keygen path only
             record["signer_identity"] = signer_identity
             record = sign_manifest(record, key_path)
+            if verify_with is not None and not verify_attestation(record, verify_with):
+                return None
 
         ledger = _ledger_path(repo_root)
         ledger.parent.mkdir(parents=True, exist_ok=True)
