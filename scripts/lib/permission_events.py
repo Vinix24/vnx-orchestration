@@ -19,7 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import atomic_io
 from project_root import resolve_central_data_dir
-from secret_patterns import mask, shell_value_end
+from secret_patterns import _SEGMENT, _dq_end, mask, shell_value_end
 from vnx_ids import PROJECT_ID_RE
 
 SCHEMA = "permission_event/1"
@@ -40,6 +40,7 @@ _LEAD_CD = re.compile(r"\s*cd\s+")
 _LEAD_ENV = re.compile(r"\s*[A-Za-z_]\w*=")
 _AND = re.compile(r"\s*&&\s*")
 _SPACE = re.compile(r"\s+")
+_PATH_RUN = re.compile(r"[\w./~@%+,:=-]*")
 _PATH = r"[\w./~@%+,:=-]*"  # path characters only; a value and its quotes are read by shell_value_end
 _HOME_PATH = re.compile(r"(?<![\w.<])(?:/(?:Users|home)/[\w.-]+|~)(?:/" + _PATH + ")?")
 _RULES = (  # (pattern, replacement): rule 2, ids, then rule 3, paths, then rule 4
@@ -51,8 +52,66 @@ _RULES = (  # (pattern, replacement): rule 2, ids, then rule 3, paths, then rule
     (re.compile(r"(?<![\w/.<])(?:/private)?/tmp(?:/" + _PATH + ")?"), "<tmp>"),
     (re.compile(r"(?<![\w.<])(?:/(?:Users|home)/[\w.-]+|~)/\.vnx-data(?:/" + _PATH + ")?"), "<vnx-data>"),
 )
+_PATH_TOKENS = frozenset(("<scratchpad>", "<tmp>", "<vnx-data>"))
 _NUMBER = re.compile(r"(?<![\w./<-])\d+(?![\w./>-])")
 _HEREDOC = re.compile(r"(?<!<)<<(?!<).*", re.DOTALL)  # a here-string (<<<) is no heredoc
+
+def _open_quote(text: str, pos: int) -> Optional[int]:
+    """Index of the quote (``'``, ``"`` or ``$'``) still open at ``pos``, else None."""
+    q, i = None, 0
+    while i < pos:
+        c = text[i]
+        if q is None:
+            if c == "\\":
+                i += 1
+            elif c in "\"'" or text.startswith("$'", i):
+                q = i
+        elif text[q] == '"':
+            if c == "\\":
+                i += 1
+            elif c == '"':
+                q = None
+        elif c == "\\" and text[q] == "$":
+            i += 1
+        elif c == "'" and i > q + (text[q] == "$"):
+            q = None
+        i += 1
+    return q
+
+def _quote_end(text: str, q: int) -> int:
+    """End of the quote opening at ``q``; an unclosed one runs to the end of the text."""
+    return _dq_end(text, q) if text[q] == '"' else _SEGMENT.match(text, q).end()
+
+def _word_tail(text: str, end: int) -> int:
+    """Extend ``end`` over the rest of the shell word: escapes, adjacent quotes, path characters."""
+    while end < len(text):
+        if text[end] == "\\":
+            end = min(end + 2, len(text))
+        elif text[end] in "\"'" or text.startswith("$'", end):
+            end = _quote_end(text, end)
+        else:
+            run = _PATH_RUN.match(text, end).end()
+            if run == end:
+                break
+            end = run
+    return end
+
+def _sub_paths(pattern: "re.Pattern[str]", repl: str, text: str) -> str:
+    """Replace each path as one whole shell word: from the opening quote it sits in (if any)
+    to the end of the word; a quote that never closes masks to the end of the text."""
+    out, pos = [], 0
+    while True:
+        m = pattern.search(text, pos)
+        if not m:
+            return "".join(out) + text[pos:]
+        start, end = m.start(), m.end()
+        if "/" in m.group():  # a bare "~" is no path
+            q = _open_quote(text, start)
+            if q is not None:
+                start, end = q, _quote_end(text, q)
+            end = _word_tail(text, end)
+        out.append(text[pos:start] + repl)
+        pos = max(end, start + 1)
 
 def _strip_lead(text: str) -> str:
     """Drop leading ``cd <path> &&`` and ``NAME=value`` words (values read by ``shell_value_end``)."""
@@ -77,8 +136,8 @@ def normalise(command: str) -> str:
     """ADR-075 decision 4: mask, then the five rules in order. Idempotent."""
     text = _strip_lead(mask(command))
     for pattern, repl in _RULES:
-        text = pattern.sub(repl, text)
-    text = _HOME_PATH.sub("~/...", text)
+        text = _sub_paths(pattern, repl, text) if repl in _PATH_TOKENS else pattern.sub(repl, text)
+    text = _sub_paths(_HOME_PATH, "~/...", text)
     text = _NUMBER.sub("<n>", text)
     text = _HEREDOC.sub("<<heredoc", text)
     return " ".join(text.split())

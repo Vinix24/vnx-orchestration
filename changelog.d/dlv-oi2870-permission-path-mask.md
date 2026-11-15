@@ -1,0 +1,1 @@
+- Permission-event normalisation now masks a home, scratchpad, tmp or vnx-data path as one whole shell word, so a quoted or backslash-escaped path with a space no longer leaks the part after the space into the ledger (OI-2870).
