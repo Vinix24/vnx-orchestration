@@ -1,0 +1,1 @@
+- `vnx memory doctor` now proposes `invalid_at` for notes that cite only closed OIs (looked up in the bound project's own store) or merged PRs, plus the validity and frontmatter warnings, into `state/memory_doctor.json` (geheugen-in-de-store M5b, ADR-078).
