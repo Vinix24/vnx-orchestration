@@ -88,7 +88,7 @@ CI is measured for at most 8 rows (`PR_ROW_MEASURE_CAP`): PRs on a `dispatch/<id
 
 The section itself carries `available` and `reason`. When `gh pr list` for the open PRs fails, `available` is `false`, `reason` holds the return code and the first 120 characters of stderr, and `open_prs` stays an empty list so every reader keeps its type. A failed read of the merged PRs adds `merged_today_error` and leaves `available` alone. A builder that is missing or raises gives `available: false` with `reason: builder_failed: <exception type>`. One unmeasured row does not make the section unavailable. The section also carries `register_error`: null when the dispatch register was read (or the caller passed the events in), else `<ExceptionType>: <message>`, meaning `gates_passed` and `blocked_on` on the rows are unmeasured and not empty.
 
-`t0_index.json` (schema `t0_index/1.3`) shows `queue.open_prs` as `null`, not `0`, when the section is unavailable, plus a top-level `pr_queue_unavailable` holding the reason. The key is absent when the read succeeded. `PROJECT_STATUS.md` prints `Open PRs: unknown (<reason>)` for the `null`.
+`t0_index.json` (schema `t0_index/1.4`) shows `queue.open_prs` as `null`, not `0`, when the section is unavailable, plus a top-level `pr_queue_unavailable` holding the reason. The key is absent when the read succeeded. `PROJECT_STATUS.md` prints `Open PRs: unknown (<reason>)` for the `null`.
 
 ### Future — authored intent
 The roadmap is the tracks database: `vnx horizon` (alias `vnx objective`) adds,
@@ -201,8 +201,8 @@ automatically when wired into a cron or post-merge hook.
 
 One ergonomic improvement would tighten the fabric further (candidate track, not yet built):
 
-1. **`vnx open-item add --track <id> --title … --severity blocker`** — a single
-   command that writes straight to `track_open_items`, so a new issue is captured
+1. **`open_items_manager.py add` taking a `--track <id>`** — one
+   step that writes straight to `track_open_items`, so a new issue is captured
    the moment you hit it. Today it is two steps (`open_items_manager add` →
    `import_open_items_to_tracks`).
 

@@ -81,7 +81,7 @@ class TestBackendDeveloperRoleScope:
             "docs/core/DISPATCH_RULES.md",
             "docs/core/technical/x.md",
             "docs/governance/decisions/ADR-001.md",
-            "docs/manifesto/HEADLESS_TRANSITION.md",
+            "docs/manifesto/ROADMAP.md",
             "schemas/quality_intelligence.sql",
             "templates/unified_report_template.md",
             ".vnx/worker_permissions.yaml",

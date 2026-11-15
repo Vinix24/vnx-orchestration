@@ -11,7 +11,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
 
 import memory_doctor
 import memory_ledger
-from project_root import resolve_project_id, resolve_state_dir
+from project_root import resolve_project_id
+from vnx_paths import ensure_env
 
 
 def _doctor(state_dir: Path, as_json: bool) -> int:
@@ -34,7 +35,8 @@ def main(argv: list) -> int:
     sub.add_parser("scan")
     sub.add_parser("doctor").add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
-    state_dir = resolve_state_dir()
+    # Same store as build_t0_state.py (ADR-026): VNX_STATE_DIR from vnx_paths, never the repo-local dir.
+    state_dir = Path(ensure_env()["VNX_STATE_DIR"])
     if args.cmd == "doctor":
         return _doctor(state_dir, args.json)
     if args.cmd == "scan":
@@ -53,7 +55,7 @@ def main(argv: list) -> int:
     except memory_ledger.BindRefused as exc:
         print("bind refused: %s" % exc, file=sys.stderr)
         return 4
-    print("bound %d folder(s)" % len(doc["memory_dirs"]))
+    print("bound %d folder(s) in %s" % (len(doc["memory_dirs"]), state_dir))
     return 0
 
 

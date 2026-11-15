@@ -12,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
 
 import operator_queue as oq
 import operator_queue_ask as qa
+import operator_queue_audit as audit
 import operator_queue_inbox as inbox
 from project_root import resolve_project_id
 
@@ -27,6 +28,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--sessie", default="cli")
     parser.add_argument("--limit", type=int, default=5)
     parser.add_argument("--all", action="store_true", help="every project: one coverage line, then its points")
+    parser.add_argument("--now", default="", help=argparse.SUPPRESS)
     parser.add_argument("--home", default="", help=argparse.SUPPRESS)
     parser.add_argument("--registry", default="", help=argparse.SUPPRESS)
     sub = parser.add_subparsers(dest="cmd")
@@ -43,6 +45,10 @@ def _parser() -> argparse.ArgumentParser:
     ans.add_argument("--by", default="T0")
     push = sub.add_parser("push-due", help="print the points a push is due for (JSON), after reserving them")
     push.add_argument("--sessie", dest="push_sessie", default="cli")
+    aud = sub.add_parser("audit", help="late points per project (ADR-076 decision 13)")
+    for flag, kw in (("--all", {"action": "store_true"}), ("--json", {"action": "store_true"}), ("--project-id", {})):
+        aud.add_argument(flag, default=argparse.SUPPRESS, **kw)  # SUPPRESS: the main parser's value stands when absent
+    aud.add_argument("--since", required=True)
     return parser
 
 
@@ -80,6 +86,23 @@ def _show_all(args) -> int:
     return 0
 
 
+def _audit(args, project_id: str, sdir, root) -> int:
+    try:
+        days = audit.parse_since(args.since)
+    except ValueError as exc:
+        print(f"vnx inbox: {exc}", file=sys.stderr)
+        return 2
+    now = args.now or None
+    if args.all:
+        results = audit.audit_all(home=Path(args.home) if args.home else Path.home(),
+                                  registry_path=Path(args.registry) if args.registry else None, now=now, since_days=days)
+    else:
+        results = [audit.audit_project(project_id, state_dir=sdir, data_root=root, now=now, since_days=days)]
+    print(json.dumps({"since_days": days, "projects": results}, indent=2, ensure_ascii=False, sort_keys=True)
+          if args.json else audit.render(results))
+    return audit.exit_code(results)
+
+
 def _show(args, project_id: str, sdir, root) -> int:
     data = inbox.show(project_id, limit=args.limit, state_dir=sdir, data_root=root)
     if args.present and data["points"]:
@@ -91,13 +114,17 @@ def _show(args, project_id: str, sdir, root) -> int:
 
 def main(argv: list) -> int:
     args = _parser().parse_args(argv)
-    if args.all and (args.present or args.cmd or args.project_id or args.state_dir or args.data_root):
+    if args.all and (args.present or args.cmd not in (None, "audit") or args.project_id or args.state_dir or args.data_root):
         print("vnx inbox: --all only shows; ask, answer, push-due, --present and a project scope are per project", file=sys.stderr)
         return 2
+    if args.all and args.cmd == "audit":
+        return _audit(args, "", None, None)
     if args.all:  # lists every project itself: needs no current project
         return _show_all(args)
     project_id, sdir = args.project_id or resolve_project_id(), Path(args.state_dir) if args.state_dir else None
     root = Path(args.data_root) if args.data_root else (sdir.parent if sdir is not None else None)
+    if args.cmd == "audit":
+        return _audit(args, project_id, sdir, root)
     try:
         if args.cmd == "ask":
             line = qa.ask(project_id, bron=args.bron, ref=args.ref, vraag=args.vraag, sluit_bij=args.sluit_bij,

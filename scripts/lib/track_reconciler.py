@@ -872,6 +872,35 @@ def _deliverable_stubs(
     ).fetchall()
 
 
+OPEN_DELIVERABLE_STATES = ("proposed", "ready", "failed", "failed_delivery", "timed_out")
+IN_FLIGHT_STATES = ("claimed", "delivering", "accepted", "running")
+
+
+def open_deliverable_counts(
+    conn: sqlite3.Connection, track_id: str, project_id: str
+) -> Dict[str, int]:
+    """Count a track's unfinished work per state (OI-2904); empty means nothing open.
+
+    Deliverable rows (output_ref set) in proposed/ready/failed/failed_delivery/
+    timed_out, plus ANY dispatch of the track that is in flight. Raises
+    sqlite3.Error on an unreadable DB: the caller must not read that as empty.
+    """
+    states = (*OPEN_DELIVERABLE_STATES, *IN_FLIGHT_STATES)
+    rows = conn.execute(
+        "SELECT state, (output_ref IS NOT NULL AND output_ref != '') AS is_deliverable, "
+        "COUNT(*) AS c FROM dispatches "
+        "WHERE track = ? AND project_id = ? "
+        f"AND state IN ({','.join('?' * len(states))}) "
+        "GROUP BY state, (output_ref IS NOT NULL AND output_ref != '')",
+        (track_id, project_id, *states),
+    ).fetchall()
+    out: Dict[str, int] = {}
+    for r in rows:
+        if r["state"] in IN_FLIGHT_STATES or r["is_deliverable"]:
+            out[r["state"]] = out.get(r["state"], 0) + r["c"]
+    return out
+
+
 def _real_dispatches_terminal(
     conn: sqlite3.Connection, track_id: str, project_id: str
 ) -> Tuple[bool, List[str]]:

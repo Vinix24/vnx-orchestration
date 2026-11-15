@@ -375,7 +375,7 @@ def test_writer_refuses_invalid_records(change):
 
 def test_unbound_writes_nothing_then_cli_scan_observes(env, monkeypatch, capsys):
     import memory_cli
-    monkeypatch.setattr(memory_cli, "resolve_state_dir", lambda: env.state)
+    monkeypatch.setenv("VNX_STATE_DIR", str(env.state))
     result = ml.scan(env.state)
     assert (result["status"], result["written"], result["reason"]) == (
         "unbound", 0, "unbound: binding file missing")

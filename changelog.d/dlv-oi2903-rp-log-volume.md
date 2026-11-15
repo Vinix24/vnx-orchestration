@@ -1,0 +1,1 @@
+- The receipt processor logs an already processed report once per process instead of every 5 seconds, logs "Report accepted" only for reports it will process, and the supervisor log rotates to `.1` above 50 MB (OI-2903).

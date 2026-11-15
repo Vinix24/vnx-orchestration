@@ -439,8 +439,7 @@ See also: `docs/operations/RECEIPT_PIPELINE.md` (pipeline mechanics), ADR-035 §
 §9's report contract is enforced at write time by `envelope_govern.py`'s
 `validate_body()` check: when a worker's report is missing a mandatory
 heading, the receipt's status is overridden to `contract_invalid` instead of
-whatever the worker/adapter claimed. Measured 05-09
-(`claudedocs/2026-09-05-golf2-contractpercentage-per-lane.md` §5a): this
+whatever the worker/adapter claimed. Measured 05-09: this
 write side works correctly across every lane (350+ live receipts). Before
 OI-1638, nothing turned that recorded fact into a consequence — it sat in
 `t0_receipts.ndjson` as one more failure-bucket literal for digests and

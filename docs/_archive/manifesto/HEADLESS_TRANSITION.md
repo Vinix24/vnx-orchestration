@@ -1,5 +1,7 @@
 # The Headless Transition: An Operator's Perspective
 
+> Archived 2026-11-15. Current lane rules: [docs/core/PROVIDER_LANES.md](../../core/PROVIDER_LANES.md) and [docs/core/DISPATCH_RULES.md](../../core/DISPATCH_RULES.md).
+
 **Audience**: Operators evaluating VNX or tracing its architectural evolution  
 **Scope**: The shift from interactive tmux-based execution to headless subprocess workers  
 **Status**: Retrospective — written after the transition completed

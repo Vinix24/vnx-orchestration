@@ -131,7 +131,7 @@ def test_ids_are_stable_and_folder_untouched(env):
 def test_cli_doctor_json_and_exit_codes(env, monkeypatch, capsys):
     mem, state = env
     (mem / "n.md").write_text("OI-1\n")
-    monkeypatch.setattr(memory_cli, "resolve_state_dir", lambda: state)
+    monkeypatch.setenv("VNX_STATE_DIR", str(state))
     assert memory_cli.main(["doctor", "--json"]) == 0
     assert json.loads(capsys.readouterr().out)["proposals"][0]["kind"] == "invalid_at_candidate"
     assert memory_cli.main(["doctor"]) == 0 and "invalid_at_candidate=1" in capsys.readouterr().out

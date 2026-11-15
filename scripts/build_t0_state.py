@@ -60,6 +60,9 @@ Schema 2.2 change (D5 fabric-state-herstel, live work):
     ``conflicts/`` directory that exists but cannot be listed is not zero:
     its count is ``null`` with a ``*_unmeasured_reason`` and it degrades
     system_health, so the dispatch guard reads WAIT, never GO.
+  - t0_index.json schema ``t0_index/1.4`` (operator-vragen-tot-antwoord Q5) adds
+    ``operator_inbox``: the open points of the operator queue, at most 5 plus
+    ``more``. Building it never writes a ``presented`` line.
   - t0_index.json schema ``t0_index/1.3`` makes ``queue.open_prs`` nullable: ``null``
     plus a top-level ``pr_queue_unavailable`` (the reason) when the open-PR read
     failed, instead of ``0``. The key is absent when the read succeeded. The
@@ -99,6 +102,7 @@ import json
 import logging
 import os
 import plistlib
+import select
 import shutil
 import sqlite3
 import subprocess
@@ -2780,6 +2784,107 @@ def _build_memory_ledger(state_dir: Path) -> Dict[str, Any]:
         return {"status": "error", "reason": f"{type(exc).__name__}: {exc}"[:200]}
 
 
+_INBOX_BUDGET_SECONDS = 0.5
+_INBOX_POINT_KEYS = ("point_id", "vraag", "age", "presented", "kopieerblok")
+
+
+def _inbox_show_child(project_id: str, state_dir: Path, out_fd: int) -> None:
+    """The detached grandchild: run show() (whose readers append to the queue), send one JSON doc, never return.
+
+    Nobody kills it: when the parent's budget runs out it closes the pipe and goes on, and this process finishes
+    its ledger append and projection rebuild on its own (OI-2899)."""
+    try:
+        try:
+            os.setsid()  # out of the caller's process group: a Ctrl-C or group kill there does not stop the writes
+        except OSError:  # vnx-silent-except: already a session leader; the writes run either way
+            pass
+        try:
+            import operator_queue_inbox as inbox
+
+            doc: Dict[str, Any] = {"data": inbox.show(project_id, limit=5, state_dir=state_dir,
+                                                      data_root=state_dir.parent)}
+        except BaseException as exc:  # carried to the parent as status=error
+            doc = {"error": f"{type(exc).__name__}: {exc}"[:200]}
+        payload = json.dumps(doc, default=str).encode("utf-8")
+        try:
+            while payload:
+                payload = payload[os.write(out_fd, payload):]
+        except OSError:  # vnx-silent-except: the parent timed out and closed the pipe; the queue writes are done
+            pass
+    finally:
+        os._exit(0)
+
+
+def _run_show_detached(project_id: str, state_dir: Path, budget: float) -> Any:
+    """show() in a double-forked grandchild. Returns its JSON doc, or ``{"timeout": True}`` after ``budget`` s."""
+    read_fd, write_fd = os.pipe()
+    pid = os.fork()
+    if pid == 0:
+        try:
+            os.close(read_fd)
+            if os.fork() == 0:
+                _inbox_show_child(project_id, state_dir, write_fd)
+        finally:
+            os._exit(0)  # the middle child exits at once, so the grandchild is reparented and never a zombie here
+    os.close(write_fd)
+    try:
+        os.waitpid(pid, 0)
+        chunks, deadline = [], time.monotonic() + budget
+        while True:
+            left = deadline - time.monotonic()
+            if left <= 0 or not select.select([read_fd], [], [], left)[0]:
+                return {"timeout": True}
+            chunk = os.read(read_fd, 65536)
+            if not chunk:
+                break
+            chunks.append(chunk)
+    finally:
+        os.close(read_fd)
+    return json.loads(b"".join(chunks).decode("utf-8"))
+
+
+def _inbox_block(data: Any) -> Dict[str, Any]:
+    """Besluit 11: status and open_total come from project_coverage(); an unknown source is never ok or zero."""
+    import operator_queue_inbox as inbox
+
+    try:
+        points = []
+        for p in data["points"][:5]:
+            item = {k: p[k] for k in _INBOX_POINT_KEYS}
+            if p.get("unknown_reden"):
+                item["unknown_reden"] = p["unknown_reden"]
+            points.append(item)
+        dekking, reden = inbox.project_coverage(data)
+        unknown = [{"name": n, "reden": r} for n, r in inbox.unknown_sources(data["coverage"])]
+        total = data["open_total"]
+        if dekking == "gelezen" and (not isinstance(total, int) or isinstance(total, bool)):
+            return {"status": "error", "reason": f"open_total malformed: {total!r}"[:200]}
+        ok = dekking == "gelezen"
+        return {"status": "ok" if ok else "unknown", "reason": reden, "coverage": data["coverage"],
+                "unknown_sources": unknown, "open_total": total if ok else None, "points": points,
+                "more": data["more"]}
+    except (KeyError, TypeError, AttributeError) as exc:
+        return {"status": "error", "reason": f"{type(exc).__name__}: {exc}"[:200]}
+
+
+def _build_operator_inbox(project_id: str, state_dir: Path) -> Dict[str, Any]:
+    """ADR-076 besluit 10: the open points. This process writes nothing; the refresh runs in its own process.
+
+    An error becomes status=error, never a raise."""
+    try:
+        run = _run_show_detached(project_id, state_dir, _INBOX_BUDGET_SECONDS)
+    except (OSError, ValueError) as exc:
+        return {"status": "error", "reason": f"{type(exc).__name__}: {exc}"[:200]}
+    if not isinstance(run, dict) or not ({"timeout", "error", "data"} & set(run)):
+        return {"status": "error", "reason": "show child sent a malformed result"}
+    if run.get("timeout") is True:
+        return {"status": "error", "reason": f"timeout: show took over {_INBOX_BUDGET_SECONDS:g}s "
+                                             "(the refresh finishes in its own process)"}
+    if "error" in run:
+        return {"status": "error", "reason": str(run["error"])[:200]}
+    return _inbox_block(run["data"])
+
+
 def build_t0_state(
     state_dir: Path,
     dispatch_dir: Path,
@@ -2825,6 +2930,7 @@ def build_t0_state(
     lifecycle_sweep = _lifecycle_sweep_section(state_dir)
     lifecycle_count = _lifecycle_count_index_summary(state_dir)
     memory_ledger = _build_memory_ledger(state_dir)  # geheugen-in-de-store M4
+    operator_inbox = _build_operator_inbox(project_id, state_dir)  # operator-vragen-tot-antwoord Q5
     elapsed = time.monotonic() - start
     system_health = _build_system_health(
         state_dir, db_ok, db_health=db_health,
@@ -2855,6 +2961,7 @@ def build_t0_state(
         "lifecycle_sweep": lifecycle_sweep,
         "lifecycle_count": lifecycle_count,
         "memory_ledger": memory_ledger,
+        "operator_inbox": operator_inbox,
         "_strategic_state_heavy": strategic_state_heavy,
         "_build_seconds": round(elapsed, 2),
     }
@@ -3010,7 +3117,7 @@ def _build_t0_index(state: Dict[str, Any]) -> Dict[str, Any]:
     pr_queue = state.get("pr_queue") or {}
     pr_unavailable = pr_queue.get("available") is False
     index = {
-        "schema": "t0_index/1.3",
+        "schema": "t0_index/1.4",
         "timestamp": state.get("generated_at", ""),
         "git_branch": git_ctx.get("branch", ""),
         "git_head": raw_head[:7],
@@ -3031,6 +3138,8 @@ def _build_t0_index(state: Dict[str, Any]) -> Dict[str, Any]:
         "contract_invalid": _contract_invalid_index_summary(state.get("contract_invalid")),
         "lifecycle": state.get("lifecycle_count") or {},
         "last_rebuild_seconds": state.get("_build_seconds"),
+        "operator_inbox": state.get("operator_inbox")
+        or {"status": "error", "reason": "operator_inbox missing from the state"},
     }
     if pr_unavailable:
         index["pr_queue_unavailable"] = pr_queue.get("reason") or "unknown"

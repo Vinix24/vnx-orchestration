@@ -379,66 +379,19 @@ def update_confidence_from_outcome(
             title = (row["title"] or f"success_pattern_{sp_id}")[:255]
             pattern_hash = _sha1(pattern_id)
 
-            usage = conn.execute(
-                "SELECT success_count, failure_count, used_count "
-                "FROM pattern_usage WHERE pattern_id = ?",
-                (pattern_id,),
-            ).fetchone()
-
-            if usage is None:
-                succ = 1 if is_success else 0
-                fail = 0 if is_success else 1
-                used = 1 if is_success else 0
-                if pu_has_project:
-                    conn.execute(
-                        "INSERT INTO pattern_usage "
-                        "(pattern_id, pattern_title, pattern_hash, used_count, "
-                        " ignored_count, success_count, failure_count, "
-                        " last_used, confidence, created_at, updated_at, project_id) "
-                        "VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?)",
-                        (pattern_id, title, pattern_hash, used,
-                         succ, fail, now, beta_score(succ, fail), now, now,
-                         project_id),
-                    )
-                else:
-                    conn.execute(
-                        "INSERT INTO pattern_usage "
-                        "(pattern_id, pattern_title, pattern_hash, used_count, "
-                        " ignored_count, success_count, failure_count, "
-                        " last_used, confidence, created_at, updated_at) "
-                        "VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)",
-                        (pattern_id, title, pattern_hash, used,
-                         succ, fail, now, beta_score(succ, fail), now, now),
-                    )
-            else:
-                succ = int(usage["success_count"] or 0) + (1 if is_success else 0)
-                fail = int(usage["failure_count"] or 0) + (0 if is_success else 1)
-                used = int(usage["used_count"] or 0) + (1 if is_success else 0)
-                conn.execute(
-                    "UPDATE pattern_usage SET success_count = ?, "
-                    "failure_count = ?, used_count = ?, "
-                    "confidence = ?, last_used = ?, updated_at = ? "
-                    "WHERE pattern_id = ?",
-                    (succ, fail, used, beta_score(succ, fail), now, now, pattern_id),
-                )
+            succ, fail = _upsert_pattern_usage(
+                conn, pattern_id, title, pattern_hash, is_success, now,
+                project_id, pu_has_project, beta_score,
+            )
 
             old_conf = float(row["confidence_score"] or 0.0)
             new_conf = round(beta_score(succ, fail), 6)
             net_change += new_conf - old_conf
 
+            _apply_success_pattern_update(conn, row, sp_id, new_conf, is_success, now)
             if is_success:
-                new_usage_count = (row["usage_count"] or 0) + 1
-                conn.execute(
-                    "UPDATE success_patterns SET confidence_score = ?, "
-                    "usage_count = ?, last_used = ? WHERE id = ?",
-                    (new_conf, new_usage_count, now, sp_id),
-                )
                 boosted += 1
             else:
-                conn.execute(
-                    "UPDATE success_patterns SET confidence_score = ? WHERE id = ?",
-                    (new_conf, sp_id),
-                )
                 decayed += 1
 
         # Record a confidence_events audit row in the SAME transaction as the
@@ -449,21 +402,9 @@ def update_confidence_from_outcome(
         # WARNING so the lost-audit case is never silent.
         _SCHEMA_ABSENT_MSGS = ("no such table", "no such column", "has no column")
         try:
-            ce_cols = ["dispatch_id", "terminal", "outcome", "patterns_boosted",
-                       "patterns_decayed", "confidence_change", "occurred_at"]
-            ce_vals: list = [dispatch_id, terminal, status, boosted, decayed,
-                             round(net_change, 4), now]
-            if ce_has_project:
-                ce_cols.append("project_id")
-                ce_vals.append(project_id)
-            if _has_column(conn, "confidence_events", "grounding_source"):
-                ce_cols.append("grounding_source")
-                ce_vals.append(grounding_source)
-            placeholders = ", ".join("?" for _ in ce_vals)
-            conn.execute(
-                f"INSERT INTO confidence_events ({', '.join(ce_cols)}) "
-                f"VALUES ({placeholders})",
-                ce_vals,
+            _insert_confidence_event(
+                conn, dispatch_id, terminal, status, boosted, decayed,
+                net_change, now, project_id, ce_has_project, grounding_source,
             )
         except sqlite3.OperationalError as exc:
             msg = str(exc).lower()
@@ -489,6 +430,118 @@ def update_confidence_from_outcome(
         conn.close()
 
     return {"boosted": boosted, "decayed": decayed}
+
+
+def _upsert_pattern_usage(
+    conn: sqlite3.Connection,
+    pattern_id: str,
+    title: str,
+    pattern_hash: str,
+    is_success: bool,
+    now: str,
+    project_id: str,
+    pu_has_project: bool,
+    beta_score: Any,
+) -> Tuple[int, int]:
+    """Insert or increment the pattern_usage row; return (success, failure) counts."""
+    usage = conn.execute(
+        "SELECT success_count, failure_count, used_count "
+        "FROM pattern_usage WHERE pattern_id = ?",
+        (pattern_id,),
+    ).fetchone()
+
+    if usage is None:
+        succ = 1 if is_success else 0
+        fail = 0 if is_success else 1
+        used = 1 if is_success else 0
+        if pu_has_project:
+            conn.execute(
+                "INSERT INTO pattern_usage "
+                "(pattern_id, pattern_title, pattern_hash, used_count, "
+                " ignored_count, success_count, failure_count, "
+                " last_used, confidence, created_at, updated_at, project_id) "
+                "VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?)",
+                (pattern_id, title, pattern_hash, used,
+                 succ, fail, now, beta_score(succ, fail), now, now,
+                 project_id),
+            )
+        else:
+            conn.execute(
+                "INSERT INTO pattern_usage "
+                "(pattern_id, pattern_title, pattern_hash, used_count, "
+                " ignored_count, success_count, failure_count, "
+                " last_used, confidence, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)",
+                (pattern_id, title, pattern_hash, used,
+                 succ, fail, now, beta_score(succ, fail), now, now),
+            )
+    else:
+        succ = int(usage["success_count"] or 0) + (1 if is_success else 0)
+        fail = int(usage["failure_count"] or 0) + (0 if is_success else 1)
+        used = int(usage["used_count"] or 0) + (1 if is_success else 0)
+        conn.execute(
+            "UPDATE pattern_usage SET success_count = ?, "
+            "failure_count = ?, used_count = ?, "
+            "confidence = ?, last_used = ?, updated_at = ? "
+            "WHERE pattern_id = ?",
+            (succ, fail, used, beta_score(succ, fail), now, now, pattern_id),
+        )
+    return succ, fail
+
+
+def _apply_success_pattern_update(
+    conn: sqlite3.Connection,
+    row: sqlite3.Row,
+    sp_id: int,
+    new_conf: float,
+    is_success: bool,
+    now: str,
+) -> None:
+    """Write the new confidence to success_patterns (usage bump only on success)."""
+    if is_success:
+        new_usage_count = (row["usage_count"] or 0) + 1
+        conn.execute(
+            "UPDATE success_patterns SET confidence_score = ?, "
+            "usage_count = ?, last_used = ? WHERE id = ?",
+            (new_conf, new_usage_count, now, sp_id),
+        )
+    else:
+        conn.execute(
+            "UPDATE success_patterns SET confidence_score = ? WHERE id = ?",
+            (new_conf, sp_id),
+        )
+
+
+def _insert_confidence_event(
+    conn: sqlite3.Connection,
+    dispatch_id: str,
+    terminal: str,
+    status: str,
+    boosted: int,
+    decayed: int,
+    net_change: float,
+    now: str,
+    project_id: str,
+    ce_has_project: bool,
+    grounding_source: Any,
+) -> None:
+    """Insert the confidence_events audit row; columns appended only when present."""
+    ce_cols = ["dispatch_id", "terminal", "outcome", "patterns_boosted",
+               "patterns_decayed", "confidence_change", "occurred_at"]
+    ce_vals: list = [dispatch_id, terminal, status, boosted, decayed,
+                     round(net_change, 4), now]
+    if ce_has_project:
+        ce_cols.append("project_id")
+        ce_vals.append(project_id)
+    if _has_column(conn, "confidence_events", "grounding_source"):
+        ce_cols.append("grounding_source")
+        ce_vals.append(grounding_source)
+    placeholders = ", ".join("?" for _ in ce_vals)
+    conn.execute(
+        f"INSERT INTO confidence_events ({', '.join(ce_cols)}) "
+        f"VALUES ({placeholders})",
+        ce_vals,
+    )
 
 
 def _sha1(text: str) -> str:

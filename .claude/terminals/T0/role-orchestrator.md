@@ -295,6 +295,10 @@ Do NOT ask the user for:
 - informal go-aheads after normal receipt review
 - trivial queue advancement decisions
 
+Two inbox rules (operator-vragen-tot-antwoord, ADR-076):
+- Before you ask Vincent anything, record it with `vnx inbox ask`; a question that lives only in the chat counts as not asked.
+- End every status update to Vincent with `vnx inbox --present --channel status`, which shows the open points and writes the `presented` lines.
+
 ## Stale Lease Cleanup (Required Before First Dispatch)
 
 Before the first promote of any new feature chain, check all target terminals for stale leases in runtime_coordination.db. The dispatcher fails closed on expired-but-uncleaned leases.

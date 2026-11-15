@@ -45,7 +45,7 @@
 ## By design
 
 - **File-based and local-first.** The filesystem is the message bus. Not designed for distributed networks, and no cloud dependency for orchestration state.
-- **Bash/Python prototype (about 8/92 ratio).** About 8% bash and 92% Python (measured 2026-10-18 by line count of tracked `.py` and `.sh` files under `scripts/` and `bin/`). The ratio reflects origin, not preference: VNX started as tmux `send-keys` scripts. New components are written in Python. See [EVOLUTION_TIMELINE.md, Language Evolution](EVOLUTION_TIMELINE.md#language-evolution-why-python-now-dominates).
+- **Bash/Python prototype (about 8/92 ratio).** About 8% bash and 92% Python (measured 2026-10-18 by line count of tracked `.py` and `.sh` files under `scripts/` and `bin/`). The ratio reflects origin, not preference: VNX started as tmux `send-keys` scripts. New components are written in Python. See [EVOLUTION_TIMELINE.md, Language Evolution](../_archive/manifesto/EVOLUTION_TIMELINE.md#language-evolution-why-python-now-dominates).
 - **Tmux dependency.** T0 management and the injection path for interactive codex/kimi/gemini terminals use tmux. The tmux-spawn worker lane for Claude was removed on 2026-09-18.
 - **Hook-agnostic.** Quality intelligence and usage tracking do not require provider hooks.
 - **T0 is a coordinator.** The orchestrator role never writes code; the work goes to workers through dispatches.

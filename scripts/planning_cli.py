@@ -754,6 +754,7 @@ def cmd_objective_reconcile(args: argparse.Namespace) -> int:
         f"  deferred={c.get('deferred', 0)}"
         f"  reopened_guard={c.get('reopened_guard', 0)}"
         f"  delivery_hold={c.get('delivery_hold', 0)}"
+        f"  open_deliverable={c.get('open_deliverable', 0)}"
     )
 
     per_track = summary.get("per_track", [])
