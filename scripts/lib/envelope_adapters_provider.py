@@ -376,63 +376,11 @@ class ProviderAdapter:
 
         # ---- gemini ----
         if pv == Provider.GEMINI:
-            from provider_spawns.gemini_spawn import spawn_gemini  # noqa: PLC0415
-
-            model = (
-                plan.model
-                if plan.model not in ("default", "sonnet", "")
-                else os.environ.get("VNX_GEMINI_MODEL", "gemini-2.5-pro")
-            )
-            try:
-                result = spawn_gemini(
-                    prompt=instruction,
-                    model=model,
-                    dispatch_id=plan.dispatch_id,
-                    terminal_id=plan.target_id,
-                    event_writer=event_writer,
-                    extra_env=role_env,
-                    cwd=cwd,
-                )
-            except BrokenPipeError as exc:
-                return _AdapterResult(
-                    returncode=1, completion_text="", status="failure",
-                    error=f"gemini spawn BrokenPipeError: {exc}",
-                )
-            return _map_generic_spawn_result(result, pv.value, model=model)
+            return self._run_gemini(plan, instruction, event_writer=event_writer, cwd=cwd, role_env=role_env)
 
         # ---- litellm:deepseek | litellm:zai | litellm:moonshot ----
         if pv in (Provider.LITELLM_DEEPSEEK, Provider.LITELLM_ZAI, Provider.LITELLM_MOONSHOT):
-            from provider_spawns.litellm_spawn import spawn_litellm  # noqa: PLC0415
-
-            # Extract sub-provider from the enum value: "litellm:deepseek" -> "deepseek"
-            base_sub = pv.value.split(":", 1)[1]
-            if plan.model not in ("default", ""):
-                model = plan.model
-            elif pv == Provider.LITELLM_DEEPSEEK:
-                model = _resolve_deepseek_model()
-            elif pv == Provider.LITELLM_ZAI:
-                model = _resolve_zai_model()
-            else:
-                model = _resolve_moonshot_model()
-            lane_key = _build_lane_key(base_sub, None)
-            try:
-                result = spawn_litellm(
-                    prompt=instruction,
-                    model=model,
-                    dispatch_id=plan.dispatch_id,
-                    terminal_id=plan.target_id,
-                    event_writer=event_writer,
-                    sub_provider=base_sub,
-                    lane=lane_key,
-                    extra_env=role_env,
-                    cwd=cwd,
-                )
-            except BrokenPipeError as exc:
-                return _AdapterResult(
-                    returncode=1, completion_text="", status="failure",
-                    error=f"litellm spawn BrokenPipeError: {exc}",
-                )
-            return _map_generic_spawn_result(result, pv.value, model=model)
+            return self._run_litellm(plan, instruction, event_writer=event_writer, cwd=cwd, role_env=role_env)
 
         # ---- deepseek-harness ----
         if pv == Provider.DEEPSEEK_HARNESS:
@@ -487,58 +435,155 @@ class ProviderAdapter:
 
         # ---- local-gemma ----
         if pv == Provider.LOCAL_GEMMA:
-            from provider_spawns.local_gemma_spawn import spawn_local_gemma  # noqa: PLC0415
-
-            raw_model = (
-                plan.model if plan.model not in ("default", "sonnet", "") else "gemma-4b-local"
-            )
-            canonical_model = _MLX_MODEL_MAP.get(raw_model, raw_model)
-            result = spawn_local_gemma(
-                instruction=instruction,
-                model=canonical_model,
-                role=effective_role,
-                deadline_seconds=300,
-                dispatch_id=plan.dispatch_id,
-                project_id=getattr(plan, "project_id", None),
-            )
-            token_usage = _extract_token_usage(result, pv.value)
-            if result.error and result.returncode != 0:
-                return _AdapterResult(
-                    returncode=result.returncode,
-                    completion_text=(result.completion_text or ""),
-                    status="failure",
-                    token_usage=token_usage,
-                    error=result.error,
-                    model=canonical_model,
-                )
-            if result.timed_out:
-                return _AdapterResult(
-                    returncode=result.returncode,
-                    completion_text=(result.completion_text or ""),
-                    status="timeout",
-                    token_usage=token_usage,
-                    timed_out=True,
-                    model=canonical_model,
-                )
-            _lg_text = result.completion_text or ""
-            status = "success" if result.returncode == 0 else "failure"
-            status, _lg_rc, _lg_err = _fail_loud_on_empty_success(
-                status, result.returncode, _lg_text, pv.value, result
-            )
-            return _AdapterResult(
-                returncode=_lg_rc,
-                completion_text=_lg_text,
-                status=status,
-                token_usage=token_usage,
-                error=_lg_err,
-                model=canonical_model,
-            )
+            return self._run_local_gemma(plan, instruction, role=effective_role)
 
         # Provider.CLAUDE, Provider.AUTO, or any unexpected value — programming error
         raise ValueError(
             f"ProviderAdapter: unsupported provider {pv!r} — "
             f"claude and auto do not route through the provider envelope "
             f"(claude_headless runs through run_envelope_headless_plan)"
+        )
+
+    def _run_gemini(
+        self,
+        plan: "ExecutionPlan",
+        instruction: str,
+        *,
+        event_writer: Optional[Callable],
+        cwd: Optional[Path],
+        role_env: Optional[Dict[str, str]],
+    ) -> _AdapterResult:
+        """Gemini spawn branch, extracted from run() (golf schoon R34b)."""
+        from provider_spawns.gemini_spawn import spawn_gemini  # noqa: PLC0415
+
+        pv = plan.provider
+        model = (
+            plan.model
+            if plan.model not in ("default", "sonnet", "")
+            else os.environ.get("VNX_GEMINI_MODEL", "gemini-2.5-pro")
+        )
+        try:
+            result = spawn_gemini(
+                prompt=instruction,
+                model=model,
+                dispatch_id=plan.dispatch_id,
+                terminal_id=plan.target_id,
+                event_writer=event_writer,
+                extra_env=role_env,
+                cwd=cwd,
+            )
+        except BrokenPipeError as exc:
+            return _AdapterResult(
+                returncode=1, completion_text="", status="failure",
+                error=f"gemini spawn BrokenPipeError: {exc}",
+            )
+        return _map_generic_spawn_result(result, pv.value, model=model)
+
+    def _run_litellm(
+        self,
+        plan: "ExecutionPlan",
+        instruction: str,
+        *,
+        event_writer: Optional[Callable],
+        cwd: Optional[Path],
+        role_env: Optional[Dict[str, str]],
+    ) -> _AdapterResult:
+        """litellm:deepseek|zai|moonshot spawn branch, extracted from run() (golf schoon R34b)."""
+        from dispatch_spec import Provider  # noqa: PLC0415
+        from provider_dispatch import (  # noqa: PLC0415
+            _build_lane_key,
+            _resolve_deepseek_model,
+            _resolve_moonshot_model,
+            _resolve_zai_model,
+        )
+        from provider_spawns.litellm_spawn import spawn_litellm  # noqa: PLC0415
+
+        pv = plan.provider
+        # Extract sub-provider from the enum value: "litellm:deepseek" -> "deepseek"
+        base_sub = pv.value.split(":", 1)[1]
+        if plan.model not in ("default", ""):
+            model = plan.model
+        elif pv == Provider.LITELLM_DEEPSEEK:
+            model = _resolve_deepseek_model()
+        elif pv == Provider.LITELLM_ZAI:
+            model = _resolve_zai_model()
+        else:
+            model = _resolve_moonshot_model()
+        lane_key = _build_lane_key(base_sub, None)
+        try:
+            result = spawn_litellm(
+                prompt=instruction,
+                model=model,
+                dispatch_id=plan.dispatch_id,
+                terminal_id=plan.target_id,
+                event_writer=event_writer,
+                sub_provider=base_sub,
+                lane=lane_key,
+                extra_env=role_env,
+                cwd=cwd,
+            )
+        except BrokenPipeError as exc:
+            return _AdapterResult(
+                returncode=1, completion_text="", status="failure",
+                error=f"litellm spawn BrokenPipeError: {exc}",
+            )
+        return _map_generic_spawn_result(result, pv.value, model=model)
+
+    def _run_local_gemma(
+        self,
+        plan: "ExecutionPlan",
+        instruction: str,
+        *,
+        role: Optional[str],
+    ) -> _AdapterResult:
+        """Local-gemma spawn branch, extracted from run() (golf schoon R34b)."""
+        from provider_dispatch import _MLX_MODEL_MAP, _extract_token_usage  # noqa: PLC0415
+        from provider_spawns.local_gemma_spawn import spawn_local_gemma  # noqa: PLC0415
+
+        pv = plan.provider
+        raw_model = (
+            plan.model if plan.model not in ("default", "sonnet", "") else "gemma-4b-local"
+        )
+        canonical_model = _MLX_MODEL_MAP.get(raw_model, raw_model)
+        result = spawn_local_gemma(
+            instruction=instruction,
+            model=canonical_model,
+            role=role,
+            deadline_seconds=300,
+            dispatch_id=plan.dispatch_id,
+            project_id=getattr(plan, "project_id", None),
+        )
+        token_usage = _extract_token_usage(result, pv.value)
+        if result.error and result.returncode != 0:
+            return _AdapterResult(
+                returncode=result.returncode,
+                completion_text=(result.completion_text or ""),
+                status="failure",
+                token_usage=token_usage,
+                error=result.error,
+                model=canonical_model,
+            )
+        if result.timed_out:
+            return _AdapterResult(
+                returncode=result.returncode,
+                completion_text=(result.completion_text or ""),
+                status="timeout",
+                token_usage=token_usage,
+                timed_out=True,
+                model=canonical_model,
+            )
+        _lg_text = result.completion_text or ""
+        status = "success" if result.returncode == 0 else "failure"
+        status, _lg_rc, _lg_err = _fail_loud_on_empty_success(
+            status, result.returncode, _lg_text, pv.value, result
+        )
+        return _AdapterResult(
+            returncode=_lg_rc,
+            completion_text=_lg_text,
+            status=status,
+            token_usage=token_usage,
+            error=_lg_err,
+            model=canonical_model,
         )
 
     def _run_kimi(
