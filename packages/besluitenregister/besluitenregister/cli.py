@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .dagboek import lees_log, titel
+from .geheimpatronen import PATTERNS
 from .lezer import lees
 from .schrijver import Geweigerd, HerkomstBotsing, Register, stand
 
@@ -17,6 +18,16 @@ MD, NDJSON = "BESLUITEN.md", "besluiten.ndjson"
 _VOOR = re.compile(r"intern|publiek|klant:[a-z0-9][a-z0-9._-]*")
 
 class Gebruik(Exception): pass  # exit 2
+
+def _veilig(tekst):
+    """Tekst van de aanroeper in een melding: met een geheimpatroon erin alleen de patroonnaam (ADR-077 besluit 6)."""
+    tekst = str(tekst)
+    p = next((p for p in PATTERNS if p.regex.search(tekst)), None)
+    return f"<weggelaten: geheimpatroon {p.name}>" if p else tekst
+
+class _Parser(argparse.ArgumentParser):
+    def error(self, message):  # argparse herhaalt een onbekende vlag of keuze letterlijk
+        super().error(_veilig(message))
 
 def _voor(w):
     if not _VOOR.fullmatch(w):
@@ -173,7 +184,7 @@ def _schrijf_atomair(pad, tekst):
 def _uit_pad(uit, logdir):
     pad = Path(uit).resolve()  # volgt symlinks en haalt .. weg
     if pad.is_dir() or pad in {(logdir / n).resolve() for n in (NDJSON, NDJSON + ".afgescheurd", MD)}:
-        raise Gebruik(f"--uit: weigert {uit}: dat is een bestand van het register zelf of een map")
+        raise Gebruik(f"--uit: weigert {_veilig(uit)}: dat is een bestand van het register zelf of een map")
     return pad
 
 def _kop(a, regels):
@@ -201,12 +212,12 @@ def _import_log(a, logdir):
     """add --from-daily-log (ADR-077 § 7): elk besluitpunt via Register.schrijf; gestopt bij de eerste weigering."""
     log = Path(a.from_daily_log)
     if not log.is_file():
-        raise Gebruik(f"--from-daily-log: bestand bestaat niet: {log}")
+        raise Gebruik(f"--from-daily-log: bestand bestaat niet: {_veilig(log)}")
     dag, gezien, punten = lees_log(log)
     if dag is None:
-        raise Gebruik(f"{log.name}: geen datum in de frontmatter (date:) of in de bestandsnaam, niets geschreven")
+        raise Gebruik(f"{_veilig(log.name)}: geen datum in de frontmatter (date:) of in de bestandsnaam, niets geschreven")
     if not punten:
-        print(f"{log.name}: " + ("geen besluitpunten onder Beslissingen" if gezien else "geen sectie Beslissingen")
+        print(f"{_veilig(log.name)}: " + ("geen besluitpunten onder Beslissingen" if gezien else "geen sectie Beslissingen")
               + ", 0 besluiten geschreven")
         return 0
     reg, slug = Register(logdir), a.slug or next(iter(r["context"] for _, r in lees(logdir / NDJSON).regels), None)
@@ -222,7 +233,8 @@ def _import_log(a, logdir):
         try:
             res = reg.schrijf(v)
         except Geweigerd as e:
-            wie = f" ({v['titel']!r})" if isinstance(e, HerkomstBotsing) else ""  # bij een geheim nooit de tekst
+            # de positie, nooit de tekst; alleen bij een botsing, die de kern pas na de geheimscan meldt
+            wie = f" ({v['bron']['ref']})" if isinstance(e, HerkomstBotsing) else ""
             print(f"geweigerd bij punt {nr} van {len(punten)}{wie}: {e}; {geschreven} geschreven vóór dit punt",
                   file=sys.stderr)
             return 3
@@ -234,7 +246,7 @@ def _import_log(a, logdir):
 def _uitvoeren(a):
     logdir = Path(a.context)
     if not logdir.is_dir():
-        raise Gebruik(f"--context: map bestaat niet: {logdir}")
+        raise Gebruik(f"--context: map bestaat niet: {_veilig(logdir)}")
     uit = lees(logdir / NDJSON)
     regels = [r for _, r in uit.regels]
     if a.sub == "add" and a.from_daily_log:
@@ -248,7 +260,7 @@ def _uitvoeren(a):
     if a.sub in ("list", "show"):
         alle, nu = _besluiten(regels), a.nu or datetime.now(timezone.utc).strftime("%Y-%m-%d")
         if a.sub == "show" and a.id not in alle:
-            print(f"onbekend besluit: {a.id}", file=sys.stderr)
+            print(f"onbekend besluit: {_veilig(a.id)}", file=sys.stderr)
             return 1
         print(*([f"{bid}  {_stand(b, nu)}  {b['v']['besloten_op']}  {b['v']['titel']}" for bid, b in alle.items()]
                 if a.sub == "list" else _blok(alle[a.id], set(alle), nu)), _tellingen(uit), sep="\n")
@@ -272,7 +284,7 @@ def _uitvoeren(a):
     return 0
 
 def _parser():
-    p = argparse.ArgumentParser(prog="besluitenregister", description="Besluitenregister per context (ADR-077).")
+    p = _Parser(prog="besluitenregister", description="Besluitenregister per context (ADR-077).")
     ouders = {}
     def ouder(naam, *verplicht, basis=()):
         o = ouders[naam] = argparse.ArgumentParser(add_help=False, parents=[ouders[x] for x in basis])

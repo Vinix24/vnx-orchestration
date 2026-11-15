@@ -237,7 +237,8 @@ def test_from_daily_log_gewijzigd_punt_exit_3_en_stopt(capsys, tmp_path):
     voor = (ctx / "besluiten.ndjson").read_bytes()
     log.write_text(LOG.replace("- Derde punt.", "- Derde punt. Nu anders."))
     code, _, err = importeer(capsys, ctx, log)
-    assert code == 3 and "punt 3 van 3" in err and "Derde punt." in err and "0 geschreven" in err
+    assert code == 3 and "punt 3 van 3" in err and "#Beslissingen (achtste T0)/1" in err and "0 geschreven" in err
+    assert "Nu anders" not in err  # de positie, nooit de tekst
     assert (ctx / "besluiten.ndjson").read_bytes() == voor
 
 def test_from_daily_log_zonder_sectie_exit_0_niets_geschreven(capsys, tmp_path):
@@ -277,8 +278,9 @@ def test_from_daily_log_gewijzigd_punt_zelfde_plek_exit_3_een_besluit(capsys, tm
     assert code == 0 and (ctx / "besluiten.ndjson").read_bytes() == voor and "0 geschreven" in out
     log.write_text(kop + "- Use PostgreSQL.\n", encoding="utf-8")
     code, _, err = importeer(capsys, ctx, log)
-    assert code == 3 and "punt 1 van 1" in err
-    assert (ctx / "besluiten.ndjson").read_bytes() == voor
+    bid = next(r for _, r in lees(ctx / "besluiten.ndjson").regels)["besluit_id"]
+    assert code == 3 and "punt 1 van 1" in err and "2026-11-14.md#Beslissingen/1" in err and bid in err
+    assert "PostgreSQL" not in err and (ctx / "besluiten.ndjson").read_bytes() == voor
     assert len(lees(ctx / "besluiten.ndjson").regels) == 1
 
 @pytest.mark.parametrize("hek", ["```", "~~~", "````"])
@@ -289,3 +291,47 @@ def test_from_daily_log_bullets_in_een_hek_zijn_geen_besluit(capsys, tmp_path, h
     regels = [r for _, r in lees(ctx / "besluiten.ndjson").regels]
     assert [r["besluit"] for r in regels] == ["Echt.", "Ook echt."]
     assert "Example" not in str(regels) and hek not in str(regels)
+
+TOKEN = "ghp_" + "A" * 36  # pas tijdens de test opgebouwd: het testbestand draagt geen letterlijk geheim
+
+def test_from_daily_log_punt_gewijzigd_naar_geheim_exit_3_zonder_waarde(capsys, tmp_path):
+    kop = "---\ndate: 2026-11-14\n---\n\n## Beslissingen\n\n"
+    ctx, log = schrijf_log(tmp_path, kop + "- Use SQLite.\n")
+    assert importeer(capsys, ctx, log)[0] == 0
+    voor = (ctx / "besluiten.ndjson").read_bytes()
+    log.write_text(kop + f"- {TOKEN} gebruiken. Daarna verder.\n", encoding="utf-8")
+    code, out, err = importeer(capsys, ctx, log)
+    assert code == 3 and "github_token" in err and TOKEN not in out + err
+    assert (ctx / "besluiten.ndjson").read_bytes() == voor
+
+def _pad_met_token(ctx, map_=False):
+    (ctx / TOKEN).mkdir() if map_ else None
+    return ctx / TOKEN
+
+LEK = {  # elk pad waarlangs tekst van de aanroeper vóór de geheimscan in een melding kwam: (argv, exitcode)
+    "show": lambda c, b: (["show", TOKEN, "--context", c], 1),
+    "keuze": lambda c, b: (["export", "--context", c, "--voor", "intern", "--reikwijdte", TOKEN], 2),
+    "onbekend argument": lambda c, b: (["list", "--context", c, TOKEN], 2),
+    "context": lambda c, b: (["list", "--context", c / TOKEN], 2),
+    "uit": lambda c, b: (["export", "--context", c, "--voor", "intern", "--uit", _pad_met_token(c, True)], 2),
+    "log bestaat niet": lambda c, b: (["add", "--context", c, "--from-daily-log", c / f"{TOKEN}.md"], 2),
+    "log zonder datum": lambda c, b: (["add", "--context", c, "--from-daily-log", _log(c, f"{TOKEN}.md", "## Beslissingen\n\n- x\n")], 2),
+    "log zonder sectie": lambda c, b: (["add", "--context", c, "--from-daily-log", _log(c, f"2026-11-14-{TOKEN}.md", "x\n")], 0),
+    "vervang": lambda c, b: (["vervang", TOKEN, "--context", c, *KOP, *VELDEN, "--titel", "t", "--besluit", "b",
+                              "--vertrouwelijkheid", "intern", "--reden", "beter"], 3),
+    "trek-in": lambda c, b: (["trek-in", TOKEN, "--context", c, *KOP, "--reden", "weg", "--bron-soort", "adr",
+                              "--bron-ref", "r"], 3),
+}
+
+def _log(ctx, naam, tekst):
+    (ctx / naam).write_text(tekst, encoding="utf-8")
+    return ctx / naam
+
+@pytest.mark.parametrize("pad", sorted(LEK))
+def test_geen_melding_herhaalt_een_geheim_van_de_aanroeper(capsys, tmp_path, pad):
+    bid = add(capsys, tmp_path, "Kies A")
+    voor = (tmp_path / "besluiten.ndjson").read_bytes()
+    argv, verwacht = LEK[pad](tmp_path, bid)
+    code, out, err = run(capsys, *argv)
+    assert code == verwacht and "github_token" in out + err and TOKEN not in out + err
+    assert (tmp_path / "besluiten.ndjson").read_bytes() == voor

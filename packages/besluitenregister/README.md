@@ -28,7 +28,7 @@ br export --voor klant:acme --van 2026-11-01 --tot 2026-12-31 --reikwijdte klant
 br add --from-daily-log "$HOME/work/acme/daily-log/2026-11-14.md" --slug klant:acme
 ```
 
-Importing the same log again writes nothing and prints the existing ids. A bullet whose text changed is refused by the core (exit 3); the import stops there and says which bullet and how many were written before it. A log without the section exits 0 with "0 besluiten geschreven".
+Importing the same log again writes nothing and prints the existing ids. A bullet whose text changed is refused by the core (exit 3); the import stops there and names the bullet by its position (`<file name>#<heading>/<n>`) and the existing id, never by its text, plus how many were written before it. A secret is refused as a secret before any other check: the message names the pattern, never the value. A log without the section exits 0 with "0 besluiten geschreven".
 
 ## Activating the skills
 
