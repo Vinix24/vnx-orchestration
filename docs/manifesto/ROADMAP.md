@@ -339,7 +339,7 @@ A function-size ratchet runs in CI (`scripts/lib/function_size_gate.py`, #2036: 
 **Status**: `Completed`
 **Why**: Mouse-enabled tmux environments can leave a pane in copy/search mode, and slash-prefixed dispatches can then be swallowed by tmux itself.
 
-`scripts/lib/input_mode_guard.sh` detects `pane_in_mode` before dispatch and fails closed when input readiness cannot be proven. Contract: `docs/core/110_INPUT_READY_TERMINAL_CONTRACT.md` (Status: Canonical).
+`scripts/lib/input_mode_guard.sh` detects `pane_in_mode` before dispatch and fails closed when input readiness cannot be proven.
 
 ---
 

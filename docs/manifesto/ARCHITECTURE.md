@@ -29,8 +29,6 @@ Every multi-agent framework I evaluated — LangGraph, CrewAI, AutoGen, Claude A
 
 I built **VNX** to solve this. Not as a product, but as an architecture I needed to trust my own agent workflows. It operates on four principles:
 
-If you want the visual proof pack (what screenshots to capture, and where they fit), see `SCREENSHOTS.md`.
-
 ### 1. The Ledger: Receipts as the Canonical Audit Trail
 
 VNX replaces opaque chat logs with an **append-only NDJSON ledger**. Every agent action — task start, task completion, failure, acknowledgment — generates a structured receipt:
@@ -58,7 +56,7 @@ VNX replaces opaque chat logs with an **append-only NDJSON ledger**. Every agent
 
 The ledger is the single source of truth. Runtime state files exist for performance, but the ledger alone can reconstruct the system's complete history.
 
-Screenshot pointer: `SCREENSHOTS.md` (S2: Chain of Custody).
+Screenshot pointer: S2, Chain of Custody.
 
 ### 2. Governance Gates: One Door, One Human Step
 
@@ -76,7 +74,7 @@ Review is gated the same way. A pull request needs one distinct reviewer per **r
 
 **A critical design constraint**: T0 (the orchestrator) plans, reviews and dispatches, and does not write code. Workers (T1/T2/T3 are role labels on dispatches) do the file changes in isolated worktrees under the governance layer's oversight. A hook also blocks T0 from spawning subagents, and `vnx guard install` registers a context guard for T0 sessions (`docs/operations/T0_CONTEXT_ROTATION.md`). This separation keeps the orchestrator from bypassing its own gates.
 
-Screenshot pointer: `SCREENSHOTS.md` (S3: Queue Manager UI, S4: Worker Refusal).
+Screenshot pointer: S3, Queue Manager UI; S4, Worker Refusal.
 
 ---
 
@@ -113,7 +111,7 @@ Secret scanning is a separate CI job (`gitleaks`, `.github/workflows/public-ci.y
 
 The quality advisory generates a risk score (0-100) and a deterministic decision: `approve`, `approve_with_followup`, or `hold`.
 
-Screenshot pointer: `SCREENSHOTS.md` (S5: Quality Advisory).
+Screenshot pointer: S5, Quality Advisory.
 
 ---
 

@@ -15,7 +15,7 @@ See also: [ADR-027](decisions/ADR-027-signed-attestation-enforcement.md) (the bi
 
 ## Why this exists
 
-Rev 1/2 of the plan-gate panel (`claudedocs/2026-07-04-governance-attribution-enforce-PLAN.md`)
+Rev 1/2 of the plan-gate panel (decision record: `docs/governance/decisions/ADR-027-signed-attestation-enforcement.md`)
 established that **no client-side layer is un-bypassable** for an actor with full local write
 access — a CLI check, a SQLite trigger, a pre-commit hook can all be skipped by the same process
 that would need to honor them. The only point that cannot be talked around is a **server-side
@@ -257,7 +257,7 @@ signing is not configured (`vnx_cli/commands/attest.py:96-114`).
 
 ## Not yet built
 
-These items are named in the plan (`claudedocs/2026-07-04-governance-attribution-enforce-PLAN.md`)
+These items are named in `docs/governance/decisions/ADR-027-signed-attestation-enforcement.md`
 but have no shipped code:
 
 - **D0 — Caller audit + key-custody design.** Deciding where the signing key actually lives

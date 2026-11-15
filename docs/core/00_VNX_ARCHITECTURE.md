@@ -705,8 +705,7 @@ Check open items digest
 
 The future state (the track layer + roadmap autopilot) only earns trust if it
 mirrors reality without a human re-stating it. The future-state
-reconciliation batch (PRD kept in the local, gitignored `claudedocs/` scratch
-space -- not part of the shipped repo, so it has no citable in-tree path)
+reconciliation batch
 makes that linkage automatic and tenant-safe. Three pieces: a **lifecycle**
 (open-item → track → dispatch), a **loop** (the autopilot tick), and a
 **multi-tenancy model** (ADR-007 composite keys).
