@@ -2847,4 +2847,27 @@ main() {
   esac
 }
 
-main "$@"
+# CLI ledger B4b (ADR-075 decisions 7, 10): main runs in a subshell so the exec branches return
+# here too, then scripts/lib/cli_invocations.py writes one line, detached, after the exit code is
+# known; it never changes the exit code or the output. `dispatch` (the single-entry door) is left
+# out so its process-tree checks see the same tree as before. VNX_CLI_RECORDED=$$ tells an exec'd
+# vnx_cli.main (whose parent is this shell) not to write a second line.
+if [ "${1:-help}" = dispatch ]; then
+  main "$@"
+  exit $?
+fi
+_vnx_t0="${EPOCHREALTIME:-}"
+_vnx_tty=0
+[ -t 0 ] && _vnx_tty=1
+export VNX_CLI_RECORDED="$$"
+set +e
+(set -e; main "$@")
+_vnx_rc=$?
+set -e
+_vnx_ms=-
+if [ -n "$_vnx_t0" ] && [ -n "${EPOCHREALTIME:-}" ]; then
+  _vnx_ms=$(( (${EPOCHREALTIME//[!0-9]/} - ${_vnx_t0//[!0-9]/}) / 1000 ))
+fi
+("$VNX_PYTHON" "$VNX_HOME/scripts/lib/cli_invocations.py" record "$_vnx_rc" "$_vnx_ms" "$_vnx_tty" -- "$@" \
+  </dev/null >/dev/null 2>&1 &) >/dev/null 2>&1 || true
+exit "$_vnx_rc"
