@@ -45,10 +45,15 @@ def _parser() -> argparse.ArgumentParser:
     ans.add_argument("--by", default="T0")
     push = sub.add_parser("push-due", help="print the points a push is due for (JSON), after reserving them")
     push.add_argument("--sessie", dest="push_sessie", default="cli")
-    aud = sub.add_parser("audit", help="late points per project (ADR-076 decision 13)")
-    for flag, kw in (("--all", {"action": "store_true"}), ("--json", {"action": "store_true"}), ("--project-id", {})):
-        aud.add_argument(flag, default=argparse.SUPPRESS, **kw)  # SUPPRESS: the main parser's value stands when absent
-    aud.add_argument("--since", required=True)
+    for name, text in (("audit", "late points per project (ADR-076 decision 13)"),
+                       ("compact", "drop points closed more than 180 days ago (decision 12)")):
+        cmd = sub.add_parser(name, help=text)
+        for flag, kw in (("--all", {"action": "store_true"}), ("--json", {"action": "store_true"}), ("--project-id", {})):
+            cmd.add_argument(flag, default=argparse.SUPPRESS, **kw)  # SUPPRESS: the main parser's value stands when absent
+        if name == "audit":
+            cmd.add_argument("--since", required=True)
+        else:
+            cmd.add_argument("--dry-run", action="store_true")
     return parser
 
 
@@ -86,6 +91,12 @@ def _show_all(args) -> int:
     return 0
 
 
+def _targets(args, home: Path) -> list:
+    """[(project_id, state_dir)] for --all (the one discovery of `vnx inbox --all`) or the single project."""
+    return [(p["project_id"], home / ".vnx-data" / p["project_id"] / "state") if p["in_store"] else (p["project_id"], None)
+            for p in inbox.discover_projects(home=home, registry_path=Path(args.registry) if args.registry else None)["projects"]]
+
+
 def _audit(args, project_id: str, sdir, root) -> int:
     try:
         days = audit.parse_since(args.since)
@@ -103,6 +114,21 @@ def _audit(args, project_id: str, sdir, root) -> int:
     return audit.exit_code(results)
 
 
+def _compact(args, project_id: str, sdir) -> int:
+    now = inbox._parse(args.now) if args.now else None
+    if args.all:
+        home = Path(args.home) if args.home else Path.home()
+        results = [oq.compact(pid, now=now, dry_run=args.dry_run, state_dir=sd) if sd is not None and sd.is_dir() else
+                   {"project_id": pid, "status": "unknown", "reason": "geen state/", "line": None, "points": 0, "lines": 0}
+                   for pid, sd in _targets(args, home)]
+    else:
+        results = [oq.compact(project_id, now=now, dry_run=args.dry_run, state_dir=sdir)]
+    lines = [f"{r['project_id']}: " + (f"unknown ({r['reason']})" if r["status"] != "ok" else
+             f"{'would remove' if args.dry_run else 'removed'} {r['points']} points, {r['lines']} lines") for r in results]
+    print(json.dumps(results, indent=2, ensure_ascii=False, sort_keys=True) if args.json else "\n".join(lines))
+    return 3 if any(r["status"] != "ok" for r in results) else 0
+
+
 def _show(args, project_id: str, sdir, root) -> int:
     data = inbox.show(project_id, limit=args.limit, state_dir=sdir, data_root=root)
     if args.present and data["points"]:
@@ -114,17 +140,21 @@ def _show(args, project_id: str, sdir, root) -> int:
 
 def main(argv: list) -> int:
     args = _parser().parse_args(argv)
-    if args.all and (args.present or args.cmd not in (None, "audit") or args.project_id or args.state_dir or args.data_root):
+    if args.all and (args.present or args.cmd not in (None, "audit", "compact") or args.project_id or args.state_dir or args.data_root):
         print("vnx inbox: --all only shows; ask, answer, push-due, --present and a project scope are per project", file=sys.stderr)
         return 2
     if args.all and args.cmd == "audit":
         return _audit(args, "", None, None)
+    if args.all and args.cmd == "compact":
+        return _compact(args, "", None)
     if args.all:  # lists every project itself: needs no current project
         return _show_all(args)
     project_id, sdir = args.project_id or resolve_project_id(), Path(args.state_dir) if args.state_dir else None
     root = Path(args.data_root) if args.data_root else (sdir.parent if sdir is not None else None)
     if args.cmd == "audit":
         return _audit(args, project_id, sdir, root)
+    if args.cmd == "compact":
+        return _compact(args, project_id, sdir)
     try:
         if args.cmd == "ask":
             line = qa.ask(project_id, bron=args.bron, ref=args.ref, vraag=args.vraag, sluit_bij=args.sluit_bij,

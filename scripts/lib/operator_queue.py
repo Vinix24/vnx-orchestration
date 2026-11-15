@@ -15,7 +15,7 @@ import hashlib
 import json
 import os
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, List, Mapping, Optional
 
@@ -305,3 +305,54 @@ def reserve(project_id: str, choose: Callable[[Dict[str, Any]], List[str]], *, s
         _append(sdir, line)
         _write_state(sdir, _read_state(sdir, project_id))
     return ids
+
+
+RETENTION_DAYS = 180
+
+
+def _expired(lines: List[Dict[str, Any]], cutoff: datetime) -> set:
+    """Point ids whose effective ``closed`` line is older than the cutoff. Open points (also ``unknown``) never are."""
+    gone: set = set()
+    for pid, point in _fold(lines).items():
+        if point["state"] == "open":
+            continue
+        closed = next(ln for ln in lines if ln["kind"] == "closed" and ln["point_id"] == pid)  # first closed line took effect
+        if datetime.fromisoformat(closed["ts"].strip().replace("Z", "+00:00")) < cutoff:
+            gone.add(pid)
+    return gone
+
+
+def compact(project_id: str, *, now: Optional[datetime] = None, dry_run: bool = False,
+            state_dir: Optional[Path] = None) -> Dict[str, Any]:
+    """ADR-076 decision 12: drop every line of a point closed more than RETENTION_DAYS ago, and a ``push_reserved``
+    once all its ids are gone. Under the writer's lock: temp file beside the ledger, fsync, atomic rename, rebuild.
+    An unreadable ledger is not touched: ``status`` ``unknown`` with the line number."""
+    sdir = Path(state_dir) if state_dir is not None else state_dir_for(project_id)
+    cutoff = (now or datetime.now(timezone.utc)) - timedelta(days=RETENTION_DAYS)
+    with _locked(sdir):
+        try:
+            lines = _ledger_lines(sdir, project_id)
+        except QueueUnreadable as exc:
+            return {"project_id": project_id, "status": "unknown", "reason": str(exc), "line": exc.line,
+                    "points": 0, "lines": 0}
+        gone = _expired(lines, cutoff)
+        alive = set(_fold(lines)) - gone  # a push_reserved goes once none of its ids survives (earlier compacts removed some)
+        keep = [ln for ln in lines if not (ln.get("point_id") in gone
+                                           or (ln["kind"] == "push_reserved" and not set(ln["point_ids"]) & alive))]
+        result = {"project_id": project_id, "status": "ok", "reason": None, "line": None, "points": len(gone),
+                  "lines": len(lines) - len(keep)}
+        if dry_run or not result["lines"]:
+            return result
+        path = sdir / LEDGER_FILENAME
+        tmp = path.with_name(path.name + f".{os.getpid()}.tmp")
+        try:
+            with open(tmp, "w", encoding="utf-8") as handle:  # vnx-atomic-write: temp file, fsync, replace
+                handle.write("".join(json.dumps(ln, sort_keys=True, ensure_ascii=False) + "\n" for ln in keep))
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(tmp, path)
+        except BaseException:
+            tmp.unlink(missing_ok=True)
+            raise
+        _write_state(sdir, _read_state(sdir, project_id))
+    return result
