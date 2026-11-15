@@ -1,0 +1,1 @@
+- `vnx objective reconcile` now skips a track with an open deliverable (proposed, ready, failed, failed_delivery, timed_out) or an in-flight dispatch with the verdict `open_deliverable`, instead of confirming it (OI-2904).

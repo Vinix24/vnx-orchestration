@@ -70,7 +70,7 @@ def refresh_derived(
             "counts": {k: 0 for k in (
                 "tracks", "nominated", "confirmed", "closed",
                 "closed_sibling", "open_pr", "unverified", "deferred", "stale",
-                "delivery_hold",
+                "delivery_hold", "open_deliverable",
             )},
             "per_track": [],
         }
@@ -156,6 +156,29 @@ def nominate_candidates(
                 })
                 continue
 
+            # OI-2904: a track with an open deliverable or an in-flight
+            # dispatch is not done, whatever its PRs say. Visible, never closed.
+            try:
+                open_work = track_reconciler.open_deliverable_counts(
+                    hold_conn, t["track_id"], project_id
+                )
+            except sqlite3.Error as exc:
+                # Unreadable state is not "nothing open": unverified, exit 3.
+                held_tracks.append({
+                    "track_id": t["track_id"], "verdict": "unverified",
+                    "pr_ref": pr_ref, "reason": f"deliverable_state_unreadable: {exc}",
+                })
+                continue
+            if open_work:
+                held_tracks.append({
+                    "track_id": t["track_id"], "verdict": "open_deliverable",
+                    "pr_ref": pr_ref,
+                    "reason": "open_deliverable: " + ", ".join(
+                        f"{n} {st}" for st, n in sorted(open_work.items())
+                    ),
+                })
+                continue
+
             # Re-close guard: if a done→active reopen history row exists,
             # compare its stamped pr_ref against the current pr_ref.
             reopen_hist = _get_latest_done_to_active_history(state_dir, t["track_id"], project_id)
@@ -190,6 +213,15 @@ def nominate_candidates(
     finally:
         hold_conn.close()
     return candidates, guarded_tracks, held_tracks
+
+
+def held_counts(held_tracks: List[Dict[str, Any]]) -> Dict[str, int]:
+    """Counter block for the tracks held at nomination, split by verdict."""
+    return {
+        "delivery_hold": sum(1 for h in held_tracks if h["verdict"] == "delivery_hold"),
+        "open_deliverable": sum(1 for h in held_tracks if h["verdict"] == "open_deliverable"),
+        "unverified": sum(1 for h in held_tracks if h["verdict"] == "unverified"),
+    }
 
 
 def gh_unavailable_result(
@@ -229,7 +261,8 @@ def gh_unavailable_result(
         "closed": 0, "closed_sibling": 0, "open_pr": 0,
         "unverified": len(candidates), "deferred": 0, "stale": 0,
         "reopened_guard": len(guarded_tracks),
-        "delivery_hold": len(held_tracks),
+        **held_counts(held_tracks),
+        "unverified": len(candidates) + held_counts(held_tracks)["unverified"],
     }
     summary = {
         "run_id": run_id, "project_id": project_id, "mode": mode,
@@ -267,7 +300,7 @@ def verify_candidates(
         "closed": 0, "closed_sibling": 0, "open_pr": 0,
         "unverified": 0, "deferred": 0, "stale": 0,
         "reopened_guard": len(guarded_tracks),
-        "delivery_hold": len(held_tracks),
+        **held_counts(held_tracks),
     }
     confirmed_candidates: List[Dict[str, Any]] = []
     per_track: List[Dict[str, Any]] = []
