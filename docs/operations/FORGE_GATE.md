@@ -1,6 +1,6 @@
 # FORGE_GATE.md — vnx-gate: van lokale review-poort naar afgedwongen check-run
 
-Operator-runbook voor golf B (`gate-enforcement-to-forge`). Plan: `claudedocs/plans/2026-09-06-golf-B-forge-dwingt-af.md` (deliverables B4, OP-B3, B5). Privé planningsdocument: `claudedocs/` is gitignored en staat niet in de repo. Doel: GitHub weigert elke merge naar `main` zonder een gepubliceerd poortoordeel op exact de PR-head, ook een kale `gh pr merge`, ook van de operator zelf.
+Operator-runbook voor golf B (`gate-enforcement-to-forge`). Beslissing: `docs/governance/decisions/ADR-061-deur-afgedwongen.md`. Doel: GitHub weigert elke merge naar `main` zonder een gepubliceerd poortoordeel op exact de PR-head, ook een kale `gh pr merge`, ook van de operator zelf.
 
 ## De deur als permit (ADR-061)
 
@@ -349,7 +349,7 @@ Deze volgorde werkt wél, en hij bevat **precies één ongegovernde stap**: stap
 
 ## 9. Geaccepteerd restrisico
 
-Letterlijk uit het plan (`claudedocs/plans/2026-09-06-golf-B-forge-dwingt-af.md`, sectie "Geaccepteerd restrisico"): de bescherming is bewerkbaar door precies de operator die hem bindt, en op een persoonlijk account is er geen audit-log-API — een protection-wijziging gevolgd door een kale merge laat niets opvraagbaars achter. Wie de private key in de keychain heeft, kan bovendien met een paar regels `curl` een `success` op elke sha zetten, langs `forge_check_run.py` heen; dezelfde operator, hetzelfde risico. Compenserende maatregelen: de drift in de deur (`pr_merge.py`) en in `vnx doctor` (§4, §8), en de receipt die apply en terugweg zelf schrijven (§4, §7). Wat overblijft is een operator die bewust drie stappen zet; dat risico is aanvaard en staat hier opgeschreven, niet weggewerkt.
+Het aanvaarde restrisico: de bescherming is bewerkbaar door precies de operator die hem bindt, en op een persoonlijk account is er geen audit-log-API — een protection-wijziging gevolgd door een kale merge laat niets opvraagbaars achter. Wie de private key in de keychain heeft, kan bovendien met een paar regels `curl` een `success` op elke sha zetten, langs `forge_check_run.py` heen; dezelfde operator, hetzelfde risico. Compenserende maatregelen: de drift in de deur (`pr_merge.py`) en in `vnx doctor` (§4, §8), en de receipt die apply en terugweg zelf schrijven (§4, §7). Wat overblijft is een operator die bewust drie stappen zet; dat risico is aanvaard en staat hier opgeschreven, niet weggewerkt.
 
 ## 10. Contract: `branch_protection.yaml` uitbreiden gaat in twee PR's (OI-1672)
 
@@ -424,7 +424,7 @@ De CI-poort zoekt standaard de workflow `VNX CI`. Een consumer heet anders: miss
 ci_workflow: "CI"
 ```
 
-Volgorde: expliciet argument, dan `ci_workflow` in het project-YAML, dan `VNX_CI_WORKFLOW_NAME`, dan `VNX CI`. De deur, `vnx pre-merge-gate` en de `merge_preflight_ci_check`-CLI lezen het veld alle drie uit `main`'s YAML van de doelrepo, over de contents-API, via `forge_protection_drift.fetch_ci_workflow_from_main`. Nooit uit een lokale kopie: de checkout naast de gate staat op gate-tijd op de branch van de PR, dus een lokale kopie laat de PR zelf kiezen welke workflow hem toetst. Bestaat het bestand maar is het onleesbaar (of is `main` zelf niet te lezen), dan weigert de CI-poort in plaats van een naam te raden: `NO-GO` bij de deur en de CLI, `SKIPPED_UNVERIFIED` bij `pre_merge_gate`. Een expliciet argument (`--ci-workflow-name`, `--workflow`) of een override-reden beslist de poort al, en dan wordt `main` niet gelezen. `pre_merge_gate._resolve_ci_workflow_name` en `merge_preflight_ci_check._resolve_workflow_name` volgen dezelfde volgorde, en `tests/test_ci_workflow_resolution_parity.py` houdt ze daaraan.
+Volgorde: expliciet argument, dan `ci_workflow` in het project-YAML, dan `VNX_CI_WORKFLOW_NAME`, dan `VNX CI`. De deur, `scripts/pre_merge_gate.py` en de `merge_preflight_ci_check`-CLI lezen het veld alle drie uit `main`'s YAML van de doelrepo, over de contents-API, via `forge_protection_drift.fetch_ci_workflow_from_main`. Nooit uit een lokale kopie: de checkout naast de gate staat op gate-tijd op de branch van de PR, dus een lokale kopie laat de PR zelf kiezen welke workflow hem toetst. Bestaat het bestand maar is het onleesbaar (of is `main` zelf niet te lezen), dan weigert de CI-poort in plaats van een naam te raden: `NO-GO` bij de deur en de CLI, `SKIPPED_UNVERIFIED` bij `pre_merge_gate`. Een expliciet argument (`--ci-workflow-name`, `--workflow`) of een override-reden beslist de poort al, en dan wordt `main` niet gelezen. `pre_merge_gate._resolve_ci_workflow_name` en `merge_preflight_ci_check._resolve_workflow_name` volgen dezelfde volgorde, en `tests/test_ci_workflow_resolution_parity.py` houdt ze daaraan.
 
 **Het veld wijzigen is verzwakken.** Na de merge vraagt de CI-poort van elke volgende PR de workflow die `main` noemt. Een PR die het veld verwisselt, toevoegt of weghaalt kiest dus zelf de check waarop hij de volgende keer wordt getoetst. Alle drie vragen `--allow-weaken "<reden>"`, in elke stand: `enforce`, `warn` en `off` (operatorbesluit 25-09-2026, de CI-controle is de ondergrens voor iedereen). Onder `enforce` en `warn` gaat dat via `forge_protection_drift.is_weakening`, onder `off` en zonder bestand op `main` via `forge_protection_drift.ci_workflow_change`, dezelfde vergelijking. De melding noemt beide waarden: `ci_workflow: 'CI' -> 'Always Green'`, of `niet gedeclareerd` waar het veld ontbreekt. Toevoegen en weghalen tellen mee omdat een ontbrekend veld de poort aan `VNX_CI_WORKFLOW_NAME` en `VNX CI` geeft. Een project zonder bestand op `main` richt vrij in via de missing-file-tak van §11.3, met één uitzondering: declareert de PR die het bestand toevoegt `ci_workflow`, dan kiest die PR de workflow waar elke volgende PR op getoetst wordt, en dat vraagt `--allow-weaken "<reden>"`. De reden komt zo in het record. Onder `off` en zonder bestand leest de deur de PR-head daarvoor; een head die niet te lezen is, is een weigering.
 
@@ -443,7 +443,6 @@ De lezer van `enforcement` en `ci_workflow` staat sinds OI-1849 op `main`. Het v
 
 ## Cross-references
 
-- Plan: `claudedocs/plans/2026-09-06-golf-B-forge-dwingt-af.md`
 - Deursemantiek (permit, identiteit, receipt-eigenaar, levensloop, activering): `docs/governance/decisions/ADR-061-deur-afgedwongen.md`
 - Merge-deur en zijn gates: `docs/core/DISPATCH_RULES.md` §2
 - De andere veertien vereiste checks en de keten van deur tot branch protection: `docs/core/ENFORCEMENT_CHAIN.md`

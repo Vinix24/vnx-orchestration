@@ -73,7 +73,6 @@ cd vnx-orchestration/docs/manifesto
 
 Screenshots are managed in one place:
 
-- `SCREENSHOTS.md` — required captures, naming, and placement.
 - `assets/screenshots/` — screenshot files.
 - `assets/diagrams/` — diagram exports.
 
@@ -85,10 +84,8 @@ Screenshots are managed in one place:
 | `ARCHITECTURE_DIAGRAM.mermaid` | Mermaid source for architecture visual |
 | `ARCHITECTURAL_DECISIONS.md` | Design decisions, tradeoffs and the index of all ADRs |
 | `OPEN_METHOD.md` | Build methodology and provenance transparency |
-| `EVOLUTION_TIMELINE.md` | Condensed technical evolution |
 | `ROADMAP.md` | Done, on main unreleased, and 2.0 |
 | `LIMITATIONS.md` | Explicit scope and constraints |
-| `SCREENSHOTS.md` | Screenshot pack and capture guidelines |
 
 ## Current Status
 

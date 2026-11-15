@@ -261,7 +261,7 @@ The decisions behind VNX are written down, not implied. The Architecture Decisio
 - [ADR-022](docs/governance/decisions/ADR-022-provider-agnostic-skill-injection.md): one structured plain-text skill prompt for every provider lane, no per-CLI mechanisms
 - [ADR-030](docs/governance/decisions/ADR-030-plan-first-gate-enforcement.md): the plan-first gate enforced at the dispatch door and the merge gate, advisory-first: plan before work, structurally
 
-For how the architecture got here, [docs/manifesto/EVOLUTION_TIMELINE.md](docs/manifesto/EVOLUTION_TIMELINE.md) reconstructs the technical evolution over roughly six months, including the private incubation provenance. The public repository is the extraction, hardening, and packaging of work that started inside a private product.
+For how the architecture got here, [docs/_archive/manifesto/EVOLUTION_TIMELINE.md](docs/_archive/manifesto/EVOLUTION_TIMELINE.md) (archived) reconstructs the technical evolution over roughly six months, including the private incubation provenance. The public repository is the extraction, hardening, and packaging of work that started inside a private product.
 
 ## Multi-provider architecture
 

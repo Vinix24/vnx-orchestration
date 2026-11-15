@@ -616,18 +616,9 @@ def materialize_artifacts(
         gate, request_payload.get("dispatch_id"),
     )
     if identity_error:
-        return gate_recorder.record_failure(
-            gate=gate, pr_number=pr_number, pr_id=pr_id,
-            result={
-                "reason": "gate_dispatch_identity_invalid",
-                "reason_detail": identity_error,
-                "duration_seconds": duration_seconds,
-                "partial_output_lines": len(stdout.splitlines()),
-                "runner_pid": os.getpid(),
-            },
-            request_payload=request_payload,
-            requests_dir=requests_dir,
-            results_dir=results_dir,
+        return _record_refused_run(
+            gate, pr_number, pr_id, stdout, duration_seconds, request_payload,
+            requests_dir, results_dir, "gate_dispatch_identity_invalid", identity_error,
         )
 
     report_path = request_payload.get("report_path", "")
@@ -693,7 +684,30 @@ def materialize_artifacts(
         return gate_recorder.record_failure_simple(
             **_fail, reason=content_err[0], reason_detail=content_err[1],
         )
+    return _refuse_or_book_run(
+        gate=gate, pr_number=pr_number, pr_id=pr_id, stdout=stdout,
+        request_payload=request_payload, duration_seconds=duration_seconds,
+        requests_dir=requests_dir, results_dir=results_dir, reports_dir=reports_dir,
+        _fail=_fail, report_file=report_file, findings=findings, blocking=blocking,
+        advisory=advisory, residual_risk=residual_risk, raw_verdict=raw_verdict,
+        canonical_verdict=canonical_verdict, recovery=recovery,
+    )
 
+
+def _refuse_or_book_run(
+    *, gate: str, pr_number: Optional[int], pr_id: str, stdout: str,
+    request_payload: Dict[str, Any], duration_seconds: float,
+    requests_dir: Path, results_dir: Path, reports_dir: Path,
+    _fail: Dict[str, Any], report_file: Path, findings: List[Dict[str, Any]],
+    blocking: List[Dict[str, Any]], advisory: List[Dict[str, Any]],
+    residual_risk: str, raw_verdict: Any, canonical_verdict: str,
+    recovery: Optional[final_answer_verdict.FinalAnswerVerdict],
+) -> Dict[str, Any]:
+    """The tail of :func:`materialize_artifacts` once its report is on disk and valid.
+
+    Refuses a degenerate run and a run that wrote no verdict, else books it
+    through :func:`_book_completed_run`.
+    """
     # OI-1485: what the run DID, beside what it concluded. Measured from the
     # same stream the report already embeds, so this adds no new capture path
     # — the numbers were on disk all along and simply never reached the record
@@ -715,18 +729,10 @@ def materialize_artifacts(
             "gate_artifacts: REFUSING a degenerate %s run pr=%s — %s",
             gate, pr_id or pr_number, gate_depth.degenerate_detail(depth),
         )
-        return gate_recorder.record_failure(
-            gate=gate, pr_number=pr_number, pr_id=pr_id,
-            result={
-                "reason": "gate_execution_degenerate",
-                "reason_detail": gate_depth.degenerate_detail(depth),
-                "duration_seconds": duration_seconds,
-                "partial_output_lines": len(stdout.splitlines()),
-                "runner_pid": os.getpid(),
-            },
-            request_payload=request_payload,
-            requests_dir=requests_dir,
-            results_dir=results_dir,
+        return _record_refused_run(
+            gate, pr_number, pr_id, stdout, duration_seconds, request_payload,
+            requests_dir, results_dir,
+            "gate_execution_degenerate", gate_depth.degenerate_detail(depth),
             extra={
                 "execution_depth": depth.to_dict(),
                 "degenerate_report_path": str(report_file),
@@ -774,7 +780,27 @@ def materialize_artifacts(
             gate, pr_number, pr_id, stdout, duration_seconds, request_payload,
             requests_dir, results_dir, recovery,
         )
+    return _book_completed_run(
+        gate=gate, pr_number=pr_number, pr_id=pr_id,
+        request_payload=request_payload, duration_seconds=duration_seconds,
+        requests_dir=requests_dir, results_dir=results_dir, reports_dir=reports_dir,
+        _fail=_fail, report_file=report_file, findings=findings, blocking=blocking,
+        advisory=advisory, residual_risk=residual_risk, raw_verdict=raw_verdict,
+        canonical_verdict=canonical_verdict, recovery=recovery, depth=depth,
+    )
 
+
+def _book_completed_run(
+    *, gate: str, pr_number: Optional[int], pr_id: str,
+    request_payload: Dict[str, Any], duration_seconds: float,
+    requests_dir: Path, results_dir: Path, reports_dir: Path,
+    _fail: Dict[str, Any], report_file: Path, findings: List[Dict[str, Any]],
+    blocking: List[Dict[str, Any]], advisory: List[Dict[str, Any]],
+    residual_risk: str, raw_verdict: Any, canonical_verdict: str,
+    recovery: Optional[final_answer_verdict.FinalAnswerVerdict],
+    depth: gate_depth.ExecutionDepth,
+) -> Dict[str, Any]:
+    """Build the result payload of a run that cleared every refusal, write it and its sidecar."""
     contract_hash = _compute_contract_hash(request_payload, gate)
     now = utc_now_iso()
 
@@ -855,6 +881,33 @@ def materialize_artifacts(
     _write_pipeline_sidecar(reports_dir, result_payload, real_dispatch_id, gate, pr_number, pr_id)
     _emit_register_event(gate, canonical_verdict, blocking, real_dispatch_id, pr_number, pr_id)
     return result_payload
+
+
+def _record_refused_run(
+    gate: str, pr_number: Optional[int], pr_id: str, stdout: str,
+    duration_seconds: float, request_payload: Dict[str, Any],
+    requests_dir: Path, results_dir: Path, reason: str, reason_detail: str,
+    **extra_kw: Any,
+) -> Dict[str, Any]:
+    """Book a run refused by the identity guard (OI-1725) or as degenerate (OI-1485).
+
+    ``extra_kw`` carries ``extra=`` for the degenerate refusal only, so the
+    identity refusal calls ``record_failure`` without it, as it always did.
+    """
+    return gate_recorder.record_failure(
+        gate=gate, pr_number=pr_number, pr_id=pr_id,
+        result={
+            "reason": reason,
+            "reason_detail": reason_detail,
+            "duration_seconds": duration_seconds,
+            "partial_output_lines": len(stdout.splitlines()),
+            "runner_pid": os.getpid(),
+        },
+        request_payload=request_payload,
+        requests_dir=requests_dir,
+        results_dir=results_dir,
+        **extra_kw,
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -1,5 +1,7 @@
 # Screenshot Pack (Placeholders)
 
+> Archived 2026-11-15. Current visuals: [README.md](../../../README.md).
+
 This document defines where screenshots should be placed in the public story (blog + repo), and what each screenshot must prove.
 
 **Rule**: Use a demo repo. Sanitize all paths, repo names, branch names, customer/product names, and any absolute `/Users/...` traces.

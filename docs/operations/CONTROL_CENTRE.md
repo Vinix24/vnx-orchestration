@@ -186,7 +186,7 @@ The persistent substrate is:
 
 Per-project isolation is enforced via composite lease keys (`project_id` + `terminal_id`) introduced in schema v12 (PR-5.3). Two projects can both have a T1 lease without collision.
 
-References: ADR-013 (Workers=N configuration), ADR-017 (Control Centre product-shape). The Wave 5 design document (`claudedocs/wave5-control-centre-architecture.md`) is a private planning note: `claudedocs/` is gitignored and it never shipped in the repo.
+References: ADR-013 (Workers=N configuration), ADR-017 (Control Centre product-shape).
 
 ---
 

@@ -122,7 +122,6 @@ All 47 commands are available in operator mode. The public command surface must 
 | `vnx analyze-sessions` | Analyze session data |
 | `vnx intelligence-export` | Export intelligence DB |
 | `vnx intelligence-import` | Import intelligence DB |
-| `vnx init-feature` | Initialize a new feature |
 | `vnx bootstrap-*` | Bootstrap sub-commands |
 | `vnx regen-settings` | Regenerate settings |
 | `vnx patch-agent-files` | Patch CLAUDE.md / AGENTS.md |

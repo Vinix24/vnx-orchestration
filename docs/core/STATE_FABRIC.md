@@ -201,8 +201,8 @@ automatically when wired into a cron or post-merge hook.
 
 One ergonomic improvement would tighten the fabric further (candidate track, not yet built):
 
-1. **`vnx open-item add --track <id> --title … --severity blocker`** — a single
-   command that writes straight to `track_open_items`, so a new issue is captured
+1. **`open_items_manager.py add` taking a `--track <id>`** — one
+   step that writes straight to `track_open_items`, so a new issue is captured
    the moment you hit it. Today it is two steps (`open_items_manager add` →
    `import_open_items_to_tracks`).
 
