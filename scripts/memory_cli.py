@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""vnx memory bind (ADR-078). The operator binds; the scan follows in M2b."""
+"""vnx memory bind|scan (ADR-078). The operator binds; the scan only observes."""
 from __future__ import annotations
 
 import argparse
@@ -16,8 +16,17 @@ def main(argv: list) -> int:
     parser = argparse.ArgumentParser(prog="vnx memory")
     sub = parser.add_subparsers(dest="cmd", required=True)
     sub.add_parser("bind").add_argument("--dir", required=True)
+    sub.add_parser("scan")
     args = parser.parse_args(argv)
     state_dir = resolve_state_dir()
+    if args.cmd == "scan":
+        result = memory_ledger.scan(state_dir)
+        if result["status"] == "unbound":
+            print("unbound: " + result["reason"].split(": ", 1)[-1])
+            return 3
+        print("scan %s: %d line(s) written, %d unreadable"
+              % (result["status"], result["written"], result["unreadable"]))
+        return 0
     from content_class import load_boundary
     from state_mutation import emit_state_mutation
     try:

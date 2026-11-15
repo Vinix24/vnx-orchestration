@@ -1,5 +1,7 @@
-"""ADR-078 M2 test duties: the binding and its refusals."""
+"""ADR-078 M2 test duties: binding refusals and the observed memory ledger."""
+import base64
 import json
+import os
 import sys
 import threading
 import time
@@ -211,3 +213,226 @@ def test_corrupt_registry_refuses(env, body):
     with pytest.raises(ml.BindRefused, match="registry"):
         ml.bind(env.state, str(env.mem), "proj")
     assert not (env.state / ml.SOURCES_FILE).exists()
+
+
+def test_crash_between_registry_and_binding_leaves_a_claim_not_a_binding(env, monkeypatch):
+    real_write = ml.atomic_io.atomic_write_json
+
+    def crash_on_binding(path, payload, **kw):
+        if Path(path).name == ml.SOURCES_FILE:
+            raise OSError("crash between the two writes")
+        return real_write(path, payload, **kw)
+    monkeypatch.setattr(ml.atomic_io, "atomic_write_json", crash_on_binding)
+    with pytest.raises(OSError):
+        ml.bind(env.state, str(env.mem), "proj")
+    assert ml._load_registry() == {str(env.mem.resolve()): "proj"}  # half one: the claim landed
+    assert ml.load_sources(env.state) == (None, "unbound: binding file missing")  # half two
+    assert ml.scan(env.state)["status"] == "unbound" and not (env.state / ml.LEDGER_FILE).exists()
+    other = env.home / ".vnx-data" / "other" / "state"
+    monkeypatch.setattr(ml.atomic_io, "atomic_write_json", real_write)
+    with pytest.raises(ml.BindRefused, match="another project"):
+        ml.bind(other, str(env.mem), "other")
+    assert ml.bind(env.state, str(env.mem), "proj")["memory_dirs"] == [str(env.mem.resolve())]
+
+
+def bound(env):
+    ml.bind(env.state, str(env.mem), "proj")
+
+
+def lines(env):
+    return ml.read_ledger(env.state / ml.LEDGER_FILE)[0]
+
+
+def test_added_for_every_note_and_second_scan_writes_zero(env):
+    bound(env)
+    before = {p.name: p.read_bytes() for p in env.mem.iterdir()}
+    assert ml.scan(env.state) == {"status": "ok", "reason": "ok", "written": 3, "unreadable": 0}
+    assert {r["note"] for r in lines(env)} == {"MEMORY.md", "a.md", "b.md"}
+    assert {r["event"] for r in lines(env)} == {"added"}
+    assert ml.scan(env.state)["written"] == 0 and len(lines(env)) == 3
+    assert {p.name: p.read_bytes() for p in env.mem.iterdir()} == before  # read-only
+
+
+def test_changed_validity_changed_removed_and_added_again(env):
+    bound(env)
+    ml.scan(env.state)
+    old = [r for r in lines(env) if r["note"] == "a.md"][0]["sha256"]
+    (env.mem / "a.md").write_text(note("metadata:\n  type: user\n  node_type: lesson", "new"))
+    (env.mem / "b.md").write_text(note("type: project\ninvalid_at: 2026-12-01"))
+    assert ml.scan(env.state)["written"] == 2
+    by = {r["note"]: r for r in lines(env)[-2:]}
+    assert (by["a.md"]["event"], by["a.md"]["prev_sha256"]) == ("changed", old)
+    assert (by["b.md"]["event"], by["b.md"]["invalid_at"]) == ("validity_changed", "2026-12-01")
+    (env.mem / "b.md").unlink()
+    ml.scan(env.state)
+    assert lines(env)[-1]["event"] == "removed" and ml.scan(env.state)["written"] == 0
+    (env.mem / "b.md").write_text(note())
+    ml.scan(env.state)
+    assert lines(env)[-1]["event"] == "added"
+
+
+@pytest.mark.parametrize("drifting_reads, seen", [(6, ("unreadable", "changed_during_read")),
+                                                  (1, ("added", None))])
+def test_change_during_read_retries_once_then_unreadable(env, monkeypatch, drifting_reads, seen):
+    bound(env)
+    real, calls = os.stat(env.mem / "a.md"), []
+    drift = SimpleNamespace(st_size=real.st_size + 1, st_mtime_ns=real.st_mtime_ns)
+
+    def flaky(_path):  # 3 notes x 2 attempts: 6 drifting reads exhaust every retry
+        calls.append(1)
+        return (b"x", real, drift if len(calls) <= drifting_reads else real)
+    monkeypatch.setattr(ml, "_read_once", flaky)
+    assert ml.scan(env.state)["written"] == 3
+    assert {(r["event"], r.get("reason")) for r in lines(env)} == {seen}
+
+
+def test_unreadable_note_and_folder_are_unknown_lines_not_skips(env, tmp_path):
+    outside = tmp_path / "outside.md"
+    outside.write_text(note())
+    (env.mem / "link.md").symlink_to(outside)
+    (env.mem / "dir.md").mkdir()
+    bound(env)
+    ml.scan(env.state)
+    by = {r["note"]: (r["event"], r.get("reason")) for r in lines(env)}
+    assert (by["link.md"], by["dir.md"]) == (("unreadable", "outside_dir"), ("unreadable", "os_error:EISDIR"))
+    os.chmod(env.mem, 0)
+    try:
+        result = ml.scan(env.state)
+    finally:
+        os.chmod(env.mem, 0o755)
+    last = lines(env)[-1]
+    assert (result["unreadable"], last["event"], last["note"], last["reason"]) == (
+        1, "unreadable", "unknown", "dir_os_error:EACCES")
+    assert not any(r["event"] == "removed" for r in lines(env))
+
+
+def test_torn_tail_set_apart(env):
+    bound(env)
+    ml.scan(env.state)
+    ledger = env.state / ml.LEDGER_FILE
+    good = ledger.read_bytes()
+    ledger.write_bytes(good + b'{"half":')
+    (env.mem / "c.md").write_text(note())
+    assert ml.scan(env.state)["written"] == 1
+    side = json.loads((env.state / (ml.LEDGER_FILE + ".afgescheurd")).read_text())
+    assert base64.b64decode(side["bytes_b64"]) == b'{"half":' and side["offset"] == len(good)
+    assert ledger.read_bytes().startswith(good) and ml.read_ledger(ledger)[1:] == (0, [])
+    ledger.write_bytes(b'{"schema":"x"}\n{"torn')
+    assert ml.read_ledger(ledger) == ([], 1, [1])  # the reader counts, never crashes
+
+
+def test_partial_when_budget_is_spent(env):
+    bound(env)
+    ticks = iter([0.0, 0.0, 5.0, 5.0, 5.0, 5.0])
+    result = ml.scan(env.state, budget=2.0, clock=lambda: next(ticks))
+    assert (result["status"], result["reason"]) == ("partial", "budget")
+    part = lines(env)[-1]
+    assert (part["event"], part["reason"], part["processed"], part["total"]) == ("partial", "budget", 1, 3)
+    assert ml.scan(env.state)["written"] == 2  # resumes: only the unseen notes
+
+
+def test_frontmatter_absent_unparseable_unknown_and_metadata_beats_top_level(env):
+    (env.mem / "c.md").write_text("no block\n")
+    (env.mem / "d.md").write_text("---\ndescription: a: b: c\n---\nx\n")
+    (env.mem / "e.md").write_bytes(b"---\n\xff\n---\n")
+    (env.mem / "f.md").write_text(note("type: top\nmetadata:\n  type: nested\n  originSessionId: s-1"))
+    (env.mem / "g.md").write_text(note("metadata: plain\ntype: top\noriginSessionId: s-2"))
+    bound(env)
+    ml.scan(env.state)
+    by = {r["note"]: r for r in lines(env)}
+    for name, fm in (("c.md", "absent"), ("d.md", "unparseable"), ("e.md", "unparseable")):
+        assert by[name]["frontmatter"] == fm
+        assert {by[name][k] for k in ("type", "node_type", "origin_session", "valid_from",
+                                      "invalid_at", "superseded_by")} == {"unknown"}
+    assert (by["f.md"]["type"], by["f.md"]["origin_session"]) == ("nested", "s-1")
+    assert (by["g.md"]["type"], by["g.md"]["origin_session"]) == ("top", "s-2")
+    assert (by["b.md"]["origin_session"], by["a.md"]["node_type"]) == ("abc-123", "lesson")
+
+
+def test_ledger_never_holds_note_text_nor_empty_or_zero_fields(env):
+    sentence = "The operator prefers short answers on Fridays."
+    (env.mem / "c.md").write_text(note("type: bad value with spaces", sentence))
+    bound(env)
+    ml.scan(env.state)
+    raw = (env.state / ml.LEDGER_FILE).read_bytes()
+    for text in (BODY, DESC, sentence, "bad value", "short answers"):
+        assert text.encode() not in raw
+    for rec in lines(env):
+        assert all(v not in ("", 0) and (v is not None or k in ("valid_from", "invalid_at", "superseded_by"))
+                   for k, v in rec.items())
+    assert {r["type"] for r in lines(env) if r["note"] == "MEMORY.md"} == {"index"}
+
+
+@pytest.mark.parametrize("change", [{"extra": 1}, {"event": "weird"}, {"note": ""},
+                                    {"schema": "memory_ledger/2"}, {"prev_sha256": None}])
+def test_writer_refuses_invalid_records(change):
+    base = {"schema": ml.LEDGER_SCHEMA, "observed_at": "t", "project_id": "p", "event": "removed",
+            "source": "s", "note": "n.md", "prev_sha256": "h"}
+    ml.validate_record(base)
+    with pytest.raises(ValueError):  # a None in ``change`` drops that field: a missing field
+        ml.validate_record({k: v for k, v in {**base, **change}.items() if v is not None})
+
+
+def test_unbound_writes_nothing_then_cli_scan_observes(env, monkeypatch, capsys):
+    import memory_cli
+    monkeypatch.setattr(memory_cli, "resolve_state_dir", lambda: env.state)
+    result = ml.scan(env.state)
+    assert (result["status"], result["written"], result["reason"]) == (
+        "unbound", 0, "unbound: binding file missing")
+    assert memory_cli.main(["scan"]) == 3
+    assert capsys.readouterr().out.startswith("unbound: binding file missing")
+    assert list(env.state.iterdir()) == []
+    bound(env)
+    assert memory_cli.main(["scan"]) == 0
+    assert "3 line(s) written" in capsys.readouterr().out
+
+
+def _disk_full(*_a):
+    raise OSError(28, "No space left on device")
+
+
+def _short_then(real, then):
+    calls = []
+
+    def write(fd, data):
+        calls.append(1)
+        if len(calls) == 1:
+            return real(fd, bytes(data[:3]))
+        return then(fd, data)
+    return write
+
+
+def test_append_writes_every_byte_after_a_short_write(tmp_path, monkeypatch):
+    path = tmp_path / "l.ndjson"
+    path.write_bytes(b'{"a":1}\n')
+    monkeypatch.setattr(ml.os, "write", _short_then(os.write, os.write))
+    ml._append_fsync(path, b'{"b":22}\n')
+    assert path.read_bytes() == b'{"a":1}\n{"b":22}\n'
+
+
+def test_append_failure_after_short_write_rolls_back(tmp_path, monkeypatch):
+    path = tmp_path / "l.ndjson"
+    path.write_bytes(b'{"a":1}\n')
+    monkeypatch.setattr(ml.os, "write", _short_then(os.write, _disk_full))
+    with pytest.raises(OSError):
+        ml._append_fsync(path, b'{"b":22}\n')
+    assert path.read_bytes() == b'{"a":1}\n'
+
+
+def test_tail_is_kept_when_the_archive_append_fails(tmp_path, monkeypatch):
+    ledger = tmp_path / ml.LEDGER_FILE
+    ledger.write_bytes(b'{"a":1}\n{"half":')
+    monkeypatch.setattr(ml.os, "write", _short_then(os.write, _disk_full))
+    with pytest.raises(OSError):
+        ml._set_apart_tail(tmp_path, ledger, ledger.read_bytes())
+    assert ledger.read_bytes() == b'{"a":1}\n{"half":'
+
+
+@pytest.mark.parametrize("bad", ["valid_from: 2026-13-01", "valid_to: 2026-02-30"])
+def test_impossible_date_is_unparseable_and_the_scan_goes_on(env, bad):
+    assert ml.parse_note(note(bad).encode(), "x.md")["frontmatter"] == "unparseable"
+    (env.mem / "c.md").write_text(note(bad))
+    bound(env)
+    assert ml.scan(env.state)["written"] == 4
+    by = {r["note"]: r for r in lines(env)}
+    assert (by["c.md"]["frontmatter"], by["a.md"]["frontmatter"]) == ("unparseable", "ok")
