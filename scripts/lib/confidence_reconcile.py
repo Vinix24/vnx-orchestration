@@ -51,7 +51,7 @@ def _recency_decay(confidence: float, last_used: datetime) -> float:
     A pattern unused for 8 weeks decays to ~0.66× its beta score.
     After ~29 weeks the floor of 0.1 kicks in, preventing full suppression.
     """
-    weeks = (datetime.utcnow() - last_used).days / 7.0
+    weeks = (datetime.now(timezone.utc).replace(tzinfo=None) - last_used).days / 7.0
     decayed = confidence * (0.95 ** weeks)
     return max(decayed, 0.1)
 
