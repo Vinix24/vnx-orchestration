@@ -1,0 +1,1 @@
+- vnx inbox shows the open operator points per project and fleet-wide (`--all`, with one coverage line per project), in a fixed order of five, and `push-due` reserves a push in the queue ledger under its lock (operator-vragen-tot-antwoord Q4).

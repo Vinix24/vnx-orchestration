@@ -17,7 +17,7 @@ import os
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Mapping, Optional
+from typing import Any, Callable, Dict, Iterator, List, Mapping, Optional
 
 try:
     from project_root import resolve_central_data_dir
@@ -278,3 +278,24 @@ def close_point(project_id: str, pid: str, *, uitkomst: str, bewijs: str, beantw
     """Close on source state: ``bewijs`` is required and refused when empty."""
     return append_line(project_id, "closed", {"point_id": pid, "uitkomst": uitkomst, "bewijs": bewijs,
                                               "beantwoord_door": beantwoord_door}, now=now, state_dir=state_dir)
+
+
+def reserve(project_id: str, choose: Callable[[Dict[str, Any]], List[str]], *, sessie: str, now: Optional[str] = None,
+            state_dir: Optional[Path] = None) -> List[str]:
+    """Decide and reserve inside one lock (ADR-076 decision 10). ``choose`` gets the state plus ``lines`` (the ledger)
+    and returns the point ids to reserve; one ``push_reserved`` line is appended and fsynced before they are returned.
+    An empty choice writes nothing. A bad ledger raises QueueUnreadable and writes nothing."""
+    sdir = Path(state_dir) if state_dir is not None else state_dir_for(project_id)
+    with _locked(sdir):
+        lines = _ledger_lines(sdir, project_id)
+        ids = list(choose({"points": _fold(lines), "lines": lines}))
+        if not ids:
+            return []
+        line = {"kind": "push_reserved", "project_id": project_id, "ts": now or _now(), "point_ids": ids, "sessie": sessie}
+        try:
+            check_line(project_id, line)
+        except ValueError as exc:
+            raise QueueRefused(str(exc)) from exc
+        _append(sdir, line)
+        _write_state(sdir, _read_state(sdir, project_id))
+    return ids
