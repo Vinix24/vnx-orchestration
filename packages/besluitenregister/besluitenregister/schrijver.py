@@ -8,10 +8,9 @@ from . import identiteit
 from .geheimpatronen import PATTERNS
 from .lezer import lees
 from .schema import EXTRA, GEMEEN, SCHEMA, valideer
+from .stand import mag
 
 Uitkomst = namedtuple("Uitkomst", "besluit_id geschreven")  # geschreven: aantal regels dat erbij kwam
-# ADR-077 § 3 zonder `nu` (geldig en te_herzien zijn hier beide "open"): per stand de gebeurtenissen die mogen
-MAG = {"open": ("herzien", "bevestigd", "ingetrokken", "vastgelegd met vervangt"), "vervangen open": ("vervangen",)}
 
 class Geweigerd(Exception):
     """Een regel die de schrijver weigert (B2: exit 3). HerkomstBotsing: zelfde herkomst, andere besluittekst;
@@ -39,26 +38,9 @@ def weiger_geheimen(regel):
         if p := next((p for p in PATTERNS if p.regex.search(tekst)), None):
             raise GeheimGeweigerd(f"veld {pad}: geheimpatroon {p.name}")
 
-def stand(regels, bid):
-    """(stand, door) van bid uit de regels in bestandsvolgorde; alleen overgangen uit de tabel tellen."""
-    s, door = "geen", None
-    for x in regels:
-        e, nieuw = x["event"], x["event"] == "vastgelegd"
-        if s == "geen" and nieuw and x["besluit_id"] == bid:
-            s = "open"
-        elif s == "open" and (nieuw and x.get("vervangt") == bid or e == "ingetrokken" and x["betreft"] == bid):
-            s, door = ("vervangen open", x["besluit_id"]) if nieuw else ("ingetrokken", None)
-        elif s == "vervangen open" and e == "vervangen" and x["betreft"] == bid and x["door"] == door:
-            s = "vervangen dicht"
-    return s, door
-
 def weiger_overgang(r, regels):
-    e = "vastgelegd met vervangt" if r.get("event") == "vastgelegd" else r.get("event")
-    bid = r.get("vervangt" if r.get("event") == "vastgelegd" else "betreft")
-    if isinstance(bid, str):  # None of geen tekst: valideer weigert daarna met de veldnaam (vervangt mag None)
-        s, door = stand(regels, bid)
-        if e not in MAG.get(s, ()) or e == "vervangen" and r.get("door") != door:
-            raise Geweigerd(f"overgang: {e} in stand {s}")
+    if geweigerd := mag(r, regels):
+        raise Geweigerd(f"overgang: {geweigerd[0]} in stand {geweigerd[1]}")
 
 def _fsync_append(pad, data=None, lengte=None):
     """Eén write met O_APPEND plus fsync, of (lengte gegeven) ftruncate plus fsync."""

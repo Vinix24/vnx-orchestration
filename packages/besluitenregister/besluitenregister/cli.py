@@ -12,7 +12,8 @@ from pathlib import Path
 from .dagboek import lees_log, titel
 from .geheimpatronen import PATTERNS
 from .lezer import lees
-from .schrijver import Geweigerd, HerkomstBotsing, Register, stand
+from .schrijver import Geweigerd, HerkomstBotsing, Register
+from .stand import bevindingen, stand
 
 MD, NDJSON = "BESLUITEN.md", "besluiten.ndjson"
 _VOOR = re.compile(r"intern|publiek|klant:[a-z0-9][a-z0-9._-]*")
@@ -48,8 +49,8 @@ def zichtbaar(voor, vertrouwelijkheid, context):
     return voor == "intern" or vertrouwelijkheid == "publiek" or (
         vertrouwelijkheid == "klant" and context is not None and context.startswith("klant:") and voor == context)
 
-def _besluiten(regels):
-    """besluit_id -> vastgelegd (de eerste), geschiedenis, stand, door en geldende herzien_op; bestandsvolgorde."""
+def _besluiten(regels, nu=None):
+    """besluit_id -> vastgelegd (de eerste), geschiedenis en Stand (met `nu`); bestandsvolgorde."""
     uit = {}
     for x in regels:
         if x["event"] == "vastgelegd" and x["besluit_id"] not in uit:
@@ -58,14 +59,8 @@ def _besluiten(regels):
         if x["betreft"] in uit:
             uit[x["betreft"]]["hist"].append(x)
     for bid, b in uit.items():
-        b["stand"], b["door"] = stand(regels, bid)
-        b["herzien_op"] = next((x["herzien_op"] for x in reversed(b["hist"]) if "herzien_op" in x), None)
+        b["stand"] = stand(regels, bid, nu)
     return uit
-
-def _stand(b, nu=None):
-    if b["stand"] == "open":
-        return "te_herzien" if nu and b["herzien_op"] and nu >= b["herzien_op"] else "geldig"
-    return "ingetrokken" if b["stand"] == "ingetrokken" else "vervangen"
 
 def _tellingen(uit):
     return f"{len(uit.regels)} regels · afgescheurd: {len(uit.afgescheurd)} · ongeldig: {len(uit.ongeldig)}"
@@ -73,13 +68,13 @@ def _tellingen(uit):
 def _bron(b):
     return f"{b['soort']} {b['ref']}" + (f" (\"{b['citaat']}\")" if b["citaat"] else "")
 
-def _blok(b, zien, nu=None):
-    v, s = b["v"], _stand(b, nu)
-    door = f" door {b['door']}" if s == "vervangen" and b["door"] in zien else ""
-    regels = [f"## {v['besluit_id']}: {v['titel']}", "", f"- stand: {s}{door}",
+def _blok(b, zien):
+    v, s = b["v"], b["stand"]
+    door = f" door {s.door}" if s.naam == "vervangen" and s.door in zien else ""
+    regels = [f"## {v['besluit_id']}: {v['titel']}", "", f"- stand: {s.naam}{door}",
               f"- besloten op {v['besloten_op']} door {v['besloten_door']}",
               f"- reikwijdte: {v['reikwijdte']} · vertrouwelijkheid: {v['vertrouwelijkheid']}",
-              f"- herzien op: {b['herzien_op'] or 'geen'}", f"- bron: {_bron(v['bron'])}"]
+              f"- herzien op: {s.herzien_op or 'geen'}", f"- bron: {_bron(v['bron'])}"]
     regels += [f"- vervangt: {v.get('vervangt')}"] * (v.get("vervangt") in zien) + [
                f"- terugweg: {v['terugweg']}", f"- links: {', '.join(v['links']) or 'geen'}",
                f"- tags: {', '.join(v['tags']) or 'geen'}", "", v["besluit"], "", f"Waarom: {v['waarom']}"]
@@ -128,7 +123,8 @@ def controle(uit, logdir):
             cur = opvolg[cur]
         if cur == start:
             fout("cirkel in vervangt", start)
-    _levenscyclus(regels, bekend, fout)
+    for soort, wat in bevindingen(regels, bekend):  # de overgangstabel van ADR-077 § 3, in stand.py
+        fout(soort, wat)
     md = Path(logdir) / MD
     if not md.is_file() or md.read_bytes() != document(uit, "intern").encode("utf-8"):
         fout("BESLUITEN.md wijkt af van render", "draai render")
@@ -137,37 +133,6 @@ def controle(uit, logdir):
     if (n := kw.read_bytes().count(b"\n") if kw.is_file() else 0):
         waarschuwingen.append(f"{n} vermelding(en) in {kw.name}")
     return fouten, waarschuwingen
-
-def _levenscyclus(regels, bekend, fout):
-    """Overgangstabel van ADR-077 § 3 in bestandsvolgorde; meldt elke regel die de schrijver zou weigeren."""
-    s, door = {}, {}
-    for x in regels:
-        e, b = x["event"], x["betreft"]
-        if e == "vastgelegd":
-            if b in s:
-                continue  # dubbel id: al gemeld
-            s[b], v = "open", x.get("vervangt")
-            if v is None or v not in bekend:
-                continue  # onbekend vervangt: al gemeld
-            if v not in s:
-                fout("gebeurtenis vóór de vastlegging", f"{b} vervangt {v}")
-            elif s[v] == "open":
-                s[v], door[v] = "vervangen open", b
-            else:
-                fout("gebeurtenis na een eindstand", f"{b} vervangt {v}")
-        elif b not in s:
-            if b in bekend:
-                fout("gebeurtenis vóór de vastlegging", f"{e} op {b}")
-        elif e == "vervangen" and s[b] == "vervangen open" and x["door"] == door[b]:
-            s[b] = "vervangen dicht"
-        elif s[b] != "open":
-            fout("gebeurtenis na een eindstand", f"{e} op {b}")
-        elif e == "vervangen":
-            fout("vervangen zonder nieuwe vastgelegd", b)
-        elif e == "ingetrokken":
-            s[b] = "ingetrokken"
-    for b in (b for b, st in s.items() if st == "vervangen open"):
-        fout("open vervanging (draai vervang opnieuw)", f"{b} door {door[b]}")
 
 def _schrijf_atomair(pad, tekst):
     fd, tmp = tempfile.mkstemp(dir=pad.parent, prefix=f".{pad.name}.", suffix=".tmp")
@@ -258,12 +223,13 @@ def _uitvoeren(a):
         print(f"{res.besluit_id} ({res.geschreven} regel(s) geschreven)")
         return 0
     if a.sub in ("list", "show"):
-        alle, nu = _besluiten(regels), a.nu or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        nu = a.nu or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        alle = _besluiten(regels, nu)
         if a.sub == "show" and a.id not in alle:
             print(f"onbekend besluit: {_veilig(a.id)}", file=sys.stderr)
             return 1
-        print(*([f"{bid}  {_stand(b, nu)}  {b['v']['besloten_op']}  {b['v']['titel']}" for bid, b in alle.items()]
-                if a.sub == "list" else _blok(alle[a.id], set(alle), nu)), _tellingen(uit), sep="\n")
+        print(*([f"{bid}  {b['stand'].naam}  {b['v']['besloten_op']}  {b['v']['titel']}" for bid, b in alle.items()]
+                if a.sub == "list" else _blok(alle[a.id], set(alle))), _tellingen(uit), sep="\n")
         return 0
     if a.sub == "render":
         _schrijf_atomair(logdir / MD, document(uit, "intern"))
