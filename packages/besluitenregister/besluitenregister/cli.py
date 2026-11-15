@@ -213,11 +213,11 @@ def _import_log(a, logdir):
     if not slug:
         raise Gebruik("--slug ontbreekt: het register heeft nog geen regels")
     ids, geschreven = [], 0
-    for nr, tekst in enumerate(punten, 1):
+    for nr, (pos, tekst) in enumerate(punten, 1):
         v = {"context": slug, "besloten_op": dag, "vastgelegd_door": a.vastgelegd_door or "skill:daily-log",
              "event": "vastgelegd", "titel": titel(tekst), "besluit": tekst, "alternatieven": [],
              "waarom": f"Overgenomen uit daily-log {log.name}", "besloten_door": a.besloten_door or "operator",
-             "bron": {"soort": "daily-log", "ref": log.name, "citaat": ""}, "reikwijdte": "context",
+             "bron": {"soort": "daily-log", "ref": f"{log.name}#{pos}", "citaat": ""}, "reikwijdte": "context",
              "vertrouwelijkheid": "intern", "terugweg": "geen: overgenomen uit de daily-log", "links": [], "tags": []}
         try:
             res = reg.schrijf(v)

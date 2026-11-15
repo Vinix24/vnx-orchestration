@@ -3,6 +3,7 @@ import re
 from pathlib import Path
 
 _KOP, _BULLET, _DATUM = re.compile(r"(#{1,6})\s+(.*?)\s*#*\s*"), re.compile(r"[-*+]\s+(.*)"), re.compile(r"\d{4}-\d{2}-\d{2}")
+_HEK = re.compile(r" {0,3}(`{3,}|~{3,})(.*)")
 LEEG = {"", "geen", "-", "n.v.t.", "n.v.t"}
 
 def datum(tekst, naam):
@@ -14,31 +15,41 @@ def datum(tekst, naam):
     return m.group(0) if (m := _DATUM.search(naam)) else None
 
 def punten(tekst):
-    """Elke bullet op het hoogste niveau in elke beslissingssectie; een geneste bullet hoort bij zijn ouder."""
-    uit, niveau, huidig, vorige_leeg, omheind, gezien = [], None, None, False, False, False
+    """Elke bullet op het hoogste niveau in elke beslissingssectie; een geneste bullet hoort bij zijn ouder.
+    Geeft (gezien, [(positie, tekst)]); positie is `<kop>/<volgnummer>` (volgnummer telt alle bullets van die kop,
+    ook de lege, zodat de positie niet verschuift als een leeg punt wordt gevuld)."""
+    uit, niveau, huidig, vorige_leeg, hek, gezien, kop, teller = [], None, None, False, None, False, "", {}
     for regel in tekst.splitlines():
-        if regel.lstrip().startswith("```"):
-            omheind = not omheind
-        k = None if omheind else _KOP.fullmatch(regel)
+        if (m := _HEK.match(regel)):
+            if hek is None:
+                hek = (m.group(1)[0], len(m.group(1)))
+                continue
+            if m.group(1)[0] == hek[0] and len(m.group(1)) >= hek[1] and not m.group(2).strip():
+                hek = None
+            continue
+        if hek is not None:
+            continue
+        k = _KOP.fullmatch(regel)
         if k:
             n = len(k.group(1))
             if niveau is not None and n <= niveau:
                 niveau = None
             if niveau is None and n in (2, 3) and k.group(2).startswith("Beslissingen"):
-                niveau, gezien = n, True
+                niveau, gezien, kop = n, True, k.group(2).strip()
             huidig = None
             continue
         if niveau is None:
             continue
         if (b := _BULLET.fullmatch(regel)):
+            teller[kop] = teller.get(kop, 0) + 1
             huidig = [b.group(1).strip()]
-            uit.append(huidig)
+            uit.append((f"{kop}/{teller[kop]}", huidig))
         elif huidig is not None and regel.strip() and (regel[0] in " \t" or not vorige_leeg):
             huidig.append(regel.rstrip())
         else:
             huidig = None
         vorige_leeg = not regel.strip()
-    return gezien, ["\n".join(p).strip() for p in uit if p[0].strip().lower() not in LEEG]
+    return gezien, [(pos, "\n".join(p).strip()) for pos, p in uit if p[0].strip().lower() not in LEEG]
 
 def titel(tekst):
     """Eerste zin, hooguit 100 tekens."""

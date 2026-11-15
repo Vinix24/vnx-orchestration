@@ -22,7 +22,7 @@ br export --voor klant:acme --van 2026-11-01 --tot 2026-12-31 --reikwijdte klant
 
 ## Importing a daily-log
 
-`add --from-daily-log <log.md>` writes every top-level bullet under a `## Beslissingen` or `### Beslissingen (...)` heading (level 2 or 3, any suffix; the section ends at the next heading of the same or a higher level) as one decision. A nested bullet belongs to its parent; empty bullets and `geen`, `-`, `n.v.t.` are skipped; no other section is read. `besloten_op` is the `date:` of the frontmatter, else the `YYYY-MM-DD` in the file name (neither: exit 2, nothing written). The source is `{"soort": "daily-log", "ref": "<file name>"}`, `vastgelegd_door` is `skill:daily-log` and `besloten_door` is `operator` (override with `--besloten-door`).
+`add --from-daily-log <log.md>` writes every top-level bullet under a `## Beslissingen` or `### Beslissingen (...)` heading (level 2 or 3, any suffix; the section ends at the next heading of the same or a higher level) as one decision. A nested bullet belongs to its parent; empty bullets and `geen`, `-`, `n.v.t.` are skipped; no other section is read. `besloten_op` is the `date:` of the frontmatter, else the `YYYY-MM-DD` in the file name (neither: exit 2, nothing written). The source is `{"soort": "daily-log", "ref": "<file name>#<heading>/<n>"}`, where `<n>` is the bullet's ordinal under that heading; for this source `herkomst` keys on that position, not on the text, so a point edited in place is refused with exit 3 instead of becoming a second decision. `vastgelegd_door` is `skill:daily-log` and `besloten_door` is `operator` (override with `--besloten-door`).
 
 ```sh
 br add --from-daily-log "$HOME/work/acme/daily-log/2026-11-14.md" --slug klant:acme

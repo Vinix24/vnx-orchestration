@@ -221,7 +221,8 @@ def test_from_daily_log_drie_besluiten_tweede_import_schrijft_niets(capsys, tmp_
     assert code == 0, err
     regels = [r for _, r in lees(ctx / "besluiten.ndjson").regels]
     assert [r["titel"] for r in regels] == ["Eerste punt.", "Tweede punt zonder punt aan het eind", "Derde punt."]
-    assert all(r["bron"] == {"soort": "daily-log", "ref": "2026-11-14.md", "citaat": ""} for r in regels)
+    assert [r["bron"] for r in regels][0] == {"soort": "daily-log", "ref": "2026-11-14.md#Beslissingen/1", "citaat": ""}
+    assert all(r["bron"]["soort"] == "daily-log" and r["bron"]["ref"].startswith("2026-11-14.md#Beslissingen") for r in regels)
     assert all(r["besloten_op"] == "2026-11-14" and r["vastgelegd_door"] == "skill:daily-log"
                and r["besloten_door"] == "operator" for r in regels)
     assert "Genest punt hoort bij de ouder." in regels[0]["besluit"] and "Dit is geen" not in str(regels)
@@ -266,3 +267,25 @@ def test_from_daily_log_check_schoon_na_render(capsys, tmp_path):
 
 def test_add_zonder_from_daily_log_mist_verplichte_vlag_exit_2(capsys, tmp_path):
     assert run(capsys, "add", "--context", tmp_path, "--titel", "x")[0] == 2
+
+def test_from_daily_log_gewijzigd_punt_zelfde_plek_exit_3_een_besluit(capsys, tmp_path):
+    kop = "---\ndate: 2026-11-14\n---\n\n## Beslissingen\n\n"
+    ctx, log = schrijf_log(tmp_path, kop + "- Use SQLite.\n")
+    assert importeer(capsys, ctx, log)[0] == 0
+    voor = (ctx / "besluiten.ndjson").read_bytes()
+    code, out, _ = importeer(capsys, ctx, log)  # ongewijzigd: niets geschreven, bestaand id getoond
+    assert code == 0 and (ctx / "besluiten.ndjson").read_bytes() == voor and "0 geschreven" in out
+    log.write_text(kop + "- Use PostgreSQL.\n", encoding="utf-8")
+    code, _, err = importeer(capsys, ctx, log)
+    assert code == 3 and "punt 1 van 1" in err
+    assert (ctx / "besluiten.ndjson").read_bytes() == voor
+    assert len(lees(ctx / "besluiten.ndjson").regels) == 1
+
+@pytest.mark.parametrize("hek", ["```", "~~~", "````"])
+def test_from_daily_log_bullets_in_een_hek_zijn_geen_besluit(capsys, tmp_path, hek):
+    tekst = f"---\ndate: 2026-11-14\n---\n\n## Beslissingen\n\n- Echt.\n\n{hek}markdown\n- Example only.\n{hek}\n\n- Ook echt.\n"
+    ctx, log = schrijf_log(tmp_path, tekst)
+    assert importeer(capsys, ctx, log)[0] == 0
+    regels = [r for _, r in lees(ctx / "besluiten.ndjson").regels]
+    assert [r["besluit"] for r in regels] == ["Echt.", "Ook echt."]
+    assert "Example" not in str(regels) and hek not in str(regels)

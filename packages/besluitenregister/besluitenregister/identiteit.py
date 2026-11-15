@@ -11,6 +11,8 @@ def event_id(regel):
     return "E-" + _sha(canoniek({k: v for k, v in regel.items() if k not in ("event_id", "vastgelegd_op")}))
 
 def herkomst(context, bron_soort, bron_ref, titel):
+    if bron_soort == "daily-log":  # de ref (`<log>#<kop>/<volgnummer>`) is de positie; de tekst mag veranderen en botst dan
+        return _sha(canoniek([context, bron_soort, bron_ref]))
     return _sha(canoniek([context, bron_soort, bron_ref, titel]))
 
 def nieuw_besluit_id(besloten_op, bestaande=()):
