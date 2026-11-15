@@ -1,0 +1,1 @@
+L2: `scripts/permission_events_scan.py` reads refused tool calls (B1), answered permission prompts (B2) and copy blocks (B4a) from bound transcripts into `permission_events.ndjson` with origin, account slot (never uuid or e-mail), coverage per source and skipped-line counts (permissieblokkades-leren L2, ADR-075).
