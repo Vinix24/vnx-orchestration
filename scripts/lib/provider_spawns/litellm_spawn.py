@@ -48,7 +48,7 @@ if _LIB_DIR not in sys.path:
 
 from _streaming_drainer import StreamingDrainerMixin, coerce_chunk_stall  # noqa: E402
 from adapters._litellm_runner import _PROVIDER_KEY_REQS  # noqa: E402
-from canonical_event import CanonicalEvent  # noqa: E402
+from canonical_event import VALID_EVENT_TYPES, CanonicalEvent  # noqa: E402
 from env_scrub_patterns import DEFAULT_SCRUB_KEY_PATTERNS, scrub_env  # noqa: E402
 import provider_switch  # scripts/lib, added to the path above
 
@@ -766,6 +766,7 @@ def _parse_agentic_events(
     error: Optional[str] = None
     events_written = 0
     ew_failures = 0
+    warned_types: set = set()
 
     def _canon(etype: str, data: dict) -> CanonicalEvent:
         return CanonicalEvent(
@@ -808,7 +809,17 @@ def _parse_agentic_events(
                     }
                 canonical = _canon("usage_complete", {"usage": evt.get("usage") or {}})
             else:
-                canonical = _canon(etype, {k: v for k, v in evt.items() if k != "event_type"})
+                data = {k: v for k, v in evt.items() if k != "event_type"}
+                if etype not in VALID_EVENT_TYPES:
+                    if etype not in warned_types:
+                        warned_types.add(etype)
+                        logger.warning(
+                            "spawn_litellm_agentic: unknown runner event type %r mapped to info (dispatch=%s)",
+                            etype, dispatch_id,
+                        )
+                    data["runner_event_type"] = etype
+                    etype = "info"
+                canonical = _canon(etype, data)
 
         if event_writer is not None:
             try:
