@@ -272,3 +272,24 @@ def test_evidence_prompt_ids_is_a_list_of_non_empty_strings(tmp_path, ids):
     path.write_text(path.read_text().replace('"evidence_prompt_ids": ["p1"]', '"evidence_prompt_ids": "p1"'))
     with pytest.raises(store.StoreUnreadable):
         store.proposals(tmp_path, "vnx-dev")
+
+
+def test_read_proposals_returns_the_replay_and_never_writes(tmp_path):
+    pid = seed(tmp_path)
+    (tmp_path / store.PROJECTION_FILENAME).unlink()
+    (tmp_path / store.LOCK_FILENAME).unlink(missing_ok=True)
+    before = sorted(p.name for p in tmp_path.iterdir())
+    entries, records = store.read_proposals(tmp_path, "vnx-dev")
+    assert [e["proposal_id"] for e in entries] == [pid] and [r["proposal_id"] for r in records] == [pid]
+    assert sorted(p.name for p in tmp_path.iterdir()) == before
+    assert store.read_proposals(tmp_path, "other-project") == ([], [])
+
+
+def test_read_proposals_refuses_what_the_write_path_refuses(tmp_path):
+    seed(tmp_path)
+    with (tmp_path / store.DECISIONS_FILENAME).open("a", encoding="utf-8") as fh:
+        fh.write("{not json\n")
+    with pytest.raises(store.StoreUnreadable):
+        store.read_proposals(tmp_path, "vnx-dev")
+    with pytest.raises(store.ProposalInvalid):
+        store.read_proposals(tmp_path, "")

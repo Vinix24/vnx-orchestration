@@ -20,7 +20,7 @@ import os
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Mapping, Optional, Sequence
+from typing import Any, Dict, Iterator, List, Mapping, Optional, Sequence, Tuple
 
 PROJECTION_FILENAME = "steering_proposals.json"
 SCHEMA = "steering_proposals/1"
@@ -268,6 +268,20 @@ def proposals(state_dir: Path, project_id: str) -> List[Dict[str, Any]]:
         state = _replay(_read_records(state_dir))
         _project(state_dir, state)
         return [state[k] for k in sorted(state) if state[k]["project_id"] == project_id]
+
+
+def read_proposals(state_dir: Path, project_id: str) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """``(proposals, decisions)`` of this project, replayed from the records, strictly read-only.
+
+    Never writes: no ``steering_proposals.json`` projection, no lock file. A reader (ADR-076 decision 14) uses
+    this instead of ``proposals()``, which rewrites the derived projection when it differs. The records file is
+    append-only and every append lands on a line boundary, so a lock-free read sees a consistent prefix.
+    """
+    project_id = _require_project(project_id)
+    records = _read_records(state_dir)
+    state = _replay(records)
+    entries = [state[k] for k in sorted(state) if state[k]["project_id"] == project_id]
+    return entries, [r for r in records if r["project_id"] == project_id]
 
 
 def get(state_dir: Path, project_id: str, pid: str) -> Dict[str, Any]:

@@ -1,0 +1,2 @@
+- The operator queue reads cap-verdict points (source 7, `mergen-met-OI`) and reads the steering store without writing its projection or lock (operator-vragen-tot-antwoord Q2b part b, OI-2885).
+- A torn or non-object line in the receipt ledger or the review rounds ledger makes the cap-verdict reader report `pr_staat_onleesbaar` or `kop_onleesbaar` and keep the point open, instead of reading a shorter history as `open` or matching an older branch (round 2).
