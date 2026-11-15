@@ -4,10 +4,6 @@
 > (`runtime_supervise`), and SUP-PR4 (`receipt_processor_supervisor`) are all
 > on `main`. There is no remaining prerequisite before enabling
 > `VNX_SUPERVISOR_MODE=unified` per project.
->
-> Background: the original research note lived at
-> `claudedocs/2026-04-29-unified-supervisor-research.md`; `claudedocs/` is
-> gitignored and that file never shipped in the repo.
 
 ---
 

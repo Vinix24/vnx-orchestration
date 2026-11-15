@@ -1,0 +1,1 @@
+- Documentation: five retired pages moved to `docs/_archive/` (stubs left at the two old paths that frozen files link), `docs/README.md` is now a pointer to `DOCS_INDEX.md`, nine stale `vnx` commands corrected, broken links fixed and the `claudedocs/` citations replaced by ADRs or dropped.

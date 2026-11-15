@@ -1,5 +1,7 @@
 # VNX Evolution Timeline (Condensed)
 
+> Archived 2026-11-15. Current history: [CHANGELOG.md](../../../CHANGELOG.md) and [docs/core/00_VNX_ARCHITECTURE.md](../../core/00_VNX_ARCHITECTURE.md).
+
 **Status**: Public summary for readers  
 **Scope**: Architectural evolution through 2026-10-18  
 **Audience**: People evaluating VNX concept and build quality

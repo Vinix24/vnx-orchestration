@@ -200,7 +200,7 @@ The dashboard requires a project registry to know which projects exist. This is 
 **Registration invariants:**
 
 - **PR-1**: A project is registered when `vnx start` is first run in a directory (auto-registration).
-- **PR-2**: Manual registration via `vnx project add <path>` for projects not yet started.
+- **PR-2**: Manual registration via `vnx register` for projects not yet started.
 - **PR-3**: The projects overview (S1) reads only from this registry — it does not scan the filesystem.
 - **PR-4**: A project with `active: false` is hidden from the dashboard but not deleted.
 
@@ -474,7 +474,7 @@ Must verify:
 
 | Risk | Mitigation |
 |------|-----------|
-| Project registry is a new file that can get out of sync | Auto-registration on `vnx start` + manual `vnx project add/remove` |
+| Project registry is a new file that can get out of sync | Auto-registration on `vnx start` + manual `vnx register` / `vnx unregister` |
 | 10s polling interval for terminal state may feel sluggish | Configurable; can be reduced. WebSocket is a future optimization. |
 | Aggregate open-item view could be slow with many projects | Index by project in memory; lazy-load item details. First release targets <10 projects. |
 | DB lock contention between dashboard reads and runtime writes | Dashboard uses read-only connections with short timeouts. WAL mode allows concurrent reads. |
