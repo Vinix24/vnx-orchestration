@@ -9,7 +9,7 @@ import argparse
 import json
 import sqlite3
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -83,7 +83,7 @@ def main():
                 file=sys.stderr,
             )
             return 1
-    now_iso = datetime.utcnow().isoformat()
+    now_iso = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
     _upsert_dispatch_row(cur, args, has_project, project_id_val, now_iso)
     _stamp_provider_model(conn, cur, args, has_project, project_id_val)
 
