@@ -176,12 +176,18 @@ def read_dream(project_id: str, *, data_root: Optional[Path] = None, now: Any = 
 _DECISION_STATUSES = frozenset({"accepted", "rejected", "applied", "approved", "dismissed"})
 
 
-def _decided(entry: dict) -> _Verdict:
+def _no_decision(entry: dict) -> Optional[str]:
+    """None when ``entry`` records a decision; else the reason it does not. The one rule every close path uses."""
     status = entry.get("status")
     if not isinstance(status, str) or not status.strip():
-        return ("unknown", "status ontbreekt of is geen tekst")
-    if status not in _DECISION_STATUSES:
-        return ("unknown", f"status={status!r} is geen besluit")
+        return f"status={status!r} ontbreekt of is geen tekst"
+    return None if status in _DECISION_STATUSES else f"status={status!r} is geen besluit"
+
+
+def _decided(entry: dict) -> _Verdict:
+    status, why = entry.get("status"), _no_decision(entry)
+    if why is not None:
+        return ("unknown", why)
     when = next((f"{k}={entry[k]}" for k in _TIME_KEYS if isinstance(entry.get(k), str) and entry[k].strip()), "")
     return ("closed", f"status={status}" + (f" {when}" if when else ""), "onbekend")
 
@@ -205,6 +211,9 @@ def _history_verdict(history: Any, hist_why: Optional[str], ref: str) -> _Verdic
     ident = ref.split(":", 1)[1]
     for entry in (history if isinstance(history, list) else []):
         if isinstance(entry, dict) and str(entry.get("id")) == ident:
+            why = _no_decision(entry)
+            if why is not None:
+                return ("unknown", f"edit_history.json: id={ident} {why}")
             return ("closed", f"edit_history.json: id={ident} status={entry.get('status')} applied_at={entry.get('applied_at')}", "onbekend")
     return ("unknown", "edit weg zonder edit_history")
 

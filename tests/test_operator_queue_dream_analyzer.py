@@ -171,6 +171,28 @@ def test_edit_vanishing_without_history_entry_is_unknown(tmp_path):
     assert s.points()[0]["unknown_reden"] == "edit weg zonder edit_history" and s.points()[0]["state"] == "open"
 
 
+_NO_STATUS = object()
+
+
+@pytest.mark.parametrize("status,closes", [(_NO_STATUS, False), ("unknown", False), ("pending", False), ("", False),
+                                           (42, False), (None, False), ("applied", True)])
+def test_history_entry_closes_only_on_a_decision_status(tmp_path, status, closes):
+    s = Store(tmp_path)
+    s.edits({"id": 8, "status": "pending", "category": "rule"})
+    qa.read_analyzer(P, **s.kw())
+    s.edits()
+    entry = {"id": 8, "applied_at": "2026-11-14T08:00:00Z"}
+    if status is not _NO_STATUS:
+        entry["status"] = status
+    s.put("edit_history.json", [entry])
+    out = qa.read_analyzer(P, **s.kw())
+    assert bool(out["closed"]) is closes
+    if not closes:
+        reden = s.points()[0]["unknown_reden"]
+        assert s.points()[0]["state"] == "open" and "edit_history.json: id=8" in reden
+        assert repr(entry.get("status")) in reden or "ontbreekt" in reden
+
+
 def test_edit_with_missing_or_unknown_status_never_closes(tmp_path):
     s = Store(tmp_path)
     s.edits({"id": 7, "status": "pending", "category": "rule"})
