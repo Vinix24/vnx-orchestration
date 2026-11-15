@@ -3,19 +3,25 @@
 A point closes only on the state its ``ref`` names, read-only; an unreadable source gives an ``unknown`` line (ADR-063).
 """
 from __future__ import annotations
+import contextlib
 import hashlib
+import importlib
+import io
 import json
 import re
 import sqlite3
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 try:
     import operator_queue as oq
+    import operator_queue_steering_verdict as steering
     import tracks as tracks_lib
     from project_root import resolve_central_data_dir
 except ImportError:  # vnx-silent-except: imported as scripts.lib.operator_queue_ask
     from scripts.lib import operator_queue as oq
+    from scripts.lib import operator_queue_steering_verdict as steering
     from scripts.lib import tracks as tracks_lib
     from scripts.lib.project_root import resolve_central_data_dir
 
@@ -81,13 +87,13 @@ def answer(project_id: str, point_id: str, *, quote: str, vastgelegd_door: str, 
                                                  "vastgelegd_door": vastgelegd_door}, now=now, state_dir=state_dir)
 
 def _answer_ts(project_id: str, pid: str, state_dir: Optional[Path]) -> Optional[str]:
-    path = (Path(state_dir) if state_dir is not None else oq.state_dir_for(project_id)) / oq.LEDGER_FILENAME
-    recs = (json.loads(raw) for raw in path.read_text(encoding="utf-8").split("\n") if f'"{pid}"' in raw)
-    return next((r["ts"] for r in recs if r.get("kind") == "answer" and r.get("point_id") == pid), None)
+    return next((r["ts"] for r in oq.answers(project_id, state_dir=state_dir) if r.get("point_id") == pid), None)
 
 class _Source:
-    def __init__(self, project_id: str, sdir: Path) -> None:
-        self.project_id, self.sdir, self._conn = project_id, sdir, None
+    def __init__(self, project_id: str, sdir: Path, *, now: Optional[str] = None,
+                 state_dir: Optional[Path] = None) -> None:
+        self.project_id, self.sdir, self.now, self.state_dir, self._conn = project_id, sdir, now, state_dir, None
+        self.cap_read: Optional[Dict[str, Any]] = None
 
     def conn(self) -> sqlite3.Connection:
         if self._conn is None:
@@ -122,6 +128,21 @@ class _Source:
             return "onbekend"
         return who if isinstance(who, str) and who.strip() else "onbekend"
 
+    def visited_phases(self, track_id: str) -> set:
+        rows = self.conn().execute("SELECT to_phase FROM track_phase_history WHERE track_id = ?", (track_id,)).fetchall()
+        return {r["to_phase"] for r in rows}
+
+    def config_audit_after(self, key: str, asked_at: str) -> Optional[str]:
+        """The ``changed_at`` of a ``project_config_audit`` row after ``asked_at`` for a key that is in ``project_config``."""
+        conn = self.conn()
+        if conn.execute("SELECT 1 FROM project_config WHERE project_id = ? AND config_key = ?",
+                        (self.project_id, key)).fetchone() is None:
+            return None
+        rows = conn.execute("SELECT changed_at FROM project_config_audit WHERE project_id = ? AND config_key = ? "
+                            "ORDER BY id", (self.project_id, key)).fetchall()
+        asked = _moment(asked_at)
+        return next((r["changed_at"] for r in rows if _moment(r["changed_at"]) > asked), None)
+
 _OPEN = ("open",)
 def _eval_dlv(src: _Source, dispatch_id: str) -> tuple:
     row = src.dispatch(dispatch_id)
@@ -144,6 +165,47 @@ def _eval_oi(src: _Source, oi_id: str) -> tuple:
         return ("unknown", f"{oi_id} is not readable in open_items.json")
     return ("closed", "beantwoord", f"{oi_id}.status={item['status']}", "onbekend") if item.get("status") in OI_ANSWERED else _OPEN
 
+def _moment(text: Any) -> datetime:
+    """An ISO instant as an aware datetime; raises ValueError for anything else (an unreadable source)."""
+    when = datetime.fromisoformat(str(text).replace("Z", "+00:00"))
+    return when if when.tzinfo else when.replace(tzinfo=datetime.now().astimezone().tzinfo)
+
+_RANK = {"queued": 0, "active": 1, "done": 2}
+
+def _eval_track(src: _Source, track_id: str, phase: str, point: Dict[str, Any]) -> tuple:
+    now = src.track_phase(track_id)
+    if now is None:
+        return ("unknown", f"track {track_id} is not readable")
+    visited = src.visited_phases(track_id) | {now, "queued"}
+    if now == "done":
+        if phase in visited:
+            return ("closed", "beantwoord", f"tracks.phase=done, {phase} visited", "onbekend")
+        return ("closed", "vervallen", f"tracks.phase=done without {phase}", "onbekend")
+    reached = now == phase if "parked" in (phase, now) else _RANK.get(now, -1) >= _RANK.get(phase, 99)
+    return ("closed", "beantwoord", f"tracks.phase={now}", "onbekend") if reached else _OPEN
+
+def _eval_config(src: _Source, key: str, point: Dict[str, Any]) -> tuple:
+    changed = src.config_audit_after(key, point["asked_at"])
+    return _OPEN if changed is None else ("closed", "beantwoord", f"project_config_audit.changed_at={changed}", "onbekend")
+
+def _eval_verdict(src: _Source, verdict_id: str, point: Dict[str, Any]) -> tuple:
+    """The match of source 7 (``read_cap_verdict``), imported: its point for the same ``verdict:`` ref decides."""
+    if src.cap_read is None:
+        src.cap_read = steering.read_cap_verdict(src.project_id, data_root=src.sdir.parent, now=src.now,
+                                                 state_dir=src.state_dir)
+    if src.cap_read["dekking"] != "gelezen":
+        return ("unknown", f"source 7 unreadable: {src.cap_read['reden']}")
+    ledger = oq.read_state(src.project_id, state_dir=src.state_dir)
+    if ledger["status"] != "ok":
+        return ("unknown", ledger["reason"])
+    mine = [p for p in ledger["points"].values() if p["bron"] == 7 and p["ref"] == point["ref"]]
+    if not mine:
+        return ("unknown", f"source 7 has no point for {point['ref']}")
+    state = mine[-1]["state"]
+    if state == "open":
+        return _OPEN
+    return ("closed", state, f"bron 7: {mine[-1]['bewijs']}", "onbekend")
+
 def _evaluate(src: _Source, project_id: str, point: Dict[str, Any], state_dir: Optional[Path]) -> tuple:
     try:
         kind, parts = parse_ref(point["ref"])
@@ -153,29 +215,59 @@ def _evaluate(src: _Source, project_id: str, point: Dict[str, Any], state_dir: O
         if kind == "antwoord":
             ts = _answer_ts(project_id, point["point_id"], state_dir)
             return _OPEN if ts is None else ("closed", "beantwoord", ts, "t0_namens_operator")
-        evaluator = {"dlv": _eval_dlv, "oi": _eval_oi}.get(kind)
+        evaluator = {"dlv": _eval_dlv, "oi": _eval_oi, "track": _eval_track, "config": _eval_config,
+                     "verdict": _eval_verdict}.get(kind)
+        if evaluator in (_eval_track, _eval_config, _eval_verdict):
+            return evaluator(src, *parts, point)
         if evaluator:
             return evaluator(src, *parts)
-    except (OSError, ValueError, KeyError, sqlite3.Error) as exc:  # vnx-silent-except: an unreadable source is an unknown line
+    except (OSError, ValueError, KeyError, TypeError, sqlite3.Error, oq.QueueRefused, oq.QueueUnreadable) as exc:  # vnx-silent-except: an unreadable source is an unknown line
         return ("unknown", f"source unreadable ({type(exc).__name__}: {exc})")
-    return _OPEN  # verdict:, track: and config: close none here
+    return _OPEN
+
+def _planning_cli() -> Any:
+    """``planning_cli`` is imported here, not at module level: it edits ``sys.path`` and loads the track layer on import."""
+    try:
+        return importlib.import_module("planning_cli")
+    except ImportError:  # vnx-silent-except: imported as scripts.lib.operator_queue_ask
+        return importlib.import_module("scripts.planning_cli")
+
+def promotion_refusal(src: _Source, point: Dict[str, Any]) -> Optional[str]:
+    """Why a promote of this source-1 point is refused today, or None; read-only, never promotes (ADR-056, ADR-076 decision 7)."""
+    try:
+        kind, parts = parse_ref(point["ref"])
+        row = src.dispatch(parts[0]) if kind == "dlv" else None
+        if row is None:
+            return "onleesbaar: the dispatch row is not readable"
+        track_id = row["track"] if "track" in row.keys() else None
+        cli, said = _planning_cli(), io.StringIO()
+        with contextlib.redirect_stderr(said):
+            blocked = bool(track_id) and cli._track_blocks_promotion(src.sdir, src.project_id, parts[0], track_id)
+        if blocked:
+            return said.getvalue().strip() or f"track {track_id!r} blocks promotion"
+        return cli._promotion_refusal(src.sdir, src.project_id, row, track_id)[0]
+    except Exception as exc:  # vnx-silent-except: an unreadable gate is a stated reason, never "nothing blocks"
+        return f"onleesbaar: {type(exc).__name__}: {exc}"
 
 def read_asked(project_id: str, *, data_root: Optional[Path] = None, now: Optional[str] = None,
                state_dir: Optional[Path] = None) -> List[Dict[str, Any]]:
     """One reader dict per source (1, 2, 8); Opens nothing."""
     out = {b: {"bron": b, "dekking": "gelezen", "reden": None, "opened": [], "closed": [], "unknown": []}
            for b in BRON.values()}
+    out[1]["weigerreden"] = {}
     state = oq.read_state(project_id, state_dir=state_dir)
     if state["status"] != "ok":
         for result in out.values():
             result.update(dekking="unknown", reden=state["reason"])
         return list(out.values())
     root = Path(data_root) if data_root is not None else resolve_central_data_dir(project_id)
-    src = _Source(project_id, root / "state")
+    src = _Source(project_id, root / "state", now=now, state_dir=state_dir)
     try:
         for point in state["points"].values():
             if point["state"] == "open" and point["bron"] in out:
                 _apply(src, project_id, point, out[point["bron"]], now, state_dir)
+                if point["bron"] == 1 and point["point_id"] not in out[1]["closed"]:
+                    out[1]["weigerreden"][point["point_id"]] = promotion_refusal(src, point)
     finally:
         src.close()
     return list(out.values())
