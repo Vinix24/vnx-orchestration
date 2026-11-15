@@ -164,3 +164,34 @@ class TestSignHelpers:
         entries = list(ndjson_hash_chain.walk_chain(_ledger(tmp_path)))
         assert len(entries) == 2
         assert entries[1][1]["prev_hash"] == entries[0][2]
+
+# OI-2849 r2: extra_fields cannot change the track or project of a pass
+_SIGN = [False, pytest.param(True, marks=pytest.mark.skipif(shutil.which("ssh-keygen") is None, reason="ssh-keygen not installed"))]
+
+
+@pytest.mark.parametrize("signed", _SIGN)
+@pytest.mark.parametrize("field,other", [("track_id", "B"), ("project_id", "other-project")])
+class TestIdentityFieldsReserved:
+    def _kw(self, tmp_path, signed):
+        if not signed:
+            return {}
+        key, _ = _key(tmp_path, "k")
+        return {"signer_identity": _ID, "key_path": str(key)}
+
+    def test_other_identity_refused_nothing_appended(self, tmp_path, field, other, signed):
+        kw = self._kw(tmp_path, signed)
+        _emit(tmp_path, track="t")
+        _emit(tmp_path, track="B", ts="2026-07-11T00:30:00Z")  # B's latest hash differs from t's
+        hash_t = list(ndjson_hash_chain.walk_chain(_ledger(tmp_path)))[0][2]
+        before = _ledger(tmp_path).read_bytes()
+        assert _emit(tmp_path, track="t", expect_latest_hash=hash_t, extra_fields={field: other}, **kw) is None
+        assert _ledger(tmp_path).read_bytes() == before
+
+    def test_same_identity_value_appends(self, tmp_path, field, other, signed):
+        kw = self._kw(tmp_path, signed)
+        _emit(tmp_path)
+        same = {"track_id": "t", "project_id": "vnx-dev"}[field]
+        rec = _emit(tmp_path, ts="2026-07-11T01:00:00Z", expect_latest_hash=_latest_hash(tmp_path),
+                    extra_fields={field: same}, **kw)
+        assert rec is not None and rec[field] == same
+        assert len(_ledger(tmp_path).read_text().splitlines()) == 2

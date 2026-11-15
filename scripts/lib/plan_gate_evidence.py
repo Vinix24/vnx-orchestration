@@ -29,6 +29,8 @@ RECORD_TYPE = "plan_gate_pass"
 VERIFIED = "verified"          # a signed record exists AND its signature verifies
 PRESENT_UNSIGNED = "present"   # a hash-chained record exists but is unsigned/unverifiable
 ABSENT = "absent"              # no plan-gate-pass record for this track
+_RESERVED_FIELDS = ("type", "prev_hash", "signature", "signer_identity")  # skipped from extra_fields
+_IDENTITY_FIELDS = ("track_id", "project_id")  # an extra_fields value other than the argument refuses the append
 
 
 def _ledger_path(repo_root: "str | Path") -> Path:
@@ -92,7 +94,7 @@ def emit_plan_gate_pass(
     "no derivation for this round"; here absence means "no derivation at all".
     Signed when ``key_path`` + ``signer_identity`` are provided (tamper-proof);
     otherwise appended unsigned but hash-chained (tamper-evident). ``extra_fields`` are copied
-    on before signing; a signed record failing ``verify_with`` is not appended (OI-2849), and with
+    on before signing (``track_id``/``project_id`` only with the argument's own value, else ``None``); a signed record failing ``verify_with`` is not appended (OI-2849), and with
     ``expect_latest_hash`` a latest pass of another hash, rechecked under the append's ledger lock,
     raises ``LatestPassChanged`` unwritten. Otherwise best-effort: the record, or ``None`` on failure.
     """
@@ -122,7 +124,9 @@ def emit_plan_gate_pass(
             if label:
                 record["gate_profile"] = label
         for key, value in (extra_fields or {}).items():
-            if key not in ("type", "prev_hash", "signature", "signer_identity"):
+            if key in _IDENTITY_FIELDS and value != record[key]:
+                return None  # the recheck and the append must target the same track and project
+            if key not in _RESERVED_FIELDS:
                 record[key] = value
         if key_path and signer_identity:
             from attestation import sign_manifest, verify_attestation  # lazy: ssh-keygen path only
