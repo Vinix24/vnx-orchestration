@@ -17,13 +17,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import actor_class
 import permission_events as pe
+import vnx_paths
 from project_root import resolve_project_id
 
 SCHEMA = "cli_invocation/1"
 LEDGER = "cli_invocations.ndjson"
 FIELDS = "schema ts invocation_id project_id vorm actor_class exit_code duration_ms".split()
-#: Subcommand names of the ``main()`` case labels in bin/vnx and the vnx_cli/main.py subparsers;
-#: pinned by tests/test_cli_invocations.py. Any other word is a positional and becomes a placeholder.
+#: bin/vnx main() case labels + vnx_cli/main.py subparsers (pinned by tests); any other word is a placeholder.
 KNOWN_SUBCOMMANDS = tuple("""
 activate add analyze-sessions approve attest backfill backfill-reason batch bootstrap-hooks bootstrap-skills
 bootstrap-terminals check cleanup close context-manifest cost-report costs daily-metrics decide-rule decide-steering
@@ -72,14 +72,11 @@ def record(argv: Sequence[str], exit_code: Optional[int], duration_ms: Optional[
     """Write one line; never raises (decision 7): on any failure the line stays away."""
     try:
         project_id = resolve_project_id()
-        line = {
-            "schema": SCHEMA, "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
-            "invocation_id": uuid.uuid4().hex[:16], "project_id": project_id,
-            "vorm": build_vorm(list(argv)), "actor_class": actor_class.derive(env, isatty),
-            "exit_code": exit_code if isinstance(exit_code, int) else None,
-            "duration_ms": duration_ms if isinstance(duration_ms, int) and duration_ms >= 0 else None,
-        }
-        state = pe._state_dir(project_id, None)
+        line = {"schema": SCHEMA, "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+                "invocation_id": uuid.uuid4().hex[:16], "project_id": project_id, "vorm": build_vorm(list(argv)),
+                "actor_class": actor_class.derive(env, isatty), "exit_code": exit_code if isinstance(exit_code, int)
+                else None, "duration_ms": duration_ms if isinstance(duration_ms, int) and duration_ms >= 0 else None}
+        state = pe._state_dir(project_id, Path(vnx_paths.resolve_paths()["VNX_STATE_DIR"]))  # the call's store
         scratch = Path(tempfile.gettempdir()).resolve()
         if os.environ.get("PYTEST_CURRENT_TEST") and scratch not in state.resolve().parents:
             return None  # a test run never writes the real store, only a store under the temp dir
@@ -108,9 +105,8 @@ def coverage(project_id: str, state_dir: Optional[Path] = None) -> Dict[str, Any
 def _cli(argv: List[str]) -> int:
     """``record <exit_code> <duration_ms|-> <tty 0|1> -- <argv...>``, started detached by the hooks."""
     if argv[:1] == ["record"] and argv[4:5] == ["--"]:
-        code = int(argv[1]) if argv[1].lstrip("-").isdigit() else None
-        ms = int(argv[2]) if argv[2].isdigit() else None
-        record(argv[5:], code, ms, isatty=argv[3] == "1")
+        record(argv[5:], int(argv[1]) if argv[1].lstrip("-").isdigit() else None,
+               int(argv[2]) if argv[2].isdigit() else None, isatty=argv[3] == "1")
     return 0
 
 

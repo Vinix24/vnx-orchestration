@@ -24,6 +24,9 @@ PID = "vnx-dev"
 def store(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("VNX_PROJECT_ID", PID)
+    for name in ("VNX_DATA_DIR", "VNX_DATA_DIR_EXPLICIT", "VNX_STATE_DIR", "VNX_DATA_HOME"):  # the conftest's too
+        monkeypatch.delenv(name, raising=False)
+    (tmp_path / ".vnx-data" / PID).mkdir(parents=True)
     return tmp_path / ".vnx-data" / PID / "state"
 
 
@@ -34,9 +37,6 @@ def test_no_argument_value_reaches_the_ledger(store):
     assert token not in text and flag_value not in text
     assert line["vorm"] == "vnx deliverable show <arg> --reason"
     assert set(json.loads(text)) == set(ci.FIELDS)
-
-
-def test_promote_vorm_and_placeholders():
     assert ci.build_vorm(["deliverable", "promote", "dlv-4856e810fb14"]) == "vnx deliverable promote <dlv>"
     assert ci.build_vorm(["review", "--pr=2959", "x", "5816d5d3a"]) == "vnx review <arg> <sha> --pr"
 
@@ -54,7 +54,7 @@ def test_recorder_failure_is_swallowed(store, monkeypatch):
     assert not (store / ci.LEDGER).exists()
 
 
-def _run(tmp_path, *args, recorder_body=None):
+def _run(tmp_path, *args, recorder_body=None, **extra_env):
     """bin/vnx copied into a VNX_HOME (it derives VNX_HOME from its own place) whose slot_cli exits 3."""
     home = tmp_path / "vnxhome"
     lib = home / "scripts" / "lib"
@@ -69,9 +69,9 @@ def _run(tmp_path, *args, recorder_body=None):
     (home / "vnx_cli").symlink_to(REPO / "vnx_cli")
     (home / "bin").mkdir()
     shutil.copy2(REPO / "bin" / "vnx", home / "bin" / "vnx")
-    env = {k: v for k, v in os.environ.items() if k not in ("VNX_CANONICAL_ROOT", "VNX_DATA_DIR")}
+    env = {k: v for k, v in os.environ.items() if k not in ("VNX_CANONICAL_ROOT", "VNX_DATA_DIR", "VNX_DATA_HOME")}
     return subprocess.run([str(home / "bin" / "vnx"), *args], cwd=tmp_path, capture_output=True, text=True,
-                          env=dict(env, HOME=str(tmp_path), VNX_PROJECT_ID=PID), timeout=60)
+                          env=dict(env, HOME=str(tmp_path), VNX_PROJECT_ID=PID, **extra_env), timeout=60)
 
 
 def _wait_lines(state):
@@ -86,6 +86,13 @@ def test_exec_branch_keeps_exit_code_and_output_and_records_once(tmp_path, store
     result = _run(tmp_path, "slot", "--token", "s3cr3tvalue")
     assert (result.returncode, result.stdout, result.stderr) == (3, "out\n", "err\n")
     assert [(x["vorm"], x["exit_code"]) for x in _wait_lines(store)] == [("vnx slot --token", 3)]
+
+
+def test_an_explicit_data_dir_gets_the_line_and_home_gets_no_store(tmp_path):
+    data = tmp_path / "explicit-data"
+    assert _run(tmp_path, "slot", VNX_DATA_DIR=str(data), VNX_DATA_DIR_EXPLICIT="1").returncode == 3
+    assert [x["vorm"] for x in _wait_lines(data / "state")] == ["vnx slot"]
+    assert not (tmp_path / ".vnx-data").exists()
 
 
 def test_raising_recorder_changes_nothing(tmp_path):
@@ -104,7 +111,7 @@ def test_known_subcommands_cover_both_parsers_and_door_is_outside(monkeypatch):
     monkeypatch.setattr(r, "maybe_reexec_pinned", lambda: None)
     parsers, names = [], set()
     monkeypatch.setattr(m._SuggestionArgumentParser, "parse_args", lambda self, *a: parsers.append(self) or sys.exit(0))
-    monkeypatch.setattr(m, "_record_cli_call", lambda *a: None)
+    monkeypatch.setattr(m.subprocess, "Popen", lambda *a, **k: None)
     with pytest.raises(SystemExit):
         m.main()
     while parsers:  # every subparser name, at every depth
