@@ -3449,58 +3449,11 @@ def _dispatch_litellm(args: argparse.Namespace) -> int:
     # Fast-fail for providers that require an explicit API key
     required_key = _SUB_PROVIDER_KEY_REQS.get(base_sub)
     if required_key and not os.environ.get(required_key):
-        print(
-            f"litellm:{base_sub} requires {required_key} env var",
-            file=sys.stderr,
-        )
-        try:
-            _emit_refusal_receipt(
-                args, args.provider, getattr(args, "model", None) or base_sub or "litellm",
-                f"litellm:{base_sub} requires {required_key} env var (missing)",
-            )
-        except Exception as _ref_exc:
-            logger.error("_dispatch_litellm: refusal receipt failed dispatch=%s: %s", args.dispatch_id, _ref_exc)
-        return _EX_USAGE
+        return _litellm_missing_key_refusal(args, base_sub, required_key)
 
-    env_model = os.environ.get("VNX_LITELLM_MODEL", "")
-    if base_sub == "deepseek":
-        model = env_model or _resolve_deepseek_model()
-    elif base_sub == "moonshot":
-        model = env_model or _resolve_moonshot_model(model_alias)
-    elif base_sub == "zai":
-        _validate_zai_model_not_legacy(args.model)
-        if model_alias:
-            _validate_zai_model_not_legacy(model_alias)
-        model = env_model or _resolve_zai_model(model_alias)
-    elif base_sub == "openrouter":
-        model = env_model or _resolve_openrouter_model(model_alias)
-    elif env_model:
-        model = env_model
-    elif base_sub and base_sub in _LITELLM_SUB_PROVIDER_DEFAULTS:
-        model = _LITELLM_SUB_PROVIDER_DEFAULTS[base_sub]
-    elif base_sub:
-        model = f"{base_sub}/default"
-    else:
-        model = "anthropic/claude-sonnet-4-6"
-
+    model = _litellm_resolve_model(args, base_sub, model_alias)
     lane_key = _build_lane_key(base_sub, model_alias)
-    _contract = None
-    _tool_call_shape = None
-    try:
-        from providers.behavior_contracts import get_contract as _get_contract
-        _contract = _get_contract(lane_key)
-        _tool_call_shape = _contract.tool_call_shape
-        logger.debug(
-            "_dispatch_litellm: lane=%s cache_control=%s tool_shape=%s",
-            lane_key,
-            _contract.cache_control_supported,
-            _tool_call_shape,
-        )
-    except KeyError:
-        logger.warning(
-            "_dispatch_litellm: no behavior contract for lane %r — proceeding without contract enforcement",
-            lane_key,
-        )
+    _tool_call_shape = _litellm_lane_tool_call_shape(lane_key)
 
     enriched_instruction = _enrich_instruction(args)
     # Isolation + (bench) seed materialization. Fail-loud by design, never a
@@ -3566,27 +3519,7 @@ def _dispatch_litellm(args: argparse.Namespace) -> int:
             review_only=getattr(args, "role", None) == "review-gate",
         )
         isolation_worktree = None
-
-        if result.error:
-            _emit_governance(args, args.provider, model, result, start_time, end_time, "failure", event_store=event_store)
-            print(f"spawn_litellm failed: {result.error}", file=sys.stderr)
-            return 1
-        if result.timed_out:
-            _emit_governance(args, args.provider, model, result, start_time, end_time, "timeout", event_store=event_store)
-            print("spawn_litellm timed out", file=sys.stderr)
-            return 1
-        if result.returncode != 0:
-            _emit_governance(args, args.provider, model, result, start_time, end_time, "failure", event_store=event_store)
-            return 1
-        if result.event_writer_failures > 0:
-            logger.error(
-                "litellm dispatch completed but %d event_writer failures occurred — audit gap",
-                result.event_writer_failures,
-            )
-            _emit_governance(args, args.provider, model, result, start_time, end_time, "success", event_store=event_store)
-            return 2
-        _emit_governance(args, args.provider, model, result, start_time, end_time, "success", event_store=event_store)
-        return 0
+        return _litellm_outcome(args, model, result, start_time, end_time, event_store)
     finally:
         # Reap the worktree FIRST (its provider_teardown_worktree event lands
         # in the live buffer), then the safety net archives+clears — the ring
@@ -3600,6 +3533,96 @@ def _dispatch_litellm(args: argparse.Namespace) -> int:
             review_only=getattr(args, "role", None) == "review-gate",
         )
         _event_store_safety_net(event_store, args)
+
+
+def _litellm_missing_key_refusal(args: argparse.Namespace, base_sub: str, required_key: str) -> int:
+    """Refuse a litellm dispatch whose sub-provider API key is not set: stderr line, receipt, EX_USAGE."""
+    print(
+        f"litellm:{base_sub} requires {required_key} env var",
+        file=sys.stderr,
+    )
+    try:
+        _emit_refusal_receipt(
+            args, args.provider, getattr(args, "model", None) or base_sub or "litellm",
+            f"litellm:{base_sub} requires {required_key} env var (missing)",
+        )
+    except Exception as _ref_exc:
+        logger.error("_dispatch_litellm: refusal receipt failed dispatch=%s: %s", args.dispatch_id, _ref_exc)
+    return _EX_USAGE
+
+
+def _litellm_resolve_model(args: argparse.Namespace, base_sub: str, model_alias: "str | None") -> str:
+    """The litellm model path for ``base_sub``; VNX_LITELLM_MODEL wins over every default."""
+    env_model = os.environ.get("VNX_LITELLM_MODEL", "")
+    if base_sub == "deepseek":
+        model = env_model or _resolve_deepseek_model()
+    elif base_sub == "moonshot":
+        model = env_model or _resolve_moonshot_model(model_alias)
+    elif base_sub == "zai":
+        _validate_zai_model_not_legacy(args.model)
+        if model_alias:
+            _validate_zai_model_not_legacy(model_alias)
+        model = env_model or _resolve_zai_model(model_alias)
+    elif base_sub == "openrouter":
+        model = env_model or _resolve_openrouter_model(model_alias)
+    elif env_model:
+        model = env_model
+    elif base_sub and base_sub in _LITELLM_SUB_PROVIDER_DEFAULTS:
+        model = _LITELLM_SUB_PROVIDER_DEFAULTS[base_sub]
+    elif base_sub:
+        model = f"{base_sub}/default"
+    else:
+        model = "anthropic/claude-sonnet-4-6"
+    return model
+
+
+def _litellm_lane_tool_call_shape(lane_key: str) -> "str | None":
+    """The behavior contract's tool_call_shape for ``lane_key``; None (with a warning) without a contract."""
+    _contract = None
+    _tool_call_shape = None
+    try:
+        from providers.behavior_contracts import get_contract as _get_contract
+        _contract = _get_contract(lane_key)
+        _tool_call_shape = _contract.tool_call_shape
+        logger.debug(
+            "_dispatch_litellm: lane=%s cache_control=%s tool_shape=%s",
+            lane_key,
+            _contract.cache_control_supported,
+            _tool_call_shape,
+        )
+    except KeyError:
+        logger.warning(
+            "_dispatch_litellm: no behavior contract for lane %r — proceeding without contract enforcement",
+            lane_key,
+        )
+    return _tool_call_shape
+
+
+def _litellm_outcome(
+    args: argparse.Namespace, model: str, result: Any, start_time: datetime, end_time: datetime,
+    event_store: Any,
+) -> int:
+    """Emit governance for a finished litellm spawn and map its outcome to the exit code."""
+    if result.error:
+        _emit_governance(args, args.provider, model, result, start_time, end_time, "failure", event_store=event_store)
+        print(f"spawn_litellm failed: {result.error}", file=sys.stderr)
+        return 1
+    if result.timed_out:
+        _emit_governance(args, args.provider, model, result, start_time, end_time, "timeout", event_store=event_store)
+        print("spawn_litellm timed out", file=sys.stderr)
+        return 1
+    if result.returncode != 0:
+        _emit_governance(args, args.provider, model, result, start_time, end_time, "failure", event_store=event_store)
+        return 1
+    if result.event_writer_failures > 0:
+        logger.error(
+            "litellm dispatch completed but %d event_writer failures occurred — audit gap",
+            result.event_writer_failures,
+        )
+        _emit_governance(args, args.provider, model, result, start_time, end_time, "success", event_store=event_store)
+        return 2
+    _emit_governance(args, args.provider, model, result, start_time, end_time, "success", event_store=event_store)
+    return 0
 
 
 def _dispatch_kimi(args: argparse.Namespace) -> int:
