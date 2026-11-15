@@ -578,6 +578,30 @@ def enforce_pr_exists(
                 reason=f"{classification.evidence}; commit state {worktree_state!r} — nothing to push",
             )
 
+    return _enforce_pr_exists_committed_or_pushed(
+        dispatch_id=dispatch_id, branch=branch, worktree_state=worktree_state,
+        repo_root=repo_root, run_dir=run_dir, receipts_file=receipts_file,
+        pr_title=pr_title, pr_body=pr_body, target_remote_head=target_remote_head,
+        skip_pr=skip_pr, provider=provider, terminal=terminal,
+    )
+
+
+def _enforce_pr_exists_committed_or_pushed(
+    *,
+    dispatch_id: str,
+    branch: str,
+    worktree_state: str,
+    repo_root: Path,
+    run_dir: Path,
+    receipts_file: "str | Path",
+    pr_title: str,
+    pr_body: str,
+    target_remote_head: "Optional[str]",
+    skip_pr: bool,
+    provider: "Optional[str]",
+    terminal: "Optional[str]",
+) -> PrEnforcementResult:
+    """``enforce_pr_exists`` for a committed/pushed tree: push, containment, PR."""
     # committed or pushed are the two states with work that must reach a PR.
     pushed = worktree_state == "pushed"
     if worktree_state == "committed":
@@ -630,7 +654,25 @@ def enforce_pr_exists(
             applicable=True, ok=True, pushed=pushed, pr_number=None, created=False,
             reason="skip_pr=True — branch pushed, auto-PR suppressed (existing dispatch branch)",
         )
+    return _enforce_pr_exists_open_pr(
+        dispatch_id=dispatch_id, branch=branch, run_dir=run_dir, receipts_file=receipts_file,
+        pr_title=pr_title, pr_body=pr_body, pushed=pushed, provider=provider, terminal=terminal,
+    )
 
+
+def _enforce_pr_exists_open_pr(
+    *,
+    dispatch_id: str,
+    branch: str,
+    run_dir: Path,
+    receipts_file: "str | Path",
+    pr_title: str,
+    pr_body: str,
+    pushed: bool,
+    provider: "Optional[str]",
+    terminal: "Optional[str]",
+) -> PrEnforcementResult:
+    """Ensure one open PR for *branch*; a failure is a ``pr_failed`` receipt."""
     try:
         from gh_pr_ensure import ensure_pr  # noqa: PLC0415
         result = ensure_pr(branch, run_dir, title=pr_title, body=pr_body, draft=False)
@@ -778,7 +820,6 @@ def _handle_dirty_substantive(
     reason = evidence
     committed = False
     pushed = False
-    pr_number: "Optional[int]" = None
     # The worker's own HEAD, taken BEFORE the salvage commit changes it: the
     # yardstick for "the worker's commits are already on origin".
     pre_salvage_head = _head_sha(wt_path)
@@ -834,7 +875,33 @@ def _handle_dirty_substantive(
                     provider=provider, terminal=terminal, wt_path=wt_path,
                 )
             reason = f"{reason}; worker delivery not established: {delivery.reason}"
+    return _handle_dirty_substantive_outcome(
+        dispatch_id=dispatch_id, branch=branch, wt_path=wt_path, receipts_file=receipts_file,
+        tracked_paths=tracked_paths, untracked_paths=untracked_paths, evidence=evidence,
+        pr_title=pr_title, pr_body=pr_body, skip_pr=skip_pr, pushed=pushed, reason=reason,
+        provider=provider, terminal=terminal,
+    )
 
+
+def _handle_dirty_substantive_outcome(
+    *,
+    dispatch_id: str,
+    branch: str,
+    wt_path: Path,
+    receipts_file: "str | Path",
+    tracked_paths: "tuple[str, ...]",
+    untracked_paths: "tuple[str, ...]",
+    evidence: str,
+    pr_title: str,
+    pr_body: str,
+    skip_pr: bool,
+    pushed: bool,
+    reason: str,
+    provider: "Optional[str]",
+    terminal: "Optional[str]",
+) -> PrEnforcementResult:
+    """The draft salvage PR (when pushed) and the corrective receipt (OI-1119)."""
+    pr_number: "Optional[int]" = None
     if pushed and not skip_pr:
         try:
             from gh_pr_ensure import ensure_pr  # noqa: PLC0415
