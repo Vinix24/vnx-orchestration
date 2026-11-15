@@ -27,6 +27,7 @@ import pytest
 SCRIPT_DIR = Path(__file__).resolve().parent.parent / "scripts"
 sys.path.insert(0, str(SCRIPT_DIR / "lib"))
 
+import gate_artifacts  # noqa: E402
 import stop_conditions as sc  # noqa: E402
 from stop_conditions import (  # noqa: E402
     CheckStatus,
@@ -604,6 +605,76 @@ class TestRepeatedGateFailureCause:
             (results_dir / f"pr-{pr}-kimi_gate.json").write_text(json.dumps(d))
         result = check_repeated_gate_failure_cause(results_dir, n=3)
         assert result.status == CheckStatus.TRIGGERED
+
+
+# ── E6: advisory-only rejections take their cause from the advisory files ──
+
+
+def _synthetic():
+    return {"severity": "error", "file_path": "", "line": 0,
+            "message": f"{gate_artifacts.VERDICT_ENTRY_PREFIX}: verdict 'fail' read as fail; 1 finding(s), none at a blocking severity"}
+
+
+def _advisory(path):
+    return {"severity": "warning", "message": "real defect", "file_path": path, "line": 3}
+
+
+def _write_gate(results_dir, pr, blocking, advisory, day):
+    d = _gate_result(pr, "codex_gate", status="completed", blocking_findings=blocking,
+                     recorded_at=f"2026-09-0{day}T00:00:00Z")
+    d["advisory_findings"] = advisory
+    (results_dir / f"pr-{pr}-codex_gate.json").write_text(json.dumps(d))
+
+
+class TestAdvisoryOnlyRejectionCause:
+    def _dir(self, tmp_path):
+        results_dir = tmp_path / "results"
+        results_dir.mkdir()
+        return results_dir
+
+    def test_three_advisory_rejections_on_different_files_do_not_trigger(self, tmp_path):
+        rd = self._dir(tmp_path)
+        for i, pr in enumerate([501, 502, 503]):
+            _write_gate(rd, pr, [_synthetic()], [_advisory(f"a{i}.py")], i + 1)
+        assert check_repeated_gate_failure_cause(rd, n=3).status == CheckStatus.CLEAR
+
+    def test_three_advisory_rejections_on_one_file_trigger_naming_it(self, tmp_path):
+        rd = self._dir(tmp_path)
+        for i, pr in enumerate([511, 512, 513]):
+            _write_gate(rd, pr, [_synthetic()], [_advisory("same.py"), _advisory(f"x{i}.py")], i + 1)
+        result = check_repeated_gate_failure_cause(rd, n=3)
+        assert result.status == CheckStatus.TRIGGERED
+        assert "file:same.py" in result.message
+        assert "file:x0.py" not in result.message
+
+    def test_synthetic_only_without_advisory_path_keeps_legacy_cause(self):
+        for advisory in ([], None, [{"message": "m", "file_path": ""}], [{"message": "m"}], "junk", [None]):
+            record = {"status": "completed", "blocking_findings": [_synthetic()]}
+            if advisory is not None:
+                record["advisory_findings"] = advisory
+            assert sc._gate_result_cause(record) == frozenset({"blocking_findings"})
+
+    def test_real_blocking_finding_with_synthetic_entry_keeps_todays_cause(self):
+        record = {
+            "status": "completed",
+            "blocking_findings": [{"severity": "blocking", "message": "x", "file_path": "real.py"}, _synthetic()],
+            "advisory_findings": [_advisory("adv.py")],
+        }
+        assert sc._gate_result_cause(record) == frozenset({"file:real.py", "blocking_findings"})
+
+    def test_non_string_message_is_not_synthetic(self):
+        record = {"status": "completed", "blocking_findings": [{"message": None, "file_path": ""}],
+                  "advisory_findings": [_advisory("adv.py")]}
+        assert sc._gate_result_cause(record) == frozenset({"blocking_findings"})
+
+    def test_classify_buckets_unchanged(self):
+        unbuilt = {"status": "failed", "reason": next(iter(sc._UNBUILT_GATE_REASONS))}
+        exhausted = {"status": "failed", "reason": sc.QUOTA_REFUSAL_REASON}
+        assert sc._classify_gate_record(unbuilt)[0] == "unbuilt"
+        assert sc._classify_gate_record(exhausted)[0] == "exhausted"
+        advisory_only = {"status": "completed", "blocking_findings": [_synthetic()],
+                         "advisory_findings": [_advisory("a.py")]}
+        assert sc._classify_gate_record(advisory_only) == ("counted", frozenset({"file:a.py"}))
 
 
 # ── tri-state discipline (cross-cutting) ────────────────────────────────
