@@ -1,0 +1,131 @@
+"""permission_events_sources: B1, B2 and B4a readers, origin and account (ADR-075 decisions 2, 5, 8)."""
+
+import json
+import sys
+from pathlib import Path
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts" / "lib"))
+
+import permission_events_sources as src
+
+TS = "2026-11-14T10:00:00.000Z"
+UUID = "0a1b2c3d-1111-2222-3333-444455556666"
+
+
+def use(tid, name="Bash", command="pytest -q", ts=TS):
+    block = {"type": "tool_use", "id": tid, "name": name, "input": {"command": command} if command else {}}
+    return {"type": "assistant", "timestamp": ts, "message": {"content": [block]}}
+
+
+def result(tid, source, kind=None, code="rule:cliArg", decision="reject", text="denied", ts=TS):
+    block = {"type": "tool_result", "tool_use_id": tid, "content": text,
+             "permissionDecision": {"decision": decision, "source": source, "reasonCode": code}}
+    if kind:
+        block["toolDenialKind"] = kind
+    return {"type": "user", "timestamp": ts, "message": {"content": [block]}}
+
+
+def asked(text, ts=TS):
+    return {"type": "assistant", "timestamp": ts, "message": {"content": [{"type": "text", "text": text}]}}
+
+
+def scan(objs, slug="-root", configs=("/nonexistent/a", "/nonexistent/b")):
+    lines = [o if isinstance(o, str) else json.dumps(o) for o in objs]
+    return src.scan_transcript(lines, project_id="vnx-dev", slug=slug, stem="sess1", account_configs=configs)
+
+
+def one(objs, **kw):
+    events = scan(objs, **kw).events
+    assert len(events) == 1
+    return events[0]
+
+
+def test_b1_config_is_never_a_user_decision():
+    ev = one([use("t1"), result("t1", "config", "user-rejected")])
+    assert (ev["bron"], ev["besluit"], ev["vorm"]) == ("B1", "refused_config", "pytest -q")
+    assert ev["reden"].startswith("rule:cliArg") and ev["session_id"] == "sess1"
+
+
+@pytest.mark.parametrize("source,kind,code,besluit", [
+    ("config", "permission-rule", "rule:cliArg", "refused_config"),
+    ("config", "automode-blocked", "classifier:auto-mode", "refused_classifier"),
+    ("classifier", "automode-blocked", "classifier:auto-mode", "refused_classifier"),
+    ("config", "permission-rule", "hook:PreToolUse", "refused_hook"),
+    ("", "permission-rule", "rule:userSettings", "refused_config"),
+])
+def test_b1_mapping(source, kind, code, besluit):
+    ev = one([use("t1"), result("t1", source, kind, code)])
+    assert (ev["bron"], ev["besluit"]) == ("B1", besluit)
+
+
+@pytest.mark.parametrize("source,besluit", [
+    ("user_temporary", "approved_once"), ("user_permanent", "approved_permanent"), ("user_reject", "refused_user"),
+])
+def test_b2_mapping(source, besluit):
+    ev = one([use("t1"), result("t1", source, None, "safetyCheck", "accept")])
+    assert (ev["bron"], ev["besluit"]) == ("B2", besluit)
+
+
+def test_non_bash_tool_uses_the_tool_name():
+    assert one([use("t1", "Write", ""), result("t1", "user_temporary", decision="accept")])["vorm"] == "Write"
+
+
+@pytest.mark.parametrize("bad", [
+    result("t1", "user-ish-new-thing", "permission-rule"),   # unknown source
+    result("t1", "", "user-rejected"),                        # a human rejection that cannot be proven
+    result("t9", "config", "permission-rule"),                # no matching tool_use
+    result("t1", "config", "permission-rule", ts="not a time"),
+])
+def test_unmappable_lines_are_skipped_and_counted(bad):
+    out = scan([use("t1"), bad])
+    assert out.events == [] and sum(out.skipped["B1"].values()) == 1
+
+
+def test_automatic_accepts_and_plain_results_are_ignored():
+    out = scan([use("t1"), result("t1", "config", None, "rule", "accept"), "not json"])
+    assert out.events == [] and out.skipped["B1"] == {"malformed_json": 1}
+
+
+def test_b4a_copy_block_needs_an_ask_outside_the_block():
+    text = "Draai dit in een eigen terminal:\n```bash\n# comment\n! cd /x && vnx deliverable promote dlv-4c83df210cdf\nls\n```"
+    ev = one([asked(text)])
+    assert (ev["bron"], ev["besluit"], ev["vorm"], ev["dispatch_id"]) == ("B4a", "asked", "vnx deliverable promote <dlv>", "dlv-4c83df210cdf")
+    assert scan([asked("Hier is code:\n```bash\nls\n```")]).events == []
+    assert scan([asked("```bash\n# draai dit\nls\n```")]).events == []
+    assert len(scan([asked("jij moet dit doen:\n```\nls -la\n```\nen ook\n```\npwd\n```")]).events) == 2
+
+
+@pytest.mark.parametrize("slug,origin", [
+    ("-Users-x-Development-vnx-orchestration--vnx-data-worktrees-dispatch-dlv-4c83df210cdf", "worker"),
+    ("-Users-x-repo-.vnx-data-worktrees-dispatch-a", "worker"),
+    ("-Users-x-Development-vnx-orchestration--claude-terminals-T0", "t0"),
+    ("-Users-x-T0", "t0"),
+    ("-Users-x-Development-vnx-orchestration", "operator"),
+    ("-tmp-claude-worktrees-foo", "unknown"),
+])
+def test_origin_and_slug_never_in_the_event(slug, origin):
+    assert src.origin_of(slug) == origin
+    ev = one([use("t1"), result("t1", "config", "permission-rule")], slug=slug)
+    assert ev["origin"] == origin and slug not in json.dumps(ev)
+
+
+def test_dispatch_id_from_a_worktree_slug():
+    ev = one([use("t1"), result("t1", "config", "permission-rule")], slug="-a--vnx-data-worktrees-dispatch-dlv-4c83df210cdf")
+    assert ev["dispatch_id"] == "dlv-4c83df210cdf"
+
+
+def test_account_is_a_slot_and_the_uuid_stays_inside(tmp_path):
+    a, b = tmp_path / "a.json", tmp_path / "b.json"
+    a.write_text(json.dumps({"oauthAccount": {"accountUuid": "other", "emailAddress": "a@example.invalid"}}))
+    b.write_text(json.dumps({"oauthAccount": {"accountUuid": UUID, "emailAddress": "b@example.invalid"}}))
+    owner = {"type": "session-owner", "accountUuid": UUID, "sessionId": "sess-from-owner"}
+    ev = one([owner, use("t1"), result("t1", "config", "permission-rule")], configs=(a, b))
+    assert ev["account"] == "sm" and ev["session_id"] == "sess-from-owner"
+    assert UUID not in json.dumps(ev) and "example.invalid" not in json.dumps(ev)
+    assert src.resolve_account(UUID, (b, a)) == "vnx"
+    for owner_uuid in (None, "", "nobody"):
+        assert src.resolve_account(owner_uuid, (a, b)) == "unknown"
+    a.write_text("{broken")
+    assert src.resolve_account(UUID, (a, tmp_path / "missing.json")) == "unknown"
