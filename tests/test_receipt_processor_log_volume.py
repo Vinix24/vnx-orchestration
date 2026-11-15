@@ -109,3 +109,26 @@ def test_no_rotation_below_limit_or_bad_limit(tmp_path):
     assert log.exists() and old.read_text() == "older copy"
     log2, old2 = _rotate(tmp_path, 51, {"VNX_SUPERVISOR_LOG_MAX_MB": "junk"})
     assert not log2.exists()  # bad limit falls back to the 50 MB default
+
+
+def test_rotation_with_gnu_style_stat(tmp_path):
+    """GNU stat reads `-f %z` as --file-system plus a second operand: multi-line stdout, exit 1."""
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake = fake_bin / "stat"
+    fake.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1" = "-f" ]; then printf "  File: x\\n    ID: 0 Namelen: 255\\nBlock size: 4096\\n"; exit 1; fi\n'
+        'if [ "$1" = "-c" ]; then wc -c < "$3" | tr -d " "; exit 0; fi\n'
+        "exit 2\n"
+    )
+    fake.chmod(0o755)
+    log = tmp_path / "sup.log"
+    with log.open("wb") as fh:
+        fh.truncate(51 * 1024 * 1024)
+    env = {k: v for k, v in os.environ.items() if k != "VNX_SUPERVISOR_LOG_MAX_MB"}
+    env["PATH"] = f"{fake_bin}:{env['PATH']}"
+    script = f'{_rotation_snippet()}\n_rotate_supervisor_log "{log}"\n'
+    subprocess.run(["bash", "-c", script], check=True, env=env)
+    assert not log.exists()
+    assert (tmp_path / "sup.log.1").stat().st_size == 51 * 1024 * 1024
