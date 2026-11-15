@@ -285,15 +285,7 @@ def check_ci_run_for_head(
     # ── Escape hatch ──────────────────────────────────────────────────────
     reason = _resolve_override_reason(override_reason)
     if reason is not None:
-        if not reason:
-            return _no_go("override_without_reason",
-                "override zonder reden geweigerd: een override vereist een niet-lege reden "
-                "(geen stille bypass)",
-                workflow_name=resolved_workflow,
-                overridden=True,
-                override_reason=reason,
-            )
-        return _overridden_go(reason, head_sha, resolved_workflow)
+        return _override_verdict(reason, head_sha, resolved_workflow)
 
     # ── gh availability ────────────────────────────────────────────────────
     if shutil.which(gh_bin) is None:
@@ -327,6 +319,31 @@ def check_ci_run_for_head(
         )
 
     # ── gh authentication ──────────────────────────────────────────────────
+    refusal = _check_gh_auth(project_root, gh_bin, head_sha, resolved_workflow)
+    if refusal is not None:
+        return refusal
+
+    runs, refusal = _query_commit_runs(project_root, gh_bin, head_sha, resolved_workflow)
+    if refusal is not None:
+        return refusal
+    return _verdict_from_runs(runs, head_sha, resolved_workflow)
+
+
+def _override_verdict(reason: str, head_sha: Optional[str], resolved_workflow: str) -> Dict[str, Any]:
+    """Verdict for an attempted override: refused without a reason, else a visible GO."""
+    if not reason:
+        return _no_go("override_without_reason",
+            "override zonder reden geweigerd: een override vereist een niet-lege reden "
+            "(geen stille bypass)",
+            workflow_name=resolved_workflow,
+            overridden=True,
+            override_reason=reason,
+        )
+    return _overridden_go(reason, head_sha, resolved_workflow)
+
+
+def _check_gh_auth(project_root: Path, gh_bin: str, head_sha: str, resolved_workflow: str) -> Optional[Dict[str, Any]]:
+    """NO-GO when ``gh auth status`` is missing, hangs or fails; None when authenticated."""
     auth, auth_err = _capture([gh_bin, "auth", "status"], timeout=GH_AUTH_TIMEOUT, cwd=str(project_root))
     if auth_err == "missing":
         return _no_go("gh_missing",
@@ -346,8 +363,17 @@ def check_ci_run_for_head(
             head_sha=head_sha,
             workflow_name=resolved_workflow,
         )
+    return None
 
-    # ── Query workflow runs, scoped to the exact commit (OI-1387) ──────────
+
+def _query_commit_runs(
+    project_root: Path, gh_bin: str, head_sha: str, resolved_workflow: str,
+) -> Tuple[Any, Optional[Dict[str, Any]]]:
+    """Query workflow runs scoped to the exact commit (OI-1387).
+
+    Returns ``(runs, None)`` with the parsed gh output, or ``(None, verdict)``
+    with the NO-GO for a missing, hanging, failing or unparseable query.
+    """
     run_list, run_err = _capture(
         [
             gh_bin, "run", "list",
@@ -360,20 +386,20 @@ def check_ci_run_for_head(
         cwd=str(project_root),
     )
     if run_err == "missing":
-        return _no_go("gh_missing",
+        return None, _no_go("gh_missing",
             "gh CLI niet beschikbaar: deze merge is niet toetsbaar",
             head_sha=head_sha,
             workflow_name=resolved_workflow,
         )
     if run_err == "timeout":
-        return _no_go("gh_run_list_timeout",
+        return None, _no_go("gh_run_list_timeout",
             f"gh run list liep vast voor workflow '{resolved_workflow}': deze merge is niet toetsbaar",
             head_sha=head_sha,
             workflow_name=resolved_workflow,
         )
     if run_list is None or run_list.returncode != 0:
         stderr = (run_list.stderr if run_list else "").strip()
-        return _no_go("gh_run_list_failed",
+        return None, _no_go("gh_run_list_failed",
             f"gh run list faalde voor workflow '{resolved_workflow}': deze merge is niet toetsbaar"
             + (f" ({stderr[:120]})" if stderr else ""),
             head_sha=head_sha,
@@ -381,14 +407,17 @@ def check_ci_run_for_head(
         )
 
     try:
-        runs = json.loads(run_list.stdout)
+        return json.loads(run_list.stdout), None
     except json.JSONDecodeError:
-        return _no_go("unparseable",
+        return None, _no_go("unparseable",
             f"gh-uitvoer niet te parsen voor workflow '{resolved_workflow}': deze merge is niet toetsbaar",
             head_sha=head_sha,
             workflow_name=resolved_workflow,
         )
 
+
+def _verdict_from_runs(runs: Any, head_sha: str, resolved_workflow: str) -> Dict[str, Any]:
+    """Verdict from the parsed run list: no run, still running, or the deciding completed run."""
     # ── Match runs to the exact HEAD SHA ────────────────────────────────────
     # ``--commit`` already scopes gh's response to head_sha; this filter is a
     # defensive no-op against a gh quirk returning extra entries.
@@ -431,6 +460,11 @@ def check_ci_run_for_head(
             return _fail(resolved_workflow, head_sha, run_id, conclusion, f"run {run_id}")
         return _go(resolved_workflow, head_sha, run_id, f"run {run_id}")
 
+    return _latest_completed_verdict(completed, head_sha, resolved_workflow)
+
+
+def _latest_completed_verdict(completed: List[Any], head_sha: str, resolved_workflow: str) -> Dict[str, Any]:
+    """Verdict from two or more completed runs on one commit: the LATEST decides."""
     # ── Multiple completed runs on the same commit: the LATEST decides ─────
     # (OI-1613). A stale failing run next to a newer successful one on the
     # same head (the tmux-spawn lane's reopen-to-retrigger pattern) must not
