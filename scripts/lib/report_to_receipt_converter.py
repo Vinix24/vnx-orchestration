@@ -2414,23 +2414,10 @@ def scan_and_convert(
     ANY stage of parsing/building/appending is caught, logged once, and the
     scan continues with the next report.
     """
-    if state_dir is None:
-        try:
-            state_dir = _resolve_state_dir()
-        except Exception as exc:
-            logger.error("report_to_receipt_converter: cannot resolve state_dir: %s", exc)
-            return ScanStats()
-
-    if not dry_run:
-        state_dir.mkdir(parents=True, exist_ok=True)
-    receipts_file = str(state_dir / "t0_receipts.ndjson")
-    watermark_path = state_dir / _WATERMARK_FILENAME
-    # OI-1102: also load the Bash processor's watermark so a report processed
-    # by the Bash lane is skipped here, and vice versa (cross-processor dedup).
-    bash_watermark_path = state_dir / _BASH_WATERMARK_FILENAME
-
-    watermark = _load_watermark(watermark_path)
-    bash_watermark = _load_watermark(bash_watermark_path)
+    opened = _open_scan_state(state_dir, dry_run)
+    if opened is None:
+        return ScanStats()
+    state_dir, receipts_file, watermark_path, watermark, bash_watermark_path, bash_watermark = opened
 
     new_count = 0
     duplicate_count = 0
@@ -2554,6 +2541,33 @@ def scan_and_convert(
     return stats
 
 
+def _open_scan_state(state_dir: Optional[Path], dry_run: bool):
+    """Resolve the state dir and load both watermarks for a scan.
+
+    Returns ``(state_dir, receipts_file, watermark_path, watermark,
+    bash_watermark_path, bash_watermark)``, or None after one ERROR line when
+    ``state_dir`` cannot be resolved. A dry run never creates ``state_dir``.
+    """
+    if state_dir is None:
+        try:
+            state_dir = _resolve_state_dir()
+        except Exception as exc:
+            logger.error("report_to_receipt_converter: cannot resolve state_dir: %s", exc)
+            return None
+
+    if not dry_run:
+        state_dir.mkdir(parents=True, exist_ok=True)
+    receipts_file = str(state_dir / "t0_receipts.ndjson")
+    watermark_path = state_dir / _WATERMARK_FILENAME
+    # OI-1102: also load the Bash processor's watermark so a report processed
+    # by the Bash lane is skipped here, and vice versa (cross-processor dedup).
+    bash_watermark_path = state_dir / _BASH_WATERMARK_FILENAME
+
+    watermark = _load_watermark(watermark_path)
+    bash_watermark = _load_watermark(bash_watermark_path)
+    return state_dir, receipts_file, watermark_path, watermark, bash_watermark_path, bash_watermark
+
+
 # ---------------------------------------------------------------------------
 # Targeted conversion — specific dispatch_ids, no directory scan
 # ---------------------------------------------------------------------------
@@ -2588,20 +2602,10 @@ def convert_dispatch_ids(
     """
     ids = [str(d).strip() for d in dispatch_ids if str(d).strip()]
 
-    if state_dir is None:
-        try:
-            state_dir = _resolve_state_dir()
-        except Exception as exc:
-            logger.error("report_to_receipt_converter: cannot resolve state_dir: %s", exc)
-            return ScanStats()
-
-    if not dry_run:
-        state_dir.mkdir(parents=True, exist_ok=True)
-    receipts_file = str(state_dir / "t0_receipts.ndjson")
-    watermark_path = state_dir / _WATERMARK_FILENAME
-    bash_watermark_path = state_dir / _BASH_WATERMARK_FILENAME
-    watermark = _load_watermark(watermark_path)
-    bash_watermark = _load_watermark(bash_watermark_path)
+    opened = _open_scan_state(state_dir, dry_run)
+    if opened is None:
+        return ScanStats()
+    state_dir, receipts_file, watermark_path, watermark, bash_watermark_path, bash_watermark = opened
 
     from report_path import resolve_report_path  # noqa: PLC0415
     from dispatch_spec import _ID_RE  # noqa: PLC0415 — canonical id-shape guard, same regex dispatch_bridge.py uses to kill path traversal before any path join
@@ -2617,43 +2621,11 @@ def convert_dispatch_ids(
     rejected_details, error_details = [], []
 
     for dispatch_id in ids:
-        # Codex finding (PR #1635): dispatch_id is caller-supplied CLI input
-        # and resolve_report_path() formats it straight into filenames — a
-        # value containing "/" or ".." could resolve reads outside
-        # unified_reports/. Validate against the same id-shape regex
-        # dispatch_bridge.stage_spec_bundle() already validates against
-        # before any path join, so there is exactly one definition of "a
-        # valid dispatch id" in the codebase. Rejected loudly (WARNING +
-        # malformed_count), never silently dropped.
-        if not _ID_RE.match(dispatch_id):
-            logger.warning(
-                "report_to_receipt_converter: --dispatch-id %r rejected — does not "
-                "match the dispatch id pattern (dispatch_spec._ID_RE); refusing to "
-                "resolve a report path from it",
-                dispatch_id,
-            )
+        located = _locate_dispatch_report(dispatch_id, data_dir, _ID_RE, resolve_report_path)
+        if located is None:
             malformed_count += 1
             continue
-        resolved = resolve_report_path(dispatch_id, data_dir=data_dir)
-        if resolved is None:
-            logger.warning(
-                "report_to_receipt_converter: --dispatch-id %s — no report file "
-                "found under %s/unified_reports",
-                dispatch_id, data_dir,
-            )
-            malformed_count += 1
-            continue
-        report_path = resolved.path
-
-        try:
-            file_hash = _compute_sha256(report_path)
-        except OSError as exc:
-            logger.warning(
-                "report_to_receipt_converter: --dispatch-id %s — cannot hash %s: %s",
-                dispatch_id, report_path, exc,
-            )
-            malformed_count += 1
-            continue
+        report_path, file_hash = located
 
         # Same cross-processor dedup as scan_and_convert(): already-processed
         # reports are silently skipped, not counted — in BOTH modes, so a
@@ -2736,6 +2708,45 @@ def convert_dispatch_ids(
     if not dry_run:
         _write_scan_heartbeat(state_dir, stats)
     return stats
+
+
+def _locate_dispatch_report(dispatch_id: str, data_dir: Path, id_re, resolve_report_path):
+    """Resolve and hash one ``--dispatch-id`` report; None (logged) when it cannot."""
+    # Codex finding (PR #1635): dispatch_id is caller-supplied CLI input
+    # and resolve_report_path() formats it straight into filenames — a
+    # value containing "/" or ".." could resolve reads outside
+    # unified_reports/. Validate against the same id-shape regex
+    # dispatch_bridge.stage_spec_bundle() already validates against
+    # before any path join, so there is exactly one definition of "a
+    # valid dispatch id" in the codebase. Rejected loudly (WARNING +
+    # malformed_count), never silently dropped.
+    if not id_re.match(dispatch_id):
+        logger.warning(
+            "report_to_receipt_converter: --dispatch-id %r rejected — does not "
+            "match the dispatch id pattern (dispatch_spec._ID_RE); refusing to "
+            "resolve a report path from it",
+            dispatch_id,
+        )
+        return None
+    resolved = resolve_report_path(dispatch_id, data_dir=data_dir)
+    if resolved is None:
+        logger.warning(
+            "report_to_receipt_converter: --dispatch-id %s — no report file "
+            "found under %s/unified_reports",
+            dispatch_id, data_dir,
+        )
+        return None
+    report_path = resolved.path
+
+    try:
+        file_hash = _compute_sha256(report_path)
+    except OSError as exc:
+        logger.warning(
+            "report_to_receipt_converter: --dispatch-id %s — cannot hash %s: %s",
+            dispatch_id, report_path, exc,
+        )
+        return None
+    return report_path, file_hash
 
 
 # ---------------------------------------------------------------------------
