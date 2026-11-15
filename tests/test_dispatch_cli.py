@@ -71,6 +71,15 @@ def _legacy_ledger_lifecycle(monkeypatch):
     monkeypatch.setenv("VNX_LEDGER_LIFECYCLE", "0")
 
 
+@pytest.fixture(autouse=True)
+def _hermetic_worker_claude_override(monkeypatch):
+    """A worker running with the worker-claude override exports these two names;
+    tests must not read them from the ambient shell. A test that wants the
+    override sets it itself with ``monkeypatch.setenv`` after this fixture."""
+    monkeypatch.delenv("VNX_OVERRIDE_WORKER_CLAUDE", raising=False)
+    monkeypatch.delenv("VNX_OVERRIDE_WORKER_CLAUDE_REASON", raising=False)
+
+
 # ---------------------------------------------------------------------------
 # Shared helpers
 # ---------------------------------------------------------------------------
