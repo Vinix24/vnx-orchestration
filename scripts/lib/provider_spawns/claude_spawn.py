@@ -467,11 +467,7 @@ def _tick_health(
 def _forward_event(event_writer: Callable[..., None], terminal_id: str, event: Any, dispatch_id: str) -> None:
     """Hand one event to the secondary ``event_writer``; a raising writer is logged, never fatal."""
     try:
-        event_writer(
-            terminal_id,
-            {"type": event.type, "data": event.data},
-            dispatch_id=dispatch_id,
-        )
+        event_writer(terminal_id, {"type": event.type, "data": event.data}, dispatch_id=dispatch_id)
     except Exception as _exc:
         logger.debug("spawn_claude: event_writer raised: %s", _exc)
 
@@ -485,10 +481,7 @@ def _on_event_stops(
         try:
             adapter.stop(terminal_id)
         except Exception as _exc:
-            logger.debug(
-                "spawn_claude: adapter.stop() after on_event=False failed: %s",
-                _exc,
-            )
+            logger.debug("spawn_claude: adapter.stop() after on_event=False failed: %s", _exc)
         return True
     return False
 
@@ -500,26 +493,17 @@ def _stream_failure_result(
     """Fail closed on a stream read failure: stop the subprocess and return non-zero."""
     logger.error(
         "spawn_claude: stream read failure for dispatch=%s terminal=%s: %s",
-        dispatch_id,
-        terminal_id,
-        e,
+        dispatch_id, terminal_id, e,
     )
     # Fail closed: stop subprocess + return non-zero immediately.
     try:
         adapter.stop(terminal_id)
     except Exception as _stop_exc:
-        logger.debug(
-            "spawn_claude: adapter.stop() in error handler raised: %s", _stop_exc
-        )
+        logger.debug("spawn_claude: adapter.stop() in error handler raised: %s", _stop_exc)
     obs = adapter.observe(terminal_id)
     _rc = obs.transport_state.get("returncode") or 1
     return ClaudeSpawnResult(
-        returncode=_rc,
-        completion={},
-        events_written=events_written,
-        session_id=adapter.get_session_id(terminal_id),
-        timed_out=False,
-        error=str(e),
-        completion_text="".join(text_parts),
-        model_resolved=model_resolved,
+        returncode=_rc, completion={}, events_written=events_written,
+        session_id=adapter.get_session_id(terminal_id), timed_out=False, error=str(e),
+        completion_text="".join(text_parts), model_resolved=model_resolved,
     )

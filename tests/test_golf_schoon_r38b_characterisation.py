@@ -14,6 +14,7 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace as NS
 from typing import Any, Dict, List, Optional
 from unittest.mock import patch
 
@@ -31,20 +32,7 @@ class _Event:
     data: Any
 
 
-class _Obs:
-    def __init__(self, rc: Optional[int]) -> None:
-        self.transport_state = {"returncode": rc}
-
-
-class _DeliverResult:
-    def __init__(self, success: bool, reason: Optional[str] = None) -> None:
-        self.success = success
-        self.failure_reason = reason
-
-
-class _FakeAdapter:
-    """Stands in for SubprocessAdapter: records every call in the shared ``log``."""
-
+class _FakeAdapter:  # stands in for SubprocessAdapter; records every call in ``log``
     def __init__(self, log: List[Any], events: List[Any], *, rc: Optional[int] = 0,
                  deliver_ok: bool = True, stop_raises: bool = False,
                  rc_cache: Optional[Dict[str, int]] = None) -> None:
@@ -56,7 +44,7 @@ class _FakeAdapter:
 
     def deliver(self, terminal_id, dispatch_id, **kwargs):
         self.log.append(("deliver", terminal_id, dispatch_id, kwargs))
-        return _DeliverResult(self.deliver_ok, None if self.deliver_ok else "unknown role")
+        return NS(success=self.deliver_ok, failure_reason=None if self.deliver_ok else "unknown role")
 
     def read_events_with_timeout(self, terminal_id, *, chunk_timeout, total_deadline):
         self.log.append(("read", terminal_id, chunk_timeout, total_deadline))
@@ -72,7 +60,7 @@ class _FakeAdapter:
 
     def observe(self, terminal_id):
         self.log.append(("observe", terminal_id))
-        return _Obs(self.rc)
+        return NS(transport_state={"returncode": self.rc})
 
     def get_session_id(self, terminal_id):
         self.log.append(("session", terminal_id))
