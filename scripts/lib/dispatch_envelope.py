@@ -679,7 +679,7 @@ def run_envelope_plan(
         PermissionError: permit was not issued by issue_permit for this plan.
         ValueError: plan.lane is not "provider".
     """
-    from dispatch_internal import is_valid_instruction_hash, require_permit  # noqa: PLC0415
+    from dispatch_internal import require_permit  # noqa: PLC0415
 
     require_permit(plan, permit)  # un-evadable backstop — FIRST action
 
@@ -689,29 +689,11 @@ def run_envelope_plan(
             f"(claude_headless runs through run_envelope_headless_plan)"
         )
 
-    # P0-3 (PR-4c): REQUIRE a valid 64-hex plan hash before delivery — fail-CLOSED.
-    # The old `if plan.instruction_sha256:` guard fell OPEN on an empty hash, letting
-    # an empty-hash plan + valid permit spawn mutated content. No hash → no spawn.
-    if not is_valid_instruction_hash(plan.instruction_sha256):
-        return _pre_spawn_failure(
-            handover, state_dir, reason=REASON_PRE_SPAWN_ERROR,
-            error=(
-                f"plan.instruction_sha256 is not a valid 64-hex digest "
-                f"(got {plan.instruction_sha256!r}); refusing to deliver (fail-closed)"
-            ),
-        )
-
-    # TOCTOU verification — re-read and verify sha256 before delivering
-    instruction = Path(plan.instruction_file).read_text(encoding="utf-8")
-    actual = hashlib.sha256(instruction.encode("utf-8")).hexdigest()
-    if actual != plan.instruction_sha256:
-        return _pre_spawn_failure(
-            handover, state_dir, reason=REASON_PRE_SPAWN_ERROR,
-            error=(
-                f"instruction file mutated after permit: sha256 mismatch "
-                f"(expected {plan.instruction_sha256[:12]}…, got {actual[:12]}…)"
-            ),
-        )
+    # P0-3 (PR-4c): REQUIRE a valid 64-hex plan hash before delivery — fail-CLOSED,
+    # then the TOCTOU re-read: a mutated instruction file never spawns.
+    instruction, _refused = _verified_instruction(plan, handover, state_dir)
+    if _refused is not None:
+        return _refused
 
     spec = EnvelopeSpec(
         dispatch_id=plan.dispatch_id,
@@ -736,23 +718,8 @@ def run_envelope_plan(
     )
 
     enriched_instruction = _prepare(spec)
-    enriched_spec = EnvelopeSpec(
-        dispatch_id=spec.dispatch_id,
-        terminal_id=spec.terminal_id,
-        provider=spec.provider,
-        model=spec.model,
-        instruction=enriched_instruction,
-        role=spec.role,
-        pr_id=spec.pr_id,
-        state_dir=spec.state_dir,
-        data_dir=spec.data_dir,
-        deadline_seconds=spec.deadline_seconds,
-        parent_dispatch=spec.parent_dispatch,
-        task_class=spec.task_class,
-        tier_from=spec.tier_from,
-        tier_to=spec.tier_to,
-        work_ref=spec.work_ref, requires_mcp=spec.requires_mcp, skill=spec.skill,
-    )
+    # Every EnvelopeSpec field carried over, only the instruction enriched.
+    enriched_spec = dataclasses.replace(spec, instruction=enriched_instruction)
 
     # INTEGRITY — the bundle dir is the pending/<id>/ that hosts instruction.md.
     integrity = _record_integrity(
@@ -789,51 +756,20 @@ def run_envelope_plan(
             report_path=report_path, receipt_path=receipt_path,
         )
 
-    from dispatch_worktree_isolation import (  # noqa: PLC0415
-        create_dispatch_worktree,
-        resolve_consumer_project_root,
-    )
-
     # Resolved BEFORE worktree creation so create_dispatch_worktree honors the
     # plan's actual base_ref instead of silently defaulting to origin/main
     # (OI-1170-class: a fix-forward dispatch with base_ref=origin/dispatch/<branch>
-    # was previously always built on origin/main with no signal).
+    # was previously always built on origin/main with no signal). The CONSUMER
+    # project root is resolved explicitly (P0 provider-worktree-root-fix), once,
+    # and any failure is the same fail-loud refusal: no shared-checkout fallback.
     _base_ref = plan.base_ref or "origin/main"
 
-    wt_path: Optional[Path] = None
-    try:
-        # Resolve the CONSUMER project root explicitly (VNX_PROJECT_ROOT / CWD-git,
-        # never __file__) so a central-install consumer (SC/MC/SEO/...) gets its
-        # worktree under ITS OWN project — not the shared ~/.vnx-system checkout
-        # this lane code lives under in a central install (P0 provider-worktree-
-        # root-fix). Resolved once and reused for both create and remove below so
-        # a fluctuating ambient CWD can't split the two onto different roots.
-        # Any resolution failure is handled by the same fail-loud path below as
-        # a worktree-creation failure — never falls back to a shared checkout.
-        _consumer_project_root = resolve_consumer_project_root()
-        wt_path = create_dispatch_worktree(
-            plan.dispatch_id, project_root=_consumer_project_root, base_ref=(base_sha or "").strip() or _base_ref)
-
-    except Exception as _wt_exc:
-        _isolation_error = (
-            f"isolation required (require_worktree) but worktree creation failed "
-            f"for {plan.dispatch_id}: {_wt_exc} — aborting; no shared-checkout fallback"
-        )
-        logger.error("run_envelope_plan: %s", _isolation_error)
-        _fail_result = _AdapterResult(
-            returncode=1,
-            completion_text="",
-            status="failure",
-            error=_isolation_error, spawn_refused="worktree_creation_failed",
-        )
-        _fail_start = _fail_end = datetime.now(timezone.utc)
-        report_path, receipt_path = _govern(
-            enriched_spec, _fail_result, _fail_start, _fail_end, integrity=integrity,
-            lifecycle_v3=getattr(handover, "is_v3", False))
-        return _pre_spawn_failure(
-            handover, state_dir, reason=REASON_PRE_SPAWN_ERROR, error=_isolation_error,
-            report_path=report_path, receipt_path=receipt_path,
-        )
+    wt_path, _consumer_project_root, _refused = _isolated_worktree(
+        plan, enriched_spec, base_ref=(base_sha or "").strip() or _base_ref, integrity=integrity,
+        handover=handover, state_dir=state_dir, lane_fn="run_envelope_plan",
+        requirement="isolation required (require_worktree)")
+    if _refused is not None:
+        return _refused
 
     # ── OI-1113 pre-measurement: capture remote HEAD of the target branch ──
     # BEFORE the worker runs, so we can verify after the push that the new HEAD
@@ -861,85 +797,45 @@ def run_envelope_plan(
     # weeks). See run_envelope_headless_plan for the full rationale. The fix
     # mirrors that lane: catch the exception, build a failure _AdapterResult
     # preserving whatever the worker produced, and fall through to _govern.
-    _phantom_diff: Optional[str] = None
-    _prior_result: "Optional[_AdapterResult]" = None  # worker output before any close-out stumble
-    result: "Optional[_AdapterResult]" = None  # bound for the exit's end line, even if the block raises
     # ADR-045 §8: this lane never sees the child, so the hand-off IS its spawn boundary.
     _exit = _LaneExit(handover, state_dir=state_dir, wt_path=wt_path,
                       dispatch_id=plan.dispatch_id, project_root=_consumer_project_root,
                       terminal_id=plan.target_id)
-    start = datetime.now(timezone.utc)
-    end = start
-    try:
+
+    def _run_worker():
         _exit.spawn_marks.setdefault("spawned_at", now_utc())
-        result = ProviderAdapter().run(plan, enriched_spec.instruction, cwd=wt_path, role=role)
-        _prior_result = result
-        end = datetime.now(timezone.utc)
-        # F1 (codex): capture the worker's diff BEFORE the teardown below —
-        # remove_dispatch_worktree deletes both the worktree and the local dispatch/<id>
-        # branch, so the phantom-guard inside _govern could not otherwise resolve the
-        # provider lane's diff and would abstain, letting the exact kimi/glm/deepseek
-        # phantom slip through.
-        # Prefer the pushed branch (survives teardown → more durable evidence) over the
-        # live worktree diff (ephemeral, torn down in the finally block). When the worker
-        # pushed its branch, the branch diff is the more reliable evidence.
-        try:
-            _phantom_diff = _resolve_phantom_diff(
-                plan.dispatch_id,
-                base_ref=_base_ref,
-                wt_path=wt_path,
-                repo=_consumer_project_root,
-            )
-        except Exception:  # noqa: BLE001 — best-effort; None -> guard abstains, never false-rejects
-            _phantom_diff = None
-        # Rij-7: enforce push+PR BEFORE the teardown removes the worktree (the only
-        # handle to the local branch). Only when the worker itself reported success —
-        # a failed worker has nothing worth pushing. Reuses pr_enforcement.enforce_pr_exists
-        # (the single per-state decision site) and the shared tmux_worktree.classify_path.
-        if result.status == "success":
-            result = _enforce_push_pr(
-                dispatch_id=plan.dispatch_id,
-                branch=_target_branch,
-                wt_path=wt_path,
-                repo_root=_consumer_project_root,
-                receipts_file=_receipts_file_for(state_dir),
-                result=result,
-                base_ref=_base_ref,
-                target_remote_head=_target_remote_head,
-                skip_pr=_skip_pr,
-                work_ref=plan.work_ref,
-                provider=enriched_spec.provider,
-                terminal=enriched_spec.terminal_id,
-            )
-    except Exception as _work_exc:  # noqa: BLE001 — never let a close-out error skip GOVERN
-        logger.exception(
-            "envelope: provider work block raised dispatch=%s — building failure "
-            "result so _govern still emits a report+receipt (OI-1743)",
-            plan.dispatch_id,
-        )
-        result = _AdapterResult(
-            returncode=_prior_result.returncode if _prior_result is not None else 1,
-            completion_text=_prior_result.completion_text if _prior_result is not None else "",
-            status="failure",
-            token_usage=_prior_result.token_usage if _prior_result is not None else {},
+        return ProviderAdapter().run(plan, enriched_spec.instruction, cwd=wt_path, role=role)
+
+    return _work_then_govern(
+        _exit, plan, enriched_spec, _run_worker,
+        lane_word="provider", state_dir=state_dir, wt_path=wt_path,
+        project_root=_consumer_project_root, base_ref=_base_ref, target_branch=_target_branch,
+        target_remote_head=_target_remote_head, skip_pr=_skip_pr, integrity=integrity)
+
+
+def _verified_instruction(plan, handover, state_dir):
+    """The plan-hash check and the TOCTOU re-read: ``(instruction, refusal)``."""
+    from dispatch_internal import is_valid_instruction_hash  # noqa: PLC0415
+
+    if not is_valid_instruction_hash(plan.instruction_sha256):
+        return None, _pre_spawn_failure(
+            handover, state_dir, reason=REASON_PRE_SPAWN_ERROR,
             error=(
-                f"provider dispatch close-out raised: {_work_exc!r} — "
-                f"worker status was "
-                f"{_prior_result.status!r} before the failure (OI-1743)"
-                if _prior_result is not None
-                else f"provider dispatch raised before any worker result: {_work_exc!r} (OI-1743)"
+                f"plan.instruction_sha256 is not a valid 64-hex digest "
+                f"(got {plan.instruction_sha256!r}); refusing to deliver (fail-closed)"
             ),
-            session_id=_prior_result.session_id if _prior_result is not None else None,
-            model=_prior_result.model if _prior_result is not None else None,
         )
-        return _exit.govern(enriched_spec, result, start, end,
-                            phantom_diff=_phantom_diff, integrity=integrity, base_ref=_base_ref)
-    else:
-        return _exit.govern(enriched_spec, result, start, end,
-                            phantom_diff=_phantom_diff, integrity=integrity, base_ref=_base_ref)
-    finally:
-        # A BaseException (KeyboardInterrupt/SystemExit) skipped both exits above.
-        _exit.close(result)
+    instruction = Path(plan.instruction_file).read_text(encoding="utf-8")
+    actual = hashlib.sha256(instruction.encode("utf-8")).hexdigest()
+    if actual != plan.instruction_sha256:
+        return None, _pre_spawn_failure(
+            handover, state_dir, reason=REASON_PRE_SPAWN_ERROR,
+            error=(
+                f"instruction file mutated after permit: sha256 mismatch "
+                f"(expected {plan.instruction_sha256[:12]}…, got {actual[:12]}…)"
+            ),
+        )
+    return instruction, None
 
 
 def _prepare_with_data_dir(spec: "EnvelopeSpec") -> str:
@@ -1016,7 +912,7 @@ def run_envelope_headless_plan(
         PermissionError: permit was not issued by issue_permit for this plan.
         ValueError: plan.lane is not "claude_headless".
     """
-    from dispatch_internal import is_valid_instruction_hash, require_permit  # noqa: PLC0415
+    from dispatch_internal import require_permit  # noqa: PLC0415
 
     require_permit(plan, permit)  # un-evadable backstop — FIRST action
 
@@ -1026,27 +922,11 @@ def run_envelope_headless_plan(
             f"got lane={plan.lane!r}"
         )
 
-    # P0-3: REQUIRE a valid 64-hex plan hash before delivery — fail-CLOSED.
-    if not is_valid_instruction_hash(plan.instruction_sha256):
-        return _pre_spawn_failure(
-            handover, state_dir, reason=REASON_PRE_SPAWN_ERROR,
-            error=(
-                f"plan.instruction_sha256 is not a valid 64-hex digest "
-                f"(got {plan.instruction_sha256!r}); refusing to deliver (fail-closed)"
-            ),
-        )
-
-    # TOCTOU verification — re-read and verify sha256 before delivering
-    instruction = Path(plan.instruction_file).read_text(encoding="utf-8")
-    actual = hashlib.sha256(instruction.encode("utf-8")).hexdigest()
-    if actual != plan.instruction_sha256:
-        return _pre_spawn_failure(
-            handover, state_dir, reason=REASON_PRE_SPAWN_ERROR,
-            error=(
-                f"instruction file mutated after permit: sha256 mismatch "
-                f"(expected {plan.instruction_sha256[:12]}…, got {actual[:12]}…)"
-            ),
-        )
+    # P0-3: REQUIRE a valid 64-hex plan hash before delivery — fail-CLOSED,
+    # then the TOCTOU re-read: a mutated instruction file never spawns.
+    instruction, _refused = _verified_instruction(plan, handover, state_dir)
+    if _refused is not None:
+        return _refused
 
     from dispatch_spec import dispatch_paths_raw  # noqa: PLC0415
 
