@@ -27,7 +27,7 @@ from test_objective_reconcile import (  # noqa: E402
 _SUMMARY_KEYS = ["counts", "dispatch_outcomes", "evidence_source_health", "finished_at",
                  "mode", "per_track", "project_id", "provenance", "run_id", "started_at"]
 _COUNTS_KEYS = ["closed", "closed_sibling", "confirmed", "deferred", "delivery_hold",
-                "nominated", "open_pr", "reopened_guard", "stale", "tracks", "unverified"]
+                "nominated", "open_deliverable", "open_pr", "reopened_guard", "stale", "tracks", "unverified"]
 
 
 def _counts(**overrides: int) -> dict:
@@ -35,7 +35,7 @@ def _counts(**overrides: int) -> dict:
     base = {
         "tracks": 0, "nominated": 0, "confirmed": 0, "closed": 0,
         "closed_sibling": 0, "open_pr": 0, "unverified": 0, "deferred": 0,
-        "stale": 0, "reopened_guard": 0, "delivery_hold": 0,
+        "stale": 0, "reopened_guard": 0, "delivery_hold": 0, "open_deliverable": 0,
     }
     base.update(overrides)
     return base
