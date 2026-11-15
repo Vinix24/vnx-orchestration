@@ -194,19 +194,23 @@ def _load_verdicts(src: Path, project_id: str) -> List[Any]:
 
 
 def _read_ndjson(path: Path) -> Optional[List[Dict[str, Any]]]:
-    """The parsable object lines of an ndjson file; None when the file cannot be read."""
+    """The object lines of an ndjson file; None when the file cannot be read or any non-empty line is torn or not an
+    object (a damaged ledger is unreadable, never a shorter history). An empty file is an empty list."""
     try:
         text = path.read_text(encoding="utf-8")
     except (OSError, ValueError):  # vnx-silent-except: unreadable is None, which the caller turns into unknown
         return None
     rows = []
     for raw in text.splitlines():
+        if not raw.strip():
+            continue
         try:
             row = json.loads(raw)
-        except ValueError:  # vnx-silent-except: a torn line is no receipt
-            continue
-        if isinstance(row, dict):
-            rows.append(row)
+        except ValueError:  # vnx-silent-except: a torn line makes the whole ledger None (unknown), never a shorter history
+            return None
+        if not isinstance(row, dict):
+            return None
+        rows.append(row)
     return rows
 
 
@@ -226,7 +230,9 @@ def default_head_of(src: Path, repo: Optional[Path] = None) -> Callable[[int], O
     The branch is the latest one the review rounds ledger records for the PR; None when any link is missing,
     also when no ``repo`` is known (the project is not in the registry)."""
     def head_of(pr: int) -> Optional[str]:
-        rows = _read_ndjson(Path(src) / "review_gates" / "rounds.ndjson") or []
+        rows = _read_ndjson(Path(src) / "review_gates" / "rounds.ndjson")
+        if rows is None:
+            return None
         branches = [r["branch"] for r in rows if r.get("pr_number") == pr and isinstance(r.get("branch"), str) and r["branch"]]
         try:
             done = subprocess.run(["git", "-C", str(repo), "rev-parse", "--verify", "--quiet",

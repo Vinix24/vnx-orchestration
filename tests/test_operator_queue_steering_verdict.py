@@ -235,7 +235,7 @@ def test_default_pr_state_reads_the_merge_receipt_and_never_the_network(env):
     root, state, queue = env
     assert rd.default_pr_state_of(state)(7) is None  # no receipt ledger: unreadable, not open
     ledger = state / "t0_receipts.ndjson"
-    ledger.write_text(json.dumps({"event_type": "pr_merged", "pr_number": 8}) + "\nnot json\n", encoding="utf-8")
+    ledger.write_text(json.dumps({"event_type": "pr_merged", "pr_number": 8}) + "\n", encoding="utf-8")
     assert rd.default_pr_state_of(state)(7) == "open"
     ledger.write_text(ledger.read_text() + json.dumps({"event_type": "pr_merged", "pr_number": 7}) + "\n", encoding="utf-8")
     assert rd.default_pr_state_of(state)(7) == "merged"
@@ -284,3 +284,45 @@ def test_without_a_registered_repo_the_default_head_is_none_and_the_point_stays_
     res = _read(rd.read_cap_verdict, env, pr_state_of=lambda pr: "open")
     assert res["closed"] == [] and len(res["unknown"]) == 1
     assert _lines(queue, "unknown")[0]["reden"] == "kop_onleesbaar"
+
+
+@pytest.mark.parametrize("bad", ["{torn", "[1, 2]", "42"])
+def test_a_malformed_receipt_line_makes_the_pr_state_unknown_never_open(env, bad):
+    _, state, queue = env
+    v = _verdict(state, "cap-pr7-a")
+    rcv.record_merge_approval(state, v, "vincent")
+    (state / "t0_receipts.ndjson").write_text(json.dumps({"event_type": "x"}) + "\n" + bad + "\n", encoding="utf-8")
+    assert rd.default_pr_state_of(state)(7) is None
+    res = _read(rd.read_cap_verdict, env, head_of=lambda pr: HEAD)
+    assert res["closed"] == [] and _lines(queue, "closed") == [] and len(res["unknown"]) == 1
+    assert _lines(queue, "unknown")[0]["reden"] == "pr_staat_onleesbaar"
+    assert _points(queue)[res["unknown"][0]]["state"] == "open"
+
+
+def test_a_torn_newest_rounds_line_is_unreadable_never_matched_through_an_older_branch(env, tmp_path):
+    _, state, queue = env
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    git = lambda *a: subprocess.run(["git", "-C", str(repo), *a], check=True, capture_output=True, text=True).stdout.strip()
+    git("init", "-q")
+    git("-c", "user.email=t@e.invalid", "-c", "user.name=t", "-c", "commit.gpgsign=false", "commit", "-q", "--allow-empty", "-m", "x")
+    git("update-ref", "refs/remotes/origin/old-branch", git("rev-parse", "HEAD"))
+    (state / "review_gates").mkdir()
+    rounds = state / "review_gates" / "rounds.ndjson"
+    rounds.write_text(json.dumps({"pr_number": 7, "branch": "old-branch"}) + "\n{torn", encoding="utf-8")
+    v = _verdict(state, "cap-pr7-a", head=git("rev-parse", "HEAD"))
+    rcv.record_merge_approval(state, v, "vincent")
+    assert rd.default_head_of(state, repo)(7) is None
+    res = _read(rd.read_cap_verdict, env, repo=repo, pr_state_of=lambda pr: "open")
+    assert res["closed"] == [] and _lines(queue, "closed") == []
+    assert _lines(queue, "unknown")[0]["reden"] == "kop_onleesbaar"
+
+
+def test_an_empty_ledger_is_an_empty_history_and_a_clean_one_still_closes(env):
+    _, state, queue = env
+    (state / "t0_receipts.ndjson").write_text("", encoding="utf-8")
+    assert rd.default_pr_state_of(state)(7) == "open"
+    v = _verdict(state, "cap-pr7-a")
+    rcv.record_merge_approval(state, v, "vincent")
+    res = _read(rd.read_cap_verdict, env, head_of=lambda pr: HEAD)
+    assert len(res["closed"]) == 1 and _lines(queue, "closed")[0]["uitkomst"] == "beantwoord"
