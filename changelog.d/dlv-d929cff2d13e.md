@@ -1,0 +1,1 @@
+- build_t0_state now runs the memory scan within 2 s and shows a memory_ledger block (status, reason, counts) in t0_state.json (geheugen-in-de-store M4)
