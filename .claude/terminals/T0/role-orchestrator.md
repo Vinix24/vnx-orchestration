@@ -428,7 +428,8 @@ Cite the policy code (A1, B2, etc) when invoking.
 
 ### Open items
 - **D1**: Close OIs with concrete code/test evidence. No premature close.
-- **D2**: File new OIs liberally — operator-approved.
+- **D2**: An OI for a finding inside the PR's diff: file it freely. An OI for a finding outside the diff: only with a concrete failure scenario (the input or state and the wrong output or crash it produces); without one, the finding is a line in the receipt review, not an OI. Operator decision 2026-11-15, morning list point 4.
+- **D3** (bulk rule): A `warn` or `info` OI without recurrence goes to `deferred`, with the reason in the defer. Without recurrence = no second OI, receipt or review finding on the same point since the OI was opened. `blocker` OIs never fall under this rule. Defer with `scripts/open_items_manager.py defer` (or `defer-pattern` for a group).
 
 ### Stop conditions (wake operator)
 - **E1**: main branch broken after merge. With `VNX_MAIN_UNVERIFIED_MAX` set, the door enforces it (gate `main`): the chain waits via `vnx main-window status`, not per main run. `--override-main` only with `revert_or_fix_forward` or an operator reason; see DISPATCH_RULES §2.2.1.
