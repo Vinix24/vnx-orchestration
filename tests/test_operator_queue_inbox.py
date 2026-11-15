@@ -450,7 +450,7 @@ def test_all_needs_no_current_project(tmp_path, monkeypatch, capsys):
 @pytest.mark.parametrize("flag", ["--project-id", "--state-dir", "--data-root"])
 def test_all_with_project_scope_is_refused(tmp_path, monkeypatch, capsys, flag):
     home, registry, _ = _home(tmp_path)
-    _no_project(monkeypatch)  # raises if main resolves a project
+    monkeypatch.setattr(inbox_cli, "resolve_project_id", lambda: 1 / 0)  # refused before any project is resolved
     scope = str(tmp_path / "s") if flag != "--project-id" else "x"
     assert inbox_cli.main(["--all", "--home", str(home), "--registry", str(registry), flag, scope]) == 2
     assert "--all" in capsys.readouterr().err and not (tmp_path / "s").exists()
