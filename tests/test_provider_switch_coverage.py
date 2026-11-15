@@ -650,7 +650,7 @@ def test_detector_flags_litellm_completion(units):
 
 
 def test_detector_flags_the_deepseek_probe_and_exempt_matches_it(units):
-    key = "scripts/lib/dispatch_cli.py:_check_reachability"
+    key = "scripts/lib/dispatch_cli.py:_probe_deepseek_api"
     assert RULE_HTTP_MODEL_HOST in _rules(units, key)
     assert key in provider_switch.EXEMPT
     assert key not in provider_switch.LAUNCH_FUNCTIONS
