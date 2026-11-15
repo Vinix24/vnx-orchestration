@@ -108,6 +108,30 @@ def recompute_dispatch_outcomes(
     return summary
 
 
+def _open_work_hold(
+    conn: sqlite3.Connection, track_id: str, project_id: str, pr_ref: str,
+) -> Optional[Dict[str, Any]]:
+    """Held-track entry when the track has open work (OI-2904), else None.
+
+    An unreadable DB is not "nothing open": the entry is verdict 'unverified'.
+    """
+    try:
+        open_work = track_reconciler.open_deliverable_counts(conn, track_id, project_id)
+    except sqlite3.Error as exc:
+        return {
+            "track_id": track_id, "verdict": "unverified", "pr_ref": pr_ref,
+            "reason": f"deliverable_state_unreadable: {exc}",
+        }
+    if not open_work:
+        return None
+    return {
+        "track_id": track_id, "verdict": "open_deliverable", "pr_ref": pr_ref,
+        "reason": "open_deliverable: " + ", ".join(
+            f"{n} {st}" for st, n in sorted(open_work.items())
+        ),
+    }
+
+
 def nominate_candidates(
     state_dir: Path, project_id: str,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
@@ -156,27 +180,10 @@ def nominate_candidates(
                 })
                 continue
 
-            # OI-2904: a track with an open deliverable or an in-flight
-            # dispatch is not done, whatever its PRs say. Visible, never closed.
-            try:
-                open_work = track_reconciler.open_deliverable_counts(
-                    hold_conn, t["track_id"], project_id
-                )
-            except sqlite3.Error as exc:
-                # Unreadable state is not "nothing open": unverified, exit 3.
-                held_tracks.append({
-                    "track_id": t["track_id"], "verdict": "unverified",
-                    "pr_ref": pr_ref, "reason": f"deliverable_state_unreadable: {exc}",
-                })
-                continue
-            if open_work:
-                held_tracks.append({
-                    "track_id": t["track_id"], "verdict": "open_deliverable",
-                    "pr_ref": pr_ref,
-                    "reason": "open_deliverable: " + ", ".join(
-                        f"{n} {st}" for st, n in sorted(open_work.items())
-                    ),
-                })
+            # OI-2904: an open deliverable or in-flight dispatch is not done.
+            open_hold = _open_work_hold(hold_conn, t["track_id"], project_id, pr_ref)
+            if open_hold is not None:
+                held_tracks.append(open_hold)
                 continue
 
             # Re-close guard: if a done→active reopen history row exists,

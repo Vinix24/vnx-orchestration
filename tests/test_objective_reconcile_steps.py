@@ -89,7 +89,7 @@ def test_refresh_derived_runtime_error_persists_summary_and_exit_2(tmp_path, mon
     assert summary["counts"] == {
         "tracks": 0, "nominated": 0, "confirmed": 0, "closed": 0,
         "closed_sibling": 0, "open_pr": 0, "unverified": 0, "deferred": 0,
-        "stale": 0, "delivery_hold": 0,
+        "stale": 0, "delivery_hold": 0, "open_deliverable": 0,
     }
 
     # Same _persist_summary call as today: summary file + one history record.
