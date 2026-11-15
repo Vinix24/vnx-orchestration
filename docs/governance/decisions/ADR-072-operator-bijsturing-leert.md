@@ -1,6 +1,6 @@
 # ADR-072 - De operator stuurt bij en het systeem leert ervan: een gebonden bron, een gesloten klassetabel, een voorstelwachtrij met eigen identiteit en een oorzaakanalyse die geen tekst bewaart
 
-**Status:** Voorgesteld 11-11-2026 (T0, track `operator-bijsturing-leert`, rij OB-0); aangenomen zodra de T0 OB-0 merget.
+**Status:** Aangenomen 2026-11-11 (PR #2684, 4bc05cc8a). Voorgesteld 11-11-2026 (T0, track `operator-bijsturing-leert`, rij OB-0).
 **Datum:** 2026-11-11
 **Besloten door:** de operator, opdracht van 10-11-2026 ~08:45Z (learning en dreaming vangen de bijsturing uit prompts, doen bij complexe gevallen een oorzaakanalyse en stellen een skill, een instructie of een feature voor); het plan `claudedocs/2026-11-07-naar-1-9/plannen/operator-bijsturing-leert.md` (revisie 2, plan-gate van 10-11-2026 met de verplichte wijziging van de tiebreaker) voor de besluiten 1 tot en met 18. Het nummer 072 is door de T0 toegewezen; ADR-071 is het hoogste eerder toegewezen nummer.
 **Cross-refs:** ADR-007 (bindingsplicht per project), ADR-056 (zelfstandigheid meten), ADR-063 (onbekend is nooit 0), ADR-065 (leren is voorstellen; het besluitmodel van de voorstelstore), ADR-066 (dream-liveness; blijft ongewijzigd, zie besluit 17), ADR-067 (dezelfde bindingsregel als besluit 9 daar).

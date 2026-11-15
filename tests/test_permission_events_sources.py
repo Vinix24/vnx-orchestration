@@ -31,6 +31,10 @@ def asked(text, ts=TS):
     return {"type": "assistant", "timestamp": ts, "message": {"content": [{"type": "text", "text": text}]}}
 
 
+def reasons(counter):
+    return {k: v for k, v in counter.items() if not k.startswith("config_")}
+
+
 def scan(objs, slug="-root", configs=("/nonexistent/a", "/nonexistent/b")):
     lines = [o if isinstance(o, str) else json.dumps(o) for o in objs]
     return src.scan_transcript(lines, project_id="vnx-dev", slug=slug, stem="sess1", account_configs=configs)
@@ -80,12 +84,12 @@ def test_non_bash_tool_uses_the_tool_name():
 ])
 def test_unmappable_lines_are_skipped_and_counted(bad):
     out = scan([use("t1"), bad])
-    assert out.events == [] and sum(out.skipped["B1"].values()) == 1
+    assert out.events == [] and sum(reasons(out.skipped["B1"]).values()) == 1
 
 
 def test_automatic_accepts_and_plain_results_are_ignored():
     out = scan([use("t1"), result("t1", "config", None, "rule", "accept"), "not json"])
-    assert out.events == [] and out.skipped["B1"] == {"malformed_json": 1}
+    assert out.events == [] and reasons(out.skipped["B1"]) == {"malformed_json": 1}
 
 
 def test_b4a_copy_block_needs_an_ask_outside_the_block():
@@ -129,3 +133,61 @@ def test_account_is_a_slot_and_the_uuid_stays_inside(tmp_path):
         assert src.resolve_account(owner_uuid, (a, b)) == "unknown"
     a.write_text("{broken")
     assert src.resolve_account(UUID, (a, tmp_path / "missing.json")) == "unknown"
+
+
+def _cfg(tmp_path, name, content):
+    (tmp_path / name).write_bytes(content if isinstance(content, bytes) else content.encode())
+    return tmp_path / name
+
+
+@pytest.mark.parametrize("name,content,reason", [
+    ("bad.json", "{broken", "config_unparseable_vnx"),
+    ("bin.json", b"\xff\xfe\x00", "config_unreadable_vnx"),
+    ("list.json", "[1]", "config_wrong_type_vnx"),
+    ("acct.json", json.dumps({"oauthAccount": "x@example.invalid"}), "config_wrong_type_vnx"),
+    ("uuid.json", json.dumps({"oauthAccount": {"accountUuid": 7}}), "config_wrong_type_vnx"),
+])
+def test_config_failure_is_a_counted_reason_distinct_from_no_match(tmp_path, name, content, reason):
+    good = _cfg(tmp_path, "good.json", json.dumps({"oauthAccount": {"accountUuid": "other", "emailAddress": "g@example.invalid"}}))
+    bad = _cfg(tmp_path, name, content)
+    assert src.resolve_account_checked(UUID, (bad, good)) == ("unknown", [reason])
+    assert src.resolve_account_checked(UUID, (good, good)) == ("unknown", [])
+    out = scan([{"type": "session-owner", "accountUuid": UUID}], configs=(bad, good))
+    assert out.skipped["B1"] == {reason: 1}
+
+
+def test_unreadable_config_names_slot_not_path(tmp_path):
+    missing = tmp_path / "secret-home" / "missing.json"
+    assert src.resolve_account_checked(UUID, (missing, missing)) == ("unknown", ["config_unreadable_vnx", "config_unreadable_sm"])
+
+
+@pytest.mark.parametrize("decision", ["reject", ["reject"], 7])
+def test_malformed_permission_decision_is_skipped_not_fatal(decision):
+    bad = result("t2", "config", "permission-rule")
+    bad["message"]["content"][0]["permissionDecision"] = decision
+    out = scan([use("t1"), use("t2"), result("t1", "config", "permission-rule"), bad])
+    assert len(out.events) == 1
+    assert out.skipped["B1"]["malformed_permission_metadata"] == 1
+
+
+def test_malformed_denial_kind_is_skipped_not_fatal():
+    bad = result("t2", "config", None)
+    bad["message"]["content"][0]["toolDenialKind"] = ["permission-rule"]
+    out = scan([use("t1"), use("t2"), result("t1", "config", "permission-rule"), bad])
+    assert len(out.events) == 1 and out.skipped["B1"]["malformed_permission_metadata"] == 1
+
+
+def test_ledger_and_coverage_hold_no_uuid_email_or_home_path(tmp_path):
+    import permission_events as pe
+    a = _cfg(tmp_path, "a.json", json.dumps({"oauthAccount": {"accountUuid": UUID, "emailAddress": "a@example.invalid"}}))
+    b = _cfg(tmp_path, "b.json", "{broken")
+    owner = {"type": "session-owner", "accountUuid": UUID, "sessionId": "s"}
+    out = scan([owner, use("t1"), result("t1", "config", "permission-rule")], configs=(a, b))
+    state = tmp_path / "state"
+    pe.write_events(out.events, "vnx-dev", state)
+    pe.write_coverage("vnx-dev", "B1", state="ok", files_read=1, window="test", count=1, state_dir=state,
+                      skipped=dict(out.skipped["B1"]))
+    cov = json.loads((state / "permission_coverage.json").read_text())
+    assert cov["sources"]["B1"]["skipped"] == {"config_unparseable_sm": 1}
+    text = "".join(p.read_text() for p in state.rglob("*") if p.is_file())
+    assert text and UUID not in text and "example.invalid" not in text and str(tmp_path) not in text

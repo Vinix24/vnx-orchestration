@@ -680,7 +680,12 @@ class DispatchDaemon:
             _release_lease(terminal, generation)
             self._processed.discard(dispatch_id)
             return
+        self._deliver_claimed(meta, dispatch_id, terminal, generation, active_path)
 
+    def _deliver_claimed(
+        self, meta: DispatchMeta, dispatch_id: str, terminal: str, generation: int, active_path: Path,
+    ) -> None:
+        """Enrich and deliver a dispatch that holds a lease and sits in active/."""
         # Enrich dispatch instruction before delivery (repo map + future layers)
         try:
             from dispatch_enricher import DispatchEnricher  # noqa: PLC0415
@@ -716,7 +721,15 @@ class DispatchDaemon:
             outcome = "failed"
         finally:
             elapsed = time.monotonic() - start_ts
+        self._finish_delivery(
+            meta, dispatch_id, active_path, outcome, elapsed, eff_terminal, eff_generation,
+        )
 
+    def _finish_delivery(
+        self, meta: DispatchMeta, dispatch_id: str, active_path: Path, outcome: str,
+        elapsed: float, eff_terminal: str, eff_generation: int,
+    ) -> None:
+        """Move, release the lease, write the audit record and log the outcome."""
         # Move active → completed on success. A failure is no outcome a T0
         # decided: the file stays in active/, where active_dispatch_janitor
         # reads its receipts and a T0 reject moves it to dead_letter/.

@@ -1,0 +1,1 @@
+- Refactor `shadow_grounding_compare` under 100 executable lines by extracting `_shadow_pattern_details` (golf schoon R20c, no behaviour change).

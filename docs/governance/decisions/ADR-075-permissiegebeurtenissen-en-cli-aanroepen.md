@@ -1,6 +1,6 @@
 # ADR-075 - Permissiegebeurtenissen en CLI-aanroepen: privacy, maskering, bewaring en levenscyclus van twee nieuwe ledgers
 
-**Status:** Voorgesteld 14-11-2026 (T0, track permissieblokkades-leren, L0); aangenomen zodra de T0 L0 merget.
+**Status:** Aangenomen 2026-11-14 (PR #2849, 28819951b). Voorgesteld 14-11-2026 (T0, track permissieblokkades-leren, L0).
 **Datum:** 2026-11-14
 **Besloten door:** de operator voor de track (besluit van 14-11-2026: elk moment waarop Vincent zelf een commando uitvoert omdat een agent het niet mag, wordt gemeten en komt in het learning-stelsel); de T0 voor de rest, op het plan `claudedocs/specs/permissieblokkades-leren/plan.md` (versie 1) en de plan-gate van 14-11-2026 (tiebreaker START, deepseek-v4-pro, ronde 2) met de verplichte wijziging: een bindend besluit over privacy, maskering, bewaring en levenscyclus van `permission_events.ndjson` en `cli_invocations.ndjson` vóór L1 en L4 shippen. Het nummer 075 is door de T0 toegewezen; ADR-074 is het hoogste nummer op `origin/main`.
 **Cross-refs:** ADR-007 (composite sleutel over `project_id`), ADR-056 (`actor_class` en wie mag promoveren), ADR-063 (onbekend is nooit 0), ADR-065 (leren is voorstellen), ADR-072 (operatorbijsturing; besluit 2 voor de binding, besluiten 11 en 12 voor privacy als testplicht).

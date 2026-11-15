@@ -1114,6 +1114,15 @@ def _register_deliverable_retarget_verb(subs: argparse.Action) -> None:
     p.add_argument("--reason", required=True, help="why it is not built (REQUIRED, in the audit event)")
 
 
+def _register_plan_gate_sign_verb(subs: argparse.Action) -> None:
+    """`plan-gate sign`: the operator signs the latest plan-gate pass of a track (OI-2849)."""
+    p_psign = subs.add_parser("sign", help="operator only: sign the latest plan-gate pass so a T0 may promote (ADR-056)")
+    _common_horizon_args(p_psign)
+    p_psign.add_argument("track_id")
+    p_psign.add_argument("--key", required=True, help="the operator's SSH private key path")
+    p_psign.add_argument("--identity", required=True, help="signer identity, as in allowed_signers")
+
+
 def _register_plan_gate_verbs(subs: argparse.Action) -> None:
     """Register the plan-gate-domain verbs under `vnx horizon plan-gate`."""
     p_pseed = subs.add_parser(
@@ -1303,6 +1312,7 @@ def _register_horizon_subparser(subparsers: argparse.Action) -> None:
     pg_parser.add_argument("--project-dir", default=".", metavar="DIR")
     pg_subs = pg_parser.add_subparsers(dest="plan_gate_verb", metavar="VERB")
     _register_plan_gate_verbs(pg_subs)
+    _register_plan_gate_sign_verb(pg_subs)
 
 
 def _register_objective_subparser(subparsers: argparse.Action) -> None:

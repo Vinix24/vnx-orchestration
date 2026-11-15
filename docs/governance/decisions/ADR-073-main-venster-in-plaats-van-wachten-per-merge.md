@@ -1,6 +1,6 @@
 # ADR-073 - Een venster op main in plaats van wachten per merge: de deur bewaakt de niet-geverifieerde merges, elke merge houdt zijn eigen run
 
-**Status:** Voorgesteld 13-11-2026 (T0, track `ci-cost-and-merge-cadence`, PR 1 van 6); aangenomen zodra de T0 deze PR merget.
+**Status:** Aangenomen 2026-11-13 (PR #2749, aaf68b3a0). Voorgesteld 13-11-2026 (T0, track `ci-cost-and-merge-cadence`, PR 1 van 6).
 **Datum:** 2026-11-13
 **Besloten door:** de operator, 13-11-2026 ~05:50Z (N=1 eerst, N=3 pas na een week meten en een apart besluit; onmeetbaar is NO-GO met een override; andere projecten pas na de meting op vnx-dev); het plan `claudedocs/specs/ci-cost-and-merge-cadence/plan.md` met de sectie "Wijzigingen na de plan-gate" (versie d209d769f0cc). Het nummer 073 is door de T0 toegewezen; ADR-074 en ADR-075 zijn gereserveerd voor `impactselectie-in-schaduw` en `integratiecandidate-en-merge-trein`.
 **Cross-refs:** ADR-061 (de deur is de enige merge-weg; §3 de volgorde van de poorten, hier aangevuld), ADR-063 (onbekend is nooit 0), ADR-064 (deltareview; DR-7 levert `merge_sha` en `tested_head` op het `pr_merged`-receipt, #2745), ADR-007 (zie "Gevolgen").

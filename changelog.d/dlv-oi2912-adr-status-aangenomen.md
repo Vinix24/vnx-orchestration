@@ -1,0 +1,1 @@
+- docs(adr): the status line of fourteen ADRs (063-078 minus 066, 070) now says Aangenomen with the merge that accepted them (OI-2912).

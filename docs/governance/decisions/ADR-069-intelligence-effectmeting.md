@@ -1,6 +1,6 @@
 # ADR-069 - De effectmeting van intelligence-injectie: een hash-arm in een bevroren venster, een harde grens van 200 per arm en vier verdictklassen onder een plafond
 
-**Status:** Voorgesteld 10-11-2026 (T0, track `intelligence-effect-measurable`, rij PR-11); aangenomen zodra de T0 PR-11 merget.
+**Status:** Aangenomen 2026-11-10 (PR #2602, beef78644). Voorgesteld 10-11-2026 (T0, track `intelligence-effect-measurable`, rij PR-11).
 **Datum:** 2026-11-10
 **Besloten door:** de operator op 07-11-2026 (besluit 2 en 3 hieronder letterlijk) en het plan `claudedocs/2026-11-07-naar-1-9/plannen/intelligence-effect-measurable.md` (revisie 2, 08-11-2026, plan-gate van 08-11 en de bindende voorwaarde van de tiebreaker) voor alle besluiten. ADR-069 was vrij op `origin/main` `b0bbe3da7` (10-11-2026): de hoogste bestaande is ADR-065, en 064 en 066 tot en met 068 en 070 zijn aan andere leveringen toegewezen. De plan gebruikte het werknummer ADR-056; dat nummer is door vijf andere plannen geclaimd en hier is het 069.
 **Cross-refs:** ADR-007 (samengestelde sleutel over `project_id`), ADR-049 (de terminale dispatch-toestanden en hun overgangen), ADR-052 (geen functie boven 200 uitvoerbare regels), ADR-063 (dagelijkse doorloopmeting: dezelfde scheiding tussen meten, voorstel en oordeel), ADR-065 (leren is voorstellen).
