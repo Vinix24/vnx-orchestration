@@ -198,6 +198,30 @@ ${T0_CONTRACT_INVALID}"
         T0_STATE_SECTION="${T0_STATE_SECTION}
 ${T0_LIFECYCLE}"
       fi
+
+      # operator-vragen-tot-antwoord Q5 (ADR-076 besluit 10): show the open points from
+      # t0_index.json. This hook only READS: it writes no `presented` line (its output lands
+      # in the T0's context, not in front of Vincent) and runs no `vnx inbox` command.
+      T0_INBOX=""
+      if [ -f "$_ci_file" ]; then
+        T0_INBOX=$(jq -r '
+          .operator_inbox as $b
+          | if ($b | type) != "object" then
+              "operator inbox: not readable (t0_index.json has no operator_inbox block; rebuild the index)"
+            elif $b.status != "ok" then
+              "operator inbox: could not be read (\($b.status // "unknown"): \($b.reason // "no reason given")); NOT the same as no open questions"
+            elif ($b.open_total | type) != "number" then
+              "operator inbox: could not be read (open_total missing); NOT the same as no open questions"
+            elif $b.open_total == 0 then empty
+            else
+              ("operator inbox: \($b.open_total) open (+\($b.more // 0) more)"),
+              (($b.points // [])[] | "  [\(.age), presented \(.presented)x] \(.vraag)" + (if (.kopieerblok // "") != "" then "\n    " + .kopieerblok else "" end))
+            end' "$_ci_file" 2>/dev/null || echo "operator inbox: could not be read (t0_index.json unparsable)")
+      fi
+      if [ -n "$T0_INBOX" ]; then
+        T0_STATE_SECTION="${T0_STATE_SECTION}
+${T0_INBOX}"
+      fi
     else
       # Not-found is a DIFFERENT state than found-but-empty (a genuinely
       # measured zero). Say so explicitly instead of falling through to a

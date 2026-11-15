@@ -60,6 +60,9 @@ Schema 2.2 change (D5 fabric-state-herstel, live work):
     ``conflicts/`` directory that exists but cannot be listed is not zero:
     its count is ``null`` with a ``*_unmeasured_reason`` and it degrades
     system_health, so the dispatch guard reads WAIT, never GO.
+  - t0_index.json schema ``t0_index/1.4`` (operator-vragen-tot-antwoord Q5) adds
+    ``operator_inbox``: the open points of the operator queue, at most 5 plus
+    ``more``. Building it never writes a ``presented`` line.
   - t0_index.json schema ``t0_index/1.3`` makes ``queue.open_prs`` nullable: ``null``
     plus a top-level ``pr_queue_unavailable`` (the reason) when the open-PR read
     failed, instead of ``0``. The key is absent when the read succeeded. The
@@ -104,6 +107,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -2780,6 +2784,44 @@ def _build_memory_ledger(state_dir: Path) -> Dict[str, Any]:
         return {"status": "error", "reason": f"{type(exc).__name__}: {exc}"[:200]}
 
 
+_INBOX_BUDGET_SECONDS = 0.5
+_INBOX_POINT_KEYS = ("point_id", "vraag", "age", "presented", "kopieerblok")
+
+
+def _build_operator_inbox(project_id: str, state_dir: Path) -> Dict[str, Any]:
+    """ADR-076 besluit 10: the open points, read only. An error becomes status=error, never a raise."""
+    box: Dict[str, Any] = {}
+
+    def _run() -> None:
+        try:
+            import operator_queue_inbox as inbox
+
+            box["data"] = inbox.show(project_id, limit=5, state_dir=state_dir, data_root=state_dir.parent)
+        except BaseException as exc:  # carried to the caller thread; any failure gives status=error
+            box["error"] = exc
+
+    worker = threading.Thread(target=_run, daemon=True)
+    worker.start()
+    worker.join(_INBOX_BUDGET_SECONDS)
+    if worker.is_alive():
+        return {"status": "error", "reason": f"timeout: show took over {_INBOX_BUDGET_SECONDS:g}s"}
+    if "error" in box:
+        exc = box["error"]
+        return {"status": "error", "reason": f"{type(exc).__name__}: {exc}"[:200]}
+    try:
+        data = box["data"]
+        points = []
+        for p in data["points"][:5]:
+            item = {k: p[k] for k in _INBOX_POINT_KEYS}
+            if p.get("unknown_reden"):
+                item["unknown_reden"] = p["unknown_reden"]
+            points.append(item)
+        return {"status": data["status"], "reason": data["reason"], "coverage": data["coverage"],
+                "open_total": data["open_total"], "points": points, "more": data["more"]}
+    except (KeyError, TypeError) as exc:
+        return {"status": "error", "reason": f"{type(exc).__name__}: {exc}"[:200]}
+
+
 def build_t0_state(
     state_dir: Path,
     dispatch_dir: Path,
@@ -2825,6 +2867,7 @@ def build_t0_state(
     lifecycle_sweep = _lifecycle_sweep_section(state_dir)
     lifecycle_count = _lifecycle_count_index_summary(state_dir)
     memory_ledger = _build_memory_ledger(state_dir)  # geheugen-in-de-store M4
+    operator_inbox = _build_operator_inbox(project_id, state_dir)  # operator-vragen-tot-antwoord Q5
     elapsed = time.monotonic() - start
     system_health = _build_system_health(
         state_dir, db_ok, db_health=db_health,
@@ -2855,6 +2898,7 @@ def build_t0_state(
         "lifecycle_sweep": lifecycle_sweep,
         "lifecycle_count": lifecycle_count,
         "memory_ledger": memory_ledger,
+        "operator_inbox": operator_inbox,
         "_strategic_state_heavy": strategic_state_heavy,
         "_build_seconds": round(elapsed, 2),
     }
@@ -3010,7 +3054,7 @@ def _build_t0_index(state: Dict[str, Any]) -> Dict[str, Any]:
     pr_queue = state.get("pr_queue") or {}
     pr_unavailable = pr_queue.get("available") is False
     index = {
-        "schema": "t0_index/1.3",
+        "schema": "t0_index/1.4",
         "timestamp": state.get("generated_at", ""),
         "git_branch": git_ctx.get("branch", ""),
         "git_head": raw_head[:7],
@@ -3031,6 +3075,8 @@ def _build_t0_index(state: Dict[str, Any]) -> Dict[str, Any]:
         "contract_invalid": _contract_invalid_index_summary(state.get("contract_invalid")),
         "lifecycle": state.get("lifecycle_count") or {},
         "last_rebuild_seconds": state.get("_build_seconds"),
+        "operator_inbox": state.get("operator_inbox")
+        or {"status": "error", "reason": "operator_inbox missing from the state"},
     }
     if pr_unavailable:
         index["pr_queue_unavailable"] = pr_queue.get("reason") or "unknown"
