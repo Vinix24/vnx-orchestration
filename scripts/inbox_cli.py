@@ -53,9 +53,13 @@ def _point_lines(points: list, more: int) -> list:
     return out + ([f"  +{more} more"] if more else [])
 
 
+def _source_lines(coverage) -> list:
+    return [f"  bron {name}: unknown ({reden})" for name, reden in inbox.unknown_sources(coverage)]
+
+
 def _render(data: dict) -> str:
     head = f"{data['project_id']}: {data['status']}" + (f" ({data['reason']})" if data["reason"] else "")
-    return "\n".join([head] + _point_lines(data["points"], data["more"]))
+    return "\n".join([head] + _source_lines(data["coverage"]) + _point_lines(data["points"], data["more"]))
 
 
 def _show_all(args) -> int:
@@ -71,7 +75,7 @@ def _show_all(args) -> int:
     for p in data["projects"]:
         total = "?" if p["open_total"] is None else p["open_total"]
         lines.append(f"{p['project_id']}: {p['dekking']}" + (f" ({p['reden']})" if p["reden"] else "") + f", open {total}")
-        lines += _point_lines(p["points"], p["more"])
+        lines += _source_lines(p["sources"]) + _point_lines(p["points"], p["more"])
     print("\n".join(lines))
     return 0
 

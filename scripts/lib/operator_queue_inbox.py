@@ -252,6 +252,31 @@ def discover_projects(*, home: Path, registry_path: Optional[Path] = None) -> Di
     return {"registry": registry, "store": store, "projects": projects}
 
 
+REDEN_MAX = 200
+
+
+def unknown_sources(coverage: Any) -> List[tuple]:
+    """[(name, reden)] for every source that is not positively read: `unknown`, malformed, or a coverage that is
+    not a list. `niet_gebonden` is not unknown. The name is the source's bron, else its reader name."""
+    if not isinstance(coverage, list):
+        return [("coverage", "coverage malformed")]
+    out = []
+    for s in coverage:
+        if not isinstance(s, dict) or s.get("dekking") not in ("gelezen", "niet_gebonden"):
+            src = s if isinstance(s, dict) else {}
+            name = src.get("bron") if src.get("bron") is not None else src.get("reader") or "?"
+            out.append((str(name), src.get("reden") or ("dekking unknown" if src.get("dekking") == "unknown"
+                                                        else "source entry malformed")))
+    return out
+
+
+def project_coverage(data: Mapping[str, Any]) -> tuple:
+    """(dekking, reden) of one project from show(): `gelezen` only when the queue is ok AND no source is unknown."""
+    parts = [] if data.get("status") == "ok" else [data.get("reason") or f"queue status {data.get('status')!r}"]
+    parts += [f"bron {name}: {reden}" for name, reden in unknown_sources(data.get("coverage"))]
+    return ("unknown", "; ".join(parts)[:REDEN_MAX]) if parts else ("gelezen", None)
+
+
 def _project_entry(home: Path, found: Dict[str, Any], limit: int, now: Any) -> Dict[str, Any]:
     pid = found["project_id"]
     out = {"project_id": pid, "dekking": "unknown", "reden": None, "open_total": None, "points": [], "more": 0,
@@ -267,9 +292,9 @@ def _project_entry(home: Path, found: Dict[str, Any], limit: int, now: Any) -> D
         data = show(pid, limit=limit, now=now, state_dir=root / "state", data_root=root)
     except Exception as exc:  # vnx-silent-except: one project that raises is unknown with the exception type, not a crash of the fleet
         return {**out, "reden": f"{type(exc).__name__}: {exc}"}
-    if data["status"] != "ok":
-        return {**out, "reden": data["reason"], "sources": data["coverage"]}
-    return {**out, "dekking": "gelezen", "open_total": data["open_total"], "points": data["points"],
+    dekking, reden = project_coverage(data)
+    total = data["open_total"] if dekking == "gelezen" else None  # unknown never counts as zero (decision 11)
+    return {**out, "dekking": dekking, "reden": reden, "open_total": total, "points": data["points"],
             "more": data["more"], "sources": data["coverage"]}
 
 

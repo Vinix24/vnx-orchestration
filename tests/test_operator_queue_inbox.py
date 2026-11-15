@@ -341,3 +341,100 @@ def test_all_absent_store_is_no_store_not_unknown(tmp_path):
     assert data["store"] == {"dekking": "gelezen", "reden": None}
     assert [(p["project_id"], p["dekking"]) for p in data["projects"]] == [
         ("alpha", "niet_gebonden"), ("gamma", "niet_gebonden")]
+
+
+def _raising(name="dream"):
+    def reader(project_id, **kw):
+        raise RuntimeError("boom")
+    return types.SimpleNamespace(READERS=((name, reader),))
+
+
+def _all_text_and_json(home, registry, capsys):
+    base = ["--all", "--home", str(home), "--registry", str(registry)]
+    assert inbox_cli.main(base) == 0
+    text = capsys.readouterr().out
+    assert inbox_cli.main(base + ["--json"]) == 0
+    return text, _by_id(json.loads(capsys.readouterr().out))
+
+
+def _text_block(text, project):
+    lines = text.splitlines()
+    start = next(i for i, ln in enumerate(lines) if ln.startswith(f"{project}:"))
+    end = next((i for i in range(start + 1, len(lines)) if not lines[i].startswith(" ")), len(lines))
+    return lines[start:end]
+
+
+def test_all_reader_raises_with_empty_queue_is_unknown_never_zero(tmp_path, monkeypatch, capsys):
+    home, registry, _ = _home(tmp_path)
+    (home / ".vnx-data" / "beta" / "state").mkdir()  # readable and empty
+    monkeypatch.setattr(inbox, "_MODULES", (_fake(), _raising()))
+    text, by_id = _all_text_and_json(home, registry, capsys)
+    beta = by_id["beta"]
+    assert beta["dekking"] == "unknown" and beta["open_total"] is None
+    assert beta["reden"] == "bron dream: RuntimeError" and beta["points"] == []
+    block = _text_block(text, "beta")
+    assert block[0].endswith(", open ?") and "unknown (bron dream: RuntimeError)" in block[0]
+    assert "  bron dream: unknown (RuntimeError)" in block
+
+
+def test_all_reader_raises_keeps_known_points_and_total_stays_unknown(tmp_path, monkeypatch, capsys):
+    home, registry, pids = _home(tmp_path)
+    monkeypatch.setattr(inbox, "_MODULES", (_fake(), _raising()))
+    text, by_id = _all_text_and_json(home, registry, capsys)
+    alpha = by_id["alpha"]
+    assert alpha["dekking"] == "unknown" and alpha["open_total"] is None
+    assert [p["point_id"] for p in alpha["points"]] == pids
+    block = _text_block(text, "alpha")
+    assert block[0].endswith(", open ?") and "  bron dream: unknown (RuntimeError)" in block
+    shown = [ln.split()[0] for ln in block[1:] if ln.startswith("  ") and not ln.startswith("  bron ")]
+    assert shown == pids
+
+
+def test_all_every_reader_healthy_is_gelezen_with_real_total(tmp_path, capsys):
+    home, registry, _ = _home(tmp_path)
+    text, by_id = _all_text_and_json(home, registry, capsys)
+    assert by_id["alpha"]["dekking"] == "gelezen" and by_id["alpha"]["open_total"] == 2
+    assert "  bron " not in text
+
+
+def test_all_niet_gebonden_source_does_not_make_project_unknown(tmp_path, monkeypatch):
+    home, registry, _ = _home(tmp_path)
+    monkeypatch.setattr(inbox, "_MODULES", (_fake({"bron": 4, "dekking": "niet_gebonden", "reden": "geen bron",
+                                                   "unknown": []}),))
+    alpha = _by_id(inbox.show_all(home=home, registry_path=registry))["alpha"]
+    assert alpha["dekking"] == "gelezen" and alpha["open_total"] == 2
+
+
+def test_all_unknown_reason_is_capped(tmp_path, monkeypatch):
+    home, registry, _ = _home(tmp_path)
+    monkeypatch.setattr(inbox, "_MODULES", (_fake({"bron": 3, "dekking": "unknown", "reden": "x" * 500,
+                                                   "unknown": []}),))
+    alpha = _by_id(inbox.show_all(home=home, registry_path=registry))["alpha"]
+    assert alpha["dekking"] == "unknown" and len(alpha["reden"]) == 200 and alpha["reden"].startswith("bron 3: x")
+
+
+def test_show_text_names_failing_source_same_as_json(sdir, monkeypatch, capsys):
+    _open(sdir, "p", "2026-11-10T00:00:00Z")
+    monkeypatch.setattr(inbox, "_MODULES", (_fake(), _raising()))
+    base = ["--project-id", PID, "--state-dir", str(sdir)]
+    assert inbox_cli.main(base) == 0
+    text = capsys.readouterr().out
+    assert inbox_cli.main(base + ["--json"]) == 0
+    data = json.loads(capsys.readouterr().out)
+    from_json = sorted(f"{s['bron'] if s['bron'] is not None else s['reader']}" for s in data["coverage"]
+                       if s["dekking"] == "unknown")
+    from_text = sorted(ln.split()[1].rstrip(":") for ln in text.splitlines() if ln.startswith("  bron "))
+    assert from_json == from_text == ["dream"]
+    assert "  bron dream: unknown (RuntimeError)" in text.splitlines()
+
+
+@pytest.mark.parametrize("coverage", [None, "x", [None], [{"reader": "r"}], [{"reader": "r", "dekking": None}],
+                                      [{"reader": "r", "dekking": "weird", "bron": 2}]])
+def test_project_coverage_malformed_source_is_unknown(coverage):
+    dekking, reden = inbox.project_coverage({"status": "ok", "reason": None, "coverage": coverage})
+    assert dekking == "unknown" and reden.startswith("bron ")
+
+
+@pytest.mark.parametrize("status", [None, "weird", "unknown"])
+def test_project_coverage_queue_not_ok_is_unknown(status):
+    assert inbox.project_coverage({"status": status, "reason": None, "coverage": []})[0] == "unknown"
