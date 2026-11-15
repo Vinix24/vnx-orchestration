@@ -448,6 +448,12 @@ def _no_ambient_vnx_project_id(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _besluiten_register_isolation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # No test reads the checkout's real daily-log/besluiten.ndjson: build_t0_state resolves the folder from here.
+    monkeypatch.setenv("VNX_BESLUITEN_LOGDIR", str(tmp_path / "_besluiten_isolated"))
+
+
+@pytest.fixture(autouse=True)
 def _launchd_guard_temp_roots(monkeypatch: pytest.MonkeyPatch) -> None:
     """A fake engine under ``tmp_path`` is under the temp dir the install guard refuses.
 

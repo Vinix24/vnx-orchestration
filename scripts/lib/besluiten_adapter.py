@@ -54,6 +54,7 @@ def sync_answers(project_id: str, logdir, *, state_dir: Optional[Path] = None) -
     Returns {"written", "present", "refused": [(point_id, reason)]}; a refusal never stops the others and its
     reason never holds the value. Raises QueueUnreadable on an unreadable queue ledger."""
     answers, vragen = oq.answers(project_id, state_dir=state_dir), _titel_van(project_id, state_dir)
+    Path(logdir).mkdir(parents=True, exist_ok=True)  # a fresh project has no register folder yet
     reg, out = Register(logdir), {"written": 0, "present": 0, "refused": []}
     for ans in answers:
         try:
@@ -67,32 +68,50 @@ def sync_answers(project_id: str, logdir, *, state_dir: Optional[Path] = None) -
     return out
 
 
-def _more(ids: List[str]) -> Dict[str, Any]:
-    return {"ids": ids[:LIMIT], "more": max(0, len(ids) - LIMIT)}
+def _gat(project_id: str, state_dir: Optional[Path], gedekt: set) -> List[str]:
+    return [a["point_id"] for a in oq.answers(project_id, state_dir=state_dir) if a["point_id"] not in gedekt]
 
 
-def index_block(project_id: str, logdir, *, state_dir: Optional[Path] = None, nu: Optional[str] = None) -> Dict[str, Any]:
-    """The ``besluiten`` block of t0_index.json, read-only. Never raises: a failure is status=error with a reason."""
+def state_block(project_id: str, logdir, *, state_dir: Optional[Path] = None, nu: Optional[str] = None) -> Dict[str, Any]:
+    """The full ``besluiten`` block of t0_state.json, read-only. Never raises: a failure is status=error."""
     pad = Path(logdir) / "besluiten.ndjson"
     nu = nu or datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    if not pad.exists():
-        return {"status": "absent"}
     try:
+        if not pad.exists():
+            return {"status": "absent", "niet_vastgelegd": _gat(project_id, state_dir, set())}
         uit = lees(pad)
         regels = [r for _, r in uit.regels]
         besl = _besluiten(regels)
         standen = {bid: stand(regels, bid, nu).naam for bid in besl}
         gedekt = {b["v"]["bron"]["ref"] for b in besl.values()
                   if b["v"]["bron"]["soort"] == "chat" and b["v"]["vastgelegd_door"] == "agent:operator-queue"}
-        gat = [a["point_id"] for a in oq.answers(project_id, state_dir=state_dir) if a["point_id"] not in gedekt]
-        herzien = _more([bid for bid, s in standen.items() if s == "te_herzien"])
-        recent = sorted((b["v"] for bid, b in besl.items() if standen[bid] in ("geldig", "te_herzien")),
-                        key=lambda v: v["besloten_op"], reverse=True)[:LIMIT]
-        return {"status": "ok", "nu": nu, "geldig": sum(s in ("geldig", "te_herzien") for s in standen.values()),
-                "te_herzien": herzien["ids"], "te_herzien_more": herzien["more"],
+        geldig = [(bid, b["v"]) for bid, b in besl.items() if standen[bid] in ("geldig", "te_herzien")]
+        recent = sorted((v for _, v in geldig), key=lambda v: v["besloten_op"], reverse=True)[:LIMIT]
+        return {"status": "ok", "nu": nu, "geldig": len(geldig),
+                "te_herzien": [bid for bid, s in standen.items() if s == "te_herzien"],
                 "recent": [{"id": v["besluit_id"], "titel": v["titel"][:RECENT_TITEL], "besloten_op": v["besloten_op"]}
                            for v in recent],
                 "afgescheurd": len(uit.afgescheurd), "ongeldig": len(uit.ongeldig),
-                "niet_vastgelegd": _more(gat)["ids"], "niet_vastgelegd_more": _more(gat)["more"]}
-    except (OSError, ValueError, KeyError, TypeError) as exc:
+                "niet_vastgelegd": _gat(project_id, state_dir, gedekt)}
+    except (OSError, ValueError, KeyError, TypeError, oq.QueueUnreadable) as exc:
         return {"status": "error", "reason": f"{type(exc).__name__}: {exc}"[:200]}
+
+
+def compact(block: Dict[str, Any]) -> Dict[str, Any]:
+    """The index form of a state block: counts and at most 3 / 5 ids, a few hundred bytes (index budget 5 KB)."""
+    if block.get("status") == "error":
+        return {"status": "error", "reason": str(block.get("reason"))[:120]}
+    herzien, gat = block.get("te_herzien") or [], block.get("niet_vastgelegd") or []
+    out: Dict[str, Any] = {"status": block.get("status"), "geldig": block.get("geldig", 0),
+                           "te_herzien": len(herzien), "te_herzien_ids": herzien[:3],
+                           "niet_vastgelegd": len(gat), "niet_vastgelegd_ids": gat[:3],
+                           "laatste": [r["id"] for r in (block.get("recent") or [])][:LIMIT]}
+    for key in ("afgescheurd", "ongeldig"):
+        if block.get(key, 0) > 0:
+            out[key] = block[key]
+    return out
+
+
+def index_block(project_id: str, logdir, *, state_dir: Optional[Path] = None, nu: Optional[str] = None) -> Dict[str, Any]:
+    """The compact ``besluiten`` block of t0_index.json."""
+    return compact(state_block(project_id, logdir, state_dir=state_dir, nu=nu))

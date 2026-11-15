@@ -345,7 +345,10 @@ class TestIndexDetailSeparation:
 # ---------------------------------------------------------------------------
 
 class TestIntegrationWithBuildT0State:
-    def test_build_t0_state_output_feeds_index(self, tmp_path):
+    def test_build_t0_state_output_feeds_index(self, tmp_path, monkeypatch):
+        from test_besluiten_adapter import populate_register
+        populate_register(tmp_path / "register", 60, 8)
+        monkeypatch.setenv("VNX_BESLUITEN_LOGDIR", str(tmp_path / "register"))
         state_dir = tmp_path / "state"
         dispatch_dir = tmp_path / "dispatches"
         state_dir.mkdir(parents=True)
@@ -358,6 +361,7 @@ class TestIntegrationWithBuildT0State:
         assert index["schema"] == "t0_index/1.5"
         assert len(index) <= 50
         serialized = json.dumps(index, indent=2, default=str).encode("utf-8")
+        assert index["besluiten"]["geldig"] == 60 and len(json.dumps(index["besluiten"])) <= 400
         assert len(serialized) < 5 * 1024
 
     def test_build_t0_state_output_feeds_detail_files(self, tmp_path):

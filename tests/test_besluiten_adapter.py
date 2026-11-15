@@ -1,6 +1,7 @@
 """besluitenregister B4: queue answers become decisions, the index block, `vnx inbox answer`. tmp_path only."""
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -18,7 +19,20 @@ from besluitenregister.lezer import lees
 from besluitenregister.schrijver import Register
 
 PID = "proj"
+NU = "2026-11-20"
 SECRET = "sk-" + "a1B2c3D4e5F6g7H8i9J0k1L2m3N4"
+
+
+def populate_register(logdir: Path, n: int = 60, herzien: int = 8) -> None:
+    logdir.mkdir(parents=True, exist_ok=True)
+    reg, ids = Register(logdir), []
+    for i in range(n):
+        titel = f"Besluit {i:03d} " + "x" * 89  # the writer allows 100
+        ans = {"citaat": f"Akkoord {i}.", "ts": f"2026-11-{1 + i % 14:02d}T08:00:00Z", "point_id": f"pt-{i:03d}"}
+        ids.append(reg.schrijf(ba._velden("vnx-orchestration", titel, ans)).besluit_id)
+    for bid in ids[:herzien]:
+        reg.schrijf({"event": "herzien", "betreft": bid, "context": "vnx-orchestration", "besloten_op": "2026-11-15",
+                     "vastgelegd_door": "operator", "waarom": "later", "herzien_op": "2026-11-18"})
 
 
 @pytest.fixture
@@ -108,7 +122,7 @@ def test_unreadable_queue_raises(env):
 
 def test_index_block(env):
     state, log = env
-    assert ba.index_block(PID, log, state_dir=state) == {"status": "absent"}
+    assert ba.index_block(PID, log, state_dir=state)["status"] == "absent"
     a, b = _ask(state, "a", "Een."), _ask(state, "b", "Twee.")
     ba.sync_answers(PID, log, state_dir=state)
     reg = Register(log)
@@ -116,10 +130,21 @@ def test_index_block(env):
                  "besloten_op": "2026-11-15", "vastgelegd_door": "operator", "waarom": "later", "herzien_op": "2026-11-20"})
     c = _ask(state, "c", "Drie.")
     blok = ba.index_block(PID, log, state_dir=state, nu="2026-11-20")
-    assert blok["status"] == "ok" and blok["geldig"] == 2 and blok["te_herzien"] == [_lines(log)[0]["besluit_id"]]
-    assert blok["niet_vastgelegd"] == [c] and blok["afgescheurd"] == 0 and blok["ongeldig"] == 0
-    assert len(blok["recent"]) == 2 and set(blok["recent"][0]) == {"id", "titel", "besloten_op"}
-    assert ba.index_block(PID, log, state_dir=state, nu="2026-11-19")["te_herzien"] == []
+    assert blok["status"] == "ok" and blok["geldig"] == 2 and blok["te_herzien_ids"] == [_lines(log)[0]["besluit_id"]]
+    assert (blok["te_herzien"], blok["niet_vastgelegd"], blok["niet_vastgelegd_ids"]) == (1, 1, [c])
+    assert "afgescheurd" not in blok and "ongeldig" not in blok and len(blok["laatste"]) == 2
+    assert ba.index_block(PID, log, state_dir=state, nu="2026-11-19")["te_herzien_ids"] == []
+    assert set(ba.state_block(PID, log, state_dir=state, nu=NU)["recent"][0]) == {"id", "titel", "besloten_op"}
+
+
+def test_index_block_is_compact_for_a_big_register(env):
+    state, log = env
+    populate_register(log, 60, 8)
+    for i in range(20):
+        _ask(state, f"gat{i}", f"Open {i}.")
+    blok = ba.index_block(PID, log, state_dir=state, nu=NU)
+    assert len(json.dumps(blok).encode()) <= 400 and blok["geldig"] == 60 and blok["te_herzien"] == 8 and blok["niet_vastgelegd"] == 20
+    assert len(blok["te_herzien_ids"]) == len(blok["niet_vastgelegd_ids"]) == 3 and len(blok["laatste"]) == 5
 
 
 def test_index_block_error(env):
@@ -127,6 +152,34 @@ def test_index_block_error(env):
     (log / "besluiten.ndjson").mkdir()
     blok = ba.index_block(PID, log, state_dir=state)
     assert blok["status"] == "error" and blok["reason"]
+
+
+def test_fresh_project_creates_the_folder_and_records_the_decision(tmp_path):
+    state, log = tmp_path / "state", tmp_path / "fresh" / "daily-log"
+    state.mkdir()
+    _ask(state, "a", "Ja.")
+    assert ba.index_block(PID, log, state_dir=state)["niet_vastgelegd"] == 1
+    inbox_cli.main(["--project-id", PID, "--state-dir", str(state), "--logdir", str(log), "answer", _ask(state, "b"), "--quote", "Nee."])
+    blok = ba.index_block(PID, log, state_dir=state)
+    assert len(_lines(log)) == 2 and blok["status"] == "ok" and blok["niet_vastgelegd"] == 0
+
+
+def test_a_failed_write_shows_in_niet_vastgelegd(tmp_path):
+    state = tmp_path / "state"
+    state.mkdir()
+    (tmp_path / "blocked").write_text("a file, not a folder")
+    log = tmp_path / "blocked" / "daily-log"
+    _ask(state, "a", "Ja.")
+    with pytest.raises(OSError):
+        ba.sync_answers(PID, log, state_dir=state)
+    blok = ba.index_block(PID, log, state_dir=state)
+    assert blok["status"] == "absent" and blok["niet_vastgelegd"] == 1
+
+
+def test_tests_never_resolve_the_real_register():
+    import build_t0_state
+    real = Path(build_t0_state.__file__).resolve().parent.parent / "daily-log"
+    assert not str(build_t0_state._besluiten_logdir()).startswith(str(real))
 
 
 def test_inbox_answer_prints_decision(env, capsys):

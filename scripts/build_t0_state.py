@@ -60,8 +60,7 @@ Schema 2.2 change (D5 fabric-state-herstel, live work):
     ``conflicts/`` directory that exists but cannot be listed is not zero:
     its count is ``null`` with a ``*_unmeasured_reason`` and it degrades
     system_health, so the dispatch guard reads WAIT, never GO.
-  - t0_index.json schema ``t0_index/1.5`` (besluitenregister B4) adds ``besluiten``: counts and
-    ids from ``daily-log/besluiten.ndjson`` plus the queue answers without a decision. Read-only.
+  - t0_index.json schema ``t0_index/1.5`` (besluitenregister B4) adds ``besluiten`` (counts, ids; titles in the state).
   - t0_index.json schema ``t0_index/1.4`` (operator-vragen-tot-antwoord Q5) adds
     ``operator_inbox``: the open points of the operator queue, at most 5 plus
     ``more``. Building it never writes a ``presented`` line.
@@ -2887,16 +2886,25 @@ def _build_operator_inbox(project_id: str, state_dir: Path) -> Dict[str, Any]:
     return _inbox_block(run["data"])
 
 
-_BESLUITEN_LOGDIR = _PROJECT_ROOT / "daily-log"
+def _besluiten_logdir() -> Path:
+    """The register folder: VNX_BESLUITEN_LOGDIR when set (tests), else <project root>/daily-log."""
+    return Path(os.environ.get("VNX_BESLUITEN_LOGDIR") or _PROJECT_ROOT / "daily-log")
 
 
 def _build_besluiten(project_id: str, state_dir: Path) -> Dict[str, Any]:
     """besluitenregister B4: the register block, read-only; an error becomes status=error, never a raise."""
     try:
         import besluiten_adapter
-        return besluiten_adapter.index_block(project_id, _BESLUITEN_LOGDIR, state_dir=state_dir)
+        return besluiten_adapter.state_block(project_id, _besluiten_logdir(), state_dir=state_dir)
     except Exception as exc:  # vnx-silent-except: reported as status=error in the block itself
         return {"status": "error", "reason": f"{type(exc).__name__}: {exc}"[:200]}
+
+
+def _besluiten_index(block: Any) -> Dict[str, Any]:
+    if not isinstance(block, dict) or not block:
+        return {"status": "error", "reason": "besluiten missing from the state"}
+    import besluiten_adapter
+    return besluiten_adapter.compact(block)
 
 
 def build_t0_state(
@@ -3156,7 +3164,7 @@ def _build_t0_index(state: Dict[str, Any]) -> Dict[str, Any]:
         "last_rebuild_seconds": state.get("_build_seconds"),
         "operator_inbox": state.get("operator_inbox")
         or {"status": "error", "reason": "operator_inbox missing from the state"},
-        "besluiten": state.get("besluiten") or {"status": "error", "reason": "besluiten missing from the state"},
+        "besluiten": _besluiten_index(state.get("besluiten")),
     }
     if pr_unavailable:
         index["pr_queue_unavailable"] = pr_queue.get("reason") or "unknown"
