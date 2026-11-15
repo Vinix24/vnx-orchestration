@@ -32,7 +32,6 @@ def asked(text, ts=TS):
 
 
 def reasons(counter):
-    """The skip reasons without the config-read ones (the default configs of scan() do not exist)."""
     return {k: v for k, v in counter.items() if not k.startswith("config_")}
 
 
@@ -137,9 +136,8 @@ def test_account_is_a_slot_and_the_uuid_stays_inside(tmp_path):
 
 
 def _cfg(tmp_path, name, content):
-    p = tmp_path / name
-    p.write_text(content) if isinstance(content, str) else p.write_bytes(content)
-    return p
+    (tmp_path / name).write_bytes(content if isinstance(content, bytes) else content.encode())
+    return tmp_path / name
 
 
 @pytest.mark.parametrize("name,content,reason", [
@@ -153,16 +151,14 @@ def test_config_failure_is_a_counted_reason_distinct_from_no_match(tmp_path, nam
     good = _cfg(tmp_path, "good.json", json.dumps({"oauthAccount": {"accountUuid": "other", "emailAddress": "g@example.invalid"}}))
     bad = _cfg(tmp_path, name, content)
     assert src.resolve_account_checked(UUID, (bad, good)) == ("unknown", [reason])
-    assert src.resolve_account_checked(UUID, (good, good)) == ("unknown", [])  # a plain mismatch has no reason
+    assert src.resolve_account_checked(UUID, (good, good)) == ("unknown", [])
     out = scan([{"type": "session-owner", "accountUuid": UUID}], configs=(bad, good))
     assert out.skipped["B1"] == {reason: 1}
 
 
 def test_unreadable_config_names_slot_not_path(tmp_path):
     missing = tmp_path / "secret-home" / "missing.json"
-    account, reasons = src.resolve_account_checked(UUID, (missing, missing))
-    assert account == "unknown" and reasons == ["config_unreadable_vnx", "config_unreadable_sm"]
-    assert not any(str(tmp_path) in r for r in reasons)
+    assert src.resolve_account_checked(UUID, (missing, missing)) == ("unknown", ["config_unreadable_vnx", "config_unreadable_sm"])
 
 
 @pytest.mark.parametrize("decision", ["reject", ["reject"], 7])

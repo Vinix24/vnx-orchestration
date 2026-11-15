@@ -74,15 +74,11 @@ def _parse_config(text: str) -> Tuple[Optional[str], Optional[str]]:
         return None, "unparseable"
     if not isinstance(data, dict):
         return None, "wrong_type"
-    if "oauthAccount" not in data:
-        return None, None
-    acct = data["oauthAccount"]
-    if not isinstance(acct, dict):
+    acct = data.get("oauthAccount")  # absent is a config without a login: no uuid, no failure
+    if acct is not None and not isinstance(acct, dict):
         return None, "wrong_type"
-    uuid = acct.get("accountUuid")
-    if uuid is None:
-        return None, None
-    return (uuid, None) if isinstance(uuid, str) and uuid else (None, "wrong_type")
+    uuid = (acct or {}).get("accountUuid")
+    return (uuid, None) if isinstance(uuid, str) and uuid else (None, None if uuid is None else "wrong_type")
 
 
 def resolve_account_checked(owner_uuid: Any, config_paths: Sequence[Any] = DEFAULT_ACCOUNT_CONFIGS) -> Tuple[str, List[str]]:
@@ -249,7 +245,7 @@ def scan_transcript(lines: Iterable[str], *, project_id: str, slug: str, stem: s
     sid = owner.get("sessionId")
     account, reasons = resolve_account_checked(owner.get("accountUuid"), account_configs)
     for reason in reasons:
-        out.skipped["B1"][reason] += 1  # counted once, under B1 (the unmapped reasons live there too): a broken config never reads as 0
+        out.skipped["B1"][reason] += 1  # under B1 like the unmapped reasons: a broken config never reads as 0
     ctx = Ctx(project_id, sid if isinstance(sid, str) and sid else stem, account, origin_of(slug), find_dispatch_id(slug))
     for bron, reader in (("B1", read_b1), ("B2", read_b2), ("B4a", read_b4a)):
         out.events.extend(reader(objs, ctx, out.skipped[bron]))
