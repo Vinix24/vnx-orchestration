@@ -1,0 +1,1 @@
+- The backend-developer, security-engineer and quality-engineer role files now carry a `## What review finds most` section: the six patterns codex review returns most, each with the proof the report must show.
