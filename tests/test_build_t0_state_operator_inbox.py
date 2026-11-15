@@ -191,3 +191,87 @@ def test_role_has_both_rules_and_the_end_command_parses(env, capsys):
     assert _ledger_bytes(state).count(b'"kanaal": "status"') + _ledger_bytes(state).count(b'"kanaal":"status"') == 1
     ask = RULE_ASK.split("`")[1].split()[2:]
     assert ask == ["ask"]
+
+
+# ── round 2: an unknown source is never ok or zero (ADR-076 besluit 11), no writer left behind ─────────
+
+def _raising_reader():
+    def reader(project_id, **kw):
+        raise RuntimeError("source gone")
+    return types.SimpleNamespace(READERS=(("boom", reader),))
+
+
+@pytest.mark.parametrize("opened", [0, 2])
+def test_unknown_source_makes_the_block_unknown_and_the_hook_names_it(env, tmp_path, monkeypatch, opened):
+    state, dispatches = env
+    monkeypatch.setattr(inbox, "_MODULES", (_quiet_reader(), _raising_reader()))
+    ids = [_open(state, r, f"2026-11-1{i}T00:00:00Z") for i, r in enumerate("ab"[:opened])]
+    doc = bts.build_t0_state(state, dispatches)
+    block = doc["operator_inbox"]
+    assert block["status"] == "unknown" and block["open_total"] is None
+    assert "boom" in block["reason"] and "RuntimeError" in block["reason"]
+    assert block["unknown_sources"] == [{"name": "boom", "reden": "RuntimeError"}]
+    assert [p["point_id"] for p in block["points"]] == ids  # the points stay as show() gave them
+    ctx = _hook_ctx(tmp_path, monkeypatch, bts._build_t0_index(doc))
+    assert "  bron boom: unknown (RuntimeError)" in ctx
+    assert "NOT the same as no open questions" in ctx
+    for ref in "ab"[:opened]:
+        assert f"vraag {ref}" in ctx
+
+
+def test_every_line_of_unknown_sources_reaches_the_hook(tmp_path, monkeypatch):
+    block = {"status": "unknown", "reason": "bron 1: x; bron 2: y", "open_total": None, "more": 0, "points": [],
+             "unknown_sources": [{"name": "1", "reden": "x"}, {"name": "2", "reden": "y"}]}
+    ctx = _hook_ctx(tmp_path, monkeypatch, {"operator_inbox": block})
+    assert "  bron 1: unknown (x)" in ctx and "  bron 2: unknown (y)" in ctx
+
+
+@pytest.mark.parametrize("coverage", [None, "garbage", [{"bron": 4, "dekking": "weird"}], [{"bron": 4}]])
+def test_malformed_coverage_is_unknown_never_ok(env, monkeypatch, coverage):
+    monkeypatch.setattr(inbox, "show", lambda *a, **kw: {"status": "ok", "reason": None, "coverage": coverage,
+                                                          "open_total": 0, "points": [], "more": 0})
+    block = bts._build_operator_inbox(PID, env[0])
+    assert block["status"] == "unknown" and block["open_total"] is None and block["unknown_sources"]
+
+
+_DRIVER = r"""
+import os, sys, time, types, json
+from pathlib import Path
+sys.path[:0] = [sys.argv[1] + "/scripts/lib", sys.argv[1] + "/scripts"]
+import build_t0_state as bts, operator_queue as oq, operator_queue_inbox as inbox
+state = Path(sys.argv[2])
+orig = oq._write_state
+def slow(sdir, st):
+    time.sleep(1.0)  # the reader sits between its ledger append and the projection when the budget runs out
+    orig(sdir, st)
+def reader(project_id, **kw):
+    oq._write_state = slow
+    oq.open_point(project_id, bron=3, ref="b", vraag="vraag b", sluit_bij="x", opened_by="t",
+                  asked_at="2026-11-12T00:00:00Z", now="2026-11-12T00:00:00Z", state_dir=state)
+    return {"bron": 3, "dekking": "gelezen", "reden": None, "unknown": []}
+inbox._MODULES = (types.SimpleNamespace(READERS=(("writer", reader),)),)
+bts._INBOX_BUDGET_SECONDS = 0.2
+print(json.dumps(bts._build_operator_inbox("proj", state)))
+"""
+
+
+def test_timeout_mid_reader_leaves_no_torn_line_and_projection_catches_up(tmp_path):
+    import time
+
+    state = tmp_path / "state"
+    _open(state, "a", "2026-11-10T00:00:00Z")
+    env_ = {k: v for k, v in os.environ.items() if k not in ("VNX_CANONICAL_ROOT", "VNX_PROJECT_ID")}
+    r = subprocess.run([sys.executable, "-c", _DRIVER, str(_ROOT), str(state)], capture_output=True, text=True,
+                       timeout=30, env=env_)
+    assert r.returncode == 0, r.stderr
+    block = json.loads(r.stdout.strip().splitlines()[-1])
+    assert block["status"] == "error" and block["reason"].startswith("timeout")
+    deadline, agree = time.monotonic() + 10, False
+    while time.monotonic() < deadline and not agree:
+        lines = oq._ledger_lines(state, PID)  # strict reader: a torn line raises QueueUnreadable
+        stored = json.loads((state / oq.STATE_FILENAME).read_text(encoding="utf-8"))
+        agree = len(lines) == 2 and stored["points"] == oq.read_state(PID, state_dir=state)["points"]
+        if not agree:
+            time.sleep(0.1)
+    assert agree, "operator_queue.json disagrees with the ledger: the writer was stopped between append and projection"
+    assert not list(state.glob("*.tmp"))

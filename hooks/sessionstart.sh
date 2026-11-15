@@ -208,6 +208,11 @@ ${T0_LIFECYCLE}"
           .operator_inbox as $b
           | if ($b | type) != "object" then
               "operator inbox: not readable (t0_index.json has no operator_inbox block; rebuild the index)"
+            elif $b.status == "unknown" then
+              # besluit 11: an unknown source is never zero. Head line, one line per unknown source, then the points.
+              ("operator inbox: could not be read completely (unknown: \($b.reason // "no reason given")); NOT the same as no open questions"),
+              (($b.unknown_sources // [])[] | "  bron \(.name): unknown (\(.reden))"),
+              (($b.points // [])[] | "  [\(.age), presented \(.presented)x] \(.vraag)" + (if (.kopieerblok // "") != "" then "\n    " + .kopieerblok else "" end))
             elif $b.status != "ok" then
               "operator inbox: could not be read (\($b.status // "unknown"): \($b.reason // "no reason given")); NOT the same as no open questions"
             elif ($b.open_total | type) != "number" then
