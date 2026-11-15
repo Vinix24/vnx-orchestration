@@ -1,0 +1,1 @@
+- refactor: `WorkflowSupervisor.handle_incident` cut from 125 to under 100 executable lines by extract-method into three private helpers, behaviour unchanged (golf schoon R25).
