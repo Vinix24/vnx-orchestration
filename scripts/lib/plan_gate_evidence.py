@@ -35,6 +35,10 @@ def _ledger_path(repo_root: "str | Path") -> Path:
     return Path(repo_root) / _LEDGER
 
 
+class LatestPassChanged(Exception):
+    """The pass a caller signed is no longer the latest of its track: nothing was appended (OI-2849)."""
+
+
 _TRACE_PROFILE_PREFIX = "profile="
 
 
@@ -69,6 +73,7 @@ def emit_plan_gate_pass(
     gov_trace: Optional[str] = None,
     extra_fields: Optional[Dict[str, Any]] = None,
     verify_with: "str | Path | None" = None,
+    expect_latest_hash: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """Append a ``plan_gate_pass`` record for a track to the repo-committed ledger.
 
@@ -87,11 +92,12 @@ def emit_plan_gate_pass(
     "no derivation for this round"; here absence means "no derivation at all".
     Signed when ``key_path`` + ``signer_identity`` are provided (tamper-proof);
     otherwise appended unsigned but hash-chained (tamper-evident). ``extra_fields`` are copied
-    on before signing; a signed record failing ``verify_with`` is not appended (OI-2849). Best-effort:
-    returns the appended record on success, ``None`` on any failure (never raises).
+    on before signing; a signed record failing ``verify_with`` is not appended (OI-2849), and with
+    ``expect_latest_hash`` a latest pass of another hash, rechecked under the append's ledger lock,
+    raises ``LatestPassChanged`` unwritten. Otherwise best-effort: the record, or ``None`` on failure.
     """
     try:
-        from ndjson_hash_chain import append_chained_entry  # noqa: PLC0415
+        from ndjson_hash_chain import _append_chained_entry_locked, _ledger_locked, compute_entry_hash  # noqa: PLC0415
 
         record: Dict[str, Any] = {
             "type": RECORD_TYPE,
@@ -127,8 +133,14 @@ def emit_plan_gate_pass(
 
         ledger = _ledger_path(repo_root)
         ledger.parent.mkdir(parents=True, exist_ok=True)
-        append_chained_entry(ledger, record)
+        with _ledger_locked(ledger):  # one hold for the recheck and the append (ADR-034 § 4)
+            latest = verify_plan_gate_pass(repo_root, track_id, project_id)[1] if expect_latest_hash else None
+            if expect_latest_hash and (latest is None or compute_entry_hash(latest) != expect_latest_hash):
+                raise LatestPassChanged(track_id)
+            _append_chained_entry_locked(ledger, record)
         return record
+    except LatestPassChanged:
+        raise
     except Exception:  # noqa: BLE001 — emission must never break the gate resolution
         return None
 

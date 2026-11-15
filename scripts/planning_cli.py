@@ -3430,7 +3430,8 @@ def cmd_plan_gate_sign(args: argparse.Namespace) -> int:
     if cls != actor_class.OPERATOR:
         print(f"plan-gate sign: actor class {cls!r} may not sign, only the operator. Nothing written.", file=sys.stderr)
         return 2
-    track_id, project_id, repo_root = args.track_id, args.project_id, Path(os.environ.get("VNX_PROJECT_ROOT", os.getcwd()))
+    track_id, project_id = args.track_id, args.project_id  # root: vnx_cli's --repo-root (from --project-dir) first
+    repo_root = Path(getattr(args, "repo_root", "") or os.environ.get("VNX_PROJECT_ROOT", os.getcwd()))
     _state, record = plan_gate_evidence.verify_plan_gate_pass(repo_root, track_id, project_id)
     if record is None:
         print(f"plan-gate sign: no plan_gate_pass for {track_id!r} ({project_id!r}). Nothing written.", file=sys.stderr)
@@ -3441,12 +3442,16 @@ def cmd_plan_gate_sign(args: argparse.Namespace) -> int:
         skip = {"type", "prev_hash", "signature", "signer_identity", "track_id", "project_id", "resolver", "resolved_at"}
         fields = {k: v for k, v in record.items() if k not in skip}
         fields.update(signed_by_operator_at=_now_utc(), signs_record_hash=compute_entry_hash(record))
-        if plan_gate_evidence.emit_plan_gate_pass(
-            repo_root=repo_root, track_id=track_id, project_id=project_id,
-            resolver=str(record.get("resolver") or ""), timestamp=str(record.get("resolved_at") or ""),
-            signer_identity=args.identity, key_path=args.key, extra_fields=fields, verify_with=signers,
-        ) is None:
-            reason = f"signing with {args.key} failed or does not verify against {signers}"
+        try:
+            if plan_gate_evidence.emit_plan_gate_pass(
+                repo_root=repo_root, track_id=track_id, project_id=project_id,
+                resolver=str(record.get("resolver") or ""), timestamp=str(record.get("resolved_at") or ""),
+                signer_identity=args.identity, key_path=args.key, extra_fields=fields, verify_with=signers,
+                expect_latest_hash=fields["signs_record_hash"],
+            ) is None:
+                reason = f"signing with {args.key} failed or does not verify against {signers}"
+        except plan_gate_evidence.LatestPassChanged:
+            reason = "the latest plan-gate pass changed while signing; nothing written, sign again"
     grant = plan_gate_enforcement.verify_promotion_grant(track_id, project_id, repo_root, signers)
     print(f"plan-gate sign: {track_id} (project {project_id!r}) grant {grant.value}")
     reason = reason or (None if grant == plan_gate_enforcement.PromotionGrant.VERIFIED else f"grant reads {grant.value}")

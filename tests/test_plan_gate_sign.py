@@ -1,6 +1,7 @@
 """`vnx plan-gate sign`: the operator signs an existing plan-gate pass (OI-2849, ADR-056)."""
 from __future__ import annotations
 
+import argparse
 import shutil
 import subprocess
 import sys
@@ -85,3 +86,29 @@ def test_refusal_writes_nothing_and_grant_stays_unsigned(e, monkeypatch, capsys,
     assert message in capsys.readouterr().err
     assert ((e / LEDGER).read_bytes() if before else (e / LEDGER).exists()) == (before or False)
     assert _grant(e) is (Grant.ABSENT if before is None else Grant.PRESENT_UNSIGNED)
+
+
+
+def test_pass_landing_between_read_and_append_is_refused(e, monkeypatch, capsys):
+    _pass(e)
+    read = plan_gate_evidence.verify_plan_gate_pass
+
+    def read_then_b_lands(*a):  # the sign step reads A, then pass B lands (once)
+        monkeypatch.setattr(plan_gate_evidence, "verify_plan_gate_pass", read)
+        return read(*a), _pass(e, ts="2026-11-15T08:00:00Z")
+    monkeypatch.setattr(plan_gate_evidence, "verify_plan_gate_pass", lambda *a: read_then_b_lands(*a)[0])
+    assert _sign(e) == 4 and "latest plan-gate pass changed" in capsys.readouterr().err
+    assert len((e / LEDGER).read_bytes().splitlines()) == 2 and _grant(e) is Grant.PRESENT_UNSIGNED
+
+
+def test_horizon_sign_reads_the_ledger_of_the_selected_project_dir(e, monkeypatch, tmp_path_factory):
+    from vnx_cli.commands import horizon
+    proj, cwd = tmp_path_factory.mktemp("proj"), tmp_path_factory.mktemp("cwd")
+    _pass(proj)
+    monkeypatch.delenv("VNX_PROJECT_ROOT")
+    monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+    monkeypatch.setenv("VNX_DATA_DIR", str(cwd / "data"))
+    monkeypatch.chdir(cwd)
+    args = argparse.Namespace(project_dir=str(proj), project_id=PROJECT, json=False, track_id=TRACK, key=str(e / "k"), identity=IDENTITY)
+    assert horizon._cmd_plan_gate_sign(args) == 0 and not (cwd / LEDGER).exists()
+    assert plan_gate_enforcement.verify_promotion_grant(TRACK, PROJECT, proj, e / "allowed_signers") is Grant.VERIFIED

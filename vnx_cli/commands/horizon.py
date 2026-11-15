@@ -373,7 +373,7 @@ def _cmd_plan_gate_attest(args: Any) -> int:
 
 def _cmd_plan_gate_sign(args: Any) -> int:
     pc = _require_planning_cli()
-    _prep(args)
+    _prep_repo(args)  # --repo-root defaults to --project-dir: sign the selected project's ledger
     return pc.cmd_plan_gate_sign(args)
 
 
