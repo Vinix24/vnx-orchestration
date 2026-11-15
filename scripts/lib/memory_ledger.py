@@ -225,10 +225,22 @@ def read_ledger(path: Path) -> Tuple[List[dict], int, List[int]]:
 
 
 def _append_fsync(path: Path, data: bytes) -> None:
+    """Append every byte of ``data`` and fsync, or restore the size before the call and raise."""
     fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
     try:
-        os.write(fd, data)  # vnx-atomic-write: one O_APPEND write per line, then fsync
-        os.fsync(fd)
+        size_before = os.fstat(fd).st_size
+        try:
+            view = memoryview(data)
+            while view:  # a short write is legal: loop on the count
+                written = os.write(fd, view)  # vnx-atomic-write: O_APPEND, all bytes or roll back, then fsync
+                if written <= 0:
+                    raise OSError("zero-byte write to " + str(path))
+                view = view[written:]
+            os.fsync(fd)
+        except BaseException:
+            os.ftruncate(fd, size_before)  # no half line survives (ADR-077 §4)
+            os.fsync(fd)
+            raise
     finally:
         os.close(fd)
 
@@ -240,7 +252,7 @@ def _set_apart_tail(state_dir: Path, ledger: Path, raw: bytes) -> None:
     entry = {"offset": len(body), "sha256": hashlib.sha256(tail).hexdigest(),
              "bytes_b64": base64.b64encode(tail).decode("ascii")}
     _append_fsync(Path(state_dir) / (LEDGER_FILE + ".afgescheurd"), (json.dumps(entry) + "\n").encode())
-    os.truncate(ledger, len(body))
+    os.truncate(ledger, len(body))  # only after the archive line is complete and fsynced
     _append_fsync(ledger, b"")  # fsync the cut ledger before the first new line
 
 
@@ -294,7 +306,7 @@ def _frontmatter(data: bytes) -> Tuple[str, Optional[dict]]:
     import yaml
     try:
         meta = yaml.safe_load("\n".join(lines[1:end]))
-    except yaml.YAMLError:
+    except (yaml.YAMLError, ValueError, TypeError):  # e.g. valid_from: 2026-13-01 fails date conversion
         return "unparseable", None
     return ("ok", meta) if isinstance(meta, dict) else ("unparseable", None)
 

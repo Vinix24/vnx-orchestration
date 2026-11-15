@@ -385,3 +385,54 @@ def test_unbound_writes_nothing_then_cli_scan_observes(env, monkeypatch, capsys)
     bound(env)
     assert memory_cli.main(["scan"]) == 0
     assert "3 line(s) written" in capsys.readouterr().out
+
+
+def _disk_full(*_a):
+    raise OSError(28, "No space left on device")
+
+
+def _short_then(real, then):
+    calls = []
+
+    def write(fd, data):
+        calls.append(1)
+        if len(calls) == 1:
+            return real(fd, bytes(data[:3]))
+        return then(fd, data)
+    return write
+
+
+def test_append_writes_every_byte_after_a_short_write(tmp_path, monkeypatch):
+    path = tmp_path / "l.ndjson"
+    path.write_bytes(b'{"a":1}\n')
+    monkeypatch.setattr(ml.os, "write", _short_then(os.write, os.write))
+    ml._append_fsync(path, b'{"b":22}\n')
+    assert path.read_bytes() == b'{"a":1}\n{"b":22}\n'
+
+
+def test_append_failure_after_short_write_rolls_back(tmp_path, monkeypatch):
+    path = tmp_path / "l.ndjson"
+    path.write_bytes(b'{"a":1}\n')
+    monkeypatch.setattr(ml.os, "write", _short_then(os.write, _disk_full))
+    with pytest.raises(OSError):
+        ml._append_fsync(path, b'{"b":22}\n')
+    assert path.read_bytes() == b'{"a":1}\n'
+
+
+def test_tail_is_kept_when_the_archive_append_fails(tmp_path, monkeypatch):
+    ledger = tmp_path / ml.LEDGER_FILE
+    ledger.write_bytes(b'{"a":1}\n{"half":')
+    monkeypatch.setattr(ml.os, "write", _short_then(os.write, _disk_full))
+    with pytest.raises(OSError):
+        ml._set_apart_tail(tmp_path, ledger, ledger.read_bytes())
+    assert ledger.read_bytes() == b'{"a":1}\n{"half":'
+
+
+@pytest.mark.parametrize("bad", ["valid_from: 2026-13-01", "valid_to: 2026-02-30"])
+def test_impossible_date_is_unparseable_and_the_scan_goes_on(env, bad):
+    assert ml.parse_note(note(bad).encode(), "x.md")["frontmatter"] == "unparseable"
+    (env.mem / "c.md").write_text(note(bad))
+    bound(env)
+    assert ml.scan(env.state)["written"] == 4
+    by = {r["note"]: r for r in lines(env)}
+    assert (by["c.md"]["frontmatter"], by["a.md"]["frontmatter"]) == ("unparseable", "ok")
