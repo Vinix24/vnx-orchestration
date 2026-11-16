@@ -63,6 +63,20 @@ def _fake_gate_worktree(tmp_path, monkeypatch):
 
 
 @pytest.fixture
+def fixed_review_interpreter(monkeypatch):
+    """The once-per-run resolver answers a fixed {path, rule}, so no real probe starts while a test patches
+    ``gate_runner.subprocess.Popen`` / ``gate_runner.os.read`` around a full ``run()``."""
+    fixed = {"path": sys.executable, "rule": gate_runner.RULE_FABRIC_CHAIN}
+
+    def _fixed(request_payload, project_root):
+        request_payload["review_interpreter"] = dict(fixed)
+        return fixed["path"], fixed["rule"]
+
+    monkeypatch.setattr(gate_runner, "_run_interpreter", _fixed)
+    return fixed
+
+
+@pytest.fixture
 def gate_env(tmp_path, monkeypatch):
     """Set up VNX environment for gate runner tests."""
     project_root = tmp_path / "project"
@@ -113,6 +127,7 @@ def _make_request_payload(gate="gemini_review", pr_number=1, **overrides):
     return payload
 
 
+@pytest.mark.usefixtures("fixed_review_interpreter")
 class TestGateTransitionsToExecuting:
     """GATE-1, GATE-3: Gate request transitions to executing when runner starts."""
 
@@ -274,6 +289,7 @@ class TestGateNotExecutable:
         assert result_file.exists()
 
 
+@pytest.mark.usefixtures("fixed_review_interpreter")
 class TestTimeoutKill:
     """GATE-6, GATE-8: Gate killed after timeout produces failed result."""
 
@@ -331,6 +347,7 @@ class TestTimeoutKill:
         assert mock_killpg.called or mock_proc.kill.called
 
 
+@pytest.mark.usefixtures("fixed_review_interpreter")
 class TestStallDetection:
     """GATE-7, GATE-8: Gate killed after stall produces failed result."""
 
@@ -386,6 +403,7 @@ class TestStallDetection:
         assert mock_killpg.called or mock_proc.kill.called
 
 
+@pytest.mark.usefixtures("fixed_review_interpreter")
 class TestExitNonzeroReasonDetail:
     """OI-1293: the exit_nonzero branch must not discard stdout/stderr.
 
@@ -600,6 +618,7 @@ class TestSkipRationaleAudit:
         assert len(lines) == 3
 
 
+@pytest.mark.usefixtures("fixed_review_interpreter")
 class TestArtifactAtomicity:
     """GATE-11: Artifact write is atomic — partial failure produces no result record."""
 
@@ -817,6 +836,7 @@ class TestRequestNormalization:
         assert record["gate"] == "codex_gate"
 
 
+@pytest.mark.usefixtures("fixed_review_interpreter")
 class TestCodexGateExecution:
     """Codex gate execution path with VNX_CODEX_HEADLESS_ENABLED=1."""
 
@@ -1035,6 +1055,7 @@ class TestGateTimeoutConfig:
         assert gate_stall_threshold("unknown_gate") == 60
 
 
+@pytest.mark.usefixtures("fixed_review_interpreter")
 class TestGateWorktreeCheckout:
     """OI-708: codex_gate/gemini_review subprocess must run with cwd at an
     isolated worktree checked out from origin/<branch>, never the
@@ -1834,8 +1855,10 @@ class TestReviewInterpreterResolvedOncePerRun:
                             staticmethod(lambda n: "diff --git a/x.py b/x.py\n+++ b/x.py\n+print(1)\n"))
         gate_runner.resolve_review_interpreter.cache_clear()
         probed = []
-        real_probe = gate_runner._imports_pytest
-        monkeypatch.setattr(gate_runner, "_imports_pytest", lambda c: probed.append(c) or real_probe(c))
+        real_resolve = gate_runner.resolve_review_interpreter_with_rule
+        monkeypatch.setattr(gate_runner, "resolve_review_interpreter_with_rule",
+                            lambda **kw: probed.append(kw) or real_resolve(**kw))
+        real_read = os.read
 
         proc = MagicMock()
         proc.stdout.fileno.return_value, proc.stderr.fileno.return_value = 10, 11
@@ -1843,6 +1866,8 @@ class TestReviewInterpreterResolvedOncePerRun:
         reads = [0]
 
         def mock_os_read(fd, size):
+            if fd not in (10, 11):  # a real Popen of the resolver's probes reads its own exec pipe
+                return real_read(fd, size)
             reads[0] += 1
             return CODEX_VERDICT_STREAM if fd == 10 and reads[0] == 1 else b""
 
@@ -1865,7 +1890,7 @@ class TestReviewInterpreterResolvedOncePerRun:
         assert f"{venv_python} -m pytest" in prompt
         assert gate_runner._RULE_TEXT[2] in prompt
 
-    def test_a_full_codex_run_probes_the_interpreter_once(self, gate_env, monkeypatch, tmp_path):
-        _result, _payload, _prompt, probed, venv_python = self._run_codex(gate_env, monkeypatch, tmp_path)
+    def test_a_full_codex_run_resolves_the_interpreter_once(self, gate_env, monkeypatch, tmp_path):
+        _result, _payload, _prompt, probed, _venv_python = self._run_codex(gate_env, monkeypatch, tmp_path)
 
-        assert probed == [str(venv_python)]
+        assert len(probed) == 1

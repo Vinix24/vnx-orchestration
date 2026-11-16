@@ -130,18 +130,28 @@ class TestResolveReviewInterpreterFailsClosed:
 
         assert gate_runner.resolve_review_interpreter() == sys.executable
 
-    def test_a_hanging_probe_is_skipped_and_killed(self, tmp_path, monkeypatch):
-        hang = tmp_path / "hang"
-        hang.write_text("#!/bin/sh\nexec sleep 30\n", encoding="utf-8")
-        hang.chmod(0o755)
-        monkeypatch.setattr(gate_runner, "_PROBE_TIMEOUT", 0.3)
-        monkeypatch.setenv("VNX_REVIEW_PYTHON", str(hang))
-        monkeypatch.setenv("VNX_PYTHON", str(hang))
-        monkeypatch.setattr(gate_runner.sys, "executable", str(hang))
-        monkeypatch.setattr(gate_runner.shutil, "which", lambda name: str(hang))
+    def test_a_hanging_probe_is_skipped(self, monkeypatch):
+        class _HangingProc:
+            returncode = None
 
-        assert gate_runner._imports_pytest(str(hang)) is False
+            def __init__(self):
+                self.killed = False
+
+            def communicate(self, timeout=None):
+                if timeout is not None:
+                    raise subprocess.TimeoutExpired(cmd="python", timeout=timeout)
+                return (b"", b"")
+
+            def kill(self):
+                self.killed = True
+
+        proc = _HangingProc()
+        monkeypatch.setenv("VNX_REVIEW_PYTHON", sys.executable)
+        monkeypatch.setenv("VNX_PYTHON", sys.executable)
+        monkeypatch.setattr(gate_runner, "_ProbePopen", lambda *a, **kw: proc)
+
         assert gate_runner.resolve_review_interpreter() is None
+        assert proc.killed
 
 
 class TestPromptNamesTheInterpreter:

@@ -164,8 +164,9 @@ def resolve_codex_review_effort(risk_class: Optional[str]) -> str:
 
 # OI-2591: a codex review runs the tests with the ``python3`` its PATH offers, which on
 # this host is 3.15 without the project packages; the seat is handed one that imports
-# pytest. The probe (``_imports_pytest``) does not go through
-# ``subprocess.Popen``, so the gate tests' patches of it cannot mock it into answering "has pytest".
+# pytest. Import-time capture below: the gate tests' ``subprocess.Popen`` patch must not
+# be able to mock this probe into answering "has pytest".
+_ProbePopen = subprocess.Popen
 
 
 REVIEW_PYTHON_KEY = "VNX_REVIEW_PYTHON"
@@ -182,61 +183,49 @@ _RULE_TEXT = {
 GATE_WORKTREE_TOKEN = "@@VNX_GATE_WORKTREE@@"
 
 
-_PROBE_TIMEOUT = 10.0
-
-
 def _imports_pytest(candidate: Optional[str]) -> bool:
-    """True when ``candidate`` imports pytest within ``_PROBE_TIMEOUT`` s. ``os.posix_spawn``, not Popen:
-    ``Popen.__init__`` reads its exec pipe via ``os.read``, which the gate tests patch process-wide."""
+    """True when ``candidate`` is a file that imports pytest within 10 s."""
     if not (candidate and os.path.isfile(candidate)):
         return False
-    null = os.devnull
-    actions = [(os.POSIX_SPAWN_OPEN, 0, null, os.O_RDONLY, 0), (os.POSIX_SPAWN_OPEN, 1, null, os.O_WRONLY, 0),
-               (os.POSIX_SPAWN_OPEN, 2, null, os.O_WRONLY, 0)]
+    proc = None
     try:
-        pid = os.posix_spawn(candidate, [candidate, "-c", "import pytest"], os.environ, file_actions=actions)
+        proc = _ProbePopen(
+            [candidate, "-c", "import pytest"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        proc.communicate(timeout=10)
+        return proc.returncode == 0
     except OSError:  # vnx-silent-except: an interpreter that cannot start is no candidate
         return False
-    deadline = time.monotonic() + _PROBE_TIMEOUT
-    while True:
-        done, status = os.waitpid(pid, os.WNOHANG)
-        if done:
-            return os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0
-        if time.monotonic() >= deadline:
-            os.kill(pid, signal.SIGKILL)
-            os.waitpid(pid, 0)
-            return False
-        time.sleep(0.01)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.communicate()
+        return False
 
 
 def _project_root_of(directory: Optional[Path]) -> Optional[str]:
-    """The main checkout of the repository ``directory`` (default cwd) belongs to, read from the ``.git``
-    entry so no subprocess starts; a worktree answers like its main checkout. None: no ``.venv`` is guessed."""
+    """The directory above ``git rev-parse --git-common-dir`` measured from ``directory`` (the
+    process's cwd when None): the main checkout of whatever project the gate worktree belongs to.
+    None when git does not answer, so no ``.venv`` is guessed."""
     try:
-        here = Path(directory or Path.cwd()).resolve()
-        for candidate in (here, *here.parents):
-            entry = candidate / ".git"
-            if entry.is_dir():
-                return str(candidate)
-            if entry.is_file():
-                text = entry.read_text(encoding="utf-8").strip()
-                if not text.startswith("gitdir:"):
-                    return None
-                gitdir = (candidate / text[len("gitdir:"):].strip()).resolve()
-                commondir = gitdir / "commondir"
-                if not commondir.is_file():
-                    return str(gitdir.parent.parent.parent) if gitdir.parent.name == "worktrees" else None
-                return str((gitdir / commondir.read_text(encoding="utf-8").strip()).resolve().parent)
-    except (OSError, UnicodeDecodeError):  # vnx-silent-except: no answer means no project .venv, rule 3 follows
+        proc = _ProbePopen(
+            ["git", "rev-parse", "--git-common-dir"], cwd=str(directory) if directory else None,
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+        )
+        out, _err = proc.communicate(timeout=10)
+    except (OSError, subprocess.TimeoutExpired):  # vnx-silent-except: no answer means no project .venv, rule 3 follows
         return None
-    return None
+    common = (out or "").strip()
+    if proc.returncode != 0 or not common:
+        return None
+    return str((Path(directory or Path.cwd()) / common).resolve().parent)
 
 
 def _run_interpreter(request_payload: Dict[str, Any], project_root: Optional[Path]) -> "tuple[Optional[str], int]":
     """The run's review interpreter, resolved once and kept on the request as ``review_interpreter``
     ({path, rule}; path None when none imports pytest). Rule 2 measures the repository the gate runs
     for: ``project_root``, else the one this file lives in (the first candidate of
-    ``project_root.resolve_project_root``, read in-process), not the cwd nor the not-yet-made worktree."""
+    ``project_root.resolve_project_root``), measured with ``git``, not the cwd nor the not-yet-made worktree."""
     kept = request_payload.get("review_interpreter")
     if isinstance(kept, dict) and "rule" in kept and "path" in kept:
         return kept["path"], kept["rule"]
@@ -1276,7 +1265,8 @@ class GateRunner:
             plan = review_delta_decide.plan_round(  # DR-6: under delta the codex seat may decide with the delta round
                 gate=gate, prompt=prompt, request_payload=request_payload, state_dir=self._state_dir, worktree=worktree_path,
                 assemble=partial(_assemble_reviewer_prompt, str(request_payload.get("pr_number")),
-                                 interpreter_rule=_run_interpreter(request_payload, self._project_root)))
+                                 interpreter_rule=(_run_interpreter(request_payload, self._project_root)
+                                                   if gate == "codex_gate" else None)))
             result = self._run_with_stall_detection(
                 gate=gate, binary=binary, prompt=plan.prompt,
                 timeout=gate_timeout(gate), stall_threshold=gate_stall_threshold(gate),
