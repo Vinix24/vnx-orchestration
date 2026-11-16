@@ -242,6 +242,16 @@ def _project_config_value(key: str, project_id: Optional[str]) -> str:
     return (config_registry.get(key, project_id or None) or "").strip()
 
 
+def _project_review_python(project_id: Optional[str]) -> str:
+    """Rule 1's VNX_REVIEW_PYTHON, by source: the project's row or the override; env, default or unset give ""."""
+    import config_registry
+    import config_runtime
+
+    config_runtime.autowire()
+    value, source = config_registry.resolve_with_source(REVIEW_PYTHON_KEY, project_id or None)
+    return (value or "").strip() if source in ("project_config", "override") else ""
+
+
 def _is_safe_interpreter_path(path: str) -> bool:
     """An interpreter path that goes into the prompt's command: absolute and free of any
     shell metacharacter or whitespace (the same character set as a test path)."""
@@ -250,11 +260,9 @@ def _is_safe_interpreter_path(path: str) -> bool:
 
 @lru_cache(maxsize=32)
 def _resolve_cached(project_id: str, root: str, configured: str, env_python: str) -> "tuple[Optional[str], int]":
-    """Keyed on everything the answer depends on, so two projects (or a changed
-    ``project_config`` value) never share an entry."""
-    # configured == env_python means the registry only echoed the process env: that is rule 3's first candidate.
-    if configured and configured != env_python and _is_safe_interpreter_path(configured) \
-            and _imports_pytest(configured):
+    """Keyed on everything the answer depends on, so two projects (or a changed or removed
+    ``project_config`` row: ``configured`` is "" without one) never share an entry."""
+    if configured and _is_safe_interpreter_path(configured) and _imports_pytest(configured):
         return configured, RULE_PROJECT_CONFIG
     if root:
         venv_python = os.path.join(root, ".venv", "bin", "python")
@@ -273,9 +281,9 @@ def resolve_review_interpreter_with_rule(
     """``(interpreter, rule)``: the first of the project's ``VNX_REVIEW_PYTHON`` (rule 1), its
     ``<projectroot>/.venv/bin/python`` (rule 2) and the OI-2591 chain VNX_REVIEW_PYTHON,
     VNX_PYTHON, sys.executable, python3.12, python3 (rule 3) that imports pytest; None when none
-    does. The answer is cached per (project, project root, configured value)."""
+    does. The answer is cached per (project, project root, rule-1 value, env value)."""
     return _resolve_cached(project_id or "", _project_root_of(worktree) or "",
-                           _project_config_value(REVIEW_PYTHON_KEY, project_id),
+                           _project_review_python(project_id),
                            os.environ.get(REVIEW_PYTHON_KEY) or "")
 
 
@@ -996,6 +1004,7 @@ class GateRunner:
         # earlier execution). ``_mark_executing`` remains the only minter, at the
         # transition to ``executing``; every record after it carries this run's id.
         request_payload.pop(gate_status.EXECUTION_ID_FIELD, None)
+        request_payload.pop("review_interpreter", None)  # resolved once per run, not reused from an earlier one
         provider = _rec.resolve_gate_provider(gate)
         using_vertex = gate == "gemini_review" and os.environ.get("VNX_GEMINI_ROUTING", "oauth") == "vertex"
         # Harness-lane gates (C6 step 1) delegate to the governed dispatcher

@@ -1833,7 +1833,7 @@ class TestReviewInterpreterResolvedOncePerRun:
     """reviews-zonder-uitkomst D1 r3: one resolution per run, before the prompt, from the gate's repository."""
 
     @staticmethod
-    def _run_codex(gate_env, monkeypatch, tmp_path):
+    def _run_codex(gate_env, monkeypatch, tmp_path, kept=None):
         import subprocess as _sp
 
         root = gate_env["project_root"]
@@ -1851,6 +1851,7 @@ class TestReviewInterpreterResolvedOncePerRun:
         monkeypatch.setenv("VNX_CODEX_HEADLESS_ENABLED", "1")
         monkeypatch.setattr("shutil.which", lambda b: "/usr/bin/fake")
         monkeypatch.setattr(gate_runner, "_project_config_value", lambda key, project_id: "")
+        monkeypatch.setattr(gate_runner, "_project_review_python", lambda project_id: "", raising=False)
         monkeypatch.setattr(GateRunner, "_fetch_gh_pr_diff",
                             staticmethod(lambda n: "diff --git a/x.py b/x.py\n+++ b/x.py\n+print(1)\n"))
         gate_runner.resolve_review_interpreter.cache_clear()
@@ -1873,6 +1874,7 @@ class TestReviewInterpreterResolvedOncePerRun:
             return CODEX_VERDICT_STREAM if fd == out_fd and reads[0] == 1 else b""
 
         payload = _make_request_payload(gate="codex_gate", report_path=str(gate_env["reports_dir"] / "r.md"), prompt="")
+        payload.update({"review_interpreter": kept} if kept else {})  # what an earlier run left behind
         runner = GateRunner(state_dir=gate_env["state_dir"], reports_dir=gate_env["reports_dir"], project_root=root)
         with patch("gate_runner.create_gate_worktree", return_value=worktree), \
              patch("gate_runner.remove_gate_worktree"), \
@@ -1895,3 +1897,39 @@ class TestReviewInterpreterResolvedOncePerRun:
         _result, _payload, _prompt, probed, _venv_python = self._run_codex(gate_env, monkeypatch, tmp_path)
 
         assert len(probed) == 1
+
+    def test_an_earlier_runs_interpreter_on_the_request_is_resolved_again(self, gate_env, monkeypatch, tmp_path):
+        result, payload, prompt, probed, venv_python = self._run_codex(
+            gate_env, monkeypatch, tmp_path, kept={"path": None, "rule": 3})
+
+        assert len(probed) == 1 and payload["review_interpreter"] == {"path": str(venv_python), "rule": 2}
+        assert f"{venv_python} -m pytest" in prompt
+
+
+class TestRuleOneByProvenance:
+    """reviews-zonder-uitkomst D1 r6: rule 1 is the project's row or the override, by source, not by value."""
+
+    @staticmethod
+    def _wire(monkeypatch, tmp_path, row, root):
+        for py in [tmp_path / "py"] + ([root / ".venv" / "bin" / "python"] if root else []):
+            py.parent.mkdir(parents=True, exist_ok=True)
+            py.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            py.chmod(0o755)
+        shim = str(tmp_path / "py")
+        monkeypatch.setattr("config_runtime.autowire", lambda *a, **kw: True)
+        monkeypatch.setattr("config_registry._db_resolver", lambda pid, key: shim if row == "row" else None)
+        monkeypatch.setattr(gate_runner, "_project_root_of", lambda directory: root and str(root))
+        monkeypatch.setenv("VNX_REVIEW_PYTHON", shim)
+        if row == "override":
+            monkeypatch.setenv("VNX_OVERRIDE_REVIEW_PYTHON", shim)
+        gate_runner.resolve_review_interpreter.cache_clear()
+        return shim
+
+    @pytest.mark.parametrize("via", ["row", "override"])
+    def test_project_config_naming_the_env_interpreter_is_still_rule_1(self, via, monkeypatch, tmp_path):
+        shim = self._wire(monkeypatch, tmp_path, via, tmp_path / "project")
+        assert gate_runner.resolve_review_interpreter_with_rule() == (shim, 1)
+
+    def test_only_the_env_naming_it_is_rule_3(self, monkeypatch, tmp_path):
+        shim = self._wire(monkeypatch, tmp_path, None, None)
+        assert gate_runner.resolve_review_interpreter_with_rule() == (shim, 3)

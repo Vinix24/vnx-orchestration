@@ -42,17 +42,17 @@ DIFF = "diff --git a/x.py b/x.py\n@@ -1 +1 @@\n+ok = 1\n"
 
 
 @pytest.fixture(autouse=True)
-def _fresh_resolution():
+def _fresh_resolution(monkeypatch):
     """The resolver is cached per process; a test must start from a cold one."""
     resolve = getattr(gate_runner, "resolve_review_interpreter", None)
     if hasattr(resolve, "cache_clear"):
         resolve.cache_clear()
     # No project store and no project .venv of the host under test: only the fabric chain.
-    mp = pytest.MonkeyPatch()
-    mp.setattr(gate_runner, "_project_config_value", lambda key, project_id: "", raising=False)
-    mp.setattr(gate_runner, "_project_root_of", lambda directory: None, raising=False)
+    # The test's own monkeypatch: a second MonkeyPatch undid before it, and its undo put the lambdas back for good.
+    monkeypatch.setattr(gate_runner, "_project_config_value", lambda key, project_id: "", raising=False)
+    monkeypatch.setattr(gate_runner, "_project_review_python", lambda project_id: "", raising=False)
+    monkeypatch.setattr(gate_runner, "_project_root_of", lambda directory: None, raising=False)
     yield
-    mp.undo()
     if hasattr(resolve, "cache_clear"):
         resolve.cache_clear()
 
@@ -259,6 +259,8 @@ class TestProjectInterpreter:
         self.config = {}
         monkeypatch.setattr(gate_runner, "_project_config_value",
                             lambda key, project_id: self.config.get(key, ""))
+        monkeypatch.setattr(gate_runner, "_project_review_python",
+                            lambda project_id: self.config.get("VNX_REVIEW_PYTHON", ""))
 
     def test_project_venv_is_rule_2_and_the_prompt_names_it_with_pythonpath(self):
         self.config["VNX_REVIEW_PYTHONPATH"] = "src"
