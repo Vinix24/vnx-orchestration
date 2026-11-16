@@ -138,6 +138,12 @@ PROVIDER_SWITCHED_OFF = "provider_switched_off"
 # other.
 GATE_QUOTA_REFUSAL_REASON = "lane_exhausted"
 
+# Prefix of the one synthetic blocking entry gate_artifacts adds to a rejection
+# that has no blocking finding (OI-1938). Lives here, stdlib-only, so both the
+# writer (gate_artifacts) and the reader (stop_conditions) import one literal
+# without stop_conditions pulling in the receipt stack.
+VERDICT_ENTRY_PREFIX = "verdict_without_blocking_finding"
+
 # Credit/balance exhaustion — matched on phrases actually observed in the
 # ledger (measured 2026-08-16, dispatch 20260816-p9p10-failure-reason-root):
 # deepseek-harness prints a direct "API Error: 402 Insufficient Balance";

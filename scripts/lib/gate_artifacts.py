@@ -17,6 +17,7 @@ from governance_receipts import utc_now_iso
 import final_answer_verdict
 import gate_depth
 import gate_recorder
+from failure_classification import VERDICT_ENTRY_PREFIX
 from gate_lane_contract import canonical_review_verdict
 from gate_outcome import GateOutcome, GateRequest, commit_gate_outcome
 from final_prompt_integrity import final_prompt_sha_for_dispatch
@@ -172,8 +173,6 @@ def _classify_findings(
             advisory.append(finding)
     return blocking, advisory
 
-
-VERDICT_ENTRY_PREFIX = "verdict_without_blocking_finding"
 
 
 def _with_verdict_entry(

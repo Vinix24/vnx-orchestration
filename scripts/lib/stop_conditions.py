@@ -78,6 +78,12 @@ from receipt_verdict import HARD_FAILURE_STATUSES, SUCCESS_STATUSES  # noqa: E40
 # so importing it keeps this module's standalone-importable contract intact —
 # importing gate_recorder (which pulls the whole receipt stack) would not.
 from failure_classification import GATE_QUOTA_REFUSAL_REASON as QUOTA_REFUSAL_REASON  # noqa: E402
+# The prefix of the one synthetic blocking entry gate_artifacts adds to a
+# rejection with no blocking finding (OI-1938). Imported, never copied: the
+# literal lives in failure_classification, and gate_artifacts imports it from
+# there too. Importing it from gate_artifacts would pull gate_recorder and yaml
+# and break this module's standalone-importable contract.
+from failure_classification import VERDICT_ENTRY_PREFIX  # noqa: E402
 
 try:
     from failure_classification import FAILURE_CLASSES as _KNOWN_FAILURE_CLASSES
@@ -724,6 +730,26 @@ _EXTERNAL_TRANSIENT_GATE_REASONS = frozenset({QUOTA_REFUSAL_REASON})
 DEFAULT_REPEAT_THRESHOLD = 3
 
 
+def _is_synthetic_verdict_entry(finding: Any) -> bool:
+    """True only for a dict whose message positively starts with the prefix."""
+    if not isinstance(finding, dict):
+        return False
+    message = finding.get("message")
+    return isinstance(message, str) and message.startswith(VERDICT_ENTRY_PREFIX)
+
+
+def _file_causes(findings: Any) -> Set[str]:
+    """``file:<path>`` for every finding with a usable ``file_path``."""
+    if not isinstance(findings, list):
+        return set()
+    causes: Set[str] = set()
+    for finding in findings:
+        path = finding.get("file_path") if isinstance(finding, dict) else None
+        if isinstance(path, str) and path.strip():
+            causes.add(f"file:{path.strip()}")
+    return causes
+
+
 def _gate_result_cause(record: Dict[str, Any]) -> Optional[FrozenSet[str]]:
     """Set of atomic causes for a review_gates/results/*.json record, or None
     for a clean pass (or an outcome this can't classify either way).
@@ -740,6 +766,13 @@ def _gate_result_cause(record: Dict[str, Any]) -> Optional[FrozenSet[str]]:
         time; OI-2074). A blocking finding without a usable ``file_path``
         contributes the legacy ``blocking_findings`` cause, so a run that
         names no file can still trip E6.
+      - the same completed run whose ONLY blocking entries are the synthetic
+        ``failure_classification.VERDICT_ENTRY_PREFIX`` entry (a ``fail`` verdict with
+        advisory findings only, OI-1938). That entry names no file and is
+        identical on every such PR, so it is no cause. The cause is then the
+        set of ``file:<file_path>`` of the record's ADVISORY findings that
+        carry a usable path. Without any, the legacy ``blocking_findings``
+        cause stays.
     """
     status = record.get("status")
     if status in _INFRA_FAIL_STATUSES:
@@ -749,6 +782,10 @@ def _gate_result_cause(record: Dict[str, Any]) -> Optional[FrozenSet[str]]:
         findings = record.get("blocking_findings")
         if not findings:
             return None
+        if all(_is_synthetic_verdict_entry(f) for f in findings):
+            advisory_causes = _file_causes(record.get("advisory_findings"))
+            if advisory_causes:
+                return frozenset(advisory_causes)
         causes = set()
         for finding in findings:
             path = finding.get("file_path") if isinstance(finding, dict) else None
@@ -764,7 +801,8 @@ def _classify_gate_record(record: Dict[str, Any]) -> Tuple[str, Optional[FrozenS
     """Bucket one review_gates result for E6: ``unbuilt``, ``exhausted`` or ``counted``.
 
     _gate_result_cause reports what the record honestly says, for any
-    infra-fail reason alike. The POLICY choice of which causes count toward a
+    infra-fail reason alike (for an advisory-only rejection that is the
+    advisory files, not the synthetic verdict entry). The POLICY choice of which causes count toward a
     repeating-failure streak belongs here, not in that helper. Two causes are
     excluded, for opposite reasons, and each keeps its OWN bucket so the two
     stay distinguishable in the output:
