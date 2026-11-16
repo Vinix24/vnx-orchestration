@@ -20,6 +20,7 @@ codex itself is never started.
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -41,11 +42,16 @@ DIFF = "diff --git a/x.py b/x.py\n@@ -1 +1 @@\n+ok = 1\n"
 
 
 @pytest.fixture(autouse=True)
-def _fresh_resolution():
+def _fresh_resolution(monkeypatch):
     """The resolver is cached per process; a test must start from a cold one."""
     resolve = getattr(gate_runner, "resolve_review_interpreter", None)
     if hasattr(resolve, "cache_clear"):
         resolve.cache_clear()
+    # No project store and no project .venv of the host under test: only the fabric chain.
+    # The test's own monkeypatch: a second MonkeyPatch undid before it, and its undo put the lambdas back for good.
+    monkeypatch.setattr(gate_runner, "_project_config_value", lambda key, project_id: "", raising=False)
+    monkeypatch.setattr(gate_runner, "_project_review_python", lambda project_id: "", raising=False)
+    monkeypatch.setattr(gate_runner, "_project_root_of", lambda directory: None, raising=False)
     yield
     if hasattr(resolve, "cache_clear"):
         resolve.cache_clear()
@@ -152,7 +158,7 @@ class TestPromptNamesTheInterpreter:
     """(c) and (d): what the review seat is told to run the tests with."""
 
     def test_resolved_interpreter_is_named_in_the_run_line(self, monkeypatch):
-        monkeypatch.setattr(gate_runner, "resolve_review_interpreter", lambda: INTERP)
+        monkeypatch.setattr(gate_runner, "resolve_review_interpreter_with_rule", lambda **kw: (INTERP, 3))
 
         prompt = _build_codex_prompt(_payload())
 
@@ -160,7 +166,7 @@ class TestPromptNamesTheInterpreter:
         assert "No interpreter with pytest was found" not in prompt
 
     def test_no_interpreter_says_the_tests_did_not_run(self, monkeypatch):
-        monkeypatch.setattr(gate_runner, "resolve_review_interpreter", lambda: None)
+        monkeypatch.setattr(gate_runner, "resolve_review_interpreter_with_rule", lambda **kw: (None, 3))
 
         prompt = _build_codex_prompt(_payload())
 
@@ -173,12 +179,12 @@ class TestPromptStaysByteIdentical:
     """(e): the new block is a pure suffix on the prompt built before it."""
 
     def test_without_the_block_the_prompt_is_the_old_prompt(self, monkeypatch):
-        monkeypatch.setattr(gate_runner, "resolve_review_interpreter", lambda: INTERP)
+        monkeypatch.setattr(gate_runner, "resolve_review_interpreter_with_rule", lambda **kw: (INTERP, 3))
         block = gate_runner._review_tests_block(INTERP)
         with_block = _build_codex_prompt(_payload())
 
         # The builder's return value before OI-2591: assembly, nothing appended.
-        monkeypatch.setattr(gate_runner, "_review_tests_block", lambda interp, diff_text="": "")
+        monkeypatch.setattr(gate_runner, "_review_tests_block", lambda *a, **kw: "")
         before_change = _build_codex_prompt(_payload())
 
         assert with_block == before_change + block
@@ -229,3 +235,132 @@ class TestCodexSpawnEnvironment:
         env = self._spawn(tmp_path, "gemini_review", "gemini").call_args.kwargs["env"]
 
         assert env is None
+
+
+def _fake_project(tmp_path: Path, venv_has_pytest: bool = True):
+    """A project root with a ``.venv/bin/python`` that answers the pytest probe, plus a gate worktree."""
+    root = tmp_path / "project"
+    py = root / ".venv" / "bin" / "python"
+    py.parent.mkdir(parents=True)
+    py.write_text(f"#!/bin/sh\nexit {0 if venv_has_pytest else 1}\n", encoding="utf-8")
+    py.chmod(0o755)
+    worktree = root / ".vnx-data" / "worktrees" / "gate-codex_gate-1-abcd"
+    worktree.mkdir(parents=True)
+    return root, py, worktree
+
+
+class TestProjectInterpreter:
+    """Track reviews-zonder-uitkomst D1: the project's interpreter and PYTHONPATH, not the fabric's."""
+
+    @pytest.fixture(autouse=True)
+    def _project_root(self, monkeypatch, tmp_path):
+        self.root, self.py, self.worktree = _fake_project(tmp_path)
+        monkeypatch.setattr(gate_runner, "_project_root_of", lambda directory: str(self.root))
+        self.config = {}
+        monkeypatch.setattr(gate_runner, "_project_config_value",
+                            lambda key, project_id: self.config.get(key, ""))
+        monkeypatch.setattr(gate_runner, "_project_review_python",
+                            lambda project_id: self.config.get("VNX_REVIEW_PYTHON", ""))
+
+    def test_project_venv_is_rule_2_and_the_prompt_names_it_with_pythonpath(self):
+        self.config["VNX_REVIEW_PYTHONPATH"] = "src"
+        diff = DIFF + "diff --git a/tests/test_a.py b/tests/test_a.py\n@@ -1 +1 @@\n+x = 1\n"
+        gh_ok = mock.Mock(returncode=0, stdout=diff, stderr="")
+        with mock.patch("gate_runner.subprocess.run", return_value=gh_ok):
+            prompt = GateRunner._build_codex_prompt(_payload())
+        prompt = prompt.replace(gate_runner.GATE_WORKTREE_TOKEN, str(self.worktree))
+        assert (f"`env -u PYTHONSAFEPATH PYTHONPATH={self.worktree}/src {self.py} -m pytest tests/test_a.py -q -p "
+                "no:cacheprovider`") in prompt
+        assert "chosen by rule 2" in prompt
+
+    def test_project_config_value_wins_over_the_venv(self, tmp_path):
+        other = tmp_path / "configured-python"
+        other.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        other.chmod(0o755)
+        self.config["VNX_REVIEW_PYTHON"] = str(other)
+        assert gate_runner.resolve_review_interpreter_with_rule() == (str(other), 1)
+
+    def test_config_value_without_pytest_falls_to_the_venv(self, tmp_path):
+        bad = tmp_path / "configured-bad"
+        bad.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+        bad.chmod(0o755)
+        self.config["VNX_REVIEW_PYTHON"] = str(bad)
+        assert gate_runner.resolve_review_interpreter_with_rule() == (str(self.py), 2)
+
+    def test_venv_without_pytest_falls_to_the_fabric_chain(self, monkeypatch, tmp_path):
+        _root, _py, _wt = _fake_project(tmp_path / "other", venv_has_pytest=False)
+        monkeypatch.setattr(gate_runner, "_project_root_of", lambda directory: str(_root))
+        monkeypatch.setenv("VNX_REVIEW_PYTHON", sys.executable)
+        assert gate_runner.resolve_review_interpreter_with_rule() == (sys.executable, 3)
+
+    @pytest.mark.parametrize("bad", ["../etc", "src;rm", "/abs/src", "a b", "src/../x", "$(id)"])
+    def test_unsafe_pythonpath_entry_is_left_out_and_named(self, bad):
+        block = gate_runner._review_tests_block(
+            INTERP, DIFF, rule=2, worktree=self.worktree, pythonpath=["src", bad])
+        assert f"PYTHONPATH={self.worktree}/src " in block
+        assert f"{self.worktree}/{bad}" not in block
+        assert "PYTHONPATH entry left out of the command" in block
+        assert json.dumps(bad) in block
+
+    def test_import_check_prints_the_package_file_from_the_worktree(self, tmp_path):
+        pkg = self.worktree / "src" / "mypkg"
+        pkg.mkdir(parents=True)
+        (pkg / "__init__.py").write_text("", encoding="utf-8")
+        block = gate_runner._review_tests_block(
+            sys.executable, DIFF, rule=2, worktree=self.worktree, pythonpath=["src"])
+        line = next(ln for ln in block.splitlines() if ln.startswith("Run `env -u PYTHONSAFEPATH PYTHONPATH"))
+        command = line[len("Run `"):line.index("` first")]
+        out = subprocess.run(["sh", "-c", command], capture_output=True, text=True, check=True).stdout
+        assert out.strip() == str(pkg / "__init__.py")
+        assert "outside the gate worktree" in block and "never a reason for `blocked`" in block
+
+    def test_no_key_and_no_venv_is_byte_identical_to_the_old_block(self, monkeypatch):
+        monkeypatch.setattr(gate_runner, "_project_root_of", lambda directory: None)
+        monkeypatch.setenv("VNX_REVIEW_PYTHON", sys.executable)
+        interpreter, rule = gate_runner.resolve_review_interpreter_with_rule()
+        assert (interpreter, rule) == (sys.executable, 3)
+        block = gate_runner._review_tests_block(interpreter, DIFF, rule=rule)
+        old = ("\n\n## Running the PR's tests\n\nRun the PR's tests with `" + sys.executable
+               + " -m pytest <files> -q -p no:cacheprovider` before the verdict, and report what "
+               "came out.\n" + gate_runner._NEVER_BLOCKING)
+        assert block == old
+
+    def test_project_interpreter_without_pythonpath_still_unsets_pythonsafepath(self):
+        block = gate_runner._review_tests_block(INTERP, DIFF, rule=2, worktree=self.worktree)
+        assert f"`env -u PYTHONSAFEPATH {INTERP} -m pytest" in block
+        assert "PYTHONPATH=" not in block
+
+    @pytest.mark.parametrize("bad", ["relative/python", "/opt/py thon", "/opt/py;id", "/opt/$(id)"])
+    def test_unsafe_configured_interpreter_is_not_taken(self, bad, tmp_path):
+        self.config["VNX_REVIEW_PYTHON"] = bad
+        assert gate_runner.resolve_review_interpreter_with_rule() == (str(self.py), 2)
+
+    def test_a_changed_config_value_is_not_served_from_the_cache(self, tmp_path):
+        other = tmp_path / "configured-python"
+        other.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        other.chmod(0o755)
+        assert gate_runner.resolve_review_interpreter_with_rule() == (str(self.py), 2)
+        self.config["VNX_REVIEW_PYTHON"] = str(other)
+        assert gate_runner.resolve_review_interpreter_with_rule() == (str(other), 1)
+
+    def test_two_projects_do_not_share_the_cached_interpreter(self, monkeypatch, tmp_path):
+        root_b, py_b, _wt = _fake_project(tmp_path / "b")
+        roots = {"a": str(self.root), "b": str(root_b)}
+        monkeypatch.setattr(gate_runner, "_project_root_of", lambda directory: roots[str(directory)])
+        assert gate_runner.resolve_review_interpreter_with_rule("pa", "a") == (str(self.py), 2)
+        assert gate_runner.resolve_review_interpreter_with_rule("pb", "b") == (str(py_b), 2)
+
+    def test_spawn_substitutes_the_worktree_and_records_the_rule(self, tmp_path):
+        runner = GateRunner(state_dir=tmp_path / "state", reports_dir=tmp_path / "reports")
+        proc = mock.Mock(returncode=0, pid=1, **{"poll.return_value": 0})
+        proc.stdout.fileno.return_value, proc.stderr.fileno.return_value = 10, 11
+        payload = _payload()
+        with mock.patch("gate_runner.subprocess.Popen", return_value=proc), \
+             mock.patch("gate_runner.select.select", return_value=([], [], [])), \
+             mock.patch("gate_runner.os.read", return_value=b""):
+            runner._run_with_stall_detection(
+                gate="codex_gate", binary="codex", prompt=f"PYTHONPATH={gate_runner.GATE_WORKTREE_TOKEN}/src",
+                timeout=5, stall_threshold=5, request_payload=payload, cwd=self.worktree)
+        written = proc.stdin.write.call_args.args[0].decode()
+        assert written == f"PYTHONPATH={self.worktree}/src"
+        assert payload["review_interpreter"] == {"path": str(self.py), "rule": 2}

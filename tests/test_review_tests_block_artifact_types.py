@@ -110,7 +110,7 @@ class TestCommandPerArtifactType:
 
 class TestTheBuiltPromptUsesTheDiff:
     def test_codex_prompt_for_a_typescript_pr_has_no_pytest_demand(self, monkeypatch):
-        monkeypatch.setattr(gate_runner, "resolve_review_interpreter", lambda: INTERP)
+        monkeypatch.setattr(gate_runner, "resolve_review_interpreter_with_rule", lambda **kw: (INTERP, 3))
         diff = _hunk("tests/scripts/gate_report.test.ts")
         gh_ok = mock.Mock(returncode=0, stdout=diff, stderr="")
         with mock.patch("gate_runner.subprocess.run", return_value=gh_ok):

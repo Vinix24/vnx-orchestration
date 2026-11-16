@@ -183,44 +183,138 @@ _RULE_TEXT = {
 GATE_WORKTREE_TOKEN = "@@VNX_GATE_WORKTREE@@"
 
 
-@lru_cache(maxsize=1)
-def resolve_review_interpreter() -> Optional[str]:
-    """The first of VNX_REVIEW_PYTHON, VNX_PYTHON, sys.executable, python3.12, python3
-    that is a file and imports pytest within 10 s; None when none of them has it."""
-    for candidate in (
-        os.environ.get("VNX_REVIEW_PYTHON"),
-        os.environ.get("VNX_PYTHON"),
-        sys.executable,
-        shutil.which("python3.12"),
-        shutil.which("python3"),
-    ):
-        if not (candidate and os.path.isfile(candidate)):
-            continue
-        try:
-            proc = _ProbePopen(
-                [candidate, "-c", "import pytest"],
-                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-            proc.communicate(timeout=10)
-            if proc.returncode == 0:
-                return candidate
-        except OSError:  # vnx-silent-except: an interpreter that cannot start is no candidate
-            continue
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.communicate()
-    return None
+def _imports_pytest(candidate: Optional[str]) -> bool:
+    """True when ``candidate`` is a file that imports pytest within 10 s."""
+    if not (candidate and os.path.isfile(candidate)):
+        return False
+    proc = None
+    try:
+        proc = _ProbePopen(
+            [candidate, "-c", "import pytest"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        proc.communicate(timeout=10)
+        return proc.returncode == 0
+    except OSError:  # vnx-silent-except: an interpreter that cannot start is no candidate
+        return False
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.communicate()
+        return False
 
 
-def _assemble_reviewer_prompt(pr: str, diff_text: str, verdict_contract: str, instruction: str) -> str:
+def _project_root_of(directory: Optional[Path]) -> Optional[str]:
+    """The directory above ``git rev-parse --git-common-dir`` measured from ``directory`` (the
+    process's cwd when None): the main checkout of whatever project the gate worktree belongs to.
+    None when git does not answer, so no ``.venv`` is guessed."""
+    try:
+        proc = _ProbePopen(
+            ["git", "rev-parse", "--git-common-dir"], cwd=str(directory) if directory else None,
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+        )
+        out, _err = proc.communicate(timeout=10)
+    except (OSError, subprocess.TimeoutExpired):  # vnx-silent-except: no answer means no project .venv, rule 3 follows
+        return None
+    common = (out or "").strip()
+    if proc.returncode != 0 or not common:
+        return None
+    return str((Path(directory or Path.cwd()) / common).resolve().parent)
+
+
+def _run_interpreter(request_payload: Dict[str, Any], project_root: Optional[Path]) -> "tuple[Optional[str], int]":
+    """The run's review interpreter, resolved once and kept on the request as ``review_interpreter``
+    ({path, rule}; path None when none imports pytest). Rule 2 measures the repository the gate runs
+    for: ``project_root``, else the one this file lives in (the first candidate of
+    ``project_root.resolve_project_root``), measured with ``git``, not the cwd nor the not-yet-made worktree."""
+    kept = request_payload.get("review_interpreter")
+    if isinstance(kept, dict) and "rule" in kept and "path" in kept:
+        return kept["path"], kept["rule"]
+    interpreter, rule = resolve_review_interpreter_with_rule(worktree=project_root or Path(__file__).resolve().parent)
+    request_payload["review_interpreter"] = {"path": interpreter, "rule": rule}
+    return interpreter, rule
+
+
+def _project_config_value(key: str, project_id: Optional[str]) -> str:
+    import config_registry
+    import config_runtime
+
+    config_runtime.autowire()
+    return (config_registry.get(key, project_id or None) or "").strip()
+
+
+def _project_review_python(project_id: Optional[str]) -> str:
+    """Rule 1's VNX_REVIEW_PYTHON, by source: the project's row or the override; env, default or unset give ""."""
+    import config_registry
+    import config_runtime
+
+    config_runtime.autowire()
+    value, source = config_registry.resolve_with_source(REVIEW_PYTHON_KEY, project_id or None)
+    return (value or "").strip() if source in ("project_config", "override") else ""
+
+
+def _is_safe_interpreter_path(path: str) -> bool:
+    """An interpreter path that goes into the prompt's command: absolute and free of any
+    shell metacharacter or whitespace (the same character set as a test path)."""
+    return os.path.isabs(path) and _is_safe_test_path(path[1:])
+
+
+@lru_cache(maxsize=32)
+def _resolve_cached(project_id: str, root: str, configured: str, env_python: str) -> "tuple[Optional[str], int]":
+    """Keyed on everything the answer depends on, so two projects (or a changed or removed
+    ``project_config`` row: ``configured`` is "" without one) never share an entry."""
+    if configured and _is_safe_interpreter_path(configured) and _imports_pytest(configured):
+        return configured, RULE_PROJECT_CONFIG
+    if root:
+        venv_python = os.path.join(root, ".venv", "bin", "python")
+        if _is_safe_interpreter_path(venv_python) and _imports_pytest(venv_python):
+            return venv_python, RULE_PROJECT_VENV
+    for candidate in (env_python or None, os.environ.get("VNX_PYTHON"), sys.executable,
+                      shutil.which("python3.12"), shutil.which("python3")):
+        if _imports_pytest(candidate):
+            return candidate, RULE_FABRIC_CHAIN
+    return None, RULE_FABRIC_CHAIN
+
+
+def resolve_review_interpreter_with_rule(
+    project_id: Optional[str] = None, worktree: Optional[Path] = None,
+) -> "tuple[Optional[str], int]":
+    """``(interpreter, rule)``: the first of the project's ``VNX_REVIEW_PYTHON`` (rule 1), its
+    ``<projectroot>/.venv/bin/python`` (rule 2) and the OI-2591 chain VNX_REVIEW_PYTHON,
+    VNX_PYTHON, sys.executable, python3.12, python3 (rule 3) that imports pytest; None when none
+    does. The answer is cached per (project, project root, rule-1 value, env value)."""
+    return _resolve_cached(project_id or "", _project_root_of(worktree) or "",
+                           _project_review_python(project_id),
+                           os.environ.get(REVIEW_PYTHON_KEY) or "")
+
+
+def resolve_review_interpreter(
+    project_id: Optional[str] = None, worktree: Optional[Path] = None,
+) -> Optional[str]:
+    return resolve_review_interpreter_with_rule(project_id, worktree)[0]
+
+
+resolve_review_interpreter.cache_clear = _resolve_cached.cache_clear  # type: ignore[attr-defined]
+
+
+def _assemble_reviewer_prompt(pr: str, diff_text: str, verdict_contract: str, instruction: str,
+                              worktree: Optional[Path] = None,
+                              interpreter_rule: "Optional[tuple[Optional[str], int]]" = None) -> str:
     """The codex reviewer prompt: untrusted-data sandwich (OI-1442), reviewer role policy and ADR rules, tests block.
     The full review and the delta round (DR-6, deciding and shadow) all build it here."""
     l3 = build_review_prompt(gate_name="reviewer", pr=pr, diff_text=diff_text, verdict_contract=verdict_contract,
                              max_chars=0, agentic=True, instruction=instruction)
     assembled = PromptAssembler().assemble(dispatch_metadata={"role": "reviewer"}, instruction=l3)
+    interpreter, rule = interpreter_rule or resolve_review_interpreter_with_rule(worktree=worktree)
+    pythonpath = _project_config_value(REVIEW_PYTHONPATH_KEY, None)
     return (format_for_provider(assembled, "codex")["pipe_input"]
-            + _review_tests_block(resolve_review_interpreter(), diff_text))
+            + _review_tests_block(interpreter, diff_text, rule=rule, worktree=worktree,
+                                  pythonpath=[e.strip() for e in pythonpath.split(",") if e.strip()]))
+
+
+def _reviewer_assembler(request_payload: Dict[str, Any], project_root: Optional[Path], codex: bool):
+    """The reviewer-prompt builder for one run; the interpreter is resolved here, once, and only for codex."""
+    return partial(_assemble_reviewer_prompt, str(request_payload.get("pr_number")),
+                   interpreter_rule=_run_interpreter(request_payload, project_root) if codex else None)
 
 
 _DIFF_HEADER_RE = re.compile(r"^diff --git a/(\S+) b/(\S+)$")
@@ -910,6 +1004,7 @@ class GateRunner:
         # earlier execution). ``_mark_executing`` remains the only minter, at the
         # transition to ``executing``; every record after it carries this run's id.
         request_payload.pop(gate_status.EXECUTION_ID_FIELD, None)
+        request_payload.pop("review_interpreter", None)  # resolved once per run, not reused from an earlier one
         provider = _rec.resolve_gate_provider(gate)
         using_vertex = gate == "gemini_review" and os.environ.get("VNX_GEMINI_ROUTING", "oauth") == "vertex"
         # Harness-lane gates (C6 step 1) delegate to the governed dispatcher
@@ -1097,6 +1192,8 @@ class GateRunner:
         """
         external_prompt = request_payload.get("prompt", "")
         prompt = external_prompt
+        if gate == "codex_gate":  # once per run, before any prompt is built
+            _run_interpreter(request_payload, self._project_root)
         if not prompt and gate == "gemini_review":
             prompt = self._build_gemini_prompt(request_payload)
         elif not prompt and gate == "codex_gate":
@@ -1182,7 +1279,7 @@ class GateRunner:
         try:
             plan = review_delta_decide.plan_round(  # DR-6: under delta the codex seat may decide with the delta round
                 gate=gate, prompt=prompt, request_payload=request_payload, state_dir=self._state_dir, worktree=worktree_path,
-                assemble=partial(_assemble_reviewer_prompt, str(request_payload.get("pr_number"))))
+                assemble=_reviewer_assembler(request_payload, self._project_root, gate == "codex_gate"))
             result = self._run_with_stall_detection(
                 gate=gate, binary=binary, prompt=plan.prompt,
                 timeout=gate_timeout(gate), stall_threshold=gate_stall_threshold(gate),
@@ -1229,7 +1326,7 @@ class GateRunner:
         if gate == "codex_gate" and review_scope.active_review_scope(self._state_dir).runs_shadow:  # DR-4b/DR-6: only under delta_shadow or delta; never changes ``record`` (fail-open)
             review_delta_shadow.run_shadow(
                 request_payload=request_payload, state_dir=self._state_dir, project_root=self._project_root,
-                assemble=partial(_assemble_reviewer_prompt, str(request_payload.get("pr_number"))),
+                assemble=_reviewer_assembler(request_payload, self._project_root, True),
                 run=lambda delta_prompt, cwd: self._run_with_stall_detection(
                     gate=gate, binary=binary, prompt=delta_prompt, timeout=gate_timeout(gate),
                     stall_threshold=gate_stall_threshold(gate), request_payload=dict(request_payload), cwd=cwd))
@@ -1603,6 +1700,7 @@ class GateRunner:
         request_payload["diff_coverage"] = gate_depth.diff_coverage(diff_content, 0)
         return _assemble_reviewer_prompt(
             str(pr_number), diff_content, _REVIEWER_VERDICT_TEMPLATE,
+            interpreter_rule=_run_interpreter(request_payload, None),
             instruction=(
                 f"Review the PR diff in the untrusted-data block, on branch {branch} "
                 f"(risk: {risk}). "
@@ -1831,7 +1929,10 @@ class GateRunner:
         cmd = self._build_gate_cmd(gate, binary, request_payload)
         # OI-2591: only the codex seat gets one, and only to name the interpreter
         # that runs the PR's tests; every other gate inherits as before (env=None).
-        interpreter = resolve_review_interpreter() if gate == "codex_gate" else None
+        # The run's one resolution (kept on the request since the prompt was built); no probe here.
+        interpreter = _run_interpreter(request_payload, self._project_root)[0] if gate == "codex_gate" else None
+        if cwd and prompt:
+            prompt = prompt.replace(GATE_WORKTREE_TOKEN, str(cwd))
         spawn_env = None if not interpreter else {**os.environ, "VNX_REVIEW_PYTHON": interpreter}
         start = time.monotonic()
         try:
