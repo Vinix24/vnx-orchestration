@@ -29,6 +29,8 @@ WRAPPERS = frozenset("bash sh zsh env timeout nohup xargs sudo command exec time
 K1_VERBS = frozenset(("ls", "cat", "head", "tail", "wc", "grep", "rg", "pwd", "date", "git status",
                       "gh pr view", "gh pr list", "gh pr checks", "gh run view", "gh run list"))  # frozen: read only
 _PLACEHOLDER = re.compile(r"<|~/\.\.\.")  # every placeholder of permission_events.normalise
+# The argument triggers of hard_stops.TABLE: ``prefix:*`` that one of them makes a hard stop allows it (rm:* -> rm -rf /)
+COMPLETIONS = ("-rf x", "--delete x", ":x", "delete x", "secret x", "apply", "up", "--prod", "promote x")
 
 def _ts(value: Any) -> Optional[datetime]:
     try:
@@ -41,9 +43,7 @@ def rule(vorm: str) -> Optional[str]:
     """The exact ``/permissions`` rule: the whole form, or the text before the first placeholder plus ``:*``."""
     cut = _PLACEHOLDER.search(vorm)
     prefix = (vorm[:cut.start()] if cut else vorm).strip()
-    if not prefix:
-        return None
-    return f"Bash({prefix}:*)" if cut else f"Bash({prefix})"
+    return (f"Bash({prefix}:*)" if cut else f"Bash({prefix})") if prefix else None
 
 def handelingsklasse(vorm: str) -> str:
     """K1 for a verb in the frozen read-only table, K6 for anything else (never lower for an unknown verb)."""
@@ -67,8 +67,11 @@ def _blocked(vorm: str, kind: str, events: Sequence[Mapping[str, Any]]) -> Optio
     stop = _hard_stop(events)
     if stop:
         return stop
-    if vorm.split()[0] in WRAPPERS:
+    if vorm.split()[0].rsplit("/", 1)[-1].lower() in WRAPPERS:  # APFS is case-insensitive: ``ENV`` runs env
         return "wrapper_prefix: a rule for a wrapper or interpreter lets any command through"
+    regel = rule(vorm)
+    if regel and regel.endswith(":*)") and any(hard_stops.classify(f"{regel[5:-3]} {c}")[0] for c in COMPLETIONS):
+        return "wildcard_reaches_hard_stop: the rule's prefix completes into a hard stop, so it is never an allow rule"
     if any(e.get("bron") == "B4b" for e in events):
         return "b4b_no_arguments: the CLI ledger keeps no arguments, so there is no safety evidence"
     if kind != "bouwgewoonte" and rule(vorm) is None:

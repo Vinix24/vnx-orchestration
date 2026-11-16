@@ -54,11 +54,13 @@ def test_promote_names_the_adr056_route():
     meldingen = pp.build(sessions(RAW["promote"], 3), COV, NOW)[1]
     assert "autonomous_promotion_eligible" in meldingen[0]["voorstel"] and "VERIFIED" in meldingen[0]["voorstel"]
 
-@pytest.mark.parametrize("cmd, reason", [("timeout 5 pytest -q", "wrapper_prefix"), ("nohup pytest -q", "wrapper_prefix"),
-                                         ("bash -c 'make test'", "indirection")])
-def test_wrappers_and_interpreters_are_notifications(cmd, reason):
+W, R = "wrapper_prefix", "wildcard_reaches_hard_stop"  # R: the events are clean, the rule rm:* allows rm -rf /
+@pytest.mark.parametrize("cmd, reason", [("timeout 5 pytest -q", W), ("nohup pytest -q", W), ("ENV pytest -q", W),
+                                         ("/usr/bin/env pytest tests/x.py", W), ("bash -c 'make test'", "indirection"),
+                                         ("rm /tmp/x/a.txt", R), ("git push origin /tmp/x", R), ("gh pr view 2972", R)])
+def test_wrappers_interpreters_and_wildcards_to_a_hard_stop_are_notifications(cmd, reason):
     group = sessions(cmd, 3)
-    assert {e["hard_stop"] for e in group} == {"" if reason == "wrapper_prefix" else "indirection"}
+    assert {e["hard_stop"] for e in group} == {"indirection" if reason == "indirection" else ""}
     proposals, meldingen, _ = pp.build(group, COV, NOW)
     assert proposals == [] and meldingen[0]["voorstel"].startswith(reason)
 
@@ -105,6 +107,7 @@ def test_notification_shares_oorzaak_with_its_proposal():
                                            ("cat /Users/someone/x.md", "Bash(cat:*)")])
 def test_permissie_rule(cmd, expected):
     assert pp.rule(pe.normalise(cmd)) == expected
+    assert "`Bash(git status)`" in pp.build(sessions("git status", 3), COV, NOW)[0][0]["voorstel"]  # exact form
 
 def test_read_events_skips_and_counts(tmp_path):
     good, old = ev("make test", "s1"), ev("make test", "s2")
