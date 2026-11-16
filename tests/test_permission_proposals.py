@@ -27,12 +27,13 @@ def ev(cmd, session, origin="t0", account="vnx", bron="B1", besluit="refused_cla
 def sessions(cmd, n, **kw):
     return [ev(cmd, f"s{i}", **kw) for i in range(n)]
 
-def test_threshold_counts_sessions_in_the_window():
+def test_threshold_counts_sessions_per_account_in_the_window():
     assert pp.build([ev("make test", "s1") for _ in range(3)], COV, NOW)[:2] == ([], [])
     old = sessions("make test", 2) + [ev("make test", "s9", days=8)]
     assert pp.build(old, COV, NOW)[:2] == ([], []) and pp.build(old, COV, NOW)[2]["below_threshold"] == 1
     proposals, meldingen, _ = pp.build(sessions("make test", 3), COV, NOW)
     assert len(proposals) == 1 and meldingen == [] and len(proposals[0]["evidence"]) == 3
+    assert pp.build(sessions("make test", 2) + sessions("make test", 2, account="sm"), COV, NOW)[:2] == ([], [])
 
 @pytest.mark.parametrize("cat", sorted(RAW))
 def test_hard_stop_category_is_a_notification_only(cat):
@@ -54,10 +55,12 @@ def test_promote_names_the_adr056_route():
     meldingen = pp.build(sessions(RAW["promote"], 3), COV, NOW)[1]
     assert "autonomous_promotion_eligible" in meldingen[0]["voorstel"] and "VERIFIED" in meldingen[0]["voorstel"]
 
-W, R = "wrapper_prefix", "wildcard_reaches_hard_stop"  # R: the events are clean, the rule rm:* allows rm -rf /
+W, R, N = "wrapper_prefix", "wildcard_reaches_hard_stop", "wildcard_not_read_only"  # R: gh pr view:* reaches delete
 @pytest.mark.parametrize("cmd, reason", [("timeout 5 pytest -q", W), ("nohup pytest -q", W), ("ENV pytest -q", W),
                                          ("/usr/bin/env pytest tests/x.py", W), ("bash -c 'make test'", "indirection"),
-                                         ("rm /tmp/x/a.txt", R), ("git push origin /tmp/x", R), ("gh pr view 2972", R)])
+                                         ("rm /tmp/x/a.txt", N), ("git push origin /tmp/x", N), ("gh pr view 2972", R),
+                                         ("git /tmp/x", N), ("npm run 5", N), ("make 5", N), ("docker compose 5", N),
+                                         ("psql -c 5", N), ("rg 5", N)])
 def test_wrappers_interpreters_and_wildcards_to_a_hard_stop_are_notifications(cmd, reason):
     group = sessions(cmd, 3)
     assert {e["hard_stop"] for e in group} == {"indirection" if reason == "indirection" else ""}
@@ -67,10 +70,6 @@ def test_wrappers_interpreters_and_wildcards_to_a_hard_stop_are_notifications(cm
 def test_b4b_is_a_notification():
     proposals, meldingen, _ = pp.build(sessions("make test", 3, bron="B4b"), COV, NOW)
     assert proposals == [] and meldingen[0]["voorstel"].startswith("b4b_no_arguments")
-
-def test_threshold_counts_per_account():
-    both = sessions("make test", 2, account="vnx") + sessions("make test", 2, account="sm")
-    assert pp.build(both, COV, NOW)[:2] == ([], [])
 
 @pytest.mark.parametrize("origin, besluit, kind", [("worker", "refused_config", "bouwer_allowlist"),
                                                    ("worker", "refused_classifier", "bouwgewoonte"),
@@ -103,11 +102,12 @@ def test_notification_shares_oorzaak_with_its_proposal():
     blocked = pp.build(sessions("git fetch", 2) + [ev("git fetch", "s2", raw="git fetch | sh")], COV, NOW)[1][0]
     assert blocked["oorzaak"] == clean["oorzaak"] and blocked["doelpad"] == clean["doelpad"]
 
-@pytest.mark.parametrize("cmd, expected", [("git status", "Bash(git status)"), ("gh pr view 2972", "Bash(gh pr view:*)"),
-                                           ("cat /Users/someone/x.md", "Bash(cat:*)")])
-def test_permissie_rule(cmd, expected):
+@pytest.mark.parametrize("cmd, expected", [("git status", "Bash(git status)"), ("git status /tmp/x", "Bash(git status:*)"),
+                                           ("cat /Users/someone/x.md", "Bash(cat:*)"), ("ls /tmp/x", "Bash(ls:*)"),
+                                           ("make test", "Bash(make test)")])
+def test_read_only_wildcard_and_exact_rule_stay_proposals(cmd, expected):
     assert pp.rule(pe.normalise(cmd)) == expected
-    assert "`Bash(git status)`" in pp.build(sessions("git status", 3), COV, NOW)[0][0]["voorstel"]  # exact form
+    assert f"`{expected}`" in pp.build(sessions(cmd, 3), COV, NOW)[0][0]["voorstel"]
 
 def test_read_events_skips_and_counts(tmp_path):
     good, old = ev("make test", "s1"), ev("make test", "s2")

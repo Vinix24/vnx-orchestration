@@ -26,7 +26,7 @@ DOELPAD = {  # kind -> the file a proposal of that kind targets, relative to the
     "bouwgewoonte": ".claude/terminals/T0/role-orchestrator.md",  # § Worker Dispatch Standards
 }
 WRAPPERS = frozenset("bash sh zsh env timeout nohup xargs sudo command exec time python python3 node perl ruby".split())
-K1_VERBS = frozenset(("ls", "cat", "head", "tail", "wc", "grep", "rg", "pwd", "date", "git status",
+K1_VERBS = frozenset(("ls", "cat", "head", "tail", "wc", "grep", "pwd", "date", "git status",
                       "gh pr view", "gh pr list", "gh pr checks", "gh run view", "gh run list"))  # frozen: read only
 _PLACEHOLDER = re.compile(r"<|~/\.\.\.")  # every placeholder of permission_events.normalise
 # The argument triggers of hard_stops.TABLE: ``prefix:*`` that one of them makes a hard stop allows it (rm:* -> rm -rf /)
@@ -69,12 +69,14 @@ def _blocked(vorm: str, kind: str, events: Sequence[Mapping[str, Any]]) -> Optio
         return stop
     if vorm.split()[0].rsplit("/", 1)[-1].lower() in WRAPPERS:  # APFS is case-insensitive: ``ENV`` runs env
         return "wrapper_prefix: a rule for a wrapper or interpreter lets any command through"
-    regel = rule(vorm)
-    if regel and regel.endswith(":*)") and any(hard_stops.classify(f"{regel[5:-3]} {c}")[0] for c in COMPLETIONS):
+    regel = rule(vorm) or ""
+    if regel.endswith(":*)") and handelingsklasse(vorm) != "K1":  # rg is K6: ``rg --pre <command>`` runs one per file
+        return "wildcard_not_read_only: a wildcard rule for a verb outside the read-only table passes any argument, a hard stop included"
+    if regel.endswith(":*)") and any(hard_stops.classify(f"{regel[5:-3]} {c}")[0] for c in COMPLETIONS):
         return "wildcard_reaches_hard_stop: the rule's prefix completes into a hard stop, so it is never an allow rule"
     if any(e.get("bron") == "B4b" for e in events):
         return "b4b_no_arguments: the CLI ledger keeps no arguments, so there is no safety evidence"
-    if kind != "bouwgewoonte" and rule(vorm) is None:
+    if kind != "bouwgewoonte" and not regel:
         return "no_rule: no permission rule can be built from this form"
     return None
 
@@ -82,8 +84,7 @@ def _evidence(events: Sequence[Mapping[str, Any]]) -> List[Dict[str, str]]:
     """One {prompt_id, ts} per session: the event_id of that session's latest event."""
     latest: Dict[str, Tuple[datetime, str, str]] = {}
     for e in events:
-        latest[e["session_id"]] = max(latest.get(e["session_id"], (_ts(e["ts"]), e["event_id"], e["ts"])),
-                                      (_ts(e["ts"]), e["event_id"], e["ts"]))
+        latest[e["session_id"]] = max(latest.get(e["session_id"], (cur := (_ts(e["ts"]), e["event_id"], e["ts"]))), cur)
     return [{"prompt_id": eid, "ts": ts} for _, eid, ts in sorted(latest.values())]
 
 def _voorstel(kind: str, vorm: str, account: str, sessions: int) -> Tuple[str, Dict[str, str]]:
@@ -104,10 +105,9 @@ def _item(key: Tuple[str, ...], events: Sequence[Mapping[str, Any]], reason: Opt
     digest = hashlib.sha256("|".join(key).encode("utf-8")).hexdigest()[:16]
     item: Dict[str, Any] = {"oorzaak": f"permission_form:{kind}:{account}:{scope}:{digest}", "doelpad": DOELPAD[kind],
                             "evidence": _evidence(events), "account": account, "bereik": scope}
-    sessions = len(item["evidence"])
     if reason:
         return {**item, "artefact_soort": MELDING, "voorstel": reason}
-    text, extra = _voorstel(kind, vorm, account, sessions)
+    text, extra = _voorstel(kind, vorm, account, len(item["evidence"]))
     return {**item, **extra, "artefact_soort": kind, "voorstel": text}
 
 def _groups(events: Sequence[Mapping[str, Any]], now: datetime, counts: Dict[str, int]) -> Dict[Tuple[str, str, str], list]:
