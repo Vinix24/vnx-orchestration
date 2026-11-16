@@ -322,6 +322,41 @@ def write_events(
             _append_all(path, "".join(lines).encode("utf-8"))
     return len(lines)
 
+def _read_line(line: bytes, project_id: str) -> tuple:
+    """(event, None) or (None, skip reason); a line from before ADR-082 has no ``hard_stop`` and stays so."""
+    try:
+        event = json.loads(line.decode("utf-8"))
+    except ValueError:  # vnx-silent-except: counted by the caller as unparseable, no content kept
+        return None, "unparseable"
+    present = [f for f in FIELDS if f != "hard_stop" or isinstance(event, dict) and "hard_stop" in event]
+    if not isinstance(event, dict) or not all(isinstance(event.get(f), str) for f in present):
+        return None, "unparseable"
+    if event["project_id"] != project_id:
+        return None, "foreign_project"
+    if event["event_id"] != event_id(project_id, event["bron"], event["session_id"], event["ts"], event["vorm"],
+                                     event.get("hard_stop", "")):
+        return None, "event_id_mismatch"
+    return event, None
+
+def read_events(project_id: str, state_dir: Optional[Path] = None) -> tuple:
+    """(events, skipped) of one project, read only: a damaged line, a foreign ``project_id`` or an ``event_id``
+    that does not match its fields is skipped and counted per reason, never returned. No ledger is ([], {})."""
+    path = _state_dir(project_id, state_dir) / "permission_events.ndjson"
+    try:
+        data = path.read_bytes()
+    except FileNotFoundError:
+        return [], {}
+    events: List[Dict[str, str]] = []
+    skipped: Dict[str, int] = {}
+    for line in data.split(b"\n"):
+        if line.strip():
+            event, why = _read_line(line, project_id)
+            if event is None:
+                skipped[why] = skipped.get(why, 0) + 1
+            else:
+                events.append(event)
+    return events, skipped
+
 def write_event(event: Dict[str, Any], project_id: str, state_dir: Optional[Path] = None) -> bool:
     """Append one event; False when its event_id was already in the ledger."""
     return write_events([event], project_id, state_dir) == 1
