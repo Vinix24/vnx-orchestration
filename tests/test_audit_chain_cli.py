@@ -113,3 +113,125 @@ def test_broken_chain_still_exits_nonzero(tmp_path: Path) -> None:
     payload = json.loads(result.stdout)
     assert payload.get("verified") is False
     assert payload.get("status") == "broken"
+    assert payload.get("violation_count") == 1
+    assert payload["violations"][0]["line_number"] == 2
+
+
+def _segmented_ledger(path: Path) -> None:
+    """Unchained epoch 0, a chain_epoch_seal, then three chained entries."""
+    path.write_text(
+        json.dumps({"seq": 0, "old": True}) + "\n"
+        + json.dumps({"seq": 1, "old": True}) + "\n",
+        encoding="utf-8",
+    )
+    sys.path.insert(0, str(_REPO_ROOT / "scripts" / "lib"))
+    from ndjson_hash_chain import append_chained_entry
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "chain_epoch_seal", _REPO_ROOT / "scripts" / "chain_epoch_seal.py"
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    assert mod.seal_ledger(path)["action"] == "sealed"
+    for i in range(3):
+        append_chained_entry(path, {"dispatch_id": f"d-{i}", "status": "success"})
+
+
+def test_segmented_ledger_exits_zero_with_real_status(tmp_path: Path) -> None:
+    ledger = tmp_path / "t0_receipts.ndjson"
+    _segmented_ledger(ledger)
+
+    result = _run_verify(ledger)
+
+    assert result.returncode == 0, f"{result.stdout!r} {result.stderr!r}"
+    payload = json.loads(result.stdout)
+    assert payload["verified"] is True
+    assert payload["status"] == "verified-segmented"
+    assert payload["path"] == str(ledger)
+
+
+def test_fully_chained_ledger_reports_verified(tmp_path: Path) -> None:
+    ledger = tmp_path / "t0_receipts.ndjson"
+    sys.path.insert(0, str(_REPO_ROOT / "scripts" / "lib"))
+    from ndjson_hash_chain import append_chained_entry
+
+    for i in range(3):
+        append_chained_entry(ledger, {"dispatch_id": f"d-{i}"})
+
+    result = _run_verify(ledger)
+
+    assert result.returncode == 0
+    payload = json.loads(result.stdout)
+    assert payload["verified"] is True and payload["status"] == "verified"
+
+
+def test_changed_byte_in_chained_line_shows_violation_line(tmp_path: Path) -> None:
+    ledger = tmp_path / "t0_receipts.ndjson"
+    _segmented_ledger(ledger)
+    lines = ledger.read_text(encoding="utf-8").splitlines()
+    target = len(lines) - 2  # second-to-last chained entry (0-based)
+    lines[target] = lines[target].replace("success", "failure!")
+    ledger.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    result = _run_verify(ledger)
+
+    assert result.returncode == 1
+    payload = json.loads(result.stdout)
+    assert payload["verified"] is False
+    assert payload["status"] == "broken"
+    assert payload["violation_count"] == len(payload["violations"]) >= 1
+    assert target + 2 in [v["line_number"] for v in payload["violations"]]
+
+
+def test_unchained_line_after_chained_ones_is_a_violation(tmp_path: Path) -> None:
+    ledger = tmp_path / "t0_receipts.ndjson"
+    _segmented_ledger(ledger)
+    with ledger.open("a", encoding="utf-8") as f:
+        f.write(json.dumps({"dispatch_id": "late", "status": "success"}) + "\n")
+
+    result = _run_verify(ledger)
+
+    assert result.returncode == 1
+    payload = json.loads(result.stdout)
+    assert payload["verified"] is False
+    assert any(
+        v.get("note") == "unchained entry inside a chained epoch"
+        for v in payload["violations"]
+    )
+
+
+def test_violations_capped_at_twenty_with_total_count(tmp_path: Path) -> None:
+    ledger = tmp_path / "t0_receipts.ndjson"
+    rows = [{"i": 0, "prev_hash": GENESIS_HASH}]
+    rows += [{"i": i, "prev_hash": "ab" * 32} for i in range(1, 31)]
+    ledger.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+
+    payload = json.loads(_run_verify(ledger).stdout)
+
+    assert len(payload["violations"]) == 20
+    assert payload["violation_count"] == 30
+
+
+def test_unknown_status_exits_nonzero_and_names_it(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("audit_chain_under_test", _AUDIT_CHAIN)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    monkeypatch.setattr(mod, "verify_chain", lambda p: (True, [], "mystery-state"))
+    monkeypatch.setattr(sys, "argv", ["audit_chain.py", "verify", str(tmp_path / "x")])
+
+    try:
+        mod.main()
+    except SystemExit as exc:
+        code = exc.code
+    else:
+        raise AssertionError("main() must exit")
+
+    assert code not in (0, None)
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["verified"] is False
+    assert payload["status"] == "mystery-state"
