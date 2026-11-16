@@ -258,6 +258,24 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         "row with an approval id since 2026-11-09; every other project has no row and "
         "keeps the risk rule.", approval=True,
         subsystem="governance-enforcement-stack", status="ACTIVATE"),
+    # Track reviews-zonder-uitkomst D1. Both keys change what the codex review seat runs the
+    # PR's tests with, so what a review sees: approval=True like VNX_REVIEW_SEAT_RULE, written
+    # to project_config with an approval id. Read by gate_runner.resolve_review_interpreter and
+    # gate_runner._review_tests_block; unset keeps the fabric's OI-2591 interpreter chain.
+    "VNX_REVIEW_PYTHON": _e(
+        "VNX_REVIEW_PYTHON", "string", "", "gate",
+        "Absolute path of the interpreter the codex review seat runs this project's tests with "
+        "(first rule of gate_runner.resolve_review_interpreter). It must import pytest, or the "
+        "next rule applies: <projectroot>/.venv/bin/python, then the fabric's interpreter chain. "
+        "Unset keeps that chain.", approval=True,
+        subsystem="governance-enforcement-stack", status="LIVE"),
+    "VNX_REVIEW_PYTHONPATH": _e(
+        "VNX_REVIEW_PYTHONPATH", "string", "", "gate",
+        "Comma-separated paths, relative to the gate worktree root (for example src), that the "
+        "codex review seat puts first in PYTHONPATH when it runs the PR's tests. An entry that is "
+        "absolute, holds .., whitespace or a shell metacharacter is left out of the command and "
+        "named as text in the prompt. Unset adds no PYTHONPATH.", approval=True,
+        subsystem="governance-enforcement-stack", status="LIVE"),
     # Deltareview DR-6 (ADR-064 "De schakelaar", ADR-060 amendment). Read by review_scope.active_review_scope.
     "VNX_REVIEW_SCOPE": _e(
         "VNX_REVIEW_SCOPE", "string", "", "gate",

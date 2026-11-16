@@ -24,7 +24,7 @@ import urllib.request
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache, partial
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR / "lib"))
@@ -169,44 +169,124 @@ def resolve_codex_review_effort(risk_class: Optional[str]) -> str:
 _ProbePopen = subprocess.Popen
 
 
-@lru_cache(maxsize=1)
-def resolve_review_interpreter() -> Optional[str]:
-    """The first of VNX_REVIEW_PYTHON, VNX_PYTHON, sys.executable, python3.12, python3
-    that is a file and imports pytest within 10 s; None when none of them has it."""
-    for candidate in (
-        os.environ.get("VNX_REVIEW_PYTHON"),
-        os.environ.get("VNX_PYTHON"),
-        sys.executable,
-        shutil.which("python3.12"),
-        shutil.which("python3"),
-    ):
-        if not (candidate and os.path.isfile(candidate)):
-            continue
-        try:
-            proc = _ProbePopen(
-                [candidate, "-c", "import pytest"],
-                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-            proc.communicate(timeout=10)
-            if proc.returncode == 0:
-                return candidate
-        except OSError:  # vnx-silent-except: an interpreter that cannot start is no candidate
-            continue
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.communicate()
-    return None
+REVIEW_PYTHON_KEY = "VNX_REVIEW_PYTHON"
+REVIEW_PYTHONPATH_KEY = "VNX_REVIEW_PYTHONPATH"
+# Rules of the interpreter choice, named in the prompt and on the request.
+RULE_PROJECT_CONFIG, RULE_PROJECT_VENV, RULE_FABRIC_CHAIN = 1, 2, 3
+_RULE_TEXT = {
+    RULE_PROJECT_CONFIG: "rule 1: VNX_REVIEW_PYTHON from the project's project_config",
+    RULE_PROJECT_VENV: "rule 2: the project's own .venv/bin/python",
+    RULE_FABRIC_CHAIN: "rule 3: the fabric's interpreter chain (OI-2591)",
+}
+# The gate worktree has a random name and does not exist when the prompt is built; the prompt
+# carries this token and ``_run_with_stall_detection`` swaps in the real path at the spawn.
+GATE_WORKTREE_TOKEN = "@@VNX_GATE_WORKTREE@@"
 
 
-def _assemble_reviewer_prompt(pr: str, diff_text: str, verdict_contract: str, instruction: str) -> str:
+def _imports_pytest(candidate: Optional[str]) -> bool:
+    """True when ``candidate`` is a file that imports pytest within 10 s."""
+    if not (candidate and os.path.isfile(candidate)):
+        return False
+    proc = None
+    try:
+        proc = _ProbePopen(
+            [candidate, "-c", "import pytest"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        proc.communicate(timeout=10)
+        return proc.returncode == 0
+    except OSError:  # vnx-silent-except: an interpreter that cannot start is no candidate
+        return False
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.communicate()
+        return False
+
+
+def _project_root_of(directory: Optional[Path]) -> Optional[str]:
+    """The directory above ``git rev-parse --git-common-dir`` measured from ``directory`` (the
+    process's cwd when None): the main checkout of whatever project the gate worktree belongs to.
+    None when git does not answer, so no ``.venv`` is guessed."""
+    try:
+        proc = _ProbePopen(
+            ["git", "rev-parse", "--git-common-dir"], cwd=str(directory) if directory else None,
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+        )
+        out, _err = proc.communicate(timeout=10)
+    except (OSError, subprocess.TimeoutExpired):  # vnx-silent-except: no answer means no project .venv, rule 3 follows
+        return None
+    common = (out or "").strip()
+    if proc.returncode != 0 or not common:
+        return None
+    return str((Path(directory or Path.cwd()) / common).resolve().parent)
+
+
+def _project_config_value(key: str, project_id: Optional[str]) -> str:
+    import config_registry
+    import config_runtime
+
+    config_runtime.autowire()
+    return (config_registry.get(key, project_id or None) or "").strip()
+
+
+def _is_safe_interpreter_path(path: str) -> bool:
+    """An interpreter path that goes into the prompt's command: absolute and free of any
+    shell metacharacter or whitespace (the same character set as a test path)."""
+    return os.path.isabs(path) and _is_safe_test_path(path[1:])
+
+
+@lru_cache(maxsize=32)
+def _resolve_cached(project_id: str, root: str, configured: str, env_python: str) -> "tuple[Optional[str], int]":
+    """Keyed on everything the answer depends on, so two projects (or a changed
+    ``project_config`` value) never share an entry."""
+    # configured == env_python means the registry only echoed the process env: that is rule 3's first candidate.
+    if configured and configured != env_python and _is_safe_interpreter_path(configured) \
+            and _imports_pytest(configured):
+        return configured, RULE_PROJECT_CONFIG
+    if root:
+        venv_python = os.path.join(root, ".venv", "bin", "python")
+        if _is_safe_interpreter_path(venv_python) and _imports_pytest(venv_python):
+            return venv_python, RULE_PROJECT_VENV
+    for candidate in (env_python or None, os.environ.get("VNX_PYTHON"), sys.executable,
+                      shutil.which("python3.12"), shutil.which("python3")):
+        if _imports_pytest(candidate):
+            return candidate, RULE_FABRIC_CHAIN
+    return None, RULE_FABRIC_CHAIN
+
+
+def resolve_review_interpreter_with_rule(
+    project_id: Optional[str] = None, worktree: Optional[Path] = None,
+) -> "tuple[Optional[str], int]":
+    """``(interpreter, rule)``: the first of the project's ``VNX_REVIEW_PYTHON`` (rule 1), its
+    ``<projectroot>/.venv/bin/python`` (rule 2) and the OI-2591 chain VNX_REVIEW_PYTHON,
+    VNX_PYTHON, sys.executable, python3.12, python3 (rule 3) that imports pytest; None when none
+    does. The answer is cached per (project, project root, configured value)."""
+    return _resolve_cached(project_id or "", _project_root_of(worktree) or "",
+                           _project_config_value(REVIEW_PYTHON_KEY, project_id),
+                           os.environ.get(REVIEW_PYTHON_KEY) or "")
+
+
+def resolve_review_interpreter(
+    project_id: Optional[str] = None, worktree: Optional[Path] = None,
+) -> Optional[str]:
+    return resolve_review_interpreter_with_rule(project_id, worktree)[0]
+
+
+resolve_review_interpreter.cache_clear = _resolve_cached.cache_clear  # type: ignore[attr-defined]
+
+
+def _assemble_reviewer_prompt(pr: str, diff_text: str, verdict_contract: str, instruction: str,
+                              worktree: Optional[Path] = None) -> str:
     """The codex reviewer prompt: untrusted-data sandwich (OI-1442), reviewer role policy and ADR rules, tests block.
     The full review and the delta round (DR-6, deciding and shadow) all build it here."""
     l3 = build_review_prompt(gate_name="reviewer", pr=pr, diff_text=diff_text, verdict_contract=verdict_contract,
                              max_chars=0, agentic=True, instruction=instruction)
     assembled = PromptAssembler().assemble(dispatch_metadata={"role": "reviewer"}, instruction=l3)
+    interpreter, rule = resolve_review_interpreter_with_rule(worktree=worktree)
+    pythonpath = _project_config_value(REVIEW_PYTHONPATH_KEY, None)
     return (format_for_provider(assembled, "codex")["pipe_input"]
-            + _review_tests_block(resolve_review_interpreter(), diff_text))
+            + _review_tests_block(interpreter, diff_text, rule=rule, worktree=worktree,
+                                  pythonpath=[e.strip() for e in pythonpath.split(",") if e.strip()]))
 
 
 _DIFF_HEADER_RE = re.compile(r"^diff --git a/(\S+) b/(\S+)$")
@@ -251,15 +331,35 @@ def _is_safe_test_path(path: str) -> bool:
     return bool(_SAFE_TEST_PATH_RE.fullmatch(path)) and not path.startswith("-")
 
 
-def _review_tests_block(interpreter: Optional[str], diff_text: str = "") -> str:
+def _safe_relative_dir(path: str) -> bool:
+    """A VNX_REVIEW_PYTHONPATH entry: relative, no ``..``, no ``:`` (the PYTHONPATH separator), and the same characters as a test path."""
+    return (_is_safe_test_path(path) and not path.startswith("/")
+            and ".." not in path.split("/") and ":" not in path)
+
+
+_IMPORT_CHECK = (
+    "import importlib, pathlib, sys; root = pathlib.Path(sys.argv[1]); "
+    "names = sorted(d.name for d in root.iterdir() if (d / '__init__.py').is_file()); "
+    "print(importlib.import_module(names[0]).__file__ if names else 'no package under ' + str(root))"
+)
+
+
+def _review_tests_block(interpreter: Optional[str], diff_text: str = "", *, rule: int = RULE_FABRIC_CHAIN,
+                        worktree: Optional[Path] = None, pythonpath: Sequence[str] = ()) -> str:
     """The codex prompt block naming the test command per changed test type (OI-2591, OI-2785).
     Only ``.py`` tests get a command (pytest); every other type gets a read-them line. A path
-    with a shell metacharacter or whitespace never enters the command: it is named as text."""
+    with a shell metacharacter or whitespace never enters the command: it is named as text.
+    ``pythonpath`` entries (VNX_REVIEW_PYTHONPATH, relative to the worktree root) go first in
+    ``PYTHONPATH`` as absolute worktree paths, behind an import check that shows where the
+    package really loads from; a refused entry is named as text, like a refused test file."""
     changed = _changed_test_files(diff_text)
     tests = [p for p in changed if _is_safe_test_path(p)]
     refused = [p for p in changed if not _is_safe_test_path(p)]
     python = [shlex.quote(p) for p in tests if p.endswith(".py")]
     others = sorted({os.path.splitext(p)[1] or "(no extension)" for p in tests if not p.endswith(".py")})
+    wt = str(worktree) if worktree else GATE_WORKTREE_TOKEN
+    paths = [f"{wt}/{p}" for p in pythonpath if _safe_relative_dir(p)]
+    refused_paths = [p for p in pythonpath if not _safe_relative_dir(p)]
     body = ""
     if python or not tests:
         files = " ".join(python) if python else "<files>"
@@ -267,14 +367,31 @@ def _review_tests_block(interpreter: Optional[str], diff_text: str = "") -> str:
             body = ("No interpreter with pytest was found on this host, so this PR's tests "
                     "cannot be run. `residual_risk` must say that the tests did not run.\n")
         else:
-            body = (f"Run the PR's tests with `{interpreter} -m pytest {files} -q -p "
+            # Measured (report, dlv-51038adbdea0-r2): PYTHONPATH alone is not enough while PYTHONSAFEPATH is
+            # set, tests that import from the repo root fail to collect; so it is unset inside this command only.
+            env = ""
+            if paths or rule != RULE_FABRIC_CHAIN:
+                env = "env -u PYTHONSAFEPATH " + (f"PYTHONPATH={shlex.quote(':'.join(paths))} " if paths else "")
+            body = (f"Run the PR's tests with `{env}{interpreter} -m pytest {files} -q -p "
                     "no:cacheprovider` before the verdict, and report what came out.\n")
+            if rule != RULE_FABRIC_CHAIN:
+                body += f"The interpreter was chosen by {_RULE_TEXT[rule]}.\n"
+            if paths:
+                check = (f"{env}{interpreter} -c {shlex.quote(_IMPORT_CHECK)} {shlex.quote(paths[0])}")
+                body += (f"Run `{check}` first: it prints the `__file__` of the project package. The "
+                         f"package must load from inside the gate worktree ({wt}); the shared .venv "
+                         "may hold an editable install of the main checkout. When the printed path is "
+                         "outside the gate worktree, `residual_risk` must say so. That is never a "
+                         "reason for `blocked`.\n")
     for ext in others:
         body += (f"- `{ext}` test files: there is no test command for this type on this host; "
                  "read those tests instead of running them.\n")
     for path in refused:
         body += ("- Test file left out of the command because its path holds a shell "
                  f"metacharacter or whitespace; read it as text, never run it: {json.dumps(path)}\n")
+    for path in refused_paths:
+        body += ("- PYTHONPATH entry left out of the command because it is not a safe relative "
+                 f"path (shell metacharacter, whitespace, absolute or `..`): {json.dumps(path)}\n")
     return "\n\n## Running the PR's tests\n\n" + body + _NEVER_BLOCKING
 
 
@@ -1780,7 +1897,12 @@ class GateRunner:
         cmd = self._build_gate_cmd(gate, binary, request_payload)
         # OI-2591: only the codex seat gets one, and only to name the interpreter
         # that runs the PR's tests; every other gate inherits as before (env=None).
-        interpreter = resolve_review_interpreter() if gate == "codex_gate" else None
+        interpreter, rule = (resolve_review_interpreter_with_rule(worktree=cwd) if gate == "codex_gate"
+                             else (None, RULE_FABRIC_CHAIN))
+        if interpreter:  # the gate report names the interpreter and the rule that chose it
+            request_payload["review_interpreter"] = {"path": interpreter, "rule": rule}
+        if cwd and prompt:
+            prompt = prompt.replace(GATE_WORKTREE_TOKEN, str(cwd))
         spawn_env = None if not interpreter else {**os.environ, "VNX_REVIEW_PYTHON": interpreter}
         start = time.monotonic()
         try:

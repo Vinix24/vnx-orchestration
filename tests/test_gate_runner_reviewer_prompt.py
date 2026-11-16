@@ -353,7 +353,8 @@ def _delta_record() -> "rd.DeltaInput":
 
 def test_the_full_codex_prompt_is_unchanged_by_the_shared_assembly(monkeypatch):
     monkeypatch.setattr(GateRunner, "_fetch_gh_pr_diff", staticmethod(lambda n: "diff --git a/x.py b/x.py\n+++ b/x.py\n+print(1)\n"))
-    monkeypatch.setattr(gate_runner, "resolve_review_interpreter", lambda: "/usr/bin/python3")
+    monkeypatch.setattr(gate_runner, "resolve_review_interpreter_with_rule", lambda **kw: ("/usr/bin/python3", 3))
+    monkeypatch.setattr(gate_runner, "_project_config_value", lambda key, project_id: "")
     full = GateRunner._build_codex_prompt({"branch": "feat/x", "risk_class": "medium", "pr_number": 7})
     # sha256 of the prompt taken on origin/main cb5bf8ac8, before the helper; a deliberate change of the reviewer policy refreshes it
     # (refreshed by OI-2785: the tests block gained the never-blocking sentence)
@@ -361,7 +362,8 @@ def test_the_full_codex_prompt_is_unchanged_by_the_shared_assembly(monkeypatch):
 
 
 def test_the_shadow_delta_prompt_keeps_the_reviewer_policy_and_wraps_the_delta_as_untrusted(monkeypatch):
-    monkeypatch.setattr(gate_runner, "resolve_review_interpreter", lambda: "/usr/bin/python3")
+    monkeypatch.setattr(gate_runner, "resolve_review_interpreter_with_rule", lambda **kw: ("/usr/bin/python3", 3))
+    monkeypatch.setattr(gate_runner, "_project_config_value", lambda key, project_id: "")
     prompt = rd.build_delta_prompt(_delta_record(), partial(gate_runner._assemble_reviewer_prompt, "7"))
     begin, end = gate_prompt.BEGIN_DIFF_MARKER, gate_prompt.END_DIFF_MARKER
     for trusted in ("# Role: Reviewer", "## ADR Compliance", gate_prompt._UNTRUSTED_DATA_RULE, "## Running the PR's tests"):

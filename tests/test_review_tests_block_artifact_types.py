@@ -110,7 +110,7 @@ class TestCommandPerArtifactType:
 
 class TestTheBuiltPromptUsesTheDiff:
     def test_codex_prompt_for_a_typescript_pr_has_no_pytest_demand(self, monkeypatch):
-        monkeypatch.setattr(gate_runner, "resolve_review_interpreter", lambda: INTERP)
+        monkeypatch.setattr(gate_runner, "resolve_review_interpreter_with_rule", lambda **kw: (INTERP, 3))
         diff = _hunk("tests/scripts/gate_report.test.ts")
         gh_ok = mock.Mock(returncode=0, stdout=diff, stderr="")
         with mock.patch("gate_runner.subprocess.run", return_value=gh_ok):
@@ -184,3 +184,25 @@ class TestUntrustedPathsNeverReachTheCommand:
         block = gate_runner._review_tests_block(None, _hunk("tests/test_$(id).py"))
         assert "-m pytest" not in block
         assert "left out of the command" in block
+
+
+class TestPythonPathInTheCommand:
+    """D1: VNX_REVIEW_PYTHONPATH entries go first in PYTHONPATH as absolute worktree paths."""
+
+    def test_pythonpath_entries_are_absolute_inside_the_worktree_and_first(self):
+        wt = Path("/gate/wt")
+        block = gate_runner._review_tests_block(
+            INTERP, _hunk("tests/test_a.py"), rule=2, worktree=wt, pythonpath=["src", "lib/x"])
+        assert (f"`env -u PYTHONSAFEPATH PYTHONPATH=/gate/wt/src:/gate/wt/lib/x {INTERP} -m pytest tests/test_a.py "
+                "-q -p no:cacheprovider`") in block
+        assert "chosen by rule 2" in block
+
+    def test_the_worktree_token_stands_in_until_the_spawn(self):
+        block = gate_runner._review_tests_block(INTERP, _hunk("tests/test_a.py"), pythonpath=["src"])
+        assert f"PYTHONPATH={gate_runner.GATE_WORKTREE_TOKEN}/src " in block
+
+    def test_a_refused_entry_is_text_not_command(self):
+        block = gate_runner._review_tests_block(
+            INTERP, _hunk("tests/test_a.py"), worktree=Path("/gate/wt"), pythonpath=["src;id"])
+        assert "PYTHONPATH=" not in block.split("PYTHONPATH entry left out")[0]
+        assert '"src;id"' in block
