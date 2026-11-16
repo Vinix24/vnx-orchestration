@@ -73,6 +73,25 @@ LOG="$(printf '%s\n' "$PATHS" | sed -n 2p)"
 
 mkdir -p "$LOG" 2>/dev/null || true
 
+# ── Skip the build in a worker session ────────────────────────────────
+# Every headless builder is a Claude session in a worktree of this repo and
+# so fires this SessionStart hook, but a builder never reads t0_state.json /
+# t0_index.json: with several builders at once the parallel builds only load
+# the machine. Ask the one classifier (actor_class.derive, ADR-056) for the
+# class of THIS session, through the same interpreter and PYTHONPATH the
+# builder gets. Only the exact class `worker` skips; t0, operator, automation
+# and unknown build as before. The t0-over-dispatch-marker order lives in
+# derive(); it is not reimplemented here.
+# Fail-open to the current behaviour: if the classification itself fails
+# (non-zero exit, no output, import error) the build runs as today.
+_ACTOR_CLASS="$(PYTHONPATH="$ENGINE_ROOT/scripts/lib:${PYTHONPATH:-}" \
+    "$PY" -c 'from actor_class import derive; print(derive())' 2>/dev/null)" || _ACTOR_CLASS=""
+if [ "$_ACTOR_CLASS" = "worker" ]; then
+    printf '[vnx] build_t0_state_hook: skipped: worker session %s\n' \
+        "${VNX_CURRENT_DISPATCH_ID:-${VNX_DISPATCH_ID:-}}" >&2
+    exit 0
+fi
+
 # ── Run the builder: visible failure, non-blocking exit ───────────────
 # Capture the builder's stderr to a per-run scratch file, then APPEND only
 # the failure incidents to the central log with an incident timestamp (D1:
