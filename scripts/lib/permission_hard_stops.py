@@ -28,7 +28,7 @@ def _w(names: str, before: str = r"\w-", after: str = r"(?![\w-])") -> "re.Patte
 
 _OP_SUBS = "read|run|inject|signin|item|vault|document|whoami|account|connect|user|group|service-account"
 _MARKERS = re.compile(r"[A-Z0-9_]*(?:TOKEN|PASSWORD|PASSWD|SECRET|API_KEY|PRIVATE_KEY)[A-Z0-9_]*")  # raw, upper
-_INDIRECT = (re.compile(r"\$[\w{(@*#?!$'\"-]|`"), _w("eval"),
+_INDIRECT = (re.compile(r"\$[\w{(@*#?!$'\"-]|`|[?*+@!]\(|\{[^\s{}]*(?:,|\.\.)[^\s{}]*\}"), _w("eval"),  # brace, extglob
              re.compile(r"\|\s*(?:\S*/)?(?:ba|z|da|k)?sh(?![\w-])", _I))  # $X ${X} $( ) $'…' `…`, eval, | sh
 _BASE64_SH = ((_w("base64"), _w("sh|bash|zsh|dash|ksh", r"\w.-")),)
 _SPLIT = re.compile(r"[\s;&|()<>]+")
@@ -58,12 +58,12 @@ CATEGORIES = frozenset(c for c, _ in TABLE)
 HARD_STOP_VALUES = frozenset(CATEGORIES | {INDIRECTION, EVIDENCE_UNAVAILABLE, ""})  # "" = falls through
 
 def _glob_hides_a_name(text: str) -> bool:
-    """A word with a glob or brace (``ss?``, ``{r,}m``) that can expand to a table name; unparseable is True."""
+    """A word with a glob (``ss?``, ``[s]sh``) that can expand to a table name; unparseable is True."""
     for word in _SPLIT.split(text):
         base = word.rsplit("/", 1)[-1]
-        if not any(c in base for c in "*?[{") or not base.strip("*"):  # a bare * names no command
+        if not any(c in base for c in "*?[") or not base.strip("*"):  # a bare * names no command
             continue
-        rx = "".join({"*": ".*", "?": ".", "{": "(?:", "}": ")", ",": "|"}.get(c, re.escape(c)) for c in
+        rx = "".join({"*": ".*", "?": "."}.get(c, re.escape(c)) for c in
                      re.sub(r"\[[^\]]*\]?", "?", base))  # a [...] class counts as any one character
         try:
             pattern = re.compile(rx, _I)

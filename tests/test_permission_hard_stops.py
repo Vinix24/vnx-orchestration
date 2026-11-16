@@ -73,10 +73,10 @@ def test_a_bash_use_without_a_str_command_is_evidence_unavailable_and_a_tool_nam
     ("git push origin --delete x", "verwijderen"), ("rm -rf /private/tmp/claude-501/p/scratchpad/o", "verwijderen"),
     ("ssh $HOST", "indirection"), ("${CMD} host", "indirection"), ("$(echo ssh) host", "indirection"),  # indirection as a whole, a secret in it still says secrets
     ("`echo rm` -rf /", "indirection"), ('eval "$X"', "indirection"), ("echo c3No | base64 -d | sh", "indirection"),
-    ("$'\\x73sh' host", "indirection"), ("/usr/bin/ss? host", "indirection"), ("{s,}sh host", "indirection"),
+    ("$'\\x73sh' host", "indirection"), ("/usr/bin/ss? host", "indirection"), ("{s,}sh host", "indirection"), ("{s..s}sh host", "indirection"), ("/usr/bin/{s..s}sh host", "indirection"),
     (f"$(echo x) --key={FAKE_KEY}", "secrets"), ("X=$(op read op://v/i)", "secrets"),
     ("git status", ""), ("cat ~/.ssh/config", ""), ("ssh-keygen -t ed25519", ""), ("grep -n op file.py", ""),  # falls through
-    ("s\\\nsh host", "server"), ("rm -\\\nrf /var/data", "verwijderen"), ("/sbin/reboo?", "indirection"), ("/usr/bin/shutdow?", "indirection"), ("echo op de lijst", ""), ("rm -f build.log", ""), ("git push origin HEAD:refs/heads/x", ""), ("ls *.py", ""),
+    ("s\\\nsh host", "server"), ("rm -\\\nrf /var/data", "verwijderen"), ("/sbin/reboo?", "indirection"), ("/usr/bin/shutdow?", "indirection"), ("echo op de lijst", ""), ("rm -f build.log", ""), ("git push origin HEAD:refs/heads/x", ""), ("ls *.py", ""), ("s{s,}h host", "indirection"), ("{r,}m -rf /x", "indirection"), ("@(ssh) host", "indirection"), ("find . -name '*.py'", ""),
 ])
 def test_the_table(raw, cat):
     assert hs.classify(raw)[0] == cat
