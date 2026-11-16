@@ -186,11 +186,8 @@ _PROBE_TIMEOUT = 10.0
 
 
 def _imports_pytest(candidate: Optional[str]) -> bool:
-    """True when ``candidate`` is a file that imports pytest within ``_PROBE_TIMEOUT`` seconds.
-
-    Started with ``os.posix_spawn`` and reaped with ``os.waitpid``, not ``subprocess.Popen``:
-    ``Popen.__init__`` reads its exec-status pipe through ``os.read``, which the gate tests patch
-    process-wide, so a Popen probe inside a run swallows the mocked codex output (``dlv-51038adbdea0-r3``)."""
+    """True when ``candidate`` imports pytest within ``_PROBE_TIMEOUT`` s. ``os.posix_spawn``, not Popen:
+    ``Popen.__init__`` reads its exec pipe via ``os.read``, which the gate tests patch process-wide."""
     if not (candidate and os.path.isfile(candidate)):
         return False
     null = os.devnull
@@ -213,10 +210,8 @@ def _imports_pytest(candidate: Optional[str]) -> bool:
 
 
 def _project_root_of(directory: Optional[Path]) -> Optional[str]:
-    """The main checkout of the repository ``directory`` belongs to (the process's cwd when
-    None): the parent of git's common dir, read from the ``.git`` entry itself so no subprocess
-    starts. A gate worktree of the same repository gives the same answer as its main checkout.
-    None when no ``.git`` is found or it is unreadable, so no ``.venv`` is guessed."""
+    """The main checkout of the repository ``directory`` (default cwd) belongs to, read from the ``.git``
+    entry so no subprocess starts; a worktree answers like its main checkout. None: no ``.venv`` is guessed."""
     try:
         here = Path(directory or Path.cwd()).resolve()
         for candidate in (here, *here.parents):
@@ -238,13 +233,10 @@ def _project_root_of(directory: Optional[Path]) -> Optional[str]:
 
 
 def _run_interpreter(request_payload: Dict[str, Any], project_root: Optional[Path]) -> "tuple[Optional[str], int]":
-    """The review interpreter of THIS run, resolved once and kept on the request as
-    ``review_interpreter`` ({path, rule}; path None when none imports pytest). Rule 2 measures
-    the root of the repository the gate runs for, not the runner's cwd and not the gate worktree,
-    which does not exist yet at prompt time. That repository is ``project_root`` when the runner
-    has one, else the one this file lives in: the first candidate of ``project_root.resolve_project_root``
-    (the helper ``gate_worktree`` uses), read from ``.git`` in-process because the helper's git
-    subprocess would start a second process at prompt time."""
+    """The run's review interpreter, resolved once and kept on the request as ``review_interpreter``
+    ({path, rule}; path None when none imports pytest). Rule 2 measures the repository the gate runs
+    for: ``project_root``, else the one this file lives in (the first candidate of
+    ``project_root.resolve_project_root``, read in-process), not the cwd nor the not-yet-made worktree."""
     kept = request_payload.get("review_interpreter")
     if isinstance(kept, dict) and "rule" in kept and "path" in kept:
         return kept["path"], kept["rule"]
