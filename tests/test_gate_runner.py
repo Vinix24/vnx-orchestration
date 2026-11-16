@@ -1806,3 +1806,66 @@ class TestHarnessLaneDelegation:
         assert saved["status"] == "unavailable"
 
         assert len(calls) == 1
+
+
+class TestReviewInterpreterResolvedOncePerRun:
+    """reviews-zonder-uitkomst D1 r3: one resolution per run, before the prompt, from the gate's repository."""
+
+    @staticmethod
+    def _run_codex(gate_env, monkeypatch, tmp_path):
+        import subprocess as _sp
+
+        root = gate_env["project_root"]
+        _sp.run(["git", "init", "-q", str(root)], check=True)
+        venv_python = root / ".venv" / "bin" / "python"
+        venv_python.parent.mkdir(parents=True)
+        venv_python.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        venv_python.chmod(0o755)
+        worktree = root / ".vnx-data" / "worktrees" / "gate-codex_gate-1-abcd"
+        worktree.mkdir(parents=True)
+        outside = tmp_path / "elsewhere"
+        outside.mkdir()
+        monkeypatch.chdir(outside)  # the runner's cwd is outside the project
+        monkeypatch.delenv("VNX_REVIEW_PYTHON", raising=False)
+        monkeypatch.setenv("VNX_CODEX_HEADLESS_ENABLED", "1")
+        monkeypatch.setattr("shutil.which", lambda b: "/usr/bin/fake")
+        monkeypatch.setattr(gate_runner, "_project_config_value", lambda key, project_id: "")
+        monkeypatch.setattr(GateRunner, "_fetch_gh_pr_diff",
+                            staticmethod(lambda n: "diff --git a/x.py b/x.py\n+++ b/x.py\n+print(1)\n"))
+        gate_runner.resolve_review_interpreter.cache_clear()
+        probed = []
+        real_probe = gate_runner._imports_pytest
+        monkeypatch.setattr(gate_runner, "_imports_pytest", lambda c: probed.append(c) or real_probe(c))
+
+        proc = MagicMock()
+        proc.stdout.fileno.return_value, proc.stderr.fileno.return_value = 10, 11
+        proc.poll.return_value, proc.returncode, proc.pid = 0, 0, 77777
+        reads = [0]
+
+        def mock_os_read(fd, size):
+            reads[0] += 1
+            return CODEX_VERDICT_STREAM if fd == 10 and reads[0] == 1 else b""
+
+        payload = _make_request_payload(gate="codex_gate", report_path=str(gate_env["reports_dir"] / "r.md"), prompt="")
+        runner = GateRunner(state_dir=gate_env["state_dir"], reports_dir=gate_env["reports_dir"], project_root=root)
+        with patch("gate_runner.create_gate_worktree", return_value=worktree), \
+             patch("gate_runner.remove_gate_worktree"), \
+             patch("gate_runner.subprocess.Popen", return_value=proc), \
+             patch("gate_runner.select.select", return_value=([], [], [])), \
+             patch("gate_runner.os.read", side_effect=mock_os_read), \
+             patch("gate_runner.os.getpgid", return_value=77777):
+            result = runner.run(gate="codex_gate", request_payload=payload, pr_number=1)
+        return result, payload, proc.stdin.write.call_args.args[0].decode(), probed, venv_python
+
+    def test_prompt_and_record_name_the_same_interpreter_and_rule(self, gate_env, monkeypatch, tmp_path):
+        result, payload, prompt, _probed, venv_python = self._run_codex(gate_env, monkeypatch, tmp_path)
+
+        assert result["status"] == "completed"
+        assert payload["review_interpreter"] == {"path": str(venv_python), "rule": 2}
+        assert f"{venv_python} -m pytest" in prompt
+        assert gate_runner._RULE_TEXT[2] in prompt
+
+    def test_a_full_codex_run_probes_the_interpreter_once(self, gate_env, monkeypatch, tmp_path):
+        _result, _payload, _prompt, probed, venv_python = self._run_codex(gate_env, monkeypatch, tmp_path)
+
+        assert probed == [str(venv_python)]

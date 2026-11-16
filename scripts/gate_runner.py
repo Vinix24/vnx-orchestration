@@ -164,9 +164,8 @@ def resolve_codex_review_effort(risk_class: Optional[str]) -> str:
 
 # OI-2591: a codex review runs the tests with the ``python3`` its PATH offers, which on
 # this host is 3.15 without the project packages; the seat is handed one that imports
-# pytest. Import-time capture below: the gate tests' ``subprocess.Popen`` patch must not
-# be able to mock this probe into answering "has pytest".
-_ProbePopen = subprocess.Popen
+# pytest. The probe (``_imports_pytest``) does not go through
+# ``subprocess.Popen``, so the gate tests' patches of it cannot mock it into answering "has pytest".
 
 
 REVIEW_PYTHON_KEY = "VNX_REVIEW_PYTHON"
@@ -183,42 +182,75 @@ _RULE_TEXT = {
 GATE_WORKTREE_TOKEN = "@@VNX_GATE_WORKTREE@@"
 
 
+_PROBE_TIMEOUT = 10.0
+
+
 def _imports_pytest(candidate: Optional[str]) -> bool:
-    """True when ``candidate`` is a file that imports pytest within 10 s."""
+    """True when ``candidate`` is a file that imports pytest within ``_PROBE_TIMEOUT`` seconds.
+
+    Started with ``os.posix_spawn`` and reaped with ``os.waitpid``, not ``subprocess.Popen``:
+    ``Popen.__init__`` reads its exec-status pipe through ``os.read``, which the gate tests patch
+    process-wide, so a Popen probe inside a run swallows the mocked codex output (``dlv-51038adbdea0-r3``)."""
     if not (candidate and os.path.isfile(candidate)):
         return False
-    proc = None
+    null = os.devnull
+    actions = [(os.POSIX_SPAWN_OPEN, 0, null, os.O_RDONLY, 0), (os.POSIX_SPAWN_OPEN, 1, null, os.O_WRONLY, 0),
+               (os.POSIX_SPAWN_OPEN, 2, null, os.O_WRONLY, 0)]
     try:
-        proc = _ProbePopen(
-            [candidate, "-c", "import pytest"],
-            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        )
-        proc.communicate(timeout=10)
-        return proc.returncode == 0
+        pid = os.posix_spawn(candidate, [candidate, "-c", "import pytest"], os.environ, file_actions=actions)
     except OSError:  # vnx-silent-except: an interpreter that cannot start is no candidate
         return False
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        proc.communicate()
-        return False
+    deadline = time.monotonic() + _PROBE_TIMEOUT
+    while True:
+        done, status = os.waitpid(pid, os.WNOHANG)
+        if done:
+            return os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0
+        if time.monotonic() >= deadline:
+            os.kill(pid, signal.SIGKILL)
+            os.waitpid(pid, 0)
+            return False
+        time.sleep(0.01)
 
 
 def _project_root_of(directory: Optional[Path]) -> Optional[str]:
-    """The directory above ``git rev-parse --git-common-dir`` measured from ``directory`` (the
-    process's cwd when None): the main checkout of whatever project the gate worktree belongs to.
-    None when git does not answer, so no ``.venv`` is guessed."""
+    """The main checkout of the repository ``directory`` belongs to (the process's cwd when
+    None): the parent of git's common dir, read from the ``.git`` entry itself so no subprocess
+    starts. A gate worktree of the same repository gives the same answer as its main checkout.
+    None when no ``.git`` is found or it is unreadable, so no ``.venv`` is guessed."""
     try:
-        proc = _ProbePopen(
-            ["git", "rev-parse", "--git-common-dir"], cwd=str(directory) if directory else None,
-            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
-        )
-        out, _err = proc.communicate(timeout=10)
-    except (OSError, subprocess.TimeoutExpired):  # vnx-silent-except: no answer means no project .venv, rule 3 follows
+        here = Path(directory or Path.cwd()).resolve()
+        for candidate in (here, *here.parents):
+            entry = candidate / ".git"
+            if entry.is_dir():
+                return str(candidate)
+            if entry.is_file():
+                text = entry.read_text(encoding="utf-8").strip()
+                if not text.startswith("gitdir:"):
+                    return None
+                gitdir = (candidate / text[len("gitdir:"):].strip()).resolve()
+                commondir = gitdir / "commondir"
+                if not commondir.is_file():
+                    return str(gitdir.parent.parent.parent) if gitdir.parent.name == "worktrees" else None
+                return str((gitdir / commondir.read_text(encoding="utf-8").strip()).resolve().parent)
+    except (OSError, UnicodeDecodeError):  # vnx-silent-except: no answer means no project .venv, rule 3 follows
         return None
-    common = (out or "").strip()
-    if proc.returncode != 0 or not common:
-        return None
-    return str((Path(directory or Path.cwd()) / common).resolve().parent)
+    return None
+
+
+def _run_interpreter(request_payload: Dict[str, Any], project_root: Optional[Path]) -> "tuple[Optional[str], int]":
+    """The review interpreter of THIS run, resolved once and kept on the request as
+    ``review_interpreter`` ({path, rule}; path None when none imports pytest). Rule 2 measures
+    the root of the repository the gate runs for, not the runner's cwd and not the gate worktree,
+    which does not exist yet at prompt time. That repository is ``project_root`` when the runner
+    has one, else the one this file lives in: the first candidate of ``project_root.resolve_project_root``
+    (the helper ``gate_worktree`` uses), read from ``.git`` in-process because the helper's git
+    subprocess would start a second process at prompt time."""
+    kept = request_payload.get("review_interpreter")
+    if isinstance(kept, dict) and "rule" in kept and "path" in kept:
+        return kept["path"], kept["rule"]
+    interpreter, rule = resolve_review_interpreter_with_rule(worktree=project_root or Path(__file__).resolve().parent)
+    request_payload["review_interpreter"] = {"path": interpreter, "rule": rule}
+    return interpreter, rule
 
 
 def _project_config_value(key: str, project_id: Optional[str]) -> str:
@@ -276,13 +308,14 @@ resolve_review_interpreter.cache_clear = _resolve_cached.cache_clear  # type: ig
 
 
 def _assemble_reviewer_prompt(pr: str, diff_text: str, verdict_contract: str, instruction: str,
-                              worktree: Optional[Path] = None) -> str:
+                              worktree: Optional[Path] = None,
+                              interpreter_rule: "Optional[tuple[Optional[str], int]]" = None) -> str:
     """The codex reviewer prompt: untrusted-data sandwich (OI-1442), reviewer role policy and ADR rules, tests block.
     The full review and the delta round (DR-6, deciding and shadow) all build it here."""
     l3 = build_review_prompt(gate_name="reviewer", pr=pr, diff_text=diff_text, verdict_contract=verdict_contract,
                              max_chars=0, agentic=True, instruction=instruction)
     assembled = PromptAssembler().assemble(dispatch_metadata={"role": "reviewer"}, instruction=l3)
-    interpreter, rule = resolve_review_interpreter_with_rule(worktree=worktree)
+    interpreter, rule = interpreter_rule or resolve_review_interpreter_with_rule(worktree=worktree)
     pythonpath = _project_config_value(REVIEW_PYTHONPATH_KEY, None)
     return (format_for_provider(assembled, "codex")["pipe_input"]
             + _review_tests_block(interpreter, diff_text, rule=rule, worktree=worktree,
@@ -1163,6 +1196,8 @@ class GateRunner:
         """
         external_prompt = request_payload.get("prompt", "")
         prompt = external_prompt
+        if gate == "codex_gate":  # once per run, before any prompt is built
+            _run_interpreter(request_payload, self._project_root)
         if not prompt and gate == "gemini_review":
             prompt = self._build_gemini_prompt(request_payload)
         elif not prompt and gate == "codex_gate":
@@ -1248,7 +1283,8 @@ class GateRunner:
         try:
             plan = review_delta_decide.plan_round(  # DR-6: under delta the codex seat may decide with the delta round
                 gate=gate, prompt=prompt, request_payload=request_payload, state_dir=self._state_dir, worktree=worktree_path,
-                assemble=partial(_assemble_reviewer_prompt, str(request_payload.get("pr_number"))))
+                assemble=partial(_assemble_reviewer_prompt, str(request_payload.get("pr_number")),
+                                 interpreter_rule=_run_interpreter(request_payload, self._project_root)))
             result = self._run_with_stall_detection(
                 gate=gate, binary=binary, prompt=plan.prompt,
                 timeout=gate_timeout(gate), stall_threshold=gate_stall_threshold(gate),
@@ -1295,7 +1331,8 @@ class GateRunner:
         if gate == "codex_gate" and review_scope.active_review_scope(self._state_dir).runs_shadow:  # DR-4b/DR-6: only under delta_shadow or delta; never changes ``record`` (fail-open)
             review_delta_shadow.run_shadow(
                 request_payload=request_payload, state_dir=self._state_dir, project_root=self._project_root,
-                assemble=partial(_assemble_reviewer_prompt, str(request_payload.get("pr_number"))),
+                assemble=partial(_assemble_reviewer_prompt, str(request_payload.get("pr_number")),
+                                 interpreter_rule=_run_interpreter(request_payload, self._project_root)),
                 run=lambda delta_prompt, cwd: self._run_with_stall_detection(
                     gate=gate, binary=binary, prompt=delta_prompt, timeout=gate_timeout(gate),
                     stall_threshold=gate_stall_threshold(gate), request_payload=dict(request_payload), cwd=cwd))
@@ -1669,6 +1706,7 @@ class GateRunner:
         request_payload["diff_coverage"] = gate_depth.diff_coverage(diff_content, 0)
         return _assemble_reviewer_prompt(
             str(pr_number), diff_content, _REVIEWER_VERDICT_TEMPLATE,
+            interpreter_rule=_run_interpreter(request_payload, None),
             instruction=(
                 f"Review the PR diff in the untrusted-data block, on branch {branch} "
                 f"(risk: {risk}). "
@@ -1897,10 +1935,8 @@ class GateRunner:
         cmd = self._build_gate_cmd(gate, binary, request_payload)
         # OI-2591: only the codex seat gets one, and only to name the interpreter
         # that runs the PR's tests; every other gate inherits as before (env=None).
-        interpreter, rule = (resolve_review_interpreter_with_rule(worktree=cwd) if gate == "codex_gate"
-                             else (None, RULE_FABRIC_CHAIN))
-        if interpreter:  # the gate report names the interpreter and the rule that chose it
-            request_payload["review_interpreter"] = {"path": interpreter, "rule": rule}
+        # The run's one resolution (kept on the request since the prompt was built); no probe here.
+        interpreter = _run_interpreter(request_payload, self._project_root)[0] if gate == "codex_gate" else None
         if cwd and prompt:
             prompt = prompt.replace(GATE_WORKTREE_TOKEN, str(cwd))
         spawn_env = None if not interpreter else {**os.environ, "VNX_REVIEW_PYTHON": interpreter}
