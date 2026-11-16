@@ -79,8 +79,11 @@ from receipt_verdict import HARD_FAILURE_STATUSES, SUCCESS_STATUSES  # noqa: E40
 # importing gate_recorder (which pulls the whole receipt stack) would not.
 from failure_classification import GATE_QUOTA_REFUSAL_REASON as QUOTA_REFUSAL_REASON  # noqa: E402
 # The prefix of the one synthetic blocking entry gate_artifacts adds to a
-# rejection with no blocking finding (OI-1938). Imported, never copied.
-from gate_artifacts import VERDICT_ENTRY_PREFIX  # noqa: E402
+# rejection with no blocking finding (OI-1938). Imported, never copied: the
+# literal lives in failure_classification, and gate_artifacts imports it from
+# there too. Importing it from gate_artifacts would pull gate_recorder and yaml
+# and break this module's standalone-importable contract.
+from failure_classification import VERDICT_ENTRY_PREFIX  # noqa: E402
 
 try:
     from failure_classification import FAILURE_CLASSES as _KNOWN_FAILURE_CLASSES
@@ -764,7 +767,7 @@ def _gate_result_cause(record: Dict[str, Any]) -> Optional[FrozenSet[str]]:
         contributes the legacy ``blocking_findings`` cause, so a run that
         names no file can still trip E6.
       - the same completed run whose ONLY blocking entries are the synthetic
-        ``gate_artifacts.VERDICT_ENTRY_PREFIX`` entry (a ``fail`` verdict with
+        ``failure_classification.VERDICT_ENTRY_PREFIX`` entry (a ``fail`` verdict with
         advisory findings only, OI-1938). That entry names no file and is
         identical on every such PR, so it is no cause. The cause is then the
         set of ``file:<file_path>`` of the record's ADVISORY findings that

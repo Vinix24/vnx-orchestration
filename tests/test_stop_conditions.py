@@ -959,3 +959,31 @@ class TestLedgerScopingEnumDrift:
         for gate_name in ("ci_gate", "wiring_gate", "claude_github_optional"):
             assert gate_name in sc.GATE_LEDGER_PROVIDERS
             assert sc.GATE_LEDGER_PROVIDERS[gate_name] == frozenset()
+
+
+# ── Standalone-import contract + shared prefix (D3a round 2) ────────────────
+
+
+def test_stop_conditions_imports_without_the_receipt_stack():
+    import subprocess
+
+    lib = str(SCRIPT_DIR / "lib")
+    code = (
+        "import sys; sys.path.insert(0, %r); import stop_conditions; "
+        "bad = [m for m in ('gate_recorder', 'gate_artifacts') if m in sys.modules]; "
+        "print(','.join(bad)); sys.exit(1 if bad else 0)" % lib
+    )
+    proc = subprocess.run(
+        [sys.executable, "-I", "-c", code], capture_output=True, text=True, timeout=60
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
+def test_verdict_entry_prefix_is_one_shared_value():
+    import failure_classification
+    import stop_conditions
+
+    shared = failure_classification.VERDICT_ENTRY_PREFIX
+    assert shared == "verdict_without_blocking_finding"
+    assert gate_artifacts.VERDICT_ENTRY_PREFIX == shared
+    assert stop_conditions.VERDICT_ENTRY_PREFIX == shared
