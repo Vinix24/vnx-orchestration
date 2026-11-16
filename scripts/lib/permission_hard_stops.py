@@ -20,16 +20,17 @@ PROMOTE_REASON = ("hard_stop:promote: ADR-056 route: metadata.autonomous_promoti
                   "plus a plan-gate grant that the verifier reads as VERIFIED")
 _I = re.IGNORECASE
 
-def _w(names: str, before: str = r"\w-") -> "re.Pattern[str]":
+_NAMES = set("op security fly psql".split())  # the glob check's names: these plus every plain name a _w rule holds
+def _w(names: str, before: str = r"\w-", after: str = r"(?![\w-])") -> "re.Pattern[str]":
     """A word anywhere, in any case: no letter, digit, ``_`` or ``-`` (plus ``before``) on either side."""
-    return re.compile(rf"(?<![{before}])(?:{names})(?![\w-])", _I)
+    _NAMES.update(names.split("|") if re.fullmatch(r"[\w-]+(?:\|[\w-]+)*", names) else ())  # one source: the rules
+    return re.compile(rf"(?<![{before}])(?:{names}){after}", _I)
 
 _OP_SUBS = "read|run|inject|signin|item|vault|document|whoami|account|connect|user|group|service-account"
 _MARKERS = re.compile(r"[A-Z0-9_]*(?:TOKEN|PASSWORD|PASSWD|SECRET|API_KEY|PRIVATE_KEY)[A-Z0-9_]*")  # raw, upper
 _INDIRECT = (re.compile(r"\$[\w{(@*#?!$'\"-]|`"), _w("eval"),
              re.compile(r"\|\s*(?:\S*/)?(?:ba|z|da|k)?sh(?![\w-])", _I))  # $X ${X} $( ) $'…' `…`, eval, | sh
-_GLOB_NAMES = ("rm ssh scp sftp mosh gcloud hcloud launchctl systemctl op gh git supabase eval base64 security "
-               "sh bash zsh dash ksh kubectl terraform pulumi vercel fly").split()
+_BASE64_SH = ((_w("base64"), _w("sh|bash|zsh|dash|ksh", r"\w.-")),)
 _SPLIT = re.compile(r"[\s;&|()<>]+")
 # (category, rules): a rule is a tuple of patterns that must all match somewhere; checked in this order.
 TABLE: Tuple[Tuple[str, Tuple[Tuple["re.Pattern[str]", ...], ...]], ...] = (
@@ -41,7 +42,7 @@ TABLE: Tuple[Tuple[str, Tuple[Tuple["re.Pattern[str]", ...], ...]], ...] = (
     ("verwijderen", (
         (_w("rm"), re.compile(r"(?<![\w-])(?:-[a-z]*r[a-z]*|--recursive)(?![\w-])", _I)),
         (_w("git"), _w("push"), re.compile(r"(?<![\w-])(?:-d|--delete)(?![\w-])|(?<!\S)\+?:\S", _I)),
-        (_w("gh"), re.compile("delete", _I)))),
+        (_w("gh|github"), re.compile("delete", _I)))),
     ("supabase", (
         (_w("supabase"),),
         (_w("grant|revoke"),),
@@ -49,7 +50,7 @@ TABLE: Tuple[Tuple[str, Tuple[Tuple["re.Pattern[str]", ...], ...]], ...] = (
     ("server", ((_w("gcloud|hcloud"),), (_w("ssh|scp|sftp|mosh", r"\w.-"),))),
     ("units", ((_w("launchctl|systemctl"),),)),
     ("deploy_herstart", (
-        (re.compile(r"(?<![a-z0-9_])(?:(?:re)?deploy|restart|reboot|shutdown|rollout)", _I),),
+        (_w("redeploy|deploy|restart|reboot|shutdown|rollout", "a-z0-9_", ""),),
         (_w("kubectl|terraform"), _w("apply")), (_w("pulumi"), _w("up")), (_w("vercel"), _w("--prod")))),
     ("promote", ((_w("deliverable"), _w("promote")),)),
 )
@@ -68,7 +69,7 @@ def _glob_hides_a_name(text: str) -> bool:
             pattern = re.compile(rx, _I)
         except re.error:
             return True
-        if any(pattern.fullmatch(name) for name in _GLOB_NAMES):
+        if any(pattern.fullmatch(name) for name in _NAMES):
             return True
     return False
 
@@ -84,11 +85,10 @@ def classify(raw_text: Any) -> Tuple[str, str]:
         masked = mask(raw_text)
     except Exception:  # vnx-silent-except: a mask failure is reported as unavailable evidence, never a pass
         return EVIDENCE_UNAVAILABLE, f"{EVIDENCE_UNAVAILABLE}: the raw form could not be masked"
-    text = raw_text.translate({ord("'"): None, ord('"'): None, ord("\\"): None})  # rule 1: de-quote first
+    text = re.sub(r"(?<!\\)((?:\\\\)*)\\\n", r"\1", raw_text).translate({ord("'"): None, ord('"'): None, ord("\\"): None})  # rule 1: join continuations, de-quote
     if masked != raw_text or SECRET in masked or _MARKERS.search(raw_text) or _match(text, TABLE[0][1]):
         return "secrets", reason("secrets")
-    if (any(p.search(raw_text + "\n" + text) for p in _INDIRECT) or _glob_hides_a_name(text)
-            or _match(text, ((_w("base64"), _w("(?:ba|z|da|k)?sh", r"\w.-")),))):
+    if any(p.search(raw_text + "\n" + text) for p in _INDIRECT) or _glob_hides_a_name(text) or _match(text, _BASE64_SH):
         return INDIRECTION, reason(INDIRECTION)
     for category, rules in TABLE[1:]:
         if _match(text, rules):

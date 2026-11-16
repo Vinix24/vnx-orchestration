@@ -160,7 +160,7 @@ def _emit(skipped: Counter, ctx: Ctx, ts: Any, bron: str, besluit: str, command:
 
 def _decisions(objs: Sequence[Dict[str, Any]]) -> Iterator[Tuple[Dict[str, Any], Dict[str, Any], str, Optional[str]]]:
     """(line, tool_result block, stored form, raw form for the hard stop, ADR-082) of the matching tool_use. A Bash use
-    without a non-empty str command stores "Bash" with raw None (evidence_unavailable); a non-Bash tool's name is both."""
+    without a non-empty str command stores "Bash" with raw None (evidence_unavailable); a non-Bash tool stores its name, raw is the name with "_" as a space."""
     uses: Dict[str, Tuple[str, Optional[str]]] = {}
     for obj in objs:
         msg = obj.get("message") if obj.get("type") == "assistant" else None
@@ -168,7 +168,7 @@ def _decisions(objs: Sequence[Dict[str, Any]]) -> Iterator[Tuple[Dict[str, Any],
             if isinstance(b, dict) and b.get("type") == "tool_use" and isinstance(b.get("id"), str):
                 cmd = (b.get("input") or {}).get("command") if isinstance(b.get("input"), dict) else None
                 name = str(b.get("name") or "")
-                uses[b["id"]] = (cmd, cmd) if name == "Bash" and isinstance(cmd, str) and cmd else (name, None if name == "Bash" else name)
+                uses[b["id"]] = (cmd, cmd) if name == "Bash" and isinstance(cmd, str) and cmd else (name, None if name == "Bash" else name.replace("_", " "))
     for obj in objs:
         msg = obj.get("message") if obj.get("type") == "user" else None
         for b in (msg.get("content") if isinstance(msg, dict) and isinstance(msg.get("content"), list) else []):

@@ -53,15 +53,16 @@ def test_no_raw_evidence_is_evidence_unavailable_after_write_and_read(tmp_path, 
     back = json.loads((tmp_path / "permission_events.ndjson").read_text())
     assert back["hard_stop"] == hs.EVIDENCE_UNAVAILABLE and hs.melding(back).startswith("evidence_unavailable")
 
-@pytest.mark.parametrize("inp", [{}, {"command": 7}, {"command": ""}, {"command": ["ssh", "h"]}])
-def test_a_bash_use_without_a_str_command_is_evidence_unavailable(tmp_path, monkeypatch, inp):
+@pytest.mark.parametrize("name, inp, cat", [("Bash", i, "evidence_unavailable") for i in ({}, {"command": 7}, {"command": ""}, {"command": ["ssh", "h"]})]
+                         + [("mcp__supabase__apply_migration", {}, "supabase"), ("mcp__github__delete_file", {}, "verwijderen"), ("mcp__claude-in-chrome__computer", {}, "")])
+def test_a_bash_use_without_a_str_command_is_evidence_unavailable_and_a_tool_name_is_read_as_words(tmp_path, monkeypatch, name, inp, cat):
     objs = [{"type": "assistant", "timestamp": NOW, "message": {"content": [
-        {"type": "tool_use", "id": "t1", "name": "Bash", "input": inp}]}}, result("t1", "config", "permission-rule", ts=NOW)]
+        {"type": "tool_use", "id": "t1", "name": name, "input": inp}]}}, result("t1", "config", "permission-rule", ts=NOW)]
     _, events = _scan(tmp_path, monkeypatch, objs)
-    assert [e["hard_stop"] for e in events] == [hs.EVIDENCE_UNAVAILABLE] and hs.melding(events[0]) is not None
+    assert [(e["vorm"], e["hard_stop"]) for e in events] == [(name, cat)] and (hs.melding(events[0]) is None) == (cat == "")
 
 @pytest.mark.parametrize("raw, cat", [
-    ('"rm" -rf /var/data', "verwijderen"),  # the block of plan v4 § Versie 4, then the plan-gate bindings ("bash -c 'ssh host uptime'", "server"), ("nohup ssh host", "server"),
+    ('"rm" -rf /var/data', "verwijderen"), ("bash -c 'ssh host uptime'", "server"), ("nohup ssh host", "server"),  # the block of plan v4 § Versie 4, then the plan-gate bindings
     ("timeout 5 ssh host", "server"), ("env -i ssh host", "server"), ("command ssh host", "server"),
     ("exec ssh host", "server"), ("time ssh host", "server"), ("\\ssh host", "server"), ("xargs -n1 ssh", "server"),
     ("gh api -X DELETE repos/o/r", "verwijderen"), ("gh api --method DELETE repos/o/r/x", "verwijderen"),
@@ -70,12 +71,12 @@ def test_a_bash_use_without_a_str_command_is_evidence_unavailable(tmp_path, monk
     ("op --account x read op://v/i", "secrets"), ("git push -d origin x", "verwijderen"),
     ("git push origin :x", "verwijderen"), ("git push origin +:x", "verwijderen"),
     ("git push origin --delete x", "verwijderen"), ("rm -rf /private/tmp/claude-501/p/scratchpad/o", "verwijderen"),
-    ("ssh $HOST", "indirection"),  # indirection as a whole, a secret in it still says secrets ("${CMD} host", "indirection"), ("$(echo ssh) host", "indirection"),
+    ("ssh $HOST", "indirection"), ("${CMD} host", "indirection"), ("$(echo ssh) host", "indirection"),  # indirection as a whole, a secret in it still says secrets
     ("`echo rm` -rf /", "indirection"), ('eval "$X"', "indirection"), ("echo c3No | base64 -d | sh", "indirection"),
     ("$'\\x73sh' host", "indirection"), ("/usr/bin/ss? host", "indirection"), ("{s,}sh host", "indirection"),
     (f"$(echo x) --key={FAKE_KEY}", "secrets"), ("X=$(op read op://v/i)", "secrets"),
-    ("git status", ""),  # falls through ("cat ~/.ssh/config", ""), ("ssh-keygen -t ed25519", ""), ("grep -n op file.py", ""),
-    ("echo op de lijst", ""), ("rm -f build.log", ""), ("git push origin HEAD:refs/heads/x", ""), ("ls *.py", ""),
+    ("git status", ""), ("cat ~/.ssh/config", ""), ("ssh-keygen -t ed25519", ""), ("grep -n op file.py", ""),  # falls through
+    ("s\\\nsh host", "server"), ("rm -\\\nrf /var/data", "verwijderen"), ("/sbin/reboo?", "indirection"), ("/usr/bin/shutdow?", "indirection"), ("echo op de lijst", ""), ("rm -f build.log", ""), ("git push origin HEAD:refs/heads/x", ""), ("ls *.py", ""),
 ])
 def test_the_table(raw, cat):
     assert hs.classify(raw)[0] == cat
