@@ -24,7 +24,7 @@ import urllib.request
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache, partial
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR / "lib"))
@@ -169,6 +169,20 @@ def resolve_codex_review_effort(risk_class: Optional[str]) -> str:
 _ProbePopen = subprocess.Popen
 
 
+REVIEW_PYTHON_KEY = "VNX_REVIEW_PYTHON"
+REVIEW_PYTHONPATH_KEY = "VNX_REVIEW_PYTHONPATH"
+# Rules of the interpreter choice, named in the prompt and on the request.
+RULE_PROJECT_CONFIG, RULE_PROJECT_VENV, RULE_FABRIC_CHAIN = 1, 2, 3
+_RULE_TEXT = {
+    RULE_PROJECT_CONFIG: "rule 1: VNX_REVIEW_PYTHON from the project's project_config",
+    RULE_PROJECT_VENV: "rule 2: the project's own .venv/bin/python",
+    RULE_FABRIC_CHAIN: "rule 3: the fabric's interpreter chain (OI-2591)",
+}
+# The gate worktree has a random name and does not exist when the prompt is built; the prompt
+# carries this token and ``_run_with_stall_detection`` swaps in the real path at the spawn.
+GATE_WORKTREE_TOKEN = "@@VNX_GATE_WORKTREE@@"
+
+
 @lru_cache(maxsize=1)
 def resolve_review_interpreter() -> Optional[str]:
     """The first of VNX_REVIEW_PYTHON, VNX_PYTHON, sys.executable, python3.12, python3
@@ -251,15 +265,35 @@ def _is_safe_test_path(path: str) -> bool:
     return bool(_SAFE_TEST_PATH_RE.fullmatch(path)) and not path.startswith("-")
 
 
-def _review_tests_block(interpreter: Optional[str], diff_text: str = "") -> str:
+def _safe_relative_dir(path: str) -> bool:
+    """A VNX_REVIEW_PYTHONPATH entry: relative, no ``..``, no ``:`` (the PYTHONPATH separator), and the same characters as a test path."""
+    return (_is_safe_test_path(path) and not path.startswith("/")
+            and ".." not in path.split("/") and ":" not in path)
+
+
+_IMPORT_CHECK = (
+    "import importlib, pathlib, sys; root = pathlib.Path(sys.argv[1]); "
+    "names = sorted(d.name for d in root.iterdir() if (d / '__init__.py').is_file()); "
+    "print(importlib.import_module(names[0]).__file__ if names else 'no package under ' + str(root))"
+)
+
+
+def _review_tests_block(interpreter: Optional[str], diff_text: str = "", *, rule: int = RULE_FABRIC_CHAIN,
+                        worktree: Optional[Path] = None, pythonpath: Sequence[str] = ()) -> str:
     """The codex prompt block naming the test command per changed test type (OI-2591, OI-2785).
     Only ``.py`` tests get a command (pytest); every other type gets a read-them line. A path
-    with a shell metacharacter or whitespace never enters the command: it is named as text."""
+    with a shell metacharacter or whitespace never enters the command: it is named as text.
+    ``pythonpath`` entries (VNX_REVIEW_PYTHONPATH, relative to the worktree root) go first in
+    ``PYTHONPATH`` as absolute worktree paths, behind an import check that shows where the
+    package really loads from; a refused entry is named as text, like a refused test file."""
     changed = _changed_test_files(diff_text)
     tests = [p for p in changed if _is_safe_test_path(p)]
     refused = [p for p in changed if not _is_safe_test_path(p)]
     python = [shlex.quote(p) for p in tests if p.endswith(".py")]
     others = sorted({os.path.splitext(p)[1] or "(no extension)" for p in tests if not p.endswith(".py")})
+    wt = str(worktree) if worktree else GATE_WORKTREE_TOKEN
+    paths = [f"{wt}/{p}" for p in pythonpath if _safe_relative_dir(p)]
+    refused_paths = [p for p in pythonpath if not _safe_relative_dir(p)]
     body = ""
     if python or not tests:
         files = " ".join(python) if python else "<files>"
@@ -267,14 +301,31 @@ def _review_tests_block(interpreter: Optional[str], diff_text: str = "") -> str:
             body = ("No interpreter with pytest was found on this host, so this PR's tests "
                     "cannot be run. `residual_risk` must say that the tests did not run.\n")
         else:
-            body = (f"Run the PR's tests with `{interpreter} -m pytest {files} -q -p "
+            # Measured (report, dlv-51038adbdea0-r2): PYTHONPATH alone is not enough while PYTHONSAFEPATH is
+            # set, tests that import from the repo root fail to collect; so it is unset inside this command only.
+            env = ""
+            if paths or rule != RULE_FABRIC_CHAIN:
+                env = "env -u PYTHONSAFEPATH " + (f"PYTHONPATH={shlex.quote(':'.join(paths))} " if paths else "")
+            body = (f"Run the PR's tests with `{env}{interpreter} -m pytest {files} -q -p "
                     "no:cacheprovider` before the verdict, and report what came out.\n")
+            if rule != RULE_FABRIC_CHAIN:
+                body += f"The interpreter was chosen by {_RULE_TEXT[rule]}.\n"
+            if paths:
+                check = (f"{env}{interpreter} -c {shlex.quote(_IMPORT_CHECK)} {shlex.quote(paths[0])}")
+                body += (f"Run `{check}` first: it prints the `__file__` of the project package. The "
+                         f"package must load from inside the gate worktree ({wt}); the shared .venv "
+                         "may hold an editable install of the main checkout. When the printed path is "
+                         "outside the gate worktree, `residual_risk` must say so. That is never a "
+                         "reason for `blocked`.\n")
     for ext in others:
         body += (f"- `{ext}` test files: there is no test command for this type on this host; "
                  "read those tests instead of running them.\n")
     for path in refused:
         body += ("- Test file left out of the command because its path holds a shell "
                  f"metacharacter or whitespace; read it as text, never run it: {json.dumps(path)}\n")
+    for path in refused_paths:
+        body += ("- PYTHONPATH entry left out of the command because it is not a safe relative "
+                 f"path (shell metacharacter, whitespace, absolute or `..`): {json.dumps(path)}\n")
     return "\n\n## Running the PR's tests\n\n" + body + _NEVER_BLOCKING
 
 

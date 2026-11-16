@@ -1,0 +1,1 @@
+- The codex review tests block can now put `VNX_REVIEW_PYTHONPATH` entries first in `PYTHONPATH` behind an import check and name the interpreter rule; the keys `VNX_REVIEW_PYTHON` and `VNX_REVIEW_PYTHONPATH` are registered, and the gate wires both in D1 (#2967).
