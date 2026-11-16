@@ -139,3 +139,20 @@ def test_steering_report_still_forwards(env, capsys, monkeypatch):
     code, _, _ = _run(["steering", "report", "--json"], capsys)
     assert code == 0 and seen == [["--state-dir", str(env), "report", "--json"]]
     assert _run(["steering"], capsys)[0] == 2
+
+
+def test_a_suppressed_proposal_and_an_acknowledged_notification_list_without_approve(env, capsys):
+    perm = {"oorzaak": "permission_form:x", "artefact_soort": "permissie", "doelpad": ".claude/settings.local.json",
+            "voorstel": "Voeg Bash(ls) toe", "handelingsklasse": "K1"}
+    pid = store.add_revision(env, PID, perm, now="2026-11-02T10:00:00Z")["proposal_id"]
+    store.reconcile(env, PID, [{**perm, "artefact_soort": store.MELDING_KIND, "voorstel": "harde stop"}],
+                    now="2026-11-02T11:00:00Z")
+    mid = next(e["proposal_id"] for e in store.proposals(env, PID) if e["proposal_id"] != pid)
+    assert _decide(mid, "approve", capsys)[0] == 2
+    store.decide(env, PID, mid, "acknowledged", reason="gezien", decided_by="operator")
+    code, out, _ = _run(["steering", "proposals", "--json"], capsys)
+    views = {p["proposal_id"]: p for p in json.loads(out)["proposals"]}
+    assert code == 0 and (views[pid]["status"], views[mid]["status"]) == ("suppressed_hard_stop", "acknowledged")
+    assert views[pid]["acties"] == [] and views[mid]["acties"] == []
+    code, out, _ = _run(["steering", "proposals"], capsys)
+    assert code == 0 and "suppressed_hard_stop" in out and "acties=-" in out

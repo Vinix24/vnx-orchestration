@@ -121,3 +121,11 @@ def test_read_events_skips_and_counts(tmp_path):
     events, skipped = pe.read_events("vnx-dev", tmp_path)
     assert events == [good, old] and skipped == {"unparseable": 1, "foreign_project": 1, "event_id_mismatch": 1}
     assert pe.read_events("vnx-dev", tmp_path / "absent") == ([], {})
+
+def test_persist_stores_the_notification_first_so_its_proposal_is_suppressed(tmp_path):
+    proposals, _, counts = pp.build(sessions("make test", 3), COV, NOW)
+    notice = {**proposals[0], "artefact_soort": pp.MELDING, "voorstel": "harde stop"}
+    notice.pop("handelingsklasse")
+    result = pp.persist(tmp_path, "vnx-dev", (proposals, [notice], counts), now="2026-11-16T12:00:00Z")
+    assert (result["added"], result["suppressed_hard_stop"]) == (1, 1)
+    assert [e["artefact_soort"] for e in store.proposals(tmp_path, "vnx-dev")] == [pp.MELDING]

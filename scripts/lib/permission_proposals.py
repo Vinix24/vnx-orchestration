@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import permission_hard_stops as hard_stops
+import steering_proposal_store as store
 
 WINDOW = timedelta(days=7)
 MIN_SESSIONS = 3
@@ -139,3 +140,9 @@ def build(events: Sequence[Mapping[str, Any]], coverage: Mapping[str, Any], now:
         reason = _blocked(vorm, kind, group)
         (meldingen if reason else proposals).append(_item((vorm, origin, account, SCOPE, kind), group, reason))
     return proposals, meldingen, counts
+
+def persist(state_dir: Path, project_id: str, built: tuple, now: Optional[str] = None) -> Dict[str, int]:
+    """Write the output of ``build`` in one ``reconcile``, notifications first so a hard stop holds back its
+    proposal in the same batch (ADR-084); returns the outcome counts. Applies nothing."""
+    proposals, meldingen, _counts = built
+    return store.reconcile(state_dir, project_id, [*meldingen, *proposals], now=now)

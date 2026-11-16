@@ -785,8 +785,9 @@ def _cmd_decide_rule(args) -> int:
     return 0
 
 
-_STATUS_ORDER = ("pending", "approved", "applied", "rejected")
+_STATUS_ORDER = ("pending", "approved", "applied", "rejected", "suppressed_hard_stop", "acknowledged")
 _STEERING_ACTIONS = {"approve": "approved", "reject": "rejected", "apply": "applied"}
+_MELDING_KIND = "alleen_melding"  # steering_proposal_store.MELDING_KIND: acknowledged in the store, never approved
 
 
 def _proposal_view(entry: dict) -> dict:
@@ -796,7 +797,15 @@ def _proposal_view(entry: dict) -> dict:
         "proposal_id": entry["proposal_id"], "status": entry["status"], "revision": len(entry["revisions"]),
         "oorzaak": entry["oorzaak"], "artefact_soort": entry["artefact_soort"], "doelpad": entry["doelpad"],
         "bewijs": list(latest.get("evidence_prompt_ids") or []), "applied_ref": entry.get("applied_ref"),
+        "acties": _actions(entry),
     }
+
+
+def _actions(entry: dict) -> list:
+    """The decide-steering actions the status allows; a notification is never approved or applied."""
+    if entry["artefact_soort"] == _MELDING_KIND:
+        return []
+    return {"pending": ["approve", "reject"], "approved": ["apply"]}.get(entry["status"], [])
 
 
 def _cmd_steering_proposals(args, rest: list) -> int:
@@ -827,7 +836,8 @@ def _cmd_steering_proposals(args, rest: list) -> int:
     for v in views:
         ref = f" applied_ref={v['applied_ref']}" if v["applied_ref"] else ""
         print(f"{v['proposal_id']} {v['status']} r{v['revision']} oorzaak={v['oorzaak']} "
-              f"artefact={v['artefact_soort']} doelpad={v['doelpad']} bewijs={','.join(v['bewijs'])}{ref}")
+              f"artefact={v['artefact_soort']} doelpad={v['doelpad']} bewijs={','.join(v['bewijs'])}{ref} "
+              f"acties={','.join(v['acties']) or '-'}")
     if not views:
         print("no steering proposals")
     return 0
