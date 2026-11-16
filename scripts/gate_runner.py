@@ -303,6 +303,12 @@ def _assemble_reviewer_prompt(pr: str, diff_text: str, verdict_contract: str, in
                                   pythonpath=[e.strip() for e in pythonpath.split(",") if e.strip()]))
 
 
+def _reviewer_assembler(request_payload: Dict[str, Any], project_root: Optional[Path], codex: bool):
+    """The reviewer-prompt builder for one run; the interpreter is resolved here, once, and only for codex."""
+    return partial(_assemble_reviewer_prompt, str(request_payload.get("pr_number")),
+                   interpreter_rule=_run_interpreter(request_payload, project_root) if codex else None)
+
+
 _DIFF_HEADER_RE = re.compile(r"^diff --git a/(\S+) b/(\S+)$")
 _NEVER_BLOCKING = ("A missing test command is never a blocking requirement: "
                    "do not return `blocked` because a test could not be run.\n")
@@ -1264,9 +1270,7 @@ class GateRunner:
         try:
             plan = review_delta_decide.plan_round(  # DR-6: under delta the codex seat may decide with the delta round
                 gate=gate, prompt=prompt, request_payload=request_payload, state_dir=self._state_dir, worktree=worktree_path,
-                assemble=partial(_assemble_reviewer_prompt, str(request_payload.get("pr_number")),
-                                 interpreter_rule=(_run_interpreter(request_payload, self._project_root)
-                                                   if gate == "codex_gate" else None)))
+                assemble=_reviewer_assembler(request_payload, self._project_root, gate == "codex_gate"))
             result = self._run_with_stall_detection(
                 gate=gate, binary=binary, prompt=plan.prompt,
                 timeout=gate_timeout(gate), stall_threshold=gate_stall_threshold(gate),
@@ -1313,8 +1317,7 @@ class GateRunner:
         if gate == "codex_gate" and review_scope.active_review_scope(self._state_dir).runs_shadow:  # DR-4b/DR-6: only under delta_shadow or delta; never changes ``record`` (fail-open)
             review_delta_shadow.run_shadow(
                 request_payload=request_payload, state_dir=self._state_dir, project_root=self._project_root,
-                assemble=partial(_assemble_reviewer_prompt, str(request_payload.get("pr_number")),
-                                 interpreter_rule=_run_interpreter(request_payload, self._project_root)),
+                assemble=_reviewer_assembler(request_payload, self._project_root, True),
                 run=lambda delta_prompt, cwd: self._run_with_stall_detection(
                     gate=gate, binary=binary, prompt=delta_prompt, timeout=gate_timeout(gate),
                     stall_threshold=gate_stall_threshold(gate), request_payload=dict(request_payload), cwd=cwd))

@@ -1861,15 +1861,16 @@ class TestReviewInterpreterResolvedOncePerRun:
         real_read = os.read
 
         proc = MagicMock()
-        proc.stdout.fileno.return_value, proc.stderr.fileno.return_value = 10, 11
+        out_fd, err_fd = 10_000, 10_001  # no real pipe of this process can get these (10/11 can, on Linux)
+        proc.stdout.fileno.return_value, proc.stderr.fileno.return_value = out_fd, err_fd
         proc.poll.return_value, proc.returncode, proc.pid = 0, 0, 77777
         reads = [0]
 
         def mock_os_read(fd, size):
-            if fd not in (10, 11):  # a real Popen of the resolver's probes reads its own exec pipe
+            if fd not in (out_fd, err_fd):  # a real Popen of the resolver's probes reads its own exec pipe
                 return real_read(fd, size)
             reads[0] += 1
-            return CODEX_VERDICT_STREAM if fd == 10 and reads[0] == 1 else b""
+            return CODEX_VERDICT_STREAM if fd == out_fd and reads[0] == 1 else b""
 
         payload = _make_request_payload(gate="codex_gate", report_path=str(gate_env["reports_dir"] / "r.md"), prompt="")
         runner = GateRunner(state_dir=gate_env["state_dir"], reports_dir=gate_env["reports_dir"], project_root=root)
