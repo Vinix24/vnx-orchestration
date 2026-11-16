@@ -1,0 +1,1 @@
+- Every permission event now carries a closed `hard_stop` field: hard stops (deleting, secrets, Supabase, servers, units, deploys and restarts, `deliverable promote`) are classified on the raw command before masking, and an event without raw evidence is `evidence_unavailable`, never an allow proposal (ADR-082, permissieblokkades-leren L5a).

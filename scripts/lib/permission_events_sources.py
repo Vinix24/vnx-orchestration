@@ -1,4 +1,5 @@
 """Permission-event readers (ADR-075 decisions 2, 5, 8): B1 refused tool calls, B2 answered prompts, B4a copy blocks.
+Each reader hands the raw source text to ``build_event``, which classifies hard stops on it before masking (ADR-082).
 
 Pure over one transcript's lines; every event is built by ``permission_events.build_event``, so nothing raw
 leaves this module. ``origin`` comes from the transcript dir slug and ``account`` from comparing the
@@ -223,7 +224,8 @@ def read_b4a(objs: Sequence[Dict[str, Any]], ctx: Ctx, skipped: Counter) -> Iter
                 if not first:
                     skipped["no_command_line"] += 1
                     continue
-                ev = _emit(skipped, ctx, obj.get("timestamp"), "B4a", "asked", first)
+                # the hard stop is read from the whole raw block (ADR-082): a later line can be the stop
+                ev = _emit(skipped, ctx, obj.get("timestamp"), "B4a", "asked", first, raw=block)
                 if ev:
                     yield ev
 
