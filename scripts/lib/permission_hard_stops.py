@@ -19,7 +19,8 @@ from secret_patterns import SECRET, mask
 EVIDENCE_UNAVAILABLE = "evidence_unavailable"
 PROMOTE_REASON = ("hard_stop:promote: ADR-056 route: metadata.autonomous_promotion_eligible on the track "
                   "plus a plan-gate grant that the verifier reads as VERIFIED")
-_CMD = r"(?:^|[;&|(`\n]|\$\()\s*(?:sudo\s+|env\s+|[A-Za-z_]\w*=\S*\s+)*"  # command position
+_CMD = (r"(?:^|[;&|(`\n]|\$\()\s*(?:sudo(?:\s+-[\w-]+(?:=\S*|\s+(?!-)\S+)?)*\s+|env\s+|[A-Za-z_]\w*=\S*\s+)*"
+        r"(?:[^\s;&|()`]*/)?")  # command position: sudo with its options, env, VAR=, then an optional path
 _I = re.IGNORECASE
 TABLE: Tuple[Tuple[str, Tuple["re.Pattern[str]", ...]], ...] = (  # (category, patterns), checked in order
     ("secrets", (
@@ -46,7 +47,7 @@ TABLE: Tuple[Tuple[str, Tuple["re.Pattern[str]", ...]], ...] = (  # (category, p
 CATEGORIES = frozenset(c for c, _ in TABLE)
 HARD_STOP_VALUES = frozenset(CATEGORIES | {EVIDENCE_UNAVAILABLE, ""})  # "" = not recognised, falls through
 _RM = re.compile(r"\brm\s+([^\n;&|)`]*)")
-_SCRATCH = re.compile(r"(?:[\w.~-]*/)*scratchpad(?:/[\w.@%+,:=-]+)*/?")
+_SCRATCH = re.compile(r"/(?:private/)?tmp/claude-\d+/(?:[\w.@%+,:=-]+/)*scratchpad(?:/[\w.@%+,:=-]+)*/?")  # absolute only
 
 
 def _rm_outside_scratchpad(raw: str) -> bool:
@@ -56,11 +57,12 @@ def _rm_outside_scratchpad(raw: str) -> bool:
             words = shlex.split(m.group(1))
         except ValueError:
             return True
-        flags = [w for w in words if w.startswith("-")]
+        end = words.index("--") if "--" in words else len(words)  # after the terminator every word is a target
+        flags = [w for w in words[:end] if w.startswith("-")]
         if not any(w in ("--recursive", "-r", "-R") or (not w.startswith("--") and set(w[1:]) & {"r", "R"})
                    for w in flags):
             continue
-        targets = [w for w in words if not w.startswith("-")]
+        targets = [w for w in words[:end] if not w.startswith("-")] + words[end + 1:]
         if not targets or any(".." in t or not _SCRATCH.fullmatch(t) for t in targets):
             return True
     return False

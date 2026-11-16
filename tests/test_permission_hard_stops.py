@@ -90,6 +90,9 @@ def test_promote_names_the_adr_056_route():
     ("rm -rf scratchpad/../../src", "verwijderen"), ("rm -r \"$DIR\"", "verwijderen"),
     ("psql -c 'GRANT ALL ON t TO anon'", "supabase"), ("hcloud server list", "server"),
     ("sudo systemctl restart web", "units"), ("kubectl rollout restart deploy/web", "deploy_herstart"),
+    ("rm -rf -- scratchpad/out -important", "verwijderen"), ("rm -rf ~/Business/scratchpad", "verwijderen"),
+    ("rm -rf scratchpad/out", "verwijderen"), ("/usr/bin/ssh host uptime", "server"), ("sudo -u root ssh host uptime", "server"),
+    ("sudo --user=root /usr/bin/scp a h:b", "server"), ("/usr/local/bin/op read op://v/i", "secrets"),
 ])
 def test_more_forms_per_category(raw, cat):
     assert hs.classify(raw)[0] == cat
@@ -102,6 +105,14 @@ def test_a_form_outside_every_category_falls_through(raw):
     ev = pe.build_event(project_id="vnx-dev", session_id="s", ts=NOW, account="vnx", origin="t0", bron="B3",
                         besluit="executed", command=raw)
     assert ev["hard_stop"] == "" and hs.melding(ev) is None
+
+
+@pytest.mark.parametrize("inp", [{}, {"command": 7}])
+def test_a_bash_use_without_a_str_command_is_evidence_unavailable(tmp_path, monkeypatch, inp):
+    objs = [{"type": "assistant", "timestamp": NOW, "message": {"content": [
+        {"type": "tool_use", "id": "t1", "name": "Bash", "input": inp}]}}, result("t1", "config", "permission-rule", ts=NOW)]
+    _, events = _scan(tmp_path, monkeypatch, objs)
+    assert [e["hard_stop"] for e in events] == [hs.EVIDENCE_UNAVAILABLE] and hs.melding(events[0]) is not None
 
 
 def test_b4a_reads_the_whole_raw_block_and_a_rescan_writes_nothing(tmp_path, monkeypatch):
