@@ -1,6 +1,7 @@
 """Hard stops on the raw form (ADR-075 decision 9, amended by ADR-082): a frozen table, no model, no I/O.
 Secrets are checked on the untouched raw text, every other rule is a word anywhere in the de-quoted projection
-(never a command position), and shell indirection is ``indirection`` as a whole. Only the closed value reaches
+(never a command position). A form that can hide its command (a shell metacharacter, an interpreter, ``.``) is
+``indirection`` as a whole, never parsed: too broad is safe. Only the closed value reaches
 the ledger (field ``hard_stop``), never the raw text. A recognised form is ``alleen_melding``."""
 
 from __future__ import annotations
@@ -20,18 +21,16 @@ PROMOTE_REASON = ("hard_stop:promote: ADR-056 route: metadata.autonomous_promoti
                   "plus a plan-gate grant that the verifier reads as VERIFIED")
 _I = re.IGNORECASE
 
-_NAMES = set("op security fly psql".split())  # the glob check's names: these plus every plain name a _w rule holds
 def _w(names: str, before: str = r"\w-", after: str = r"(?![\w-])") -> "re.Pattern[str]":
     """A word anywhere, in any case: no letter, digit, ``_`` or ``-`` (plus ``before``) on either side."""
-    _NAMES.update(names.split("|") if re.fullmatch(r"[\w-]+(?:\|[\w-]+)*", names) else ())  # one source: the rules
     return re.compile(rf"(?<![{before}])(?:{names}){after}", _I)
 
 _OP_SUBS = "read|run|inject|signin|item|vault|document|whoami|account|connect|user|group|service-account"
 _MARKERS = re.compile(r"[A-Z0-9_]*(?:TOKEN|PASSWORD|PASSWD|SECRET|API_KEY|PRIVATE_KEY)[A-Z0-9_]*")  # raw, upper
-_INDIRECT = (re.compile(r"\$[\w{(@*#?!$'\"-]|`|[?*+@!]\(|\{[^\s{}]*(?:,|\.\.)[^\s{}]*\}"), _w("eval"),  # brace, extglob
-             re.compile(r"\|\s*(?:\S*/)?(?:ba|z|da|k)?sh(?![\w-])", _I))  # $X ${X} $( ) $'…' `…`, eval, | sh
-_BASE64_SH = ((_w("base64"), _w("sh|bash|zsh|dash|ksh", r"\w.-")),)
-_SPLIT = re.compile(r"[\s;&|()<>]+")
+_META = re.compile(r"[|;&<>()$`{}*?\[\]!\n\\]")  # rule 1, on the de-quoted text with its backslashes
+_RUNS = _w(r"sh|bash|zsh|dash|ksh|fish|csh|tcsh|source|eval|python3\.\d+|python[23]?|perl|ruby|node|deno|bun|php|lua|tclsh"
+           r"|osascript|g?awk|xargs", r"\w.-")  # rule 2: runs text the classifier cannot read
+_DOT = re.compile(r"(?:^|\s)\.\s")  # rule 3: ``.`` as a command (``. /tmp/f``), not ``./x.sh`` or ``ls .``
 # (category, rules): a rule is a tuple of patterns that must all match somewhere; checked in this order.
 TABLE: Tuple[Tuple[str, Tuple[Tuple["re.Pattern[str]", ...], ...]], ...] = (
     ("secrets", (
@@ -57,21 +56,9 @@ TABLE: Tuple[Tuple[str, Tuple[Tuple["re.Pattern[str]", ...], ...]], ...] = (
 CATEGORIES = frozenset(c for c, _ in TABLE)
 HARD_STOP_VALUES = frozenset(CATEGORIES | {INDIRECTION, EVIDENCE_UNAVAILABLE, ""})  # "" = falls through
 
-def _glob_hides_a_name(text: str) -> bool:
-    """A word with a glob (``ss?``, ``[s]sh``) that can expand to a table name; unparseable is True."""
-    for word in _SPLIT.split(text):
-        base = word.rsplit("/", 1)[-1]
-        if not any(c in base for c in "*?[") or not base.strip("*"):  # a bare * names no command
-            continue
-        rx = "".join({"*": ".*", "?": "."}.get(c, re.escape(c)) for c in
-                     re.sub(r"\[[^\]]*\]?", "?", base))  # a [...] class counts as any one character
-        try:
-            pattern = re.compile(rx, _I)
-        except re.error:
-            return True
-        if any(pattern.fullmatch(name) for name in _NAMES):
-            return True
-    return False
+def _hides_the_command(quoted_out: str, text: str) -> bool:
+    """A metacharacter (backslashes still present), an interpreter word, or ``.`` as a command."""
+    return bool(_META.search(quoted_out.strip()) or _RUNS.search(text) or _DOT.search(text))
 
 def _match(text: str, rules: Tuple[Tuple["re.Pattern[str]", ...], ...]) -> bool:
     return any(all(p.search(text) for p in rule) for rule in rules)
@@ -85,10 +72,11 @@ def classify(raw_text: Any) -> Tuple[str, str]:
         masked = mask(raw_text)
     except Exception:  # vnx-silent-except: a mask failure is reported as unavailable evidence, never a pass
         return EVIDENCE_UNAVAILABLE, f"{EVIDENCE_UNAVAILABLE}: the raw form could not be masked"
-    text = re.sub(r"(?<!\\)((?:\\\\)*)\\\n", r"\1", raw_text).translate({ord("'"): None, ord('"'): None, ord("\\"): None})  # rule 1: join continuations, de-quote
+    quoted_out = re.sub(r"(?<!\\)((?:\\\\)*)\\\n", r"\1", raw_text).translate({ord("'"): None, ord('"'): None})  # join, de-quote
+    text = quoted_out.replace("\\", "")
     if masked != raw_text or SECRET in masked or _MARKERS.search(raw_text) or _match(text, TABLE[0][1]):
         return "secrets", reason("secrets")
-    if any(p.search(raw_text + "\n" + text) for p in _INDIRECT) or _glob_hides_a_name(text) or _match(text, _BASE64_SH):
+    if _hides_the_command(quoted_out, text):
         return INDIRECTION, reason(INDIRECTION)
     for category, rules in TABLE[1:]:
         if _match(text, rules):
