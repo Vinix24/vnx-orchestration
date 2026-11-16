@@ -158,24 +158,26 @@ def _emit(skipped: Counter, ctx: Ctx, ts: Any, bron: str, besluit: str, command:
         return None
 
 
-def _decisions(objs: Sequence[Dict[str, Any]]) -> Iterator[Tuple[Dict[str, Any], Dict[str, Any], str]]:
-    """(line, tool_result block, command or tool name of the matching tool_use)."""
-    uses: Dict[str, str] = {}
+def _decisions(objs: Sequence[Dict[str, Any]]) -> Iterator[Tuple[Dict[str, Any], Dict[str, Any], str, Optional[str]]]:
+    """(line, tool_result block, stored form, raw form for the hard stop, ADR-082) of the matching tool_use. A Bash use
+    without a non-empty str command stores "Bash" with raw None (evidence_unavailable); a non-Bash tool's name is both."""
+    uses: Dict[str, Tuple[str, Optional[str]]] = {}
     for obj in objs:
         msg = obj.get("message") if obj.get("type") == "assistant" else None
         for b in (msg.get("content") if isinstance(msg, dict) and isinstance(msg.get("content"), list) else []):
             if isinstance(b, dict) and b.get("type") == "tool_use" and isinstance(b.get("id"), str):
                 cmd = (b.get("input") or {}).get("command") if isinstance(b.get("input"), dict) else None
-                uses[b["id"]] = cmd if b.get("name") == "Bash" and isinstance(cmd, str) else str(b.get("name") or "")
+                name = str(b.get("name") or "")
+                uses[b["id"]] = (cmd, cmd) if name == "Bash" and isinstance(cmd, str) and cmd else (name, None if name == "Bash" else name)
     for obj in objs:
         msg = obj.get("message") if obj.get("type") == "user" else None
         for b in (msg.get("content") if isinstance(msg, dict) and isinstance(msg.get("content"), list) else []):
             if isinstance(b, dict) and b.get("type") == "tool_result":
-                yield obj, b, uses.get(b.get("tool_use_id"), "")
+                yield (obj, b, *uses.get(b.get("tool_use_id"), ("", None)))
 
 
 def _read_decisions(objs: Sequence[Dict[str, Any]], ctx: Ctx, skipped: Counter, want: str) -> Iterator[Dict[str, str]]:
-    for obj, block, command in _decisions(objs):
+    for obj, block, command, raw in _decisions(objs):
         decision, kind = _field("permissionDecision", block, obj), _field("toolDenialKind", block, obj)
         if (decision is not None and not isinstance(decision, dict)) or (kind is not None and not isinstance(kind, str)):
             if want == "B1":  # a malformed line is counted once, under B1
@@ -194,7 +196,7 @@ def _read_decisions(objs: Sequence[Dict[str, Any]], ctx: Ctx, skipped: Counter, 
         code = (decision or {}).get("reasonCode")  # decision is a dict or None here (checked above); None has no code
         refused = verdict[1].startswith("refused")
         ev = _emit(skipped, ctx, obj.get("timestamp"), want, verdict[1], command, reason_code=code if isinstance(code, str) else None,
-                   reason_text=_result_text(block) if refused else None)  # an approval's text is tool output: never kept
+                   raw=raw, reason_text=_result_text(block) if refused else None)  # an approval's text is tool output: never kept
         if ev:
             yield ev
 
@@ -223,7 +225,7 @@ def read_b4a(objs: Sequence[Dict[str, Any]], ctx: Ctx, skipped: Counter) -> Iter
                 if not first:
                     skipped["no_command_line"] += 1
                     continue
-                ev = _emit(skipped, ctx, obj.get("timestamp"), "B4a", "asked", first)
+                ev = _emit(skipped, ctx, obj.get("timestamp"), "B4a", "asked", first, raw=block)
                 if ev:
                     yield ev
 

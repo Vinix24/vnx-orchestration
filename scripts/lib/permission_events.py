@@ -18,6 +18,7 @@ from typing import Any, Dict, Iterable, Iterator, List, Optional
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import atomic_io
+import permission_hard_stops as hard_stops
 from project_root import resolve_central_data_dir
 from secret_patterns import _SEGMENT, _dq_end, mask, shell_value_end
 from vnx_ids import PROJECT_ID_RE
@@ -34,7 +35,8 @@ BESLUITEN = frozenset(
     "approved_once approved_permanent asked executed".split())
 COVERAGE_STATES = frozenset("ok absent unbound error unknown".split())
 FIELDS = ("schema ts event_id project_id session_id account origin bron "
-          "besluit reden vorm dispatch_id").split()
+          "besluit reden vorm dispatch_id hard_stop").split()
+_NO_RAW = object()
 
 _LEAD_CD = re.compile(r"\s*cd\s+")
 _LEAD_ENV = re.compile(r"\s*[A-Za-z_]\w*=")
@@ -154,9 +156,9 @@ def normalise(command: str) -> str:
     text = _HEREDOC.sub("<<heredoc", text)
     return " ".join(text.split())
 
-def event_id(project_id: str, bron: str, session_id: str, ts: str, vorm: str) -> str:
-    """sha256(project_id|bron|sessie|ts|vorm)[:16] over the normalised vorm."""
-    raw = "|".join((project_id, bron, session_id, ts, _safe_text(vorm)))
+def event_id(project_id: str, bron: str, session_id: str, ts: str, vorm: str, hard_stop: str = "") -> str:
+    """sha256(project_id|bron|sessie|ts|vorm[|hard_stop])[:16], normalised vorm; "" keeps the pre-ADR-082 id."""
+    raw = "|".join((project_id, bron, session_id, ts, _safe_text(vorm)) + ((hard_stop,) if hard_stop else ()))
     return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
 def _safe_text(value: Any, *, normalised: bool = True) -> str:
@@ -181,20 +183,23 @@ def _check_ts(ts: Any) -> None:
 def build_event(
     *, project_id: str, session_id: str, ts: str, account: str, origin: str, bron: str,
     besluit: str, command: str, reason_code: Optional[str] = None,
-    reason_text: Optional[str] = None, dispatch_id: Optional[str] = None,
+    reason_text: Optional[str] = None, dispatch_id: Optional[str] = None, raw: Any = _NO_RAW,
 ) -> Dict[str, str]:
-    """Turn raw inputs into a safe ledger event (masked, normalised, hashed)."""
+    """Turn raw inputs into a safe ledger event (masked, normalised, hashed). ``hard_stop`` is classified on
+    ``raw`` (default: ``command``) before any masking (ADR-082); ``raw=None`` is evidence_unavailable."""
     _check_ts(ts)
+    hard_stop = hard_stops.classify(command if raw is _NO_RAW else raw)[0]
     vorm = _safe_text(command)
     return {
         "schema": SCHEMA, "ts": ts,
-        "event_id": event_id(project_id, bron, session_id, ts, vorm),
+        "event_id": event_id(project_id, bron, session_id, ts, vorm, hard_stop),
         "project_id": project_id, "session_id": session_id, "account": account,
         "origin": origin, "bron": bron, "besluit": besluit,
         "reden": f"{_safe_text(reason_code or '', normalised=False)} "
                  f"{_safe_text(reason_text or '')[:REASON_MAX]}".strip(),  # decision 2: code + 120 chars
         "vorm": vorm,
         "dispatch_id": _safe_text(dispatch_id or "", normalised=False),
+        "hard_stop": hard_stop,  # the closed value only: the raw text never enters the event
     }
 
 def _state_dir(project_id: Any, state_dir: Optional[Path]) -> Path:
@@ -224,13 +229,14 @@ def _validate(event: Dict[str, Any], project_id: str) -> Dict[str, str]:
     if set(event) != set(FIELDS) or event["schema"] != SCHEMA or not isinstance(event["session_id"], str):
         raise ValueError(f"event must carry exactly the {SCHEMA} fields, session_id a str")
     _check_ts(event["ts"])
-    for name, allowed in (("account", ACCOUNTS), ("origin", ORIGINS), ("bron", BRONNEN), ("besluit", BESLUITEN)):
+    for name, allowed in (("account", ACCOUNTS), ("origin", ORIGINS), ("bron", BRONNEN), ("besluit", BESLUITEN),
+                          ("hard_stop", hard_stops.HARD_STOP_VALUES)):
         _check_closed(name, event[name], allowed)
     clean = dict(event)
     clean["vorm"] = _safe_text(event["vorm"])
     clean["reden"] = _safe_text(event["reden"])
     clean["dispatch_id"] = _safe_text(event["dispatch_id"], normalised=False)
-    expected = event_id(project_id, clean["bron"], clean["session_id"], clean["ts"], clean["vorm"])
+    expected = event_id(project_id, clean["bron"], clean["session_id"], clean["ts"], clean["vorm"], clean["hard_stop"])
     if clean["event_id"] != expected:
         raise ValueError("event_id does not match the normalised event")
     return clean
