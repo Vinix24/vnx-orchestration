@@ -9,6 +9,46 @@ sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
 from ndjson_hash_chain import verify_chain, walk_chain
 
 
+HEALTHY_STATUSES = ("verified", "verified-segmented")
+EXIT_UNKNOWN_STATUS = 3
+
+
+def _verify_report(path, ok, violations, status):
+    """Map a verify_chain() result to (payload, exit code), fail-closed.
+
+    Healthy only on a positive status AND ok is True (exit 0). "unchained"
+    means nothing could be checked (exit 2). "broken", or a healthy status
+    with ok not True, is a real defect (exit 1, violations capped at 20 plus
+    the total). Any other status is unknown, never healthy (exit 3).
+    """
+    if status in HEALTHY_STATUSES and ok is True:
+        return {"verified": True, "status": status, "path": str(path)}, 0
+    if status == "unchained":
+        # D1: "unchained" means verify_chain() could not check anything — no
+        # entry carries prev_hash, so integrity is UNMEASURED, not confirmed.
+        # Chaining stays an explicit decision (VNX_CHAIN_RECEIPTS=1).
+        return {
+            "verified": False,
+            "status": "unchained",
+            "path": str(path),
+            "warning": (
+                "Hash-chain verification not possible: no entries carry prev_hash. "
+                "Enable chaining by setting VNX_CHAIN_RECEIPTS=1."
+            ),
+        }, 2
+    payload = {
+        "verified": False,
+        "status": status,
+        "path": str(path),
+        "violations": violations[:20],
+        "violation_count": len(violations),
+    }
+    if status == "broken" or status in HEALTHY_STATUSES:
+        return payload, 1
+    payload["error"] = f"unknown verify_chain status: {status!r}"
+    return payload, EXIT_UNKNOWN_STATUS
+
+
 def main():
     parser = argparse.ArgumentParser(description="NDJSON hash-chain audit tool")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -23,39 +63,9 @@ def main():
 
     if args.cmd == "verify":
         ok, violations, status = verify_chain(args.path)
-        if status == "unchained":
-            # D1: "unchained" means verify_chain() could not check anything —
-            # no entry carries prev_hash, so integrity is UNMEASURED, not
-            # confirmed. Reporting verified:true/exit 0 here reads to any
-            # caller checking only the exit code or the "verified" field as
-            # "the chain is fine", when no chain was ever there to check.
-            # This does NOT build the hash-chain — that stays an explicit,
-            # separate decision (VNX_CHAIN_RECEIPTS=1). It only stops the
-            # tool from asserting a positive it never measured.
-            print(json.dumps({
-                "verified": False,
-                "status": "unchained",
-                "path": str(args.path),
-                "warning": (
-                    "Hash-chain verification not possible: no entries carry prev_hash. "
-                    "Enable chaining by setting VNX_CHAIN_RECEIPTS=1."
-                ),
-            }, indent=2))
-            sys.exit(2)
-        elif status == "verified":
-            print(json.dumps({
-                "verified": True,
-                "status": "verified",
-                "path": str(args.path),
-            }))
-            sys.exit(0)
-        else:
-            print(json.dumps({
-                "verified": False,
-                "status": "broken",
-                "violations": violations[:20],
-            }, indent=2))
-            sys.exit(1)
+        payload, code = _verify_report(args.path, ok, violations, status)
+        print(json.dumps(payload, indent=2))
+        sys.exit(code)
     elif args.cmd == "walk":
         for line_no, entry, hash_ in walk_chain(args.path):
             print(f"{line_no}\t{hash_[:16]}\t{entry.get('event_type', 'plain')}")
