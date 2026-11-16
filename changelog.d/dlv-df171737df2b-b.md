@@ -1,1 +1,0 @@
-- `run_dispatch` (scripts/lib/dispatch_cli.py) under 100 executable lines by extract-method: `_merge_plan_warnings`, `_run_scout_prepass`, `_export_worker_env`, `_run_lane` (golf schoon R29b).

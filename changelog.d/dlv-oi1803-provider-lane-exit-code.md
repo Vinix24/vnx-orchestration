@@ -1,1 +1,0 @@
-- fix(dispatch): a provider run whose only output is an API credit or auth refusal now books failure and the door exits non-zero, instead of a clean success (OI-1803)

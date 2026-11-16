@@ -1,1 +1,0 @@
-- A detached HEAD no longer stands in for the dispatch branch: it classifies from origin and pushes with HEAD:refs/heads/<branch> (OI-2716).

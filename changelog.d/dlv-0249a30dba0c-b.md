@@ -1,1 +1,0 @@
-- `read_asked` now closes `track:<id>:<fase>`, `config:<sleutel>` and `verdict:<id>` points on the state they name (the verdict through the source-7 match), returns the promote refusal reason per open source-1 point under `weigerreden`, and `operator_queue.answers` reads the `answer` lines (operator-vragen-tot-antwoord Q3 part b).

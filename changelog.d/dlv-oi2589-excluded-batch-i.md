@@ -1,1 +1,0 @@
-- test: seven more CI-excluded test files (pool manager/state/provider mix, provider string canon, provider dispatch contract/entry, wave7 deepseek smoke) pass on main again (OI-2589, batch i)

@@ -1,1 +1,0 @@
-- Golf schoon R34b: `ProviderAdapter.run` under 100 executable lines by extracting the gemini, litellm and local-gemma branches into private helpers (no behaviour change).

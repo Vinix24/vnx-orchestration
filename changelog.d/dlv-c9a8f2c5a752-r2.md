@@ -1,1 +1,0 @@
-- ADR-079 (documentation follows the code) is added, with one line in the worker base prompt that tells builders to update the `docs/` page in the same PR as a behaviour change.

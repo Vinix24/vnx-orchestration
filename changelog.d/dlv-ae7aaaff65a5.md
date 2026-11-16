@@ -1,1 +1,0 @@
-- Refactor: `update_confidence_from_outcome` split by extract-method to under 100 lines, behaviour unchanged (golf schoon R20b).

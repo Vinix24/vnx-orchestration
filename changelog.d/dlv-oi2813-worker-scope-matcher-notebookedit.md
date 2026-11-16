@@ -1,1 +1,0 @@
-- The worker-scope hook is registered for NotebookEdit too, so the matcher in settings, the probe settings and the docs matches the hook's write-like tools (OI-2813).

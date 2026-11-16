@@ -1,1 +1,0 @@
-- `_govern_impl` in `scripts/lib/dispatch_govern.py` is cut from 169 to 85 executable lines by moving the worker-report read and the emit-then-receipt step into two private helpers; behaviour, log lines and the order of writes are unchanged (golf schoon R32).

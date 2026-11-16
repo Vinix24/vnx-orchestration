@@ -1,1 +1,0 @@
-- Golf schoon R21: `_import_table` (migrate_import) and `run_reconcile` (objective_reconcile) brought under 100 executable lines by extract-method, behaviour unchanged.

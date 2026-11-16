@@ -1,1 +1,0 @@
-- The wheel-build tests (`test_wheel_builds`, `test_wheel_install_smoke`) take one shared file lock around the build, so two xdist workers no longer race on `build/bdist.*/wheel` (OI-2875).

@@ -1,1 +1,0 @@
-- CI cost (impactselectie-in-schaduw PR 4a-2): `vnx impact report` shows the misses of reduced selections, the reduced share, the red runs and the wall clock of the shadow job beside Profile A, over the ledger that `vnx impact collect` keeps.

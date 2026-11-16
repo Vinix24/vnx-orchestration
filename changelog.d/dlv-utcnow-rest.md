@@ -1,1 +1,0 @@
-- Four more Python modules (`t0_intelligence_aggregator`, `query_quality_intelligence`, `confidence_reconcile`, `skill_refinement`) no longer call the deprecated `datetime.utcnow()`: they read a timezone-aware UTC clock and keep their timestamps byte-identical; `deliberation_panel._utcnow` was already aware (follow-up of OI-2874).

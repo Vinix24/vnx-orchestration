@@ -1,1 +1,0 @@
-- `convert_dispatch_ids`, `scan_and_convert` and `SubprocessAdapter.deliver` are each under 100 executable lines through extract-method; behaviour, log lines and the order of side effects are unchanged (golf schoon R42).

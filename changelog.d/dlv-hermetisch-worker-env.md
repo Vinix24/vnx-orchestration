@@ -1,1 +1,0 @@
-- Two test groups (`test_dispatch_cli.py`, `test_subprocess_adapter_policy_record.py`) no longer read `VNX_OVERRIDE_WORKER_CLAUDE*` and `VNX_PERMISSION_POLICY_DIGEST` from the worker environment.
