@@ -1,1 +1,0 @@
-- An unknown event type on a litellm agentic runner line now becomes an `info` event that keeps the runner type as `runner_event_type`, instead of a ValueError that ended the spawn (OI-2873).

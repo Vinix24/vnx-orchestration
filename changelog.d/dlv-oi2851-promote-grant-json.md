@@ -1,1 +1,0 @@
-- `vnx deliverable list --json` now adds `promote_grant` (`track_opt_in`, `grant`, `t0_can_promote`) to every proposed row, so a reader can tell "waits on the operator" from "the T0 can promote this"; read only, the promote rule is unchanged (OI-2851).

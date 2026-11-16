@@ -1,1 +1,0 @@
-- `log_dispatch_metadata.py` uses a timezone-aware UTC clock instead of the deprecated `datetime.utcnow()`, with an unchanged timestamp format (OI-2874).

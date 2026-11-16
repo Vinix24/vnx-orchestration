@@ -1,1 +1,0 @@
-- Split `generate_markdown_report` in `scripts/llm_benchmark.py` into private section helpers (golf schoon R07b); behaviour unchanged.

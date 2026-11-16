@@ -1,1 +1,0 @@
-- A revision of a day without its base file is now refused by the daily-metrics day store itself (OI-2694).

@@ -1,1 +1,0 @@
-- `vnx inbox ask` and `vnx inbox answer` put a question for the operator in the queue (ref grammar of ADR-076 decision 4, a refused secret exits 2) and record the operator's own words for a chat question; `read_asked` closes sources 1, 2 and 8 on the state their `dlv:`, `oi:` and `antwoord:` ref names (operator-vragen-tot-antwoord Q3).

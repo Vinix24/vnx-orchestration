@@ -1,1 +1,0 @@
-- Golf schoon R34: `remove_dispatch_worktree` and `ProviderAdapter.run` are under 100 executable lines by extract-method; behaviour unchanged, pinned by characterisation tests.

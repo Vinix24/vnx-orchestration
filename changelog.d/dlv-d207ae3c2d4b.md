@@ -1,1 +1,0 @@
-- golf schoon R40: `reconcile_commit_provenance` and `register_provenance_link` in `scripts/lib/receipt_provenance.py` cut under 100 executable lines by extract-method, behaviour unchanged.

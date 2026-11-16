@@ -1,1 +1,0 @@
-- The toolkit export refuses a committed build artefact (`__pycache__`, `.pytest_cache`, `.pyc`, `.pyo`) in the plugin source and its leak scan now reads every file it publishes (OI-2154).

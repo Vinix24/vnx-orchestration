@@ -1,2 +1,0 @@
-- plan-gate: `emit_plan_gate_pass` takes `extra_fields`, `verify_with` and `expect_latest_hash`; the latest-pass recheck and the append share one ledger lock (OI-2849, preceding part).
-- plan-gate: `extra_fields` can no longer change the `track_id` or `project_id` of a pass; a differing value refuses the append (OI-2849, round 2).

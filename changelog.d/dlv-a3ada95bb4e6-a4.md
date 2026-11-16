@@ -1,1 +1,0 @@
-- Every permission event now carries a closed `hard_stop` field, classified on the raw command before masking: words anywhere in the de-quoted text (no command position), shell indirection as `indirection`, no raw evidence as `evidence_unavailable`, and a hard stop keeps its own `event_id` (ADR-082, permissieblokkades-leren L5a).

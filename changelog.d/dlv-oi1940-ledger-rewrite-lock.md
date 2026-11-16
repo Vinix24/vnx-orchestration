@@ -1,1 +1,0 @@
-- The nightly token backfill rewrites the receipt ledger only when it enriches a line, under the append lock, and keeps every other line byte for byte (OI-1940).

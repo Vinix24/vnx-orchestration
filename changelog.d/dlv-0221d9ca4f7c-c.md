@@ -1,1 +1,0 @@
-- The headless lane start now stamps the staged dispatch difficulty into dispatch_metadata.difficulty_json (herwerk-per-model-en-reviewer, decision rule part b).

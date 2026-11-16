@@ -1,1 +1,0 @@
-- fix(intelligence): every writer of intelligence_usage.ndjson closes a torn tail through one shared append helper before it appends (OI-2714)

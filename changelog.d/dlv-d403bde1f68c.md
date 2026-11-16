@@ -1,1 +1,0 @@
-- E6 now takes the cause of a rejection whose only blocking entry is the synthetic verdict entry from the files of its advisory findings, so three unrelated advisory-only rejections no longer trip it (reviews-zonder-uitkomst D3a).

@@ -1,1 +1,0 @@
-- Four class-C characterisation tests for `scripts/orphan_sweep.py:main` pin path expansion, logging config, exception propagation and the JSON error exit (golf schoon R10 follow-up, OI-2860).

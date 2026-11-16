@@ -1,1 +1,0 @@
-- Golf schoon R24: `verify_dispatch_provenance` and `_rebuild_table_phase1` cut under 100 executable lines by extract-method, behaviour unchanged and pinned by characterisation tests.

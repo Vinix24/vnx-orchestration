@@ -1,1 +1,0 @@
-- `vnx staging-list` lists the staged spec bundles (`pending/<id>/dispatch-spec.json`, oldest first, `--json`, `--help`) instead of raising a KeyError, and `vnx queue-status` reads the horizon queue instead of printing "Unknown command" (OI-2828).
