@@ -70,8 +70,8 @@ Each item carries ``kind``, counted in ``by_kind``:
 
 * ``gate_retry_cap`` (R10) — a review-gate obligation of this project that
   the obligation runner parked at the retry cap: its gate ran twice on the
-  PR's head without a verdict it can book (``degenerate_retry_cap``, see
-  ``gate_run_guard``), and the runner will not run it again on that head. It
+  PR's head without a verdict it can book (``degenerate_retry_cap`` or
+  ``verdict_without_findings_retry_cap``, see ``gate_run_guard``), and the runner will not run it again on that head. It
   is a point about the gate, not about the dispatch's outcome: it is listed
   beside any dispatch item of the same id, and a decision does not close it.
   It leaves the list when the obligation leaves the cap: a new head reviewed,
@@ -98,7 +98,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, NamedTuple, Optional
 
-from gate_obligations import OBLIGATIONS_SUBDIR, REASON_DEGENERATE_RETRY_CAP, STATUS_PENDING
+from gate_obligations import (
+    OBLIGATIONS_SUBDIR, REASON_DEGENERATE_RETRY_CAP, REASON_VERDICT_WITHOUT_FINDINGS_RETRY_CAP, STATUS_PENDING,
+)
 from ledger_attempt_state import (AttemptVerdict, KIND_ENDED, KIND_LEGACY, KIND_LIVE,  # noqa: E501
                                   KIND_UNKNOWN, LEDGER_FILENAME, attempt_verdict, read_ledger)
 from receipt_outcome import (
@@ -841,11 +843,16 @@ def abandoned_dispatch_items(
     return items
 
 
+# The two cap reasons of R10: the degenerate cap and, ADR-080 besluit 3, the
+# cap after two runs that ended in ``verdict_without_findings``.
+_RETRY_CAP_REASONS = frozenset({REASON_DEGENERATE_RETRY_CAP, REASON_VERDICT_WITHOUT_FINDINGS_RETRY_CAP})
+
+
 def gate_retry_cap_items(obligations_dir: Path, project_id: str) -> List[Dict[str, Any]]:
     """The review-gate obligations of ``project_id`` parked at the retry cap (R10).
 
     Read from ``<state_dir>/review_gates/obligations``: pending, reason
-    ``degenerate_retry_cap``. An obligation stamped with another project is not
+    ``degenerate_retry_cap`` or ``verdict_without_findings_retry_cap``. An obligation stamped with another project is not
     this project's (ADR-007); one without a project id is the store's own. An
     obligation file that cannot be read is skipped here with a warning: the
     producer-freshness monitor already reports it as ``source_unreadable``
@@ -864,7 +871,8 @@ def gate_retry_cap_items(obligations_dir: Path, project_id: str) -> List[Dict[st
             continue
         if not isinstance(record, dict) or record.get("status") != STATUS_PENDING:
             continue
-        if record.get("reason") != REASON_DEGENERATE_RETRY_CAP:
+        cap_reason = record.get("reason")
+        if cap_reason not in _RETRY_CAP_REASONS:
             continue
         if str(record.get("project_id") or project_id) != project_id:
             continue
@@ -875,7 +883,7 @@ def gate_retry_cap_items(obligations_dir: Path, project_id: str) -> List[Dict[st
             "dispatch_id": str(record.get("dispatch_id") or path.stem),
             "outcome": OUTCOME_RETRY_CAP,
             "status": STATUS_PENDING,
-            "reason": str(record.get("reason_detail") or REASON_DEGENERATE_RETRY_CAP),
+            "reason": str(record.get("reason_detail") or cap_reason),
             "last_seen": seen.astimezone(timezone.utc).isoformat() if seen else None,
             "gate": record.get("gate"),
             "pr_number": record.get("pr_number"),
