@@ -1371,7 +1371,7 @@ class GateRequestHandlerMixin:
             current_refusal = self._seat_switch_refusal(current)
 
     def _verdict_without_findings_hop(
-        self, gate: str, pr_number: int, head_sha: str,
+        self, gate: str, pr_number: int, head: _PrHead,
     ) -> Optional[Dict[str, Any]]:
         """The hop of a gate whose obligation reached ``verdict_without_findings_retry_cap`` on this head.
 
@@ -1382,15 +1382,16 @@ class GateRequestHandlerMixin:
         (``iter_obligations``), it is never read as "not capped".
         """
         state_dir = getattr(self, "state_dir", None)
-        if state_dir is None or not head_sha:
+        if state_dir is None:
             return None
         for _path, record in iter_obligations(Path(state_dir)):
             if record.get("gate") != gate or not obligation_matches_pr(record, pr_number):
                 continue
             if record.get("reason") != REASON_VERDICT_WITHOUT_FINDINGS_RETRY_CAP:
                 continue
-            # The cap must be reached on THIS head, not only named there.
-            if not gate_run_guard.cap_reached(record.get("head_runs"), head_sha):
+            head_sha = head.sha()  # looked up only once a capped record matched
+            # The cap must be reached on THIS head; an unknown head skips nothing.
+            if not head_sha or not gate_run_guard.cap_reached(record.get("head_runs"), head_sha):
                 continue
             return {
                 "gate": gate,
@@ -1414,7 +1415,7 @@ class GateRequestHandlerMixin:
         """
         if current in held:
             return _held_seat_hop(current, held[current]), False
-        capped_hop = self._verdict_without_findings_hop(current, pr_number, head.sha())
+        capped_hop = self._verdict_without_findings_hop(current, pr_number, head)
         if capped_hop is not None:
             return capped_hop, False
         hop: Optional[Dict[str, Any]] = None

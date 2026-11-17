@@ -101,7 +101,7 @@ def _record(env) -> Dict[str, Any]:
 
 
 def _hop(env, head: str = HEAD_SHA):
-    return _manager()._verdict_without_findings_hop("codex_gate", PR, head)
+    return _manager()._verdict_without_findings_hop("codex_gate", PR, _PrHead(PR, head))
 
 
 class TestTheCount:
