@@ -59,8 +59,8 @@ def _phase(d: Path, nodeids: list, cases: list, stamp: dict = RUN) -> None:
 CASES = {
     "collected_differs": ("collected_differs", lambda ds: _json(ds[2] / "args/collected.json", {**manifest("serial", [A, B, C, D, E]), **RUN})),
     "source_differs": ("source_differs", lambda ds: _plan(ds[1], source="hash")),
-    "in no shard": ("in no shard", lambda ds: _phase(ds[2], [], [])),
-    "in more than one phase": ("in more than one phase", lambda ds: _phase(ds[3], [E, F], [(E, PASS), (F, PASS)])),
+    "in no shard": ("in no shard", lambda ds: [_phase(ds[2], [], [])] + [_plan(d, assignment={f: n for f, n in ASSIGN.items() if n != 3}) for d in ds]),
+    "in more than one phase": ("in more than one phase", lambda ds: write_phase(ds[0], "serial", manifest("serial", [E]), [(E, PASS)], lambda _: RUN)),
     "not_run": ("not_run", lambda ds: _phase(ds[1], [C, D], [(C, PASS)])),
     "run_more_than_once": ("run_more_than_once", lambda ds: _phase(ds[1], [C, D], [(C, PASS), (C, PASS), (D, PASS)])),
     "unexpected_skip": ("unexpected_skip", lambda ds: _phase(ds[1], [C, D], [(C, PASS), (D, skip("no db"))])),
@@ -94,6 +94,16 @@ def test_every_gap_in_the_shard_evidence_turns_completeness_red(tmp_path, case):
     change(dirs)
     verdict = _verdict(tmp_path, dirs)
     assert verdict["exit"] in (1, 2) and token in json.dumps([verdict["differences"], verdict["invalid_evidence"]])
+
+
+@pytest.mark.parametrize("assignment", [{}, {**ASSIGN, "tests/test_d.py": 99}, {**ASSIGN, "tests/test_d.py": 0},
+                                        {**ASSIGN, "/tests/test_e.py": 4}, {**ASSIGN, "tests/test_c.py": 4}])
+def test_a_malformed_assignment_in_every_plan_is_refused(tmp_path, assignment):
+    dirs = _shards(tmp_path)
+    for d in dirs:
+        _plan(d, assignment=assignment)
+    verdict = _verdict(tmp_path, dirs)
+    assert verdict["exit"] == 2 and "malformed_shard_plan" in {p["reason"] for p in verdict["invalid_evidence"]}
 
 
 @pytest.mark.parametrize("value", ["0/4", "5/4", "4", "1/4/2", "a/4", "1/100", "/4", "1/", "01/4"])

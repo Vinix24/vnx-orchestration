@@ -83,9 +83,8 @@ phase manifests and XMLs of the same run and fails on a collected test that
 did not run, a test run more than once, a selection the two phases do not
 partition, a failed collection, or a skip whose key is not recorded in
 ``scripts/ci/xdist_expected_skips.txt``. Its verdict is
-``xdist-completeness-verdict.json``. ``--shard-dir`` once per shard, in order, checks N shards of one run (C2b)
-and also fails on collected sets or plans that differ between shards, or a collected test in no shard or in two.
-Exit codes of ``compare`` and
+``xdist-completeness-verdict.json``. ``--shard-dir`` per shard, in order: N shards of one run (C2b), also failing
+on collected sets or plans that differ between shards or a test in no shard or two. Exit codes of ``compare`` and
 ``completeness``: the verdict's exit (0, 1, 2), or 0 when a compare run is not
 applicable (light profile); 2 with a reason on stderr, never a traceback, when
 an argument is malformed or the verdict or its summary cannot be written.
@@ -986,12 +985,25 @@ def read_shard(reader: PhaseReader, k: int, total: int, directory: Path) -> dict
         phases.append(reader.load(directory, "serial"))
     elif (directory / "manifest-serial.json").exists() or (directory / "junit-serial.xml").exists():
         reader.problems.append(("serial_outside_shard_one", "serial-phase evidence; the serial list runs in shard 1 only"))
-    if None in phases:
+    problem = None if None in phases else assignment_problem(plan["assignment"], k, total, phases[0])
+    reader.problems += [("malformed_shard_plan", problem)] if problem else []
+    if None in phases or problem:
         return None
     for phase in phases:
         phase.name = f"shard-{k}" if phase.name == "shard" else f"shard-{k}-{phase.name}"
     units = set(collected["nodeids"]) | {o["nodeid"] for o in collected["collection_outcomes"]}
     return {"shard": k, "plan": plan, "collected": units, "phases": phases}
+
+
+def assignment_problem(assignment: dict, k: int, total: int, phase: Phase) -> str | None:
+    """Why the plan's file -> shard map is unusable, or None; the serial phase of shard 1 is outside it."""
+    bad = [f"{f!r}: {n!r}" for f, n in assignment.items() if not f or f.startswith("/") or ".." in f.split("/")
+           or whole_number(n) is None or not 1 <= n <= total]
+    if not assignment or bad:
+        return f"assignment is empty or holds {bad[:3]}; expected relative test paths to shards 1..{total}"
+    ran = {n.split("::")[0] for n in [*map(phase.nodeid_by_key.get, phase.executions), *_collection_nodes(phase)] if n}
+    mine = {f for f, n in assignment.items() if n == k}
+    return None if ran == mine else f"assignment gives shard {k} {sorted(mine)[:3]}, it ran {sorted(ran)[:3]}"
 
 
 def shard_differences(shards: list, expected: set) -> dict:
