@@ -246,6 +246,27 @@ def _reclassification_section(raw_verdict: Any, execution_id: Any) -> str:
     ])
 
 
+def _booked_findings(
+    findings: List[Dict[str, Any]], canonical_verdict: str, raw_verdict: Any, findings_parsed: bool,
+) -> Tuple[List[Dict[str, Any]], bool]:
+    """``(findings to book, reclassified)``: ADR-080 besluit 1 before OI-1938.
+
+    A rejection with zero findings is absence, booked ``unavailable`` with its
+    findings left empty; only a rejection with at least one finding gets the
+    synthetic line of :func:`_with_verdict_entry`.
+    """
+    if findings_parsed and is_verdict_without_findings(findings, canonical_verdict):
+        return findings, True
+    return _with_verdict_entry(findings, canonical_verdict, raw_verdict), False
+
+
+def _section_if(reclassified: bool, raw_verdict: Any, request_payload: Dict[str, Any]) -> Optional[str]:
+    """The Herclassificatie section of a reclassified run, naming the request's ``execution_id``; else ``None``."""
+    if not reclassified:
+        return None
+    return _reclassification_section(raw_verdict, request_payload.get(gate_status.EXECUTION_ID_FIELD))
+
+
 def _reclassify_payload(result_payload: Dict[str, Any], gate: str, raw_verdict: Any) -> None:
     """Turn a completed payload into the ``unavailable`` record of ADR-080 besluit 1."""
     result_payload.update(
@@ -705,21 +726,14 @@ def materialize_artifacts(
             verdict = _verdict_from_block(recovery.verdict)
     findings, residual_risk, findings_parsed, raw_verdict = verdict
     canonical_verdict = canonical_review_verdict(raw_verdict)
-    # ADR-080 besluit 1: a rejection with zero findings is absence, booked
-    # `unavailable`; only a rejection with at least one finding gets the line.
-    reclassified = findings_parsed and is_verdict_without_findings(findings, canonical_verdict)
-    if not reclassified:
-        findings = _with_verdict_entry(findings, canonical_verdict, raw_verdict)
+    findings, reclassified = _booked_findings(findings, canonical_verdict, raw_verdict, findings_parsed)
     blocking, advisory = _classify_findings(findings)
 
     report_file = Path(report_path)
     report_text = format_report(
-        gate, stdout, request_payload,
+        gate, stdout, request_payload, reclassification=_section_if(reclassified, raw_verdict, request_payload),
         blocking=blocking if findings_parsed else None,
         advisory=advisory if findings_parsed else None,
-        reclassification=_reclassification_section(
-            raw_verdict, request_payload.get(gate_status.EXECUTION_ID_FIELD),
-        ) if reclassified else None,
     )
     if recovery is not None and recovery.recovered:
         # One truth on disk: the door's agreement check (invariant 7) and the
