@@ -42,6 +42,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR / "lib"))
 
 import state_writer
+from ndjson_hash_chain import ChainedLedgerRefused, refuse_chained_locked
 
 log = logging.getLogger(__name__)
 
@@ -345,7 +346,8 @@ def _update_ndjson(
     patched = skipped = 0
     def _rewrite(current_content: bytes) -> bytes:
         nonlocal patched, skipped
-
+        # Live: rewrite_locked's sentinel for t0_receipts.ndjson IS append_receipt.lock, held here.
+        refuse_chained_locked(T0_RECEIPTS_NDJSON)
         updated_lines: List[str] = []
         patched = 0
         skipped = 0
@@ -402,7 +404,10 @@ def main() -> None:
     print(f"[backfill] JSON: {ph} HEADLESS patched, {pw} worker patched, {js} skipped")
 
     print("\n[backfill] Updating t0_receipts.ndjson...")
-    np, ns = _update_ndjson(pr_gate_index, dispatch_index, args.dry_run)
+    try:
+        np, ns = _update_ndjson(pr_gate_index, dispatch_index, args.dry_run)
+    except ChainedLedgerRefused as exc:
+        raise SystemExit(f"[backfill] NDJSON: {exc}")
     print(f"[backfill] NDJSON: {np} patched, {ns} skipped")
 
     mode = "DRY RUN" if args.dry_run else "LIVE"
