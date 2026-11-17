@@ -25,6 +25,7 @@ sys.path.insert(0, str(SCRIPT_DIR / "lib"))
 from project_root import resolve_data_dir
 import dispatch_lifecycle as lifecycle
 import state_writer
+from ndjson_hash_chain import ChainedLedgerRefused, refuse_chained_locked, unchained_write
 
 INTELLIGENCE_ARCHIVE_MIN_MB = 50
 INTELLIGENCE_ARCHIVE_KEEP_DAYS = 7
@@ -241,6 +242,33 @@ def _emit_receipts_rotation(*, live_file: Path, archive_file: Path, keep_lines: 
           keep_lines=keep_lines, kept_unfinished_v3_starts=kept_starts, dry_run=dry_run)
 
 
+def _receipts_refused(exc: ChainedLedgerRefused, *, dry_run: bool) -> int:
+    """A chained ledger is never rotated (ADR-083): the step is skipped and counts as failed."""
+    _emit("ERROR", "receipts_skip_chained_ledger", path=str(exc.ledger_path), tail_state=exc.state,
+          adr="ADR-083", dry_run=dry_run, error=str(exc))
+    return 1
+
+
+def _compact_receipts_dry_run(live_file: Path, archive_file: Path) -> int:
+    """Describe the rotation without writing; a chained ledger is refused here too."""
+    try:
+        with unchained_write(live_file):
+            lines = live_file.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True)
+    except ChainedLedgerRefused as exc:
+        return _receipts_refused(exc, dry_run=True)
+    if len(lines) <= RECEIPTS_MAX_RECORDS:
+        _emit("INFO", "receipts_skip", reason="within_cap", line_count=len(lines), cap=RECEIPTS_MAX_RECORDS)
+        return 0
+    if archive_file.exists():
+        _emit("INFO", "receipts_skip", reason="archive_already_exists_today", archive=str(archive_file))
+        return 0
+    keep, overflow, kept_starts = _partition_receipts(lines)
+    _emit_receipts_rotation(live_file=live_file, archive_file=archive_file,
+                            keep_lines=len(keep), archive_lines=len(overflow),
+                            kept_starts=kept_starts, dry_run=True)
+    return 0
+
+
 def compact_receipts(state_dir: Path, *, dry_run: bool = False) -> int:
     """Cap t0_receipts.ndjson at 10000 lines, archive overflow. Returns 0 on success."""
     live_file = state_dir / "t0_receipts.ndjson"
@@ -251,18 +279,7 @@ def compact_receipts(state_dir: Path, *, dry_run: bool = False) -> int:
         return 0
 
     if dry_run:
-        lines = live_file.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True)
-        if len(lines) <= RECEIPTS_MAX_RECORDS:
-            _emit("INFO", "receipts_skip", reason="within_cap", line_count=len(lines), cap=RECEIPTS_MAX_RECORDS)
-            return 0
-        if archive_file.exists():
-            _emit("INFO", "receipts_skip", reason="archive_already_exists_today", archive=str(archive_file))
-            return 0
-        keep, overflow, kept_starts = _partition_receipts(lines)
-        _emit_receipts_rotation(live_file=live_file, archive_file=archive_file,
-                                keep_lines=len(keep), archive_lines=len(overflow),
-                                kept_starts=kept_starts, dry_run=True)
-        return 0
+        return _compact_receipts_dry_run(live_file, archive_file)
 
     # Two-phase write: stage archive content to a temp path so the real archive path
     # only appears after the live-file rewrite succeeds.  A partial failure leaves no
@@ -272,7 +289,8 @@ def compact_receipts(state_dir: Path, *, dry_run: bool = False) -> int:
     try:
         def _rewrite(current_content: bytes) -> bytes:
             nonlocal archive_tmp, plan
-
+            # rewrite_locked's sentinel for t0_receipts.ndjson IS append_receipt.lock: held here.
+            refuse_chained_locked(live_file)
             current_lines = current_content.decode("utf-8", errors="replace").splitlines(keepends=True)
             if len(current_lines) <= RECEIPTS_MAX_RECORDS:
                 plan = {
@@ -315,6 +333,8 @@ def compact_receipts(state_dir: Path, *, dry_run: bool = False) -> int:
                                 dry_run=dry_run)
         os.replace(archive_tmp, archive_file)
         archive_tmp = None
+    except ChainedLedgerRefused as exc:
+        return _receipts_refused(exc, dry_run=False)
     except OSError as exc:
         _emit("ERROR", "receipts_io_error", error=str(exc))
         return 1

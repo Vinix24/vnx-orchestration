@@ -34,9 +34,24 @@ if [ -f "$WT_RECEIPTS" ]; then
   | while read -r rid; do
       # `|| true`: a non-matching pattern (e.g. spaced NDJSON) must not abort the
       # merge loop under pipefail; it just skips that receipt.
-      grep "\"receipt_id\":\"$rid\"" "$WT_RECEIPTS" >> "$MAIN_RECEIPTS" || true
-    done
-  echo "[ok] Receipts: merged (deduplicated)"
+      grep "\"receipt_id\":\"$rid\"" "$WT_RECEIPTS" || true
+    done \
+  | if python3 -c '
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from ndjson_hash_chain import ChainedLedgerRefused, unchained_write
+ledger, lines = Path(sys.argv[2]), [line for line in sys.stdin if line.strip()]
+try:  # the append runs inside the guard, under append_receipt.lock (ADR-083)
+    with unchained_write(ledger), ledger.open("a", encoding="utf-8") as fh:
+        fh.writelines(lines)
+except ChainedLedgerRefused as exc:
+    sys.exit(f"[refused] Receipts: {exc}")
+' "$(dirname "$0")/lib" "$MAIN_RECEIPTS"; then
+    echo "[ok] Receipts: merged (deduplicated)"
+  else
+    echo "[skip] Receipts: not merged into $MAIN_RECEIPTS"
+  fi
 fi
 
 # 3. Intelligence DB (INSERT OR IGNORE — preserves existing main data)
