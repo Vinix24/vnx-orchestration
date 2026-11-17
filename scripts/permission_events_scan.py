@@ -120,7 +120,7 @@ def run_scan(project_id: str, since: str, projects_root: Path, state_dir: Option
 
 
 def main_prune(argv: List[str]) -> int:
-    parser = argparse.ArgumentParser(prog="permission_events_scan.py prune", description="ADR-075 decision 6: 90 days live, a year archived, then removed")
+    parser = argparse.ArgumentParser(prog="permission_events_scan.py prune", description="ADR-075 decision 6: lines older than 90 days move to the archive")
     parser.add_argument("--project-id", required=True)
     parser.add_argument("--state-dir", help="project state dir (default: central store of the project)")
     args = parser.parse_args(argv)
@@ -133,7 +133,7 @@ def main_prune(argv: List[str]) -> int:
         print(f"prune failed: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 1
     for name, rep in entry["ledgers"].items():
-        print(f"{name} moved {rep['moved']} removed {len(rep['removed_archives'])} unparseable_ts {rep['unparseable_ts']}")
+        print(f"{name} moved {rep['moved']} removed {rep['removed_archives']} ({rep['removed_reason']}) unparseable_ts {rep['unparseable_ts']}")
     return 0
 
 

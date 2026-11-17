@@ -1,31 +1,24 @@
-"""permission_events_prune: ADR-075 decision 6, 90 days live, a year archived, then removed."""
+"""permission_events_prune: ADR-075 decision 6, lines older than 90 days move to the archive, bytes exact."""
 
-import json
-import multiprocessing
-import sys
-import threading
-import time
+import json, multiprocessing, sys, threading, time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT / "scripts"))
-sys.path.insert(0, str(ROOT / "scripts" / "lib"))
+sys.path[:0] = [str(ROOT / "scripts"), str(ROOT / "scripts" / "lib")]
 
+import append_receipt as ar
 import atomic_io
 import permission_events as pe
+import permission_events_prune as pp
 import permission_events_scan as scan
 
 PID = "vnx-dev"
 NOW = datetime(2026, 11, 17, 12, 0, tzinfo=timezone.utc)
 LEDGER_FILES = ("permission_events.ndjson", "cli_invocations.ndjson")
-
-
-def _pp():
-    import permission_events_prune as pp  # imported late so the red run on main fails per test, not at collection
-    return pp
+M91 = (NOW - timedelta(days=91)).strftime("%Y-%m")
 
 
 def _line(days, tag):
@@ -38,76 +31,94 @@ def _seed(state, name):
 
 
 def _tags(path):
-    return [json.loads(x)["tag"] for x in path.read_text().splitlines()] if path.exists() else []
+    return [json.loads(x)["tag"] for x in path.read_text().splitlines()]
+
+
+def _snap(state):
+    return {str(p.relative_to(state)): p.read_bytes() for p in sorted(state.rglob("*.ndjson"))}
+
+
+def _cov(state):
+    return json.loads((state / "permission_coverage.json").read_text())["sources"]["prune"]
 
 
 @pytest.fixture
 def state(tmp_path):
-    s = tmp_path / "state"
-    s.mkdir()
-    return s
+    return tmp_path
+
+
+@pytest.fixture(autouse=True)
+def receipts(state, monkeypatch):
+    """The receipt append is the external boundary: record each receipt with the ledgers as they were at that moment."""
+    got = []
+    monkeypatch.setattr(ar, "append_receipt_payload", lambda r, **k: got.append((r, k, _snap(state))) or ar.AppendResult(
+        status="appended", receipts_file=Path(k["receipts_file"]), idempotency_key="k"))
+    return got
 
 
 @pytest.mark.parametrize("ledger,fname", [("permission_events", LEDGER_FILES[0]), ("cli_invocations", LEDGER_FILES[1])])
-def test_adr_fixture_and_second_round_moves_nothing(state, ledger, fname):
-    pp = _pp()
+def test_adr_fixture_and_second_round_moves_nothing(state, receipts, ledger, fname):
     _seed(state, fname)
-    # last year's archive file: its month ended more than 365 days ago, so it goes
-    old = state / pp.ARCHIVE_DIR / f"{ledger}-2025-08.ndjson"
-    old.parent.mkdir(parents=True)
-    old.write_text(_line(400, "d400") + "\n")
+    before = _snap(state)
     entry = pp.prune(PID, state, NOW)
     assert _tags(state / fname) == ["d10", "d89", "nots"]
-    month = (NOW - timedelta(days=91)).strftime("%Y-%m")
-    assert _tags(state / pp.ARCHIVE_DIR / f"{ledger}-{month}.ndjson") == ["d91"]
-    assert not old.exists()
-    assert all("d400" not in f.read_text() for f in state.rglob("*.ndjson"))  # the 400-day line is nowhere
+    assert _tags(state / pp.ARCHIVE_DIR / f"{ledger}-{M91}.ndjson") == ["d91"]
+    m400 = f"archive/permission_events/{ledger}-{(NOW - timedelta(days=400)).strftime('%Y-%m')}.ndjson"
+    assert _tags(state / m400) == ["d400"]  # removal is not enabled in this step
     rep = entry["ledgers"][ledger]
-    d400 = f"{ledger}-{(NOW - timedelta(days=400)).strftime('%Y-%m')}.ndjson"  # archived this round, expired in the same round
-    assert (rep["moved"], sorted(rep["removed_archives"]), rep["unparseable_ts"]) == (2, sorted([old.name, d400]), 1)
+    assert (rep["moved"], rep["removed_archives"], rep["removed_reason"], rep["unparseable_ts"]) == (2, 0, "removal_not_enabled", 1)
     assert rep["oldest_live_ts"] == (NOW - timedelta(days=89)).isoformat()
-    cov = json.loads((state / "permission_coverage.json").read_text())["sources"]["prune"]
-    assert cov["status"] == "ok" and cov["ledgers"][ledger]["moved"] == 2
+    assert _cov(state)["status"] == "ok" and _cov(state)["ledgers"][ledger]["moved"] == 2
+    (receipt, kw, seen), = receipts  # one decision, written before any ledger byte changed
+    assert seen == before and kw["receipts_file"] == str(state / "t0_receipts.ndjson")
+    assert receipt["event_type"] == "state_mutation" and receipt["round_id"] == entry["round_id"]
+    assert receipt["ledgers"][ledger] == {f"archive/permission_events/{ledger}-{M91}.ndjson": 1, m400: 1}
     again = pp.prune(PID, state, NOW)
-    assert again["ledgers"][ledger]["moved"] == 0 and again["ledgers"][ledger]["unparseable_ts"] == 1
-    assert _tags(state / pp.ARCHIVE_DIR / f"{ledger}-{month}.ndjson") == ["d91"]
+    assert again["ledgers"][ledger]["moved"] == 0 and len(receipts) == 1
+    assert _tags(state / pp.ARCHIVE_DIR / f"{ledger}-{M91}.ndjson") == ["d91"]
 
 
-def test_bad_ts_naive_ts_and_torn_tail_stay_live(state):
-    pp = _pp()
+@pytest.mark.parametrize("tail,bad", [(_line(300, "valid-old-tail").encode(), 2), (b'{"ts": "2020-01-01T00:00:00+00:00", "ta', 3)])
+def test_bad_ts_invalid_utf8_and_torn_tail_stay_live_byte_for_byte_over_two_rounds(state, tail, bad):
     f = state / LEDGER_FILES[0]
-    f.write_bytes((_line(200, "old") + "\n" + json.dumps({"ts": "2020-01-01T00:00:00", "tag": "naive"}) + "\n"
-                   + json.dumps({"ts": "garbage", "tag": "garb"}) + "\n").encode() + b'{"ts": "2020-01-01T00:00:00+00:00", "ta')
-    entry = pp.prune(PID, state, NOW)
-    raw = f.read_bytes()
-    assert b"naive" in raw and b"garb" in raw and b'"ta' in raw and b"old" not in raw
-    assert entry["ledgers"]["permission_events"]["unparseable_ts"] == 3
+    keep = (json.dumps({"ts": "2020-01-01T00:00:00", "tag": "naive"}) + "\n").encode() + b'\xff\xfe{"ts": 1\n\n' + tail
+    f.write_bytes((_line(200, "old") + "\n").encode() + keep)
+    assert pp.prune(PID, state, NOW)["ledgers"]["permission_events"]["unparseable_ts"] == bad
+    pp.prune(PID, state, NOW)
+    assert f.read_bytes() == keep
 
 
-def test_rename_failure_leaves_both_ledgers_unchanged_and_status_error(state, monkeypatch):
-    pp = _pp()
+FAILS = {"second_live_rename": (atomic_io, "atomic_write_text", lambda a, n: a[0].name in LEDGER_FILES and n == 2),
+         "coverage_write": (pe, "_store_coverage", lambda a, n: n == 1),
+         "decision_receipt": (ar, "append_receipt_payload", lambda a, n: True)}
+
+
+def _fail(monkeypatch, mod, attr, when):
+    real, calls = getattr(mod, attr), []
+    def flaky(*a, **k):
+        calls.append(a)
+        if when(a, len(calls)):
+            raise OSError("disk full")
+        return real(*a, **k)
+    monkeypatch.setattr(mod, attr, flaky)
+
+
+@pytest.mark.parametrize("target", [*FAILS, "receipt_duplicate"])
+def test_any_failure_leaves_ledgers_and_archive_unchanged_and_status_error(state, monkeypatch, target):
     for name in LEDGER_FILES:
         _seed(state, name)
-    before = {n: (state / n).read_bytes() for n in LEDGER_FILES}
-    real, calls = atomic_io.atomic_write_text, []
-
-    def flaky(path, content, *a, **k):
-        if path.name in LEDGER_FILES:
-            calls.append(path.name)
-            if len(calls) == 2:  # the second live file fails after the first one was already replaced
-                raise OSError("disk full")
-        return real(path, content, *a, **k)
-
-    monkeypatch.setattr(atomic_io, "atomic_write_text", flaky)
-    with pytest.raises(OSError):
+    old = state / pp.ARCHIVE_DIR / f"permission_events-{M91}.ndjson"
+    old.parent.mkdir(parents=True)
+    old.write_bytes(b'{"tag": "earlier"}')  # an archive that already exists, torn tail included
+    before = _snap(state)
+    if target in FAILS:
+        _fail(monkeypatch, *FAILS[target])
+    else:
+        monkeypatch.setattr(ar, "append_receipt_payload", lambda r, **k: ar.AppendResult("duplicate", Path("x"), "k"))
+    with pytest.raises((OSError, RuntimeError)):
         pp.prune(PID, state, NOW)
-    assert {n: (state / n).read_bytes() for n in LEDGER_FILES} == before
-    cov = json.loads((state / "permission_coverage.json").read_text())["sources"]["prune"]
-    assert cov["status"] == "error" and "disk full" in cov["reason"]
-    monkeypatch.setattr(atomic_io, "atomic_write_text", real)
-    pp.prune(PID, state, NOW)  # the retry adds nothing twice to the archive
-    month = (NOW - timedelta(days=91)).strftime("%Y-%m")
-    assert _tags(state / pp.ARCHIVE_DIR / f"permission_events-{month}.ndjson") == ["d91"]
+    assert _snap(state) == before
+    assert _cov(state)["status"] == "error" and _cov(state)["reason"]
 
 
 def _hold(state, ready, release):
@@ -117,7 +128,6 @@ def _hold(state, ready, release):
 
 
 def test_prune_waits_for_a_writer_in_another_process(state):
-    pp = _pp()
     _seed(state, LEDGER_FILES[0])
     ready, release = multiprocessing.Event(), multiprocessing.Event()
     proc = multiprocessing.Process(target=_hold, args=(str(state), ready, release))
@@ -125,8 +135,7 @@ def test_prune_waits_for_a_writer_in_another_process(state):
     try:
         assert ready.wait(10)
         done = []
-        t = threading.Thread(target=lambda: done.append(pp.prune(PID, state, NOW)))
-        t.start()
+        (t := threading.Thread(target=lambda: done.append(pp.prune(PID, state, NOW)))).start()
         time.sleep(0.5)
         assert not done and "d91" in (state / LEDGER_FILES[0]).read_text()  # waiting: not skipped, not interleaved
         release.set()
@@ -137,17 +146,13 @@ def test_prune_waits_for_a_writer_in_another_process(state):
         proc.join(10)
 
 
-def test_old_scan_call_without_subcommand_still_scans(tmp_path, monkeypatch, capsys):
+def test_old_scan_call_without_subcommand_still_scans_and_prune_subcommand(tmp_path, state, monkeypatch, capsys):
     monkeypatch.setenv("HOME", str(tmp_path))
     st = tmp_path / ".vnx-data" / PID / "state"
     rc = scan.main(["--project-id", PID, "--since", "7d", "--projects-root", str(tmp_path / "p"), "--state-dir", str(st)])
     assert rc == 0 and "B1 " in capsys.readouterr().out
     assert "B1" in json.loads((st / "permission_coverage.json").read_text())["sources"]
-
-
-def test_prune_subcommand_cli(state, capsys):
     _seed(state, LEDGER_FILES[0])
     assert scan.main(["prune", "--project-id", PID, "--state-dir", str(state)]) == 0
-    assert "permission_events moved" in capsys.readouterr().out
+    assert "permission_events moved 2 removed 0 (removal_not_enabled)" in capsys.readouterr().out
     assert scan.main(["prune", "--project-id", "../x", "--state-dir", str(state)]) == 2
-
