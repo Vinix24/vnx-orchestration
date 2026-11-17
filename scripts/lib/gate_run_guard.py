@@ -59,8 +59,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
+from failure_classification import VERDICT_WITHOUT_FINDINGS
 from gate_obligations import (
     REASON_DEGENERATE_RETRY_CAP,
+    REASON_VERDICT_WITHOUT_FINDINGS_RETRY_CAP,
     STATUS_PENDING,
     obligation_matches_pr,
     obligation_path,
@@ -87,7 +89,9 @@ MAX_REVIEWER_RUNS_PER_HEAD = 2
 # same head cuts the same diff again. Every other unavailable reason (quota,
 # lane_exhausted, binary_not_found, worktree_checkout_failed, ...) ran no
 # reviewer and does not count.
-REVIEWER_RAN_REASONS = frozenset({"gate_execution_degenerate", "timeout", "stall", "stalled"})
+REVIEWER_RAN_REASONS = frozenset(
+    {"gate_execution_degenerate", "timeout", "stall", "stalled", VERDICT_WITHOUT_FINDINGS}
+)
 _PARTIAL_REVIEW_STATUS = "partial_review"
 
 FORCE_RERUN_USAGE = '--force-rerun --reason "..."'
@@ -418,7 +422,13 @@ def book_reviewer_run(
     head_runs = next_head_runs(record.get("head_runs"), head_sha, result or {})
     fields: Dict[str, Any] = {"head_runs": head_runs}
     if cap_reached(head_runs, head_sha):
-        fields.update(reason=REASON_RETRY_CAP, reason_detail=cap_detail(gate, pr_ref, dispatch_id, head_runs))
+        cap_reason = (
+            REASON_VERDICT_WITHOUT_FINDINGS_RETRY_CAP
+            if str((result or {}).get("reason") or "") == VERDICT_WITHOUT_FINDINGS
+            else REASON_RETRY_CAP
+        )
+        detail = cap_detail(gate, pr_ref, dispatch_id, head_runs)
+        fields.update(reason=cap_reason, reason_detail=detail.replace(REASON_RETRY_CAP, cap_reason, 1))
         logger.warning("gate_run_guard: %s", fields["reason_detail"])
     return update_obligation(path, **fields)
 
