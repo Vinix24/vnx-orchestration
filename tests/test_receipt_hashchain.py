@@ -27,6 +27,7 @@ import multiprocessing as mp
 import os
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -46,6 +47,8 @@ from append_receipt_internals.idempotency import (  # noqa: E402
     _write_receipt_under_lock,
 )
 from ndjson_hash_chain import GENESIS_HASH, compute_entry_hash, verify_chain  # noqa: E402
+from append_receipt_internals.common import AppendReceiptError
+from chain_epoch_seal import seal_ledger
 
 
 def _append_one(receipt_path: Path, receipt: dict) -> None:
@@ -240,3 +243,64 @@ def test_verify_is_stable_on_replay(tmp_path, monkeypatch):
     assert first[0] is True
     assert first[2] == "verified"
     assert first == second == third, "verify must be deterministic across replays"
+
+
+
+# ADR-083 (receipt-hashketen-aan H3): the ledger's own tail decides, the variable is unset.
+_PINNED_LINE = (b'{"event_type":"test_event","dispatch_id":"d1","n":1,'
+                b'"outcome_id":"bee1b5622c59434a0d6a892c856fdf4aa7c11e60ee2113b79f0a8871a2530732"}\n')
+
+
+def _ledger(tmp_path: Path, monkeypatch, *, sealed: bool) -> tuple[Path, str]:
+    monkeypatch.delenv("VNX_CHAIN_RECEIPTS", raising=False)
+    receipt_path = tmp_path / "t0_receipts.ndjson"
+    receipt_path.write_bytes(b'{"a":1}\n')
+    return receipt_path, (seal_ledger(receipt_path)["marker_hash"] if sealed else "")
+
+
+def _append_n(receipt_path: Path, n: int) -> None:
+    _append_one(receipt_path, {"event_type": "test_event", "dispatch_id": f"d{n}", "n": n})
+
+
+def test_sealed_ledger_chains_without_the_variable(tmp_path, monkeypatch):
+    receipt_path, marker_hash = _ledger(tmp_path, monkeypatch, sealed=True)
+    _append_n(receipt_path, 1)
+    assert _read_lines(receipt_path)[-1]["prev_hash"] == marker_hash
+    assert verify_chain(receipt_path) == (True, [], "verified-segmented")
+
+
+def test_unchained_ledger_without_the_variable_is_byte_for_byte_as_before(tmp_path, monkeypatch):
+    receipt_path, _ = _ledger(tmp_path, monkeypatch, sealed=False)
+    _append_n(receipt_path, 1)
+    assert receipt_path.read_bytes() == b'{"a":1}\n' + _PINNED_LINE
+
+
+def test_debris_after_a_chained_entry_links_to_that_entry(tmp_path, monkeypatch):
+    receipt_path, _ = _ledger(tmp_path, monkeypatch, sealed=True)
+    _append_n(receipt_path, 1)
+    chained_hash = compute_entry_hash(_read_lines(receipt_path)[-1])
+    with receipt_path.open("ab") as fh:
+        fh.write(b'{"torn": "fr\t#vnx-torn-tail-closed\n\nnot json\n{"also": "torn')
+    _append_n(receipt_path, 2)
+    last = json.loads(receipt_path.read_bytes().splitlines()[-1])
+    assert (last["dispatch_id"], last["prev_hash"]) == ("d2", chained_hash)
+
+
+def test_ambiguous_tail_refuses_and_leaves_the_ledger_unchanged(tmp_path, monkeypatch):
+    receipt_path, _ = _ledger(tmp_path, monkeypatch, sealed=True)
+    with receipt_path.open("ab") as fh:
+        fh.write(b"x" * 65536 + b"\n")  # 64 KiB + 1 of debris
+    before = receipt_path.read_bytes()
+    with pytest.raises(AppendReceiptError) as refused:
+        _append_n(receipt_path, 1)
+    assert refused.value.code == "receipt_tail_ambiguous" and str(receipt_path) in refused.value.message
+    assert receipt_path.read_bytes() == before
+
+
+def test_ten_parallel_appends_after_a_seal_do_not_fork(tmp_path, monkeypatch):
+    receipt_path, _ = _ledger(tmp_path, monkeypatch, sealed=True)
+    with ThreadPoolExecutor(max_workers=10) as pool:
+        list(pool.map(lambda n: _append_n(receipt_path, n), range(10)))
+    entries = _read_lines(receipt_path)
+    assert len(entries) == 12 and len({e["prev_hash"] for e in entries[2:]}) == 10
+    assert verify_chain(receipt_path) == (True, [], "verified-segmented")

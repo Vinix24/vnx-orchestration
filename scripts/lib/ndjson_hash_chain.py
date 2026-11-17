@@ -17,6 +17,7 @@ from __future__ import annotations
 import fcntl
 import hashlib
 import json
+import os
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -244,6 +245,67 @@ def _read_last_hash(path: Path) -> str | None:
         return compute_entry_hash(entry)
     except json.JSONDecodeError:
         return None
+
+
+# Mirrors ``idempotency._TORN_TAIL_WINDOW``, pinned equal by tests/test_ndjson_hash_chain.py.
+TAIL_WINDOW = 65536
+TAIL_CHAINING, TAIL_UNCHAINED, TAIL_EMPTY, TAIL_AMBIGUOUS = "chaining", "unchained", "empty", "ambiguous"
+_TORN_TAIL_MARK = b"\t#vnx-torn-tail-closed"  # ndjson_io.TORN_TAIL_CLOSED, kept import-free here
+
+
+def read_ledger_tail(path: Path) -> tuple[str, str | None]:
+    """``(state, entry_hash)`` of a ledger's last parseable entry, read from the end only.
+
+    Public (ADR-083): the append path, ``ledger_health`` and H2's writer refusal share it.
+    Lines are read back in ``TAIL_WINDOW`` chunks, each judged whole (one long record is not
+    debris); at most ``TAIL_WINDOW`` bytes of blank or debris lines (unparseable, non-object,
+    ``#vnx-torn-tail-closed``) are skipped, so it is never a full scan. ``chaining``: a marker
+    or ``prev_hash``; ``unchained``: neither; ``empty``: read to the start, no entry;
+    ``ambiguous``: the budget ran out first, and the caller refuses.
+    """
+    try:
+        fh = path.open("rb")
+    except FileNotFoundError:
+        return TAIL_EMPTY, None
+    with fh:
+        pos, buf, end, skipped = fh.seek(0, os.SEEK_END), b"", 0, 0
+        while pos > 0 or end > 0:  # buf[:end] is read but not yet judged
+            nl = buf.rfind(b"\n", 0, end)
+            while nl < 0 and pos > 0:
+                start = max(0, pos - TAIL_WINDOW)
+                chunk = os.pread(fh.fileno(), pos - start, start)
+                buf, end, pos = chunk + buf[:end], end + len(chunk), start
+                nl = buf.rfind(b"\n", 0, end)
+            raw, end = buf[nl + 1:end], max(nl, 0)
+            entry = _tail_entry(raw)
+            if entry is not None:
+                chains = entry.get("type") == EPOCH_MARKER_TYPE or "prev_hash" in entry
+                return (TAIL_CHAINING if chains else TAIL_UNCHAINED), compute_entry_hash(entry)
+            skipped += len(raw) + 1
+            if skipped > TAIL_WINDOW and (pos > 0 or end > 0):  # stopped short of the start
+                return TAIL_AMBIGUOUS, None
+    return TAIL_EMPTY, None
+
+
+def _tail_entry(raw: bytes) -> dict | None:
+    """The JSON object on one tail line, or None for a blank or debris line."""
+    if not raw.strip() or raw.endswith(_TORN_TAIL_MARK):
+        return None
+    try:
+        entry = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        return None
+    return entry if isinstance(entry, dict) else None
+
+
+def chain_receipts_variable_on() -> bool:
+    """``VNX_CHAIN_RECEIPTS`` is 1/true/yes/on (case-insensitive) in this process."""
+    return os.environ.get("VNX_CHAIN_RECEIPTS", "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def append_chains(tail_state: str) -> bool:
+    """ADR-083 precedence: a ``chaining`` tail chains; otherwise the variable decides."""
+    return tail_state == TAIL_CHAINING or chain_receipts_variable_on()
 
 
 def verify_chain(path: Path) -> tuple[bool, list[dict], str]:
