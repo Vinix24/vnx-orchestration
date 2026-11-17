@@ -1073,17 +1073,25 @@ def report_rejects(record: Dict[str, Any]) -> bool:
     review to contradict. A record without a report on disk, or with one that
     cannot be read, is incomplete, never a rejection: it fills no seat and does
     not block on its own.
+
+    A reviewer run the writer reclassified (``unavailable`` with reason
+    ``verdict_without_findings``, ADR-080) did review, so its report is read
+    too, and it rejects unless all four conditions of
+    ``closure_verifier.report_reclassification_holds`` hold; without a readable
+    report it rejects, because nothing proves the absence.
     """
     import closure_verifier as cv
     from gate_status import FAIL_STATES, PARTIAL_REVIEW_STATES, PASS_STATES, canonical_status
 
-    if canonical_status(record) not in PASS_STATES | FAIL_STATES | PARTIAL_REVIEW_STATES:
+    reclassified = cv.is_reclassified_without_findings(record)
+    if not reclassified and canonical_status(record) not in PASS_STATES | FAIL_STATES | PARTIAL_REVIEW_STATES:
         return False
     report_path = record.get("report_path")
     if not isinstance(report_path, str) or not report_path.strip():
-        return False
-    indicators = cv._report_blocking_indicators(Path(report_path.strip()))
-    return bool(indicators)
+        # A reclassification nobody can check against its report is no proof of absence.
+        return reclassified
+    indicators = cv._report_blocking_indicators(Path(report_path.strip()), record)
+    return reclassified if indicators is None else bool(indicators)
 
 
 def blocking_records(on_head: Dict[str, Tuple[SeatedRecord, ...]]) -> Tuple[Rejection, ...]:

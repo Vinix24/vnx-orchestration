@@ -42,6 +42,7 @@ from gate_status import (
     is_execution_id as _is_execution_id,
     is_test_run_record as _is_test_run_record,
 )
+from failure_classification import VERDICT_WITHOUT_FINDINGS
 from dispatch_spec import RETIRED_GATE_NAMES, Gate
 from gate_recorder import GATE_PROVIDER_HARNESS_LANE, resolve_gate_provider
 from gate_obligations import (
@@ -803,7 +804,7 @@ def _merge_door_record_verdict(
         }
     # Invariant 7: a passing verdict whose report still carries blocking
     # indicators is a contradiction, not evidence.
-    indicators = _report_blocking_indicators(report_path)
+    indicators = _report_blocking_indicators(report_path, result)
     if indicators is None:
         return {
             "verdict": "NO-GO",
@@ -2986,7 +2987,87 @@ def _count_report_blocking_indicators(content: str) -> int:
     return _count_matches_excluding_negations(_PROSE_FALLBACK_PATTERNS, filtered)
 
 
-def _report_blocking_indicators(report_path: Path) -> Optional[int]:
+# ADR-080 besluit 2 (track reviews-zonder-uitkomst, D2). The writer (D5) puts
+# this section in the writer-made part of the report, i.e. ahead of
+# RAW_OUTPUT_HEADING, with exactly one line ``execution_id: <id>``. D5 imports
+# both constants from here.
+RECLASSIFICATION_HEADING = "## Herclassificatie"
+# gate_artifacts.format_report: from this heading to the end of the report is
+# the reviewer's raw output, copied verbatim. Nothing in it is writer-made.
+RAW_OUTPUT_HEADING = "## Gate Output"
+_RECLASSIFICATION_SECTION_RE = re.compile(
+    rf"^{re.escape(RECLASSIFICATION_HEADING)}[ \t]*$(.*?)(?=^## |\Z)", re.MULTILINE | re.DOTALL,
+)
+_RECLASSIFICATION_ID_RE = re.compile(r"^[ \t]*(?:-[ \t]*)?execution_id:[ \t]*`?([^`\s]+)`?[ \t]*$", re.MULTILINE)
+_FINDINGS_COUNT_RE = re.compile(r"^(Blocking|Advisory) count:[ \t]*(\d+)[ \t]*$", re.MULTILINE)
+
+
+def is_reclassified_without_findings(record: Dict[str, Any]) -> bool:
+    """Condition 1 of ADR-080 besluit 2: status ``unavailable`` with reason ``verdict_without_findings``."""
+    return (
+        isinstance(record, dict)
+        and gate_canonical_status(record) in _GATE_UNAVAILABLE_STATES
+        and record.get("reason") == VERDICT_WITHOUT_FINDINGS
+    )
+
+
+def _record_has_no_findings(record: Dict[str, Any]) -> bool:
+    """Condition 2: both findings lists present and empty; a missing or malformed field is not empty."""
+    if record.get("blocking_findings") != [] or record.get("advisory_findings") != []:
+        return False
+    if "findings" in record and record["findings"] != []:
+        return False
+    return all(
+        key not in record or (type(record[key]) is int and record[key] == 0)
+        for key in ("blocking_count", "advisory_count")
+    )
+
+
+def _writer_part(content: str) -> Optional[str]:
+    """The report before its raw output, ``None`` when the raw-output heading is absent."""
+    lines = content.splitlines()
+    for index, line in enumerate(lines):
+        if line.rstrip() == RAW_OUTPUT_HEADING:
+            return "\n".join(lines[:index])
+    return None
+
+
+def _writer_findings_empty(writer: str) -> bool:
+    """Condition 3: the writer's ``## Findings`` counts exactly 0 blocking and 0 advisory, and lists nothing."""
+    section = _extract_normalized_findings_section(writer)
+    if section is None:
+        return False
+    if sorted(_FINDINGS_COUNT_RE.findall(section)) != [("Advisory", "0"), ("Blocking", "0")]:
+        return False
+    if any(re.search(pattern, section, re.IGNORECASE) for pattern in _FINDINGS_SECTION_PATTERNS):
+        return False
+    return not any(line.lstrip().startswith(("-", "*", "#")) for line in section.splitlines())
+
+
+def _names_execution_id(writer: str, execution_id: Any) -> bool:
+    """Condition 4: one writer-made Herclassificatie section naming exactly the record's ``execution_id``."""
+    if not _is_execution_id(execution_id):
+        return False
+    sections = _RECLASSIFICATION_SECTION_RE.findall(writer)
+    return len(sections) == 1 and _RECLASSIFICATION_ID_RE.findall(sections[0]) == [execution_id]
+
+
+def report_reclassification_holds(record: Dict[str, Any], content: str) -> bool:
+    """ADR-080 besluit 2: may the FAIL verdict of this report be skipped? Only when all four conditions hold.
+
+    Each is read from the record or from the writer-made part of the report
+    (before :data:`RAW_OUTPUT_HEADING`), never from the reviewer's raw output:
+    a planted Herclassificatie heading in that output counts for nothing.
+    """
+    if not is_reclassified_without_findings(record) or not _record_has_no_findings(record):
+        return False
+    writer = _writer_part(content)
+    if writer is None:
+        return False
+    return _writer_findings_empty(writer) and _names_execution_id(writer, record.get(_EXECUTION_ID_FIELD))
+
+
+def _report_blocking_indicators(report_path: Path, record: Optional[Dict[str, Any]] = None) -> Optional[int]:
     """Invariant 7's reading of one report on disk: its blocking indicators, ``None`` when unreadable.
 
     The one report reader for a contradiction between a record and its report.
@@ -2994,11 +3075,17 @@ def _report_blocking_indicators(report_path: Path) -> Optional[int]:
     (:func:`_merge_door_record_verdict`), and the seat evaluation uses it to
     find a rejection in the report of any review peer on the head
     (``review_seat_evaluation.report_rejects``, OI-2058 R5b round 2).
+
+    With ``record``, the one exception of ADR-080 besluit 2: a report whose
+    record passes :func:`report_reclassification_holds` counts 0. Any other
+    record (a PASS record among them) is read as before.
     """
     try:
         content = Path(report_path).read_text(encoding="utf-8")
     except OSError:
         return None
+    if record is not None and report_reclassification_holds(record, content):
+        return 0
     return _count_report_blocking_indicators(content)
 
 
