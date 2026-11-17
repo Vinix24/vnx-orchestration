@@ -1,12 +1,9 @@
-"""Read Profile A of ``vnx-ci.yml`` in either of its two shapes.
+"""Read Profile A of ``vnx-ci.yml`` in either shape, finding jobs by display name, never by id.
 
-``single``      today: one job (``profile-a``) carries every step and the required check name.
-``aggregator``  C3 of pr-ci-onder-zes-minuten: four ``Profile A shard (k/4)`` jobs, one
-                ``Profile A guards`` job, and the job named ``Profile A (doctor + core tests)``
-                that needs all five and runs ``if: always()``.
-
-Jobs are found by display **name**, never by id. Anything that is neither shape raises
-``WorkflowShapeError``: this module never answers a missing job with an empty list.
+``single``: one job carries every step and the required check name (today).
+``aggregator`` (C3): four ``Profile A shard (k/4)`` jobs, ``Profile A guards``, and the required
+job, which needs all five and runs ``if: always()``. Anything else raises ``WorkflowShapeError``;
+a missing job is never answered with an empty list.
 """
 
 from __future__ import annotations
@@ -58,7 +55,7 @@ class ProfileAJob:
 
     @property
     def timeout(self) -> Any:
-        """The raw ``timeout-minutes`` value (an int or an expression string); ``None`` when absent."""
+        """The raw ``timeout-minutes`` (an int or an expression string); ``None`` when absent."""
         return self.body.get("timeout-minutes")
 
 
@@ -67,10 +64,7 @@ class ProfileAStep:
     job: ProfileAJob
     index: int
     step: dict
-
-    @property
-    def name(self) -> object:
-        return self.step.get("name")
+    name: object = None
 
 
 def load_workflow(path: Path) -> dict:
@@ -97,8 +91,7 @@ class ProfileA:
         if not isinstance(jobs, dict) or not jobs:
             raise WorkflowShapeError("the workflow has no jobs mapping")
         named = [(str(i), _display_name(str(i), b), b) for i, b in jobs.items()]
-        bad = [i for i, _, b in named if not isinstance(b, dict)]
-        if bad:
+        if bad := [i for i, _, b in named if not isinstance(b, dict)]:
             raise WorkflowShapeError(f"jobs that are not mappings: {bad}")
         required = [t for t in named if t[1] == REQUIRED_CHECK_NAME]
         if len(required) != 1:
@@ -140,8 +133,7 @@ class ProfileA:
 
     @property
     def steps(self) -> list[ProfileAStep]:
-        """Every step of every Profile A job, each tagged with its job."""
-        return [ProfileAStep(j, i, s) for j in self.jobs for i, s in enumerate(j.steps) if isinstance(s, dict)]
+        return [ProfileAStep(j, i, s, s.get("name")) for j in self.jobs for i, s in enumerate(j.steps) if isinstance(s, dict)]
 
     def jobs_with_role(self, role: str) -> list[ProfileAJob]:
         return [j for j in self.jobs if j.role == role]
@@ -158,9 +150,6 @@ class ProfileA:
 
     def job_running(self, name: str, role: str | None = None) -> ProfileAJob:
         return self.step(name, role).job
-
-    def needs(self, job: ProfileAJob) -> list[str]:
-        return job.needs
 
     def timeouts(self) -> dict[str, Any]:
         return {j.job_id: j.timeout for j in self.jobs}

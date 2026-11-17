@@ -45,10 +45,6 @@ def profile_a_steps() -> list:
     return [entry.step for entry in shape.profile_a(WORKFLOW).steps]
 
 
-def profile_a_step(name: str) -> dict:
-    return shape.profile_a(WORKFLOW).step(name).step
-
-
 def test_step_sits_directly_after_completeness_and_before_the_evidence_upload(jobs):
     order = [step.get("name") for step in profile_a_steps()]
     assert order.index(STEP) == order.index(COMPLETENESS) + 1
@@ -56,7 +52,7 @@ def test_step_sits_directly_after_completeness_and_before_the_evidence_upload(jo
 
 
 def test_step_cannot_turn_the_job_red(jobs):
-    step = profile_a_step(STEP)
+    step = shape.profile_a(WORKFLOW).step(STEP).step
     assert step["continue-on-error"] is True
     assert step["timeout-minutes"] == 5
     assert LIGHT in step["if"] and "always()" in step["if"]
@@ -102,7 +98,7 @@ def test_shadow_job_keeps_continue_on_error_no_needs_and_is_in_no_required_list(
 
 
 def test_shadow_step_in_profile_a_has_no_event_condition(jobs):
-    step = profile_a_step(STEP)
+    step = shape.profile_a(WORKFLOW).step(STEP).step
     assert "github.event_name" not in step["if"]
     upload = [s for s in profile_a_steps() if (s.get("with") or {}).get("name") == "impact-shadow"][0]
     assert "github.event_name" not in upload["if"]
