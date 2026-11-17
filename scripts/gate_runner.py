@@ -180,22 +180,42 @@ _RULE_TEXT = {
     RULE_FABRIC_CHAIN: "rule 3: the fabric's interpreter chain (OI-2591)",
 }
 # The gate worktree has a random name and does not exist when the prompt is built; the prompt
-# carries this token and ``_run_with_stall_detection`` swaps in the real path at the spawn.
-# The token is random per process, so a PR diff cannot carry it in advance, and the fill-in
-# (``_fill_worktree_token``) only touches the tests block that ``_review_tests_block`` appends
-# last: a literal ``@@VNX_GATE_WORKTREE@@`` in the diff, title or body stays literal.
-GATE_WORKTREE_TOKEN = f"@@VNX_GATE_WORKTREE_{secrets.token_hex(8)}@@"
+# carries a token and ``_run_with_stall_detection`` swaps in the real path at the spawn.
+# The token is random per request and lives on the request payload (``worktree_token``), next to
+# the prompt that carries it: a stored prompt run again in another process keeps its own token.
+# A PR diff cannot carry it in advance, and the fill-in (``_fill_worktree_token``) only touches
+# the tests block that ``_review_tests_block`` appends last: a literal token-shaped string in the
+# diff, title or body stays literal. A payload without a valid stored token is never substituted.
+WORKTREE_TOKEN_FIELD = "worktree_token"
+_WORKTREE_TOKEN_RE = re.compile(r"@@VNX_GATE_WORKTREE_[0-9a-f]{16}@@")
 _TESTS_BLOCK_HEADER = "\n\n## Running the PR's tests\n\n"
 
 
-def _fill_worktree_token(prompt: str, worktree: Path) -> str:
-    """Swap ``GATE_WORKTREE_TOKEN`` for the worktree path, inside the tests block only.
-    The block is the tail of the prompt, from its last header. Without that header the prompt
-    comes back unchanged (fail closed): nothing outside the block is ever substituted."""
+def _valid_worktree_token(token: Any) -> bool:
+    return isinstance(token, str) and bool(_WORKTREE_TOKEN_RE.fullmatch(token))
+
+
+def _request_worktree_token(request_payload: Dict[str, Any]) -> str:
+    """The request's worktree token: the stored one when valid, else a new one stored now.
+    Called where a prompt is built, so the token and the prompt that carries it travel together."""
+    kept = request_payload.get(WORKTREE_TOKEN_FIELD)
+    if _valid_worktree_token(kept):
+        return kept
+    token = f"@@VNX_GATE_WORKTREE_{secrets.token_hex(8)}@@"
+    request_payload[WORKTREE_TOKEN_FIELD] = token
+    return token
+
+
+def _fill_worktree_token(prompt: str, worktree: Path, token: Any) -> str:
+    """Swap ``token`` for the worktree path, inside the tests block only.
+    The block is the tail of the prompt, from its last header. Without that header, or without
+    a valid token (a prompt built elsewhere), the prompt comes back unchanged (fail closed)."""
+    if not _valid_worktree_token(token):
+        return prompt
     head, sep, block = prompt.rpartition(_TESTS_BLOCK_HEADER)
     if not sep:
         return prompt
-    return head + sep + block.replace(GATE_WORKTREE_TOKEN, str(worktree))
+    return head + sep + block.replace(token, str(worktree))
 
 
 def _imports_pytest(candidate: Optional[str]) -> bool:
@@ -313,7 +333,8 @@ resolve_review_interpreter.cache_clear = _resolve_cached.cache_clear  # type: ig
 
 def _assemble_reviewer_prompt(pr: str, diff_text: str, verdict_contract: str, instruction: str,
                               worktree: Optional[Path] = None,
-                              interpreter_rule: "Optional[tuple[Optional[str], int]]" = None) -> str:
+                              interpreter_rule: "Optional[tuple[Optional[str], int]]" = None,
+                              worktree_token: Optional[str] = None) -> str:
     """The codex reviewer prompt: untrusted-data sandwich (OI-1442), reviewer role policy and ADR rules, tests block.
     The full review and the delta round (DR-6, deciding and shadow) all build it here."""
     l3 = build_review_prompt(gate_name="reviewer", pr=pr, diff_text=diff_text, verdict_contract=verdict_contract,
@@ -322,14 +343,15 @@ def _assemble_reviewer_prompt(pr: str, diff_text: str, verdict_contract: str, in
     interpreter, rule = interpreter_rule or resolve_review_interpreter_with_rule(worktree=worktree)
     pythonpath = _project_config_value(REVIEW_PYTHONPATH_KEY, None)
     return (format_for_provider(assembled, "codex")["pipe_input"]
-            + _review_tests_block(interpreter, diff_text, rule=rule, worktree=worktree,
+            + _review_tests_block(interpreter, diff_text, rule=rule, worktree=worktree, worktree_token=worktree_token,
                                   pythonpath=[e.strip() for e in pythonpath.split(",") if e.strip()]))
 
 
 def _reviewer_assembler(request_payload: Dict[str, Any], project_root: Optional[Path], codex: bool):
     """The reviewer-prompt builder for one run; the interpreter is resolved here, once, and only for codex."""
     return partial(_assemble_reviewer_prompt, str(request_payload.get("pr_number")),
-                   interpreter_rule=_run_interpreter(request_payload, project_root) if codex else None)
+                   interpreter_rule=_run_interpreter(request_payload, project_root) if codex else None,
+                   worktree_token=_request_worktree_token(request_payload) if codex else None)
 
 
 _DIFF_HEADER_RE = re.compile(r"^diff --git a/(\S+) b/(\S+)$")
@@ -388,7 +410,8 @@ _IMPORT_CHECK = (
 
 
 def _review_tests_block(interpreter: Optional[str], diff_text: str = "", *, rule: int = RULE_FABRIC_CHAIN,
-                        worktree: Optional[Path] = None, pythonpath: Sequence[str] = ()) -> str:
+                        worktree: Optional[Path] = None, pythonpath: Sequence[str] = (),
+                        worktree_token: Optional[str] = None) -> str:
     """The codex prompt block naming the test command per changed test type (OI-2591, OI-2785).
     Only ``.py`` tests get a command (pytest); every other type gets a read-them line. A path
     with a shell metacharacter or whitespace never enters the command: it is named as text.
@@ -400,7 +423,7 @@ def _review_tests_block(interpreter: Optional[str], diff_text: str = "", *, rule
     refused = [p for p in changed if not _is_safe_test_path(p)]
     python = [shlex.quote(p) for p in tests if p.endswith(".py")]
     others = sorted({os.path.splitext(p)[1] or "(no extension)" for p in tests if not p.endswith(".py")})
-    wt = str(worktree) if worktree else GATE_WORKTREE_TOKEN
+    wt = str(worktree) if worktree else (worktree_token if _valid_worktree_token(worktree_token) else "<worktree>")
     paths = [f"{wt}/{p}" for p in pythonpath if _safe_relative_dir(p)]
     refused_paths = [p for p in pythonpath if not _safe_relative_dir(p)]
     body = ""
@@ -1716,6 +1739,7 @@ class GateRunner:
         return _assemble_reviewer_prompt(
             str(pr_number), diff_content, _REVIEWER_VERDICT_TEMPLATE,
             interpreter_rule=_run_interpreter(request_payload, None),
+            worktree_token=_request_worktree_token(request_payload),
             instruction=(
                 f"Review the PR diff in the untrusted-data block, on branch {branch} "
                 f"(risk: {risk}). "
@@ -1947,7 +1971,7 @@ class GateRunner:
         # The run's one resolution (kept on the request since the prompt was built); no probe here.
         interpreter = _run_interpreter(request_payload, self._project_root)[0] if gate == "codex_gate" else None
         if cwd and prompt:
-            prompt = _fill_worktree_token(prompt, cwd)
+            prompt = _fill_worktree_token(prompt, cwd, request_payload.get(WORKTREE_TOKEN_FIELD))
         spawn_env = None if not interpreter else {**os.environ, "VNX_REVIEW_PYTHON": interpreter}
         start = time.monotonic()
         try:
