@@ -511,7 +511,6 @@ jobs:
   profile-c:
     name: Profile C (adoption smoke tests)
     runs-on: ubuntu-24.04
-    needs: profile-a
     # See "Profile A" above: bounds a hung job to minutes, not GitHub's
     # 6-hour hard limit (measured baseline 16-21 min, 45 min ceiling).
     timeout-minutes: 45
@@ -568,7 +567,6 @@ jobs:
   profile-b:
     name: Profile B (snapshot integration)
     runs-on: ubuntu-24.04
-    needs: profile-a
     # See "Profile A" above: bounds a hung job to minutes, not GitHub's
     # 6-hour hard limit (measured baseline 16-21 min, 45 min ceiling).
     timeout-minutes: 45
