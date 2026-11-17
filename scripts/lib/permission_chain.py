@@ -53,6 +53,20 @@ def read_invocations(project_id: str, state_dir: Path) -> Tuple[Optional[List[Di
     return lines, bad
 
 
+def pair_key(vorm: Any) -> Optional[Tuple[str, ...]]:
+    """The one key both sides pair on: the vnx CLI plus its known subcommand path, never placeholders, positionals or
+    flags (B4b carries no argument values). ``None`` (never pairs) for a non-vnx first word or a non-string form."""
+    words = vorm.split() if isinstance(vorm, str) else []
+    if not words or not (words[0] == "vnx" or words[0].endswith("/vnx")):
+        return None
+    path: List[str] = []
+    for word in words[1:]:
+        if word not in cli_invocations.KNOWN_SUBCOMMANDS:
+            break
+        path.append(word)
+    return ("vnx", *path)
+
+
 def pair(events: List[Dict[str, Any]], invocations: Optional[List[Dict[str, Any]]]) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
     """``(events, counts)``: every event comes back, a paired ``asked`` carries ``paired_invocation_id``.
     Counts: ``asked``, ``pairs``, ``ambiguous`` (invocations that fit two or more asks), ``unpaired``, ``bad_ts``."""
@@ -64,7 +78,8 @@ def pair(events: List[Dict[str, Any]], invocations: Optional[List[Dict[str, Any]
     stamped = [(_ts(i.get("ts")), i) for i in invocations or [] if i.get("actor_class") == "operator"]
     counts["bad_ts"] = sum(1 for t, _ in stamped if t is None)
     for when, inv in sorted(((t, i) for t, i in stamped if t is not None), key=lambda p: p[0]):
-        fits = [k for k, a in enumerate(asked) if k not in taken and k not in dead and a.get("vorm") == inv.get("vorm")
+        fits = [k for k, a in enumerate(asked) if k not in taken and k not in dead and (key := pair_key(inv.get("vorm"))) is not None
+                and pair_key(a.get("vorm")) == key
                 and (at := _ts(a.get("ts"))) is not None and at <= when <= at + PAIR_WINDOW]
         if len(fits) == 1:
             taken[fits[0]] = str(inv.get("invocation_id") or "")

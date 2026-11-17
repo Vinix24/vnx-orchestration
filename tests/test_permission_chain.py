@@ -11,6 +11,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path[:0] = [str(ROOT / "scripts"), str(ROOT / "scripts" / "lib")]
 
 import build_t0_state as bts
+import cli_invocations
 import permission_chain as chain
 import permission_events as pe
 import permission_events_scan as scan
@@ -81,6 +82,20 @@ def test_an_invocation_before_the_ask_or_of_another_vorm_does_not_pair():
     a = asked(5)
     assert chain.pair([a], [invocation(10, a["vorm"])])[1]["pairs"] == 0
     assert chain.pair([a], [invocation(1, "vnx other")])[1]["pairs"] == 0
+
+
+REAL = cli_invocations.build_vorm(["deliverable", "promote", "dlv-abc123"])
+
+
+@pytest.mark.parametrize("command, inv_vorm, pairs", [
+    ("bin/vnx deliverable promote dlv-abc123", REAL, 1),
+    ("/opt/homebrew/bin/vnx deliverable promote dlv-abc123", REAL, 1),
+    ("bin/vnx deliverable promote dlv-abc123", cli_invocations.build_vorm(["deliverable", "list"]), 0),
+    ("gh pr merge 12", "gh pr merge <pr>", 0),
+])
+def test_pairing_uses_one_command_key_on_both_sides(command, inv_vorm, pairs):
+    a = asked(10, command=command)
+    assert chain.pair([a], [invocation(1, inv_vorm)])[1]["pairs"] == pairs
 
 
 def test_two_asks_before_one_invocation_are_ambiguous_and_pair_none():
