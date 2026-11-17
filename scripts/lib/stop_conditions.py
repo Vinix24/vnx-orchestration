@@ -59,7 +59,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, FrozenSet, List, Optional, Set, Tuple
+from typing import Any, Dict, FrozenSet, List, Optional, Sequence, Set, Tuple
 
 _HERE = Path(__file__).resolve().parent
 if str(_HERE) not in sys.path:
@@ -1156,22 +1156,42 @@ def run_all_checks(
     return results
 
 
-def write_halt_file(state_dir: Path, results: List[StopConditionResult]) -> Path:
+def write_halt_file(
+    state_dir: Path,
+    results: List[StopConditionResult],
+    *,
+    scoped_out: Sequence[StopConditionResult] = (),
+    scope: Optional[Dict[str, Any]] = None,
+) -> Path:
     """Write ``halt.json`` atomically (tmp file + os.replace via atomic_io).
 
     This module only ever WRITES halt.json on a trigger — it never clears an
     existing one. Recovery (deciding the operator has addressed the halt and
     the chain may resume) is a deliberate, separate action, not something a
     measurement pass should do implicitly.
+
+    ``scoped_out`` holds TRIGGERED results the door measured as provably
+    unrelated to the dispatch (they never block). They are NOT listed in
+    ``triggered``; they get their own ``scoped_out`` list (with the ``scope``
+    they were measured against) and are marked ``"scope": "scoped_out"`` in
+    ``all_checks``. ``CheckStatus`` is deliberately unchanged.
     """
     from atomic_io import atomic_write_json
 
     state_dir = Path(state_dir)
     halt_path = state_dir / HALT_FILENAME
+    scoped_ids = {id(r) for r in scoped_out}
+    all_checks = []
+    for r in results:
+        entry = r.to_dict()
+        if id(r) in scoped_ids:
+            entry["scope"] = "scoped_out"
+        all_checks.append(entry)
     payload = {
         "halted_at": _utc_now_iso(),
-        "triggered": [r.to_dict() for r in results if r.status == CheckStatus.TRIGGERED],
-        "all_checks": [r.to_dict() for r in results],
+        "triggered": [r.to_dict() for r in results if r.status == CheckStatus.TRIGGERED and id(r) not in scoped_ids],
+        "scoped_out": [{**r.to_dict(), "scope": dict(scope or {})} for r in scoped_out],
+        "all_checks": all_checks,
     }
     atomic_write_json(halt_path, payload)
     return halt_path

@@ -2800,7 +2800,15 @@ def _check_stop_conditions_verdict(
 
     if not dry_run:
         try:
-            write_halt_file(state_dir, results)
+            write_halt_file(
+                state_dir,
+                results,
+                scoped_out=scoped_out,
+                scope={
+                    "providers": sorted(relevant_spec_providers or ()),
+                    "gates": sorted(relevant_gates or ()),
+                },
+            )
         except Exception as exc:  # vnx-silent-except: halt.json persistence is a best-effort audit trail, never a reason to change the verdict already decided
             print(
                 f"[dispatch_cli] [WARN] failed to persist halt.json: {exc!r}",
