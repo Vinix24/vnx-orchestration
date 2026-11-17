@@ -550,6 +550,20 @@ class TestRequestAndExecuteCountsOnTheObligation:
         _d4_run(manager_env)
         assert json.loads(obligation.read_text())["head_runs"]["reviewer_runs"] == 1
 
+    def test_a_lane_that_rewrites_the_dispatch_id_still_counts_on_the_original(self, manager_env):
+        obligation = _d4_obligation(manager_env)
+
+        def harness_run(*, request_payload, **_ignored):
+            request_payload["dispatch_id"] = "gate-glm_gate-pr7-generated"  # as _run_harness_lane_path does
+            return dict(DEGENERATE_D4)
+
+        for expected in (1, 2):
+            _d4_request(manager_env, "d4-step0")
+            with patch("gate_runner.GateRunner.run", side_effect=harness_run):
+                _make_manager().execute_gate(gate="codex_gate", pr_number=7)
+            assert json.loads(obligation.read_text()).get("head_runs", {}).get("reviewer_runs") == expected
+        assert json.loads(obligation.read_text())["reason"] == "degenerate_retry_cap"
+
     @pytest.mark.parametrize("dispatch_id", ["", "d4-other", "../d4-step0", "/tmp/d4-step0"])
     def test_no_dispatch_id_no_obligation_or_an_unsafe_id_writes_nothing(self, manager_env, dispatch_id):
         obligation = _d4_obligation(manager_env)
