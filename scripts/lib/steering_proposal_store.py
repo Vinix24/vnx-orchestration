@@ -12,8 +12,8 @@ an exclusive ``fcntl.flock``. An unreadable record file raises ``StoreUnreadable
 
 ADR-084 for the three ``PERMISSION_KINDS``: a rejection reopens only on ``reopen_with_note`` or a changed
 ``handelingsklasse``, never on fresh evidence. A notification (``MELDING_KIND``) is only ``acknowledged``, and
-it suppresses every permission proposal with its ``oorzaak`` for good: never added, revised or reopened, and a
-pending or approved one gets a ``suppressed`` record (status ``suppressed_hard_stop``).
+it suppresses every permission proposal with its ``oorzaak`` for good: ``_apply`` refuses every step but a
+``suppressed`` record (status ``suppressed_hard_stop``), so every writer and every replay holds these rules.
 """
 
 from __future__ import annotations
@@ -34,8 +34,7 @@ LOCK_FILENAME = ".steering_proposals.lock"
 REVISION_DECISIONS = frozenset({"proposed", "revised", "reopened"})
 OPERATOR_DECISIONS = frozenset({"approved", "rejected", "applied", "acknowledged"})
 RECORD_DECISIONS = REVISION_DECISIONS | OPERATOR_DECISIONS | {"suppressed"}
-OUTCOMES = ("added", "revised", "unchanged", "reopened", "suppressed_rejected", "suppressed_hard_stop",
-            "applied_with_hard_stop")
+OUTCOMES = ("added", "revised", "unchanged", "reopened", "suppressed_rejected", "suppressed_hard_stop", "applied_with_hard_stop")
 PERMISSION_KINDS = frozenset({"permissie", "bouwer_allowlist", "bouwgewoonte"})
 MELDING_KIND = "alleen_melding"
 KLASSEN = frozenset(f"K{n}" for n in range(1, 9))
@@ -185,9 +184,14 @@ def _apply(state: Dict[str, Dict[str, Any]], record: Mapping[str, Any]) -> None:
     entry = state.get(pid)
     if entry is None or entry["project_id"] != record["project_id"]:
         raise DecisionRefused("unknown proposal")
+    if entry["artefact_soort"] in PERMISSION_KINDS and decision != "suppressed" and _melding_for(state, entry["project_id"], entry["oorzaak"]):
+        raise DecisionRefused(f"a stored hard stop blocks {decision} on this permission proposal")
     if decision in REVISION_DECISIONS:
         if decision == "reopened" and entry["status"] != "rejected":
             raise DecisionRefused("only a rejected proposal reopens")
+        operator_note = _text(record.get("reason")) and _text(record.get("decided_by")).lower() not in ("", "system")
+        if decision == "reopened" and entry["artefact_soort"] in PERMISSION_KINDS and not (operator_note or _class_change(entry, record)):
+            raise DecisionRefused("a rejected permission proposal reopens only on an operator note or a changed class")
         _add_revision(entry, record)
         if decision == "reopened":
             entry.update(status="pending", decided_at=None, decided_revision=None)
@@ -336,7 +340,9 @@ def add_revision(state_dir: Path, project_id: str, proposal: Mapping[str, Any], 
                                                                     len(entry["revisions"]) + 1)
         record = _record(project_id, item["proposal_id"], revision, decision, stamp, evidence_prompt_ids=ids,
                          **{n: item[n] for n in (*_REQUIRED_TEXT, "handelingsklasse") if n in item})
-        _commit(state_dir, state, [record])
+        owed = _suppress(json.loads(json.dumps(state)), project_id, item, stamp, dict.fromkeys(OUTCOMES, 0)) \
+            if item["artefact_soort"] == MELDING_KIND else []  # a notification suppresses from every writer
+        _commit(state_dir, state, [record, *owed])
     return record
 
 
@@ -375,8 +381,7 @@ def _melding_for(state: Mapping[str, Mapping[str, Any]], project_id: str, oorzaa
 
 def _class_change(entry: Mapping[str, Any], item: Mapping[str, Any]) -> Optional[str]:
     """``old -> new`` when the class differs from the one on the rejected revision; both must be known."""
-    old = entry["revisions"][entry["decided_revision"] - 1].get("handelingsklasse")
-    new = item.get("handelingsklasse")
+    old, new = entry["revisions"][entry["decided_revision"] - 1].get("handelingsklasse"), item.get("handelingsklasse")
     return f"handelingsklasse {old} -> {new}" if old in KLASSEN and new in KLASSEN and old != new else None
 
 
@@ -390,6 +395,7 @@ def _plan(state: Mapping[str, Mapping[str, Any]], project_id: str, item: Mapping
     if entry is None:
         return "added", _record(project_id, pid, 1, "proposed", now, evidence_prompt_ids=ids, **content)
     revision, changed = len(entry["revisions"]) + 1, item["voorstel"] != entry["revisions"][-1]["voorstel"]
+    changed = changed or item.get("handelingsklasse") != entry["revisions"][-1].get("handelingsklasse")
     rejected = entry["status"] == "rejected"
     why = (_class_change(entry, item) if permission else "new evidence after the rejection") if rejected else None
     fresh = ids if permission else _fresh_evidence(entry, item["evidence"]) if rejected else []
@@ -424,22 +430,21 @@ def reconcile(state_dir: Path, project_id: str, batch: Sequence[Mapping[str, Any
                 _apply(scratch, record)
                 records.append(record)
             if item["artefact_soort"] == MELDING_KIND:
-                records += _suppress(scratch, project_id, item["oorzaak"], stamp, counts)
+                records += _suppress(scratch, project_id, item, stamp, counts)
         _commit(state_dir, state, records)
     return counts
 
 
-def _suppress(scratch: Dict[str, Dict[str, Any]], project_id: str, oorzaak: str, now: str,
-              counts: Dict[str, int]) -> List[Dict[str, Any]]:
+def _suppress(scratch: Dict[str, Dict[str, Any]], project_id: str, melding: Mapping[str, Any], now: str, counts: Dict[str, int]):
     """The ``suppressed`` records a notification owes the permission proposals with its ``oorzaak``."""
-    melding, records = _melding_for(scratch, project_id, oorzaak), []
+    oorzaak, records = melding["oorzaak"], []
     for pid, entry in sorted(scratch.items()):
         if entry["project_id"] != project_id or entry["oorzaak"] != oorzaak or entry["artefact_soort"] not in PERMISSION_KINDS:
             continue
         if entry["status"] == "applied":
             counts["applied_with_hard_stop"] += 1
         elif entry["status"] in ("pending", "approved"):
-            record = _record(project_id, pid, len(entry["revisions"]), "suppressed", now, reason=melding)
+            record = _record(project_id, pid, len(entry["revisions"]), "suppressed", now, reason=melding["proposal_id"])
             _apply(scratch, record)
             records.append(record)
     return records
@@ -448,7 +453,7 @@ def _suppress(scratch: Dict[str, Dict[str, Any]], project_id: str, oorzaak: str,
 def reopen_with_note(state_dir: Path, project_id: str, pid: str, *, note: str, decided_by: str,
                      now: Optional[str] = None) -> Dict[str, Any]:
     """Reopen a rejected proposal on a note of the operator (ADR-084): a ``reopened`` record with the content of
-    the latest revision. Refused for any other status, an empty note, ``system``, or a stored hard stop."""
+    the latest revision. Refused for an empty note or ``system``; ``_apply`` refuses another status or a hard stop."""
     project_id = _require_project(project_id)
     if not _text(note) or _text(decided_by).lower() in ("", "system"):
         raise DecisionRefused("reopen_with_note needs a note and an operator as decided_by")
@@ -458,12 +463,9 @@ def reopen_with_note(state_dir: Path, project_id: str, pid: str, *, note: str, d
         entry = state.get(pid)
         if entry is None or entry["project_id"] != project_id:
             raise ProposalNotFound(pid)
-        if entry["status"] != "rejected" or _melding_for(state, project_id, entry["oorzaak"]):
-            raise DecisionRefused(f"only a rejected proposal without a hard stop reopens, this one is {entry['status']}")
         latest = entry["revisions"][-1]
-        content = {"oorzaak": entry["oorzaak"], "artefact_soort": entry["artefact_soort"], "doelpad": entry["doelpad"],
-                   "voorstel": latest["voorstel"], **({"handelingsklasse": latest["handelingsklasse"]}
-                                                       if latest.get("handelingsklasse") else {})}
+        content = {**{n: entry[n] for n in ("oorzaak", "artefact_soort", "doelpad")},
+                   **{n: latest[n] for n in ("voorstel", "handelingsklasse") if n in latest}}
         record = _record(project_id, pid, len(entry["revisions"]) + 1, "reopened", stamp, reason=_text(note),
                          decided_by=_text(decided_by), **content)
         _commit(state_dir, state, [record])

@@ -367,3 +367,19 @@ def test_a_notification_is_only_acknowledged_and_still_suppresses(tmp_path):
     with pytest.raises(store.DecisionRefused):
         store.decide(tmp_path, "vnx-dev", pid, "acknowledged", reason="gezien", decided_by="op", now=T1)
     assert store.reconcile(tmp_path, "vnx-dev", [perm()], now=T2) == counts(suppressed_hard_stop=1)
+
+
+def test_every_writer_holds_the_hard_stop_and_the_class_rule_and_a_rebuild_keeps_them(tmp_path):
+    store.reconcile(tmp_path, "vnx-dev", [perm(), perm(kind="bouwgewoonte"), perm(oorzaak="y")], now=T0)
+    pids = {(e["oorzaak"], e["artefact_soort"]): e["proposal_id"] for e in store.proposals(tmp_path, "vnx-dev")}
+    store.decide(tmp_path, "vnx-dev", pids["permission_form:x", "bouwgewoonte"], "approved", reason="ja", decided_by="op", now=T1)
+    store.add_revision(tmp_path, "vnx-dev", melding(), now=T2)
+    (tmp_path / store.PROJECTION_FILENAME).unlink()  # the status is rebuilt from the records alone
+    assert sorted(store.get(tmp_path, "vnx-dev", p)["status"] for p in pids.values()) == ["pending"] + ["suppressed_hard_stop"] * 2
+    assert store.reconcile(tmp_path, "vnx-dev", [perm("K6", oorzaak="y")], now=T2) == counts(revised=1)
+    reject(tmp_path, pid := pids["y", "permissie"])
+    with pytest.raises(store.DecisionRefused): store.decide(tmp_path, "vnx-dev", pids["permission_form:x", "permissie"], "approved", reason="ja", decided_by="op")
+    with pytest.raises(store.DecisionRefused): store.add_revision(tmp_path, "vnx-dev", perm(kind="bouwer_allowlist"), now=T3)
+    with pytest.raises(store.DecisionRefused): store.add_revision(tmp_path, "vnx-dev", perm("K6", oorzaak="y"), reopen=True, now=T3)
+    assert store.reconcile(tmp_path, "vnx-dev", [perm("K6", ts=T3, oorzaak="y")], now=T3) == counts(suppressed_rejected=1)
+    assert [store.get(tmp_path, "vnx-dev", pid)[k] for k in ("status", "decided_revision")] == ["rejected", 2]
