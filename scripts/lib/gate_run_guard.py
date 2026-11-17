@@ -31,7 +31,9 @@ Two guards, one module:
   ``gate_execution_degenerate``, a timeout or a stall. A refusal that ran no
   reviewer (quota, capacity before start, a failed setup step) does not count.
   The count lives on the obligation record (``head_runs``) and starts again on
-  a new head. The obligation runner applies it (``gate_obligation_runner``).
+  a new head. Every run is counted where it launches, ``execute_gate``
+  (:func:`book_reviewer_run`), whoever started it; the obligation runner
+  enforces the cap before its own launches (``gate_obligation_runner``).
 
 Lock files never accumulate without bound. A clean release unlinks the file
 while it still holds the lock; a taker that opened the old file before that
@@ -57,7 +59,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
-from gate_obligations import REASON_DEGENERATE_RETRY_CAP
+from gate_obligations import (
+    REASON_DEGENERATE_RETRY_CAP,
+    STATUS_PENDING,
+    obligation_matches_pr,
+    obligation_path,
+    update_obligation,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +93,7 @@ _PARTIAL_REVIEW_STATUS = "partial_review"
 FORCE_RERUN_USAGE = '--force-rerun --reason "..."'
 
 _UNSAFE_KEY_CHARS = re.compile(r"[^A-Za-z0-9_.-]")
+_SAFE_DISPATCH_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 _UNKNOWN_HEAD = "unknown-head"
 _NO_PROJECT = "_"
 # A taker whose file was replaced between its open and its lock tries again on
@@ -372,6 +381,46 @@ def cap_detail(gate: str, pr_number: Any, dispatch_id: str, head_runs: Dict[str,
         f"resets the count; an operator rerun is gate_obligation_runner.py --dispatch-prefix {dispatch_id} "
         f"{FORCE_RERUN_USAGE}"
     )
+
+
+def book_reviewer_run(
+    state_dir: Path, *, dispatch_id: Any, gate: str, pr_ref: Any, head_sha: str, result: Optional[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    """Count one finished run on its obligation's ``head_runs``; the updated record, or ``None`` when nothing counted.
+
+    Called by ``execute_gate`` under the run lock, so a run counts once
+    whoever started it. Only a run of a request that names a dispatch whose
+    obligation is for this gate and this PR, still pending, on a known head,
+    and in which the reviewer ran (:func:`reviewer_ran`). The run that
+    reaches the cap writes ``degenerate_retry_cap`` and its detail; it refuses
+    nothing, the runner decides on the next launch. An id that is no plain
+    file name and an unreadable obligation count nothing and are logged.
+    """
+    dispatch_id = str(dispatch_id or "").strip()
+    if not dispatch_id or gate == "ci_gate" or not head_sha or not reviewer_ran(result):
+        return None
+    if not _SAFE_DISPATCH_ID.match(dispatch_id) or ".." in dispatch_id:
+        logger.warning("gate_run_guard: dispatch id %r is no plain name: run not counted", dispatch_id)
+        return None
+    path = obligation_path(state_dir, dispatch_id)
+    if not path.is_file():
+        return None
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        logger.warning("gate_run_guard: obligation %s unreadable, %s run not counted: %s", path.name, gate, exc)
+        return None
+    if not isinstance(record, dict) or record.get("gate") != gate or record.get("status") != STATUS_PENDING:
+        return None
+    names_pr = record.get("pr_number") is not None or record.get("pr_id")
+    if names_pr and not obligation_matches_pr(record, pr_ref):
+        return None
+    head_runs = next_head_runs(record.get("head_runs"), head_sha, result or {})
+    fields: Dict[str, Any] = {"head_runs": head_runs}
+    if cap_reached(head_runs, head_sha):
+        fields.update(reason=REASON_RETRY_CAP, reason_detail=cap_detail(gate, pr_ref, dispatch_id, head_runs))
+        logger.warning("gate_run_guard: %s", fields["reason_detail"])
+    return update_obligation(path, **fields)
 
 
 def force_rerun_record(reason: str, *, head_sha: str, set_by: str) -> Dict[str, Any]:

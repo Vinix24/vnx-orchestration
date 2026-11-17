@@ -205,7 +205,8 @@ runner fulfils them:
       while this launch was on its way is used, never run over; (c) the retry
       cap: at most ``gate_run_guard.MAX_REVIEWER_RUNS_PER_HEAD`` runs on one
       head in which the reviewer ran without a bookable verdict
-      (:func:`_book_reviewer_run`), after which the obligation stays pending
+      (counted at the launch point, ``execute_gate``; read back here by
+      :func:`_report_cap_reached`), after which the obligation stays pending
       under ``degenerate_retry_cap`` and reports ``retry_capped`` until the
       head changes. A refusal that ran no reviewer (quota, capacity, a setup
       failure) does not count. A run on a head that already has a decided,
@@ -3793,38 +3794,25 @@ def _park_at_cap(
     return {"action": ACTION_RETRY_CAPPED, "detail": detail, "reason": REASON_DEGENERATE_RETRY_CAP}
 
 
-def _book_reviewer_run(
-    path: Path,
-    head_sha: str,
-    result_data: Optional[Dict[str, Any]],
-    outcome: Dict[str, Any],
-    *,
-    gate: str,
-    pr_number: int,
-    dispatch_id: str,
+def _report_cap_reached(
+    path: Path, head_sha: str, result_data: Optional[Dict[str, Any]], outcome: Dict[str, Any],
+    *, gate: str, pr_number: int, dispatch_id: str,
 ) -> None:
-    """R10: count a run in which the reviewer ran on ``head_sha`` without a bookable verdict.
+    """R10: report ``retry_capped`` when this run brought the obligation to the cap on ``head_sha``.
 
-    Only a pending obligation counts, only on a known head, and only a result
-    in which the reviewer ran (``gate_run_guard.reviewer_ran``: a degenerate
-    verdict, a timeout, a stall, a partial review). A quota or capacity refusal
-    and a failed setup step ran no reviewer and leave the count alone. The run
-    that reaches the cap parks the obligation under ``degenerate_retry_cap``
-    and reports ``retry_capped``.
+    ``execute_gate`` counted the run (``gate_run_guard.book_reviewer_run``);
+    this reads the count back, never counts again. Only a pending obligation,
+    only a known head, only a run in which the reviewer ran. The temporary
+    refusal booked just before wrote its own reason, so :func:`_park_at_cap`
+    writes ``degenerate_retry_cap`` back.
     """
     if not head_sha or not gate_run_guard.reviewer_ran(result_data):
         return
     fresh = _read_obligation_record(path)
     if not fresh or fresh.get("status") != STATUS_PENDING:
         return
-    head_runs = gate_run_guard.next_head_runs(fresh.get("head_runs"), head_sha, result_data or {})
-    if not gate_run_guard.cap_reached(head_runs, head_sha):
-        update_obligation(path, head_runs=head_runs)
-        return
-    detail = gate_run_guard.cap_detail(gate, pr_number, dispatch_id, head_runs)
-    update_obligation(path, head_runs=head_runs, reason=REASON_DEGENERATE_RETRY_CAP, reason_detail=detail)
-    _LOG.warning("gate_obligation_runner: %s", detail)
-    outcome.update(action=ACTION_RETRY_CAPPED, detail=detail, reason=REASON_DEGENERATE_RETRY_CAP)
+    if gate_run_guard.cap_reached(fresh.get("head_runs"), head_sha):
+        outcome.update(_park_at_cap(path, fresh, gate=gate, pr_number=pr_number, dispatch_id=dispatch_id))
 
 
 def _apply_force_rerun(
@@ -4467,9 +4455,8 @@ def _fulfill_temporary_refusal(
         )
         outcome["action"] = "not_executable"
         outcome["detail"] = escalation_detail
-    # R10: a reviewer that ran without a bookable verdict counts toward
-    # the retry cap of this head; the run that reaches it parks the obligation.
-    _book_reviewer_run(
+    # R10: execute_gate counted the run; the run that reached the cap parks the obligation.
+    _report_cap_reached(
         path, head_sha_before_run, result_data, outcome, gate=gate, pr_number=pr_number,
         dispatch_id=dispatch_id,
     )

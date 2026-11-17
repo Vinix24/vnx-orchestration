@@ -50,7 +50,8 @@ class GateExecutorMixin:
         run, nothing written, never a pass. Under the lock the round ledger is
         read again (:meth:`_verdict_landed_on_head`): a verdict another run
         booked on this head while this request waited is the answer, not a
-        second run.
+        second run. A finished run is counted on its obligation's ``head_runs``
+        here (``gate_run_guard.book_reviewer_run``); the count refuses nothing.
         """
         import gate_run_guard
         from gate_runner import GateRunner
@@ -73,6 +74,9 @@ class GateExecutorMixin:
             return request_payload
 
         head_sha = str(request_payload.get("commit_sha") or "")
+        # Taken before the run: the harness lane overwrites the payload's
+        # dispatch_id with its own gate-run id (gate_runner._run_harness_lane_path).
+        dispatch_id = request_payload.get("dispatch_id")
         pr_ref = pr_number if pr_number is not None else pr_id
         with gate_run_guard.held_run(self.state_dir, pr_ref=pr_ref, gate=gate, head_sha=head_sha) as lock:
             if not lock.acquired:
@@ -92,12 +96,13 @@ class GateExecutorMixin:
                 reports_dir=self.reports_dir,
                 project_root=Path(self.paths["PROJECT_ROOT"]),
             )
-            return runner.run(
-                gate=gate,
-                request_payload=request_payload,
-                pr_number=pr_number,
-                pr_id=pr_id,
+            result = runner.run(gate=gate, request_payload=request_payload, pr_number=pr_number, pr_id=pr_id)
+            # R10: the one place a run is counted on its obligation, whoever started it.
+            gate_run_guard.book_reviewer_run(
+                self.state_dir, dispatch_id=dispatch_id, gate=gate,
+                pr_ref=pr_ref, head_sha=head_sha, result=result,
             )
+            return result
 
     def _verdict_landed_on_head(
         self, gate: str, request_payload: Dict[str, Any], pr_number: Optional[int], head_sha: str,
