@@ -3747,8 +3747,8 @@ def _recheck_under_lock(
     """``(refusal, evidence)`` for a launch that holds the run lock; both ``None``: it runs.
 
     In this order: an obligation another runner already booked is not run
-    again; without a force-rerun, an obligation at the cap on this head is
-    parked (:func:`_park_at_cap`) unless it is :func:`_passed_over`, and a decided, complete-evidence verdict
+    again; without a force-rerun, an obligation at the retry cap on this head
+    is parked (:func:`_park_at_cap`) unless :func:`_passed_over`, and a decided, complete-evidence verdict
     on this head that landed since the pre-execution decision is booked
     (:func:`_book_existing_evidence`) instead of run over.
     """
@@ -3789,6 +3789,13 @@ def _passed_over(record: Dict[str, Any], head_sha: str, result: Any = None, gate
     runs, cap = record.get("head_runs"), REASON_VERDICT_WITHOUT_FINDINGS_RETRY_CAP
     ran = [e for e in (result or {}).get("gates") or [] if e.get("gate") == gate and e.get("request_status") == "requested"]
     return record.get("reason") == cap == gate_run_guard.cap_reason(runs) and gate_run_guard.cap_reached(runs, head_sha) and not ran
+
+
+def _temporary_refusal_or_hop(record, head_sha: str, result: Any, declared: Tuple[str, str, Any], gate: str, pr_number):
+    """:func:`_temporary_refusal` of the declared record, or, when the seat went on (:func:`_passed_over`), the cap reason: that record is old and is not judged."""
+    if _passed_over(record, head_sha, result, gate):
+        return REASON_VERDICT_WITHOUT_FINDINGS_RETRY_CAP, f"{gate} passed over on head {head_sha[:8]} (ADR-080 besluit 3); its successor has no verdict yet", None
+    return (*_temporary_refusal(gate, pr_number, declared[0], declared[1]), declared[2])
 
 
 def _park_at_cap(
@@ -4923,12 +4930,8 @@ def _fulfill_run_gate(
         _drop_provider_not_installed_result(
             result_file, result_status, result_reason, gate=gate, pr_number=pr_number)
 
-        temp_reason, temp_detail = _temporary_refusal(gate, pr_number, result_status, result_reason)
-        if _passed_over(launch.record, head_sha_before_run, result, gate):
-            # The declared gate did not run: its record is the old one. Its seat is the successor's.
-            temp_reason, temp_detail, result_data = REASON_VERDICT_WITHOUT_FINDINGS_RETRY_CAP, (
-                f"{gate} passed over on head {head_sha_before_run[:8]} (ADR-080 besluit 3); its takeover "
-                "successor has no decided verdict on this head yet"), None
+        temp_reason, temp_detail, result_data = _temporary_refusal_or_hop(
+            launch.record, head_sha_before_run, result, (result_status, result_reason, result_data), gate, pr_number)
         if temp_reason is not None:
             return _fulfill_temporary_refusal(
                 path, outcome, temp_reason, temp_detail, manager=manager, gate=gate,

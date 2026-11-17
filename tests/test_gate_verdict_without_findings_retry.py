@@ -329,8 +329,6 @@ def test_a_runner_tick_at_the_cap_runs_the_successor_never_the_declared_gate(
     record = json.loads(path.read_text(encoding="utf-8"))
     assert record["status"] == status and record["reason"] == reason and record["head_runs"] == runs
     assert json.loads(codex.read_text()) == dict(VWF, gate="codex_gate", commit_sha=HEAD_A)
-    if last_reason == "gate_execution_degenerate":
-        assert outcome["action"] == "retry_capped" and manager.calls == []
-    else:
-        assert outcome["action"] != "retry_capped" and manager.asked == ["codex_gate"]
-        assert [call["review_stack"] for call in manager.calls] == [["kimi_gate"]]
+    capped = last_reason == "gate_execution_degenerate"  # only the degenerate cap parks and calls nothing
+    assert (outcome["action"] == "retry_capped") is capped and getattr(manager, "asked", None) == (None if capped else ["codex_gate"])
+    assert [call["review_stack"] for call in manager.calls] == ([] if capped else [["kimi_gate"]])
