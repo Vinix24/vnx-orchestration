@@ -185,3 +185,7 @@ Een regel in `cli_invocations.ndjson` bevat `ts`, `invocation_id`, `project_id`,
 - **Een korte termijn van 30 dagen.** Afgewezen: een voorstel dat drie weken open staat, verliest dan het voorvenster van zijn effectmeting.
 - **De shellgeschiedenis lezen voor B4b.** Afgewezen: te breed en er staat privéwerk in. De CLI-ledger dekt de vnx-CLI, de rest is `unknown`.
 - **Een centrale tabel in Supabase.** Afgewezen voor nu: niets in deze track heeft gegevens over projecten heen nodig, en lokale bestanden houden de gegevens op de machine. Een latere tabel is een nieuw besluit onder ADR-007.
+
+## Aanvulling L6: één keten in de dream-stap
+
+`scripts/lib/permission_chain.py::run_permission_chain` draait in de dream-stap, na de steering-stap, in vaste volgorde: scan (7 dagen), koppelen, berekenen, wegschrijven. Koppelen: een `asked`-gebeurtenis (B4a) en de eerste `executed` CLI-aanroep van `actor_class operator` met dezelfde `vorm`, van het moment van de vraag tot 30 minuten later. Een aanroep koppelt aan hooguit één vraag; passen twee vragen op één aanroep, dan koppelt geen van beide en telt de aanroep als `ambiguous`. Een ontbrekende aanroep is `unpaired`, nooit "Vincent deed het niet"; een onleesbare B4b-ledger is `unknown` in de dekking. De keten schrijft `state/permission_chain.json` en faalt nooit dream: een fout is `status: "error"` met de stap. `t0_index.json` (`t0_index/1.6`) draagt `permission_proposals` (open voorstellen en meldingen, hooguit 5, de rest als `more`) en het nachtelijke digest een sectie "Permissievoorstellen".
