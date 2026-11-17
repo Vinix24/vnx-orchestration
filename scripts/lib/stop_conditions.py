@@ -84,6 +84,7 @@ from failure_classification import GATE_QUOTA_REFUSAL_REASON as QUOTA_REFUSAL_RE
 # there too. Importing it from gate_artifacts would pull gate_recorder and yaml
 # and break this module's standalone-importable contract.
 from failure_classification import VERDICT_ENTRY_PREFIX  # noqa: E402
+from failure_classification import VERDICT_WITHOUT_FINDINGS  # noqa: E402
 
 try:
     from failure_classification import FAILURE_CLASSES as _KNOWN_FAILURE_CLASSES
@@ -727,6 +728,12 @@ _UNBUILT_GATE_REASONS = frozenset({"gate_runner_missing"})
 # it is still reported loudly (a non-triggering notice, never a silent skip).
 _EXTERNAL_TRANSIENT_GATE_REASONS = frozenset({QUOTA_REFUSAL_REASON})
 
+# A rejection that carries no finding at all (ADR-080 besluit 4) is booked as
+# ``unavailable`` with this reason. It is no verdict, so it is no recurring
+# cause either: excluded from the streak (it neither counts toward it nor
+# breaks it) and reported loudly in its own bucket.
+_VERDICT_WITHOUT_FINDINGS_REASONS = frozenset({VERDICT_WITHOUT_FINDINGS})
+
 DEFAULT_REPEAT_THRESHOLD = 3
 
 
@@ -798,7 +805,8 @@ def _gate_result_cause(record: Dict[str, Any]) -> Optional[FrozenSet[str]]:
 
 
 def _classify_gate_record(record: Dict[str, Any]) -> Tuple[str, Optional[FrozenSet[str]]]:
-    """Bucket one review_gates result for E6: ``unbuilt``, ``exhausted`` or ``counted``.
+    """Bucket one review_gates result for E6: ``unbuilt``, ``exhausted``,
+    ``no_verdict`` or ``counted``.
 
     _gate_result_cause reports what the record honestly says, for any
     infra-fail reason alike (for an advisory-only rejection that is the
@@ -812,7 +820,10 @@ def _classify_gate_record(record: Dict[str, Any]) -> Tuple[str, Optional[FrozenS
         ITSELF, usually at a date the provider states out loud
         (D-gate-quota-105245). Halting on it stays broken for exactly as long
         as the provider's window lasts.
-    Both are reported as loud, non-triggering notices — excluded from the
+      - verdict_without_findings: a rejection with zero findings is no
+        verdict and no recurring cause (ADR-080 besluit 4); bucket
+        ``no_verdict``.
+    All three are reported as loud, non-triggering notices — excluded from the
     streak, never silently dropped.
     """
     cause = _gate_result_cause(record)
@@ -825,6 +836,8 @@ def _classify_gate_record(record: Dict[str, Any]) -> Tuple[str, Optional[FrozenS
         return "unbuilt", cause
     if cause_reason in _EXTERNAL_TRANSIENT_GATE_REASONS:
         return "exhausted", cause
+    if cause_reason in _VERDICT_WITHOUT_FINDINGS_REASONS:
+        return "no_verdict", cause
     return "counted", cause
 
 
@@ -862,6 +875,7 @@ def _excluded_gate_notices(
     check_id: str,
     unbuilt_gate_records: Dict[str, List[Tuple[datetime, Any]]],
     exhausted_gate_records: Dict[str, List[Tuple[datetime, Any]]],
+    no_verdict_gate_records: Optional[Dict[str, List[Tuple[datetime, Any]]]] = None,
 ) -> List[StopConditionResult]:
     """Loud, non-triggering notices for the records kept out of the streak.
 
@@ -872,6 +886,8 @@ def _excluded_gate_notices(
     (VNX_REVIEW_GATE_TAKEOVER_CHAIN), not a stop condition. Both are
     _unmeasurable-shaped, a status that can never tip _combine's verdict to
     TRIGGERED, so each is a loud non-event, never a silent one or a halt.
+    A third bucket, ``no_verdict`` (reason ``verdict_without_findings``), is a
+    rejection that named nothing: no verdict, so no recurring cause.
     """
     notices: List[StopConditionResult] = []
     for gate, records in unbuilt_gate_records.items():
@@ -895,6 +911,18 @@ def _excluded_gate_notices(
                 f"(reason:{QUOTA_REFUSAL_REASON}, {len(records)}x gezien, meest recente PR #{newest_pr}) "
                 f"— externe, tijdelijke oorzaak, telt niet mee als systemische herhaling",
                 gate=gate, reason=QUOTA_REFUSAL_REASON, count=len(records), newest_pr=newest_pr,
+            )
+        )
+    for gate, records in (no_verdict_gate_records or {}).items():
+        records.sort(key=lambda r: r[0])
+        newest_pr = records[-1][1]
+        notices.append(
+            _unmeasurable(
+                f"{check_id}:{VERDICT_WITHOUT_FINDINGS}:{gate}",
+                f"gate '{gate}' wees af zonder bevinding "
+                f"(reason:{VERDICT_WITHOUT_FINDINGS}, {len(records)}x gezien, meest recente PR #{newest_pr}) "
+                f"— geen uitkomst en geen terugkerende oorzaak, telt niet mee in de reeks",
+                gate=gate, reason=VERDICT_WITHOUT_FINDINGS, count=len(records), newest_pr=newest_pr,
             )
         )
     return notices
@@ -943,6 +971,7 @@ def check_repeated_gate_failure_cause(
     by_gate: Dict[str, List[Tuple[datetime, Any, Optional[FrozenSet[str]]]]] = {}
     unbuilt_gate_records: Dict[str, List[Tuple[datetime, Any]]] = {}
     exhausted_gate_records: Dict[str, List[Tuple[datetime, Any]]] = {}
+    no_verdict_gate_records: Dict[str, List[Tuple[datetime, Any]]] = {}
     for fp in files:
         try:
             d = json.loads(fp.read_text(encoding="utf-8"))
@@ -961,16 +990,18 @@ def check_repeated_gate_failure_cause(
             unbuilt_gate_records.setdefault(gate, []).append((ts, d.get("pr_number")))
         elif bucket == "exhausted":
             exhausted_gate_records.setdefault(gate, []).append((ts, d.get("pr_number")))
+        elif bucket == "no_verdict":
+            no_verdict_gate_records.setdefault(gate, []).append((ts, d.get("pr_number")))
         else:
             by_gate.setdefault(gate, []).append((ts, d.get("pr_number"), cause))
 
-    if not by_gate and not unbuilt_gate_records and not exhausted_gate_records:
+    if not by_gate and not unbuilt_gate_records and not exhausted_gate_records and not no_verdict_gate_records:
         return _unmeasurable(check_id, "geen bruikbare gate-resultaten met geldige recorded_at gevonden")
 
     sub_results: List[StopConditionResult] = [
         _gate_window_result(check_id, gate, entries, n) for gate, entries in by_gate.items()
     ]
-    sub_results.extend(_excluded_gate_notices(check_id, unbuilt_gate_records, exhausted_gate_records))
+    sub_results.extend(_excluded_gate_notices(check_id, unbuilt_gate_records, exhausted_gate_records, no_verdict_gate_records))
     return _combine(check_id, sub_results, sub_key="per_gate")
 
 
