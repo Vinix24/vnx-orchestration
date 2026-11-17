@@ -107,8 +107,8 @@ def test_lock_held_by_another_process_skips_without_waiting(tmp_path):
 @pytest.mark.parametrize(
     "gz_bytes,outcome",
     [
-        (gzip.compress(b"one\n") + gzip.compress(b"two\nthree"), "pair_removed_plain"),  # equal, two members
-        (gzip.compress(b"one\ntw"), "pair_recompressed"),  # a prefix
+        (gzip.compress(b"one\n", mtime=0) + gzip.compress(b"two\nthree", mtime=0), "pair_removed_plain"),  # equal, two members
+        (gzip.compress(b"one\ntw", mtime=0), "pair_recompressed"),  # a prefix
     ],
 )
 def test_pair_equal_or_prefix_ends_in_one_gz_of_the_plain(tmp_path, gz_bytes, outcome):
@@ -119,7 +119,7 @@ def test_pair_equal_or_prefix_ends_in_one_gz_of_the_plain(tmp_path, gz_bytes, ou
     assert gzip.decompress((tmp_path / "d1.ndjson.gz").read_bytes()) == b"one\ntwo\nthree"
 
 
-@pytest.mark.parametrize("gz_bytes", [gzip.compress(b"other\n"), gzip.compress(b"one\ntwo\nthree\nfour\n"), b"not gzip"])
+@pytest.mark.parametrize("gz_bytes", [gzip.compress(b"other\n", mtime=0), gzip.compress(b"one\ntwo\nthree\nfour\n", mtime=0), b"not gzip"])
 def test_pair_anything_else_or_unreadable_is_divergent_and_removes_nothing(tmp_path, gz_bytes):
     plain = _plain(tmp_path, "d1", b"one\ntwo\nthree\n")
     gz = tmp_path / "d1.ndjson.gz"
