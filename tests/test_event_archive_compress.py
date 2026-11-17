@@ -252,3 +252,16 @@ def test_gz_changed_after_the_compare_is_changed_and_the_compare_runs_outside_th
     assert held and not any(held)
     assert _outcomes(result) == [("d1.ndjson", "skipped", "changed")]
     assert plain.read_bytes() == b"one\ntwo\n" and _names(tmp_path) == ["d1.ndjson", "d1.ndjson.gz"]
+
+
+def test_a_symlinked_plain_file_is_no_candidate_and_its_target_is_untouched(tmp_path):
+    outside = tmp_path / "outside"
+    target = _plain(outside, "t", b"keep\n")
+    directory = tmp_path / "T1"
+    directory.mkdir()
+    link = directory / "old.ndjson"
+    link.symlink_to(target)
+    assert eac.candidates([directory], 7, now=lambda: NOW) == []
+    _round(directory)
+    assert target.read_bytes() == b"keep\n" and link.is_symlink()
+    assert not (outside / "t.ndjson.gz").exists() and not (directory / "old.ndjson.gz").exists()

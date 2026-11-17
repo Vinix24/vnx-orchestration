@@ -939,6 +939,19 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
+def _archive_dirs_inside(archive: Path) -> list:
+    """Real directories under *archive*; a symlink or a directory resolving outside it is logged and skipped."""
+    if not archive.is_dir():
+        return []
+    root, dirs = archive.resolve(), []
+    for entry in sorted(archive.iterdir()):
+        if entry.is_symlink() or not entry.resolve().is_relative_to(root):
+            print(f"cleanup_reviewed_worktrees: archiefmap overgeslagen: {entry} -> {entry.resolve()}", file=sys.stderr)
+        elif entry.is_dir():
+            dirs.append(entry)
+    return dirs
+
+
 def compress_event_archive(repo_root: Path) -> None:
     """The daily archive round of ADR-081, fail-open: it never raises and never
     changes the sweep's exit code. Every outcome is one or more stderr lines."""
@@ -948,7 +961,7 @@ def compress_event_archive(repo_root: Path) -> None:
         from vnx_data_footprint_probe import compress_days
 
         archive = vnx_paths.resolve_data_root(repo_root) / "events" / "archive"
-        dirs = sorted(d for d in archive.iterdir() if d.is_dir()) if archive.is_dir() else []
+        dirs = _archive_dirs_inside(archive)
         result = compress_archive_round(dirs, compress_days())
     except Exception as exc:  # vnx-silent-except: fail-open by ADR-081, the failure is logged by type and message
         print(f"cleanup_reviewed_worktrees: archiefcompressie mislukt: {type(exc).__name__}: {exc}", file=sys.stderr)

@@ -601,6 +601,21 @@ class TestArchiveCompressionSweep:
         assert gzip.decompress(plain.with_name("d1.ndjson.gz").read_bytes()) == b'{"a":1}\n'
         assert "archiefcompressie {'compressed': 1} gestopt=done" in err
 
+    def test_a_symlinked_terminal_directory_is_skipped_and_logged(self, fx, monkeypatch, tmp_path, capsys):
+        real = self._archive(tmp_path, "d1", b'{"a":1}\n')
+        archive = real.parent.parent
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        target = outside / "old.ndjson"
+        target.write_bytes(b"keep\n")
+        old = time.time() - 30 * 86400
+        os.utime(target, (old, old))
+        (archive / "T2").symlink_to(outside, target_is_directory=True)
+        _, err = self._released(fx, monkeypatch, tmp_path, capsys)
+        assert target.read_bytes() == b"keep\n" and not (outside / "old.ndjson.gz").exists()
+        assert f"archiefmap overgeslagen: {archive / 'T2'} -> {outside.resolve()}" in err
+        assert not real.exists() and real.with_name("d1.ndjson.gz").exists()
+
     def test_dry_run_compresses_nothing(self, fx, tmp_path):
         plain = self._archive(tmp_path, "d1", b'{"a":1}\n')
         assert crw.main(["--repo-root", str(fx.repo), "--json"]) == 0

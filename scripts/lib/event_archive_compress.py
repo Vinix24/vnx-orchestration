@@ -214,10 +214,16 @@ def _replace_under_lock(res, plain, gz, snap, gz_snap, kind, scratch) -> FileRes
     return res
 
 
+def _contained(directory: Path, pattern: str) -> List[Path]:
+    """Files matching *pattern* that are not symlinks and resolve inside *directory*."""
+    root = directory.resolve()
+    return [p for p in directory.glob(pattern) if not p.is_symlink() and p.resolve().is_relative_to(root)]
+
+
 def candidates(directories: Iterable[Path], days: float, now: Callable[[], float] = time.time) -> List[Path]:
     """Plain archive files with an mtime more than *days* old, oldest first."""
     cutoff, found = now() - days * 86400, []
-    for path in (p for d in directories for p in Path(d).glob("*" + ARCHIVE_SUFFIX)):
+    for path in (p for d in directories for p in _contained(Path(d), "*" + ARCHIVE_SUFFIX)):
         snap = _snap(path)
         if snap is not None and path.is_file() and snap[2] / 1e9 < cutoff:
             found.append((snap[2], path))
