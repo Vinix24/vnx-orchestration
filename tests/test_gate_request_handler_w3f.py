@@ -480,3 +480,47 @@ class TestContractFlowDispatchIdTopLevel:
 
         assert "dispatch_id" in payload, "dispatch_id must always be present in ci_gate contract payload"
         assert payload["dispatch_id"] == ""
+
+
+# ---------------------------------------------------------------------------
+# reviews-zonder-uitkomst D4, step 0: does a run started outside the obligation
+# runner count on the obligation record (head_runs)?
+# ---------------------------------------------------------------------------
+
+class TestRequestAndExecuteCountsOnTheObligation:
+    @pytest.mark.xfail(
+        strict=True,
+        reason=(
+            "measured: head_runs is written only by gate_obligation_runner._book_reviewer_run; "
+            "review_gate_manager request-and-execute -> GateExecutor.execute_gate -> GateRunner.run "
+            "books no obligation (no GateObligation reaches commit_gate_outcome there), so a manual "
+            "run is not counted against the per-head cap. D4 stops here for the T0 to decide."
+        ),
+    )
+    def test_a_reviewer_run_outside_the_runner_updates_head_runs(self, manager_env, monkeypatch):
+        import gate_obligations
+
+        head = "ab" * 20
+        dispatch_id = "d4-step0"
+        state_dir = manager_env["state_dir"]
+        monkeypatch.chdir(manager_env["project_root"])
+        obligation = gate_obligations.register_obligation(
+            state_dir, dispatch_id=dispatch_id, gate="codex_gate", pr_number=7, branch="fix/step0",
+        )
+        assert obligation is not None
+        request = manager_env["requests_dir"] / "pr-7-codex_gate.json"
+        request.write_text(json.dumps({
+            "gate": "codex_gate", "pr_number": 7, "status": "requested",
+            "commit_sha": head, "dispatch_id": dispatch_id,
+        }))
+        degenerate = {
+            "gate": "codex_gate", "pr_number": 7, "status": "unavailable",
+            "reason": "gate_execution_degenerate", "commit_sha": head,
+        }
+        manager = _make_manager()
+        with patch("gate_runner.GateRunner.run", return_value=degenerate):
+            manager.execute_gate(gate="codex_gate", pr_number=7)
+
+        head_runs = json.loads(obligation.read_text()).get("head_runs") or {}
+        assert head_runs.get("head_sha") == head
+        assert head_runs.get("reviewer_runs") == 1
