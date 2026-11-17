@@ -44,7 +44,6 @@ _KNOWN_BACKLOG: dict[str, int] = {
     "context_rotation.py": 2,
     "dispatch_broker.py": 1,
     "dispatch_cli.py": 1,
-    "event_store.py": 1,
     "headless_dispatch_writer.py": 1,
     "health_beacon.py": 1,
     "injection_effectiveness_probe.py": 1,

@@ -1195,7 +1195,9 @@ class TestEndOfRunArchive:
         assert not live.exists()
         # No scratch file of any name beside the archive, and the archive keeps
         # the live stream's mode, as archive()'s copy2 gives it (not mkstemp's 0600).
-        assert [p.name for p in dest.parent.iterdir()] == [dest.name]
+        assert sorted(p.name for p in dest.parent.iterdir()) == sorted(
+            [dest.name, event_store.ARCHIVE_LOCK_NAME]
+        )
         assert stat.S_IMODE(dest.stat().st_mode) == live_mode
         # A second call finds nothing of this dispatch left: idempotent.
         assert store.archive_completed_stream(TERMINAL, self.DID) is None
@@ -1288,12 +1290,12 @@ class TestEndOfRunArchive:
             def no_sync(_fd):
                 raise OSError(28, "No space left on device")
             monkeypatch.setattr(event_store.os, "fsync", no_sync)
-            expected = []
+            expected = [event_store.ARCHIVE_LOCK_NAME]
         else:
             # A directory where the archive file belongs: the move onto it fails.
             (archive_dir / f"{self.DID}.ndjson").mkdir(parents=True)
             (archive_dir / f"{self.DID}.ndjson" / "occupant").write_text("x\n")
-            expected = [f"{self.DID}.ndjson"]
+            expected = sorted([f"{self.DID}.ndjson", event_store.ARCHIVE_LOCK_NAME])
         store = event_store.EventStore(events_dir=events_dir)
         assert store.archive_completed_stream(TERMINAL, self.DID) is None
         assert sorted(p.name for p in archive_dir.iterdir()) == expected
