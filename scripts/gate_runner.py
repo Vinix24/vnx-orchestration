@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import re
+import secrets
 import select
 import shlex
 import shutil
@@ -180,7 +181,21 @@ _RULE_TEXT = {
 }
 # The gate worktree has a random name and does not exist when the prompt is built; the prompt
 # carries this token and ``_run_with_stall_detection`` swaps in the real path at the spawn.
-GATE_WORKTREE_TOKEN = "@@VNX_GATE_WORKTREE@@"
+# The token is random per process, so a PR diff cannot carry it in advance, and the fill-in
+# (``_fill_worktree_token``) only touches the tests block that ``_review_tests_block`` appends
+# last: a literal ``@@VNX_GATE_WORKTREE@@`` in the diff, title or body stays literal.
+GATE_WORKTREE_TOKEN = f"@@VNX_GATE_WORKTREE_{secrets.token_hex(8)}@@"
+_TESTS_BLOCK_HEADER = "\n\n## Running the PR's tests\n\n"
+
+
+def _fill_worktree_token(prompt: str, worktree: Path) -> str:
+    """Swap ``GATE_WORKTREE_TOKEN`` for the worktree path, inside the tests block only.
+    The block is the tail of the prompt, from its last header. Without that header the prompt
+    comes back unchanged (fail closed): nothing outside the block is ever substituted."""
+    head, sep, block = prompt.rpartition(_TESTS_BLOCK_HEADER)
+    if not sep:
+        return prompt
+    return head + sep + block.replace(GATE_WORKTREE_TOKEN, str(worktree))
 
 
 def _imports_pytest(candidate: Optional[str]) -> bool:
@@ -420,7 +435,7 @@ def _review_tests_block(interpreter: Optional[str], diff_text: str = "", *, rule
     for path in refused_paths:
         body += ("- PYTHONPATH entry left out of the command because it is not a safe relative "
                  f"path (shell metacharacter, whitespace, absolute or `..`): {json.dumps(path)}\n")
-    return "\n\n## Running the PR's tests\n\n" + body + _NEVER_BLOCKING
+    return _TESTS_BLOCK_HEADER + body + _NEVER_BLOCKING
 
 
 # The dispatcher (plan_gate_panel._make_default_dispatcher) reports a provider_dispatch
@@ -1932,7 +1947,7 @@ class GateRunner:
         # The run's one resolution (kept on the request since the prompt was built); no probe here.
         interpreter = _run_interpreter(request_payload, self._project_root)[0] if gate == "codex_gate" else None
         if cwd and prompt:
-            prompt = prompt.replace(GATE_WORKTREE_TOKEN, str(cwd))
+            prompt = _fill_worktree_token(prompt, cwd)
         spawn_env = None if not interpreter else {**os.environ, "VNX_REVIEW_PYTHON": interpreter}
         start = time.monotonic()
         try:
