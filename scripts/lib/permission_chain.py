@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import io
 import json
-import os
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -21,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import cli_invocations
+from atomic_io import atomic_write_text
 import permission_events as pe
 import permission_proposals as proposals_lib
 
@@ -94,10 +94,7 @@ def pair(events: List[Dict[str, Any]], invocations: Optional[List[Dict[str, Any]
 
 def _write_report(state_dir: Path, report: Dict[str, Any]) -> None:
     path = Path(state_dir) / REPORT_FILE
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(json.dumps(report, sort_keys=True, indent=2) + "\n", encoding="utf-8")
-    os.replace(tmp, path)
+    atomic_write_text(path, json.dumps(report, sort_keys=True, indent=2) + "\n")
 
 
 def run_permission_chain(state_dir: Path, project_id: str, projects_root: Path, now: Optional[datetime] = None) -> Dict[str, Any]:
