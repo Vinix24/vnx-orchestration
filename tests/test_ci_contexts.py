@@ -5,7 +5,9 @@ Two measured cases anchor this file and they look identical from the outside:
   #1691 — five of fourteen required contexts were never created during an
           Actions outage. ``gh pr checks`` showed nine passes, zero fails.
   #1701 — twelve of fourteen green, Profile B and Profile C absent because
-          both declare ``needs: profile-a`` and profile-a had not finished.
+          both declared ``needs: profile-a`` and profile-a had not finished.
+          Since pr-ci-onder-zes-minuten C1 the real vnx-ci.yml no longer has
+          that edge; only the fixture graphs reproduce this shape now.
 
 The first must block loudly. The second must say "wait". A guard that
 collapses them is either useless or blocks every PR in its first minutes.
@@ -122,18 +124,19 @@ def test_graph_on_missing_directory_is_an_error_not_an_empty_pass(tmp_path):
     assert graph.parse_errors and "not found" in graph.parse_errors[0]
 
 
-def test_real_vnx_ci_still_gates_profile_b_and_c_behind_profile_a():
-    """The #1701 fact this module is calibrated against, guarded in place.
+def test_real_vnx_ci_does_not_gate_profile_b_and_c_behind_profile_a():
+    """Profile B and C start with the run (pr-ci-onder-zes-minuten C1).
 
-    If vnx-ci.yml ever drops ``needs: profile-a`` from Profile B/C, the
-    waiting_upstream classification stops describing this repo and the guard
-    silently changes meaning.
+    Neither uses an output or artifact of Profile A, so the ``needs`` edge is
+    gone and a missing B/C context in this repo is no longer
+    ``waiting_upstream``. The generic waiting_upstream logic stays covered by
+    the fixture graphs below.
     """
     graph = cc.parse_workflow_graph(REPO_ROOT / ".github" / "workflows")
     for context in ("Profile B (snapshot integration)", "Profile C (adoption smoke tests)"):
         node = graph.by_context[context]
         assert node.workflow_file == "vnx-ci.yml"
-        assert "profile-a" in node.needs
+        assert "profile-a" not in node.needs
 
 
 # ---------------------------------------------------------------------------
