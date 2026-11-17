@@ -591,6 +591,52 @@ class TestRepeatedGateFailureCause:
         result = check_repeated_gate_failure_cause(results_dir, n=3)
         assert result.status != CheckStatus.TRIGGERED
 
+    def test_verdict_without_findings_streak_does_not_trigger_and_is_loud(self, tmp_path):
+        # ADR-080 besluit 4: a rejection without findings is no verdict and no
+        # recurring cause: no E6, exactly one loud notice for the gate.
+        results_dir = tmp_path / "results"
+        results_dir.mkdir()
+        for i, pr in enumerate([3001, 3002, 3003]):
+            d = _gate_result(pr, "codex_gate", status="unavailable", reason="verdict_without_findings", recorded_at=f"2026-09-0{i+1}T00:00:00Z")
+            (results_dir / f"pr-{pr}-codex_gate.json").write_text(json.dumps(d))
+        result = check_repeated_gate_failure_cause(results_dir, n=3)
+        assert result.status != CheckStatus.TRIGGERED
+        per_gate = result.evidence["per_gate"]
+        notices = [k for k in per_gate if "verdict_without_findings" in k]
+        assert notices == ["repeated_gate_failure_cause:verdict_without_findings:codex_gate"]
+        notice = per_gate[notices[0]]
+        assert notice["status"] == CheckStatus.UNMEASURABLE.value
+        assert notice["evidence"]["count"] == 3
+        assert notice["evidence"]["newest_pr"] == 3003
+        assert notice["evidence"]["gate"] == "codex_gate"
+
+    def test_verdict_without_findings_record_neither_counts_nor_breaks_streak(self, tmp_path):
+        # Absence of a verdict says nothing about the cause: two real failures
+        # plus the reclassified record do not trigger (it does not count), and
+        # a third real failure with the same cause triggers although the
+        # reclassified record sits inside the window (it does not break it).
+        results_dir = tmp_path / "results"
+        results_dir.mkdir()
+        recs = [
+            (4001, "provider_not_installed", "2026-09-01T00:00:00Z"),
+            (4002, "verdict_without_findings", "2026-09-02T00:00:00Z"),
+            (4003, "provider_not_installed", "2026-09-03T00:00:00Z"),
+        ]
+        for pr, reason, ts in recs:
+            d = _gate_result(pr, "codex_gate", status="unavailable", reason=reason, recorded_at=ts)
+            (results_dir / f"pr-{pr}-codex_gate.json").write_text(json.dumps(d))
+        assert check_repeated_gate_failure_cause(results_dir, n=3).status != CheckStatus.TRIGGERED
+        d = _gate_result(4004, "codex_gate", status="unavailable", reason="provider_not_installed", recorded_at="2026-09-04T00:00:00Z")
+        (results_dir / "pr-4004-codex_gate.json").write_text(json.dumps(d))
+        assert check_repeated_gate_failure_cause(results_dir, n=3).status == CheckStatus.TRIGGERED
+
+    def test_verdict_without_findings_classified_in_own_bucket(self):
+        record = {"status": "unavailable", "reason": "verdict_without_findings"}
+        assert sc._classify_gate_record(record)[0] == "no_verdict"
+        # Unknown / missing reason stays counted (fail-closed on evidence).
+        assert sc._classify_gate_record({"status": "unavailable", "reason": "other"})[0] == "counted"
+        assert sc._classify_gate_record({"status": "unavailable"})[0] == "counted"
+
     def test_different_gates_scored_independently(self, tmp_path):
         # codex_gate stays clean; kimi_gate has the 3x repeat — overall must
         # still trigger (any-sub-triggered wins), and the untriggered gate
