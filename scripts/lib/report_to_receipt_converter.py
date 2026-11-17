@@ -942,13 +942,21 @@ def _run_fail_closed_checks(
     violations: List[str] = []
 
     # Check 1: v1 frontmatter validation
+    # The import sits in its own try: an unbound SchemaViolation in the handler
+    # below crashed the whole converter (OI-2975). A missing module is a named
+    # violation, never a skip.
     try:
         from unified_report_schema import validate_frontmatter, SchemaViolation
-        validate_frontmatter(text)
-    except SchemaViolation as exc:
-        violations.append(f"frontmatter_v1: {exc}")
-    except ImportError:
-        pass  # schema module not available — skip check rather than crash
+    except ImportError as exc:
+        violations.append(
+            f"frontmatter_v1: schema module unavailable "
+            f"({type(exc).__name__}: {str(exc)[:120]})"
+        )
+    else:
+        try:
+            validate_frontmatter(text)
+        except SchemaViolation as exc:
+            violations.append(f"frontmatter_v1: {exc}")
 
     # Check 2: body contract headings (re-verify via the existing validator)
     if not body_result.valid:
