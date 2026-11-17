@@ -43,8 +43,9 @@ def _bind(state):
 
 
 def _propose(state, kind="regel", text="v1", now="2026-11-15T08:00:00Z", **kw):
-    rec = sps.add_revision(state, P, {"oorzaak": "o", "artefact_soort": kind, "doelpad": "d.md", "voorstel": text},
-                           now=now, **kw)
+    klasse = {"handelingsklasse": "K1"} if kind == "permissie" else {}  # ADR-084: permissie carries its class
+    rec = sps.add_revision(state, P, {"oorzaak": "o", "artefact_soort": kind, "doelpad": "d.md", "voorstel": text,
+                                      **klasse}, now=now, **kw)
     return rec["proposal_id"]
 
 
@@ -326,3 +327,16 @@ def test_an_empty_ledger_is_an_empty_history_and_a_clean_one_still_closes(env):
     rcv.record_merge_approval(state, v, "vincent")
     res = _read(rd.read_cap_verdict, env, head_of=lambda pr: HEAD)
     assert len(res["closed"]) == 1 and _lines(queue, "closed")[0]["uitkomst"] == "beantwoord"
+
+
+def test_a_suppressed_proposal_closes_and_a_notification_asks_to_see_never_to_approve(env):
+    _, state, queue = env
+    _bind(state)
+    _propose(state, kind="permissie")
+    opened = _read(rd.read_steering, env)[1]["opened"]
+    sps.reconcile(state, P, [{"oorzaak": "o", "artefact_soort": sps.MELDING_KIND, "doelpad": "d.md",
+                              "voorstel": "harde stop"}], now="2026-11-15T09:00:00Z")
+    six = _read(rd.read_steering, env)[1]
+    assert six["closed"] == opened and _points(queue)[opened[0]]["state"] == "vervallen"
+    vraag = _points(queue)[six["opened"][0]]["vraag"]
+    assert "gezien" in vraag and "goedkeuren" not in vraag

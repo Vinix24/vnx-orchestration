@@ -131,13 +131,19 @@ def _steer_entry(ctx: "_Ctx", res: Dict[str, Any], entry: Dict[str, Any], record
         if rec is not None:
             bewijs = f"{rec['decision']} revisie {rec['revision']} op {rec['decided_at']} ({rec['decision_id']})"
             _close(res, ctx.project_id, point["point_id"], "beantwoord", bewijs, rec["decided_by"], ctx.now, ctx.state_dir)
+        elif entry["status"] == "suppressed_hard_stop":
+            _close(res, ctx.project_id, point["point_id"], "vervallen", "onderdrukt door een harde stop", "onbekend",
+                   ctx.now, ctx.state_dir)
         elif point["revisie"] < current:
             _close(res, ctx.project_id, point["point_id"], "vervallen", f"vervangen door revisie {current}", "onbekend",
                    ctx.now, ctx.state_dir)
     if entry["status"] == "pending" and not any(p["revisie"] == current for p in mine):
-        vraag = f"Steering-voorstel ({entry['artefact_soort']}) voor {entry['doelpad']}: goedkeuren of afwijzen?"
-        _open(res, ctx.project_id, ref, current, vraag, "approved, rejected of applied in de steering-store",
-              entry["revisions"][current - 1]["recorded_at"], ctx.now, ctx.state_dir)
+        melding = entry["artefact_soort"] == sps.MELDING_KIND  # a point to see, never to approve
+        vraag = (f"Melding (harde stop) voor {entry['doelpad']}: gezien?" if melding else
+                 f"Steering-voorstel ({entry['artefact_soort']}) voor {entry['doelpad']}: goedkeuren of afwijzen?")
+        _open(res, ctx.project_id, ref, current, vraag, "acknowledged in de steering-store" if melding else
+              "approved, rejected of applied in de steering-store", entry["revisions"][current - 1]["recorded_at"],
+              ctx.now, ctx.state_dir)
 
 
 def read_steering(project_id: str, *, data_root: Optional[Path] = None, now: Optional[str] = None,
