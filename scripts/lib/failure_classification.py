@@ -143,6 +143,7 @@ GATE_QUOTA_REFUSAL_REASON = "lane_exhausted"
 # writer (gate_artifacts) and the reader (stop_conditions) import one literal
 # without stop_conditions pulling in the receipt stack.
 VERDICT_ENTRY_PREFIX = "verdict_without_blocking_finding"
+VERDICT_WITHOUT_FINDINGS = "verdict_without_findings"
 
 # Credit/balance exhaustion — matched on phrases actually observed in the
 # ledger (measured 2026-08-16, dispatch 20260816-p9p10-failure-reason-root):
