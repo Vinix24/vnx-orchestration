@@ -17,7 +17,8 @@ from governance_receipts import utc_now_iso
 import final_answer_verdict
 import gate_depth
 import gate_recorder
-from failure_classification import VERDICT_ENTRY_PREFIX
+import gate_status
+from failure_classification import VERDICT_ENTRY_PREFIX, VERDICT_WITHOUT_FINDINGS
 from gate_lane_contract import canonical_review_verdict
 from gate_outcome import GateOutcome, GateRequest, commit_gate_outcome
 from final_prompt_integrity import final_prompt_sha_for_dispatch
@@ -99,8 +100,13 @@ def format_report(
     request_payload: Dict[str, Any],
     blocking: Optional[List[Dict[str, Any]]] = None,
     advisory: Optional[List[Dict[str, Any]]] = None,
+    reclassification: Optional[str] = None,
 ) -> str:
     """Format gate output as a normalized headless report.
+
+    ``reclassification`` (ADR-080 besluit 1) is the writer-made Herclassificatie
+    section (:func:`_reclassification_section`), placed ahead of the raw output
+    so the report reader of besluit 2 finds it in the writer's part only.
 
     When ``blocking``/``advisory`` are not None (i.e. this gate's output
     actually carried the shared verdict-block shape — see OI-1763 above), a
@@ -126,6 +132,8 @@ def format_report(
     if blocking is not None or advisory is not None:
         lines.append(_format_findings_section(blocking or [], advisory or []))
         lines.append("")
+    if reclassification:
+        lines.extend([reclassification, ""])
     lines.extend([
         "## Gate Output",
         "",
@@ -208,6 +216,49 @@ def _with_verdict_entry(
         "line": 0,
     }
     return [*findings, entry]
+
+
+def is_verdict_without_findings(findings: List[Dict[str, Any]], canonical_verdict: str) -> bool:
+    """ADR-080 besluit 1: a ``fail`` or ``blocked`` with zero findings of ANY severity.
+
+    Such a run is booked ``unavailable`` with reason ``verdict_without_findings``
+    instead of getting the synthetic line of :func:`_with_verdict_entry`. One
+    finding, advisory included, keeps that line and the ``fail`` (OI-1938).
+    """
+    return canonical_verdict in ("fail", "blocked") and isinstance(findings, list) and not findings
+
+
+def _reclassification_section(raw_verdict: Any, execution_id: Any) -> str:
+    """The writer-made Herclassificatie section: raw verdict, reason and the record's ``execution_id``.
+
+    A request without a minted id writes ``(none)``: the report reader of
+    ADR-080 besluit 2 then finds no matching id and the report keeps blocking
+    the head, which is the fail-closed answer for an unidentifiable run.
+    """
+    from closure_verifier import RECLASSIFICATION_HEADING  # deferred: a heavy module, one constant
+
+    shown = execution_id if gate_status.is_execution_id(execution_id) else "(none)"
+    return "\n".join([
+        RECLASSIFICATION_HEADING, "",
+        f"execution_id: {shown}",
+        f"raw_verdict: {str(raw_verdict).strip()!r}",
+        f"reason: {VERDICT_WITHOUT_FINDINGS}",
+    ])
+
+
+def _reclassify_payload(result_payload: Dict[str, Any], gate: str, raw_verdict: Any) -> None:
+    """Turn a completed payload into the ``unavailable`` record of ADR-080 besluit 1."""
+    result_payload.update(
+        status="unavailable",
+        reason=VERDICT_WITHOUT_FINDINGS,
+        reason_detail=(
+            f"verdict {str(raw_verdict).strip()!r} with zero findings of any severity: no "
+            "statement anyone can act on, booked as absence (ADR-080 besluit 1)"
+        ),
+        summary=f"{gate} {VERDICT_WITHOUT_FINDINGS} — NOT a verdict",
+        raw_verdict=str(raw_verdict).strip(),
+        required_reruns=[gate],
+    )
 
 
 def _verdict_is_required(gate: str) -> bool:
@@ -487,8 +538,15 @@ def _write_result_record(
     result_payload: Dict[str, Any],
     report_file: Path,
     request: Optional[GateRequest] = None,
+    *,
+    reclassified: bool = False,
 ) -> Optional[str]:
     """Write result JSON, its receipt and ``request``'s end in one commit (GE-4b); error detail or None.
+
+    ``reclassified`` (ADR-080 besluit 1): the ``unavailable`` record of a
+    rejection without findings books its own ``review_gate_result`` receipt
+    (``gate_status: unavailable``, ``reason: verdict_without_findings``) in the
+    same commit, through the undecided-receipt hook of ``commit_gate_outcome``.
 
     OI-1472: this was the last PRODUCTION writer of a
     ``review_gates/results/`` record still calling ``write_text`` directly,
@@ -515,9 +573,13 @@ def _write_result_record(
         if result_file is None:
             raise ValueError("pr_number or pr_id required")
         json.loads(json.dumps(result_payload, indent=2))  # verify valid JSON (GATE-12 step 5)
+        receipt_fields = {"reason": VERDICT_WITHOUT_FINDINGS} if reclassified else None
         _payload_on_disk, written = commit_gate_outcome(
-            GateOutcome.from_record(gate, result_payload, pr_id=pr_id, downgraded=True),
+            GateOutcome.from_record(
+                gate, result_payload, pr_id=pr_id, downgraded=True, receipt_fields=receipt_fields,
+            ),
             results_dir=results_dir, result_path=result_file, request=request,
+            book_undecided_receipt=reclassified,
         )
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         _cleanup_orphan_report(report_file)
@@ -643,7 +705,11 @@ def materialize_artifacts(
             verdict = _verdict_from_block(recovery.verdict)
     findings, residual_risk, findings_parsed, raw_verdict = verdict
     canonical_verdict = canonical_review_verdict(raw_verdict)
-    findings = _with_verdict_entry(findings, canonical_verdict, raw_verdict)
+    # ADR-080 besluit 1: a rejection with zero findings is absence, booked
+    # `unavailable`; only a rejection with at least one finding gets the line.
+    reclassified = findings_parsed and is_verdict_without_findings(findings, canonical_verdict)
+    if not reclassified:
+        findings = _with_verdict_entry(findings, canonical_verdict, raw_verdict)
     blocking, advisory = _classify_findings(findings)
 
     report_file = Path(report_path)
@@ -651,6 +717,9 @@ def materialize_artifacts(
         gate, stdout, request_payload,
         blocking=blocking if findings_parsed else None,
         advisory=advisory if findings_parsed else None,
+        reclassification=_reclassification_section(
+            raw_verdict, request_payload.get(gate_status.EXECUTION_ID_FIELD),
+        ) if reclassified else None,
     )
     if recovery is not None and recovery.recovered:
         # One truth on disk: the door's agreement check (invariant 7) and the
@@ -689,7 +758,7 @@ def materialize_artifacts(
         requests_dir=requests_dir, results_dir=results_dir, reports_dir=reports_dir,
         _fail=_fail, report_file=report_file, findings=findings, blocking=blocking,
         advisory=advisory, residual_risk=residual_risk, raw_verdict=raw_verdict,
-        canonical_verdict=canonical_verdict, recovery=recovery,
+        canonical_verdict=canonical_verdict, recovery=recovery, reclassified=reclassified,
     )
 
 
@@ -701,6 +770,7 @@ def _refuse_or_book_run(
     blocking: List[Dict[str, Any]], advisory: List[Dict[str, Any]],
     residual_risk: str, raw_verdict: Any, canonical_verdict: str,
     recovery: Optional[final_answer_verdict.FinalAnswerVerdict],
+    reclassified: bool = False,
 ) -> Dict[str, Any]:
     """The tail of :func:`materialize_artifacts` once its report is on disk and valid.
 
@@ -786,6 +856,7 @@ def _refuse_or_book_run(
         _fail=_fail, report_file=report_file, findings=findings, blocking=blocking,
         advisory=advisory, residual_risk=residual_risk, raw_verdict=raw_verdict,
         canonical_verdict=canonical_verdict, recovery=recovery, depth=depth,
+        reclassified=reclassified,
     )
 
 
@@ -798,8 +869,14 @@ def _book_completed_run(
     residual_risk: str, raw_verdict: Any, canonical_verdict: str,
     recovery: Optional[final_answer_verdict.FinalAnswerVerdict],
     depth: gate_depth.ExecutionDepth,
+    reclassified: bool = False,
 ) -> Dict[str, Any]:
-    """Build the result payload of a run that cleared every refusal, write it and its sidecar."""
+    """Build the result payload of a run that cleared every refusal, write it and its sidecar.
+
+    ``reclassified`` (ADR-080 besluit 1): the run said fail or blocked with zero
+    findings. It is booked ``unavailable``/``verdict_without_findings`` with its
+    own ``review_gate_result`` receipt, and no register event: it is no verdict.
+    """
     contract_hash = _compute_contract_hash(request_payload, gate)
     now = utc_now_iso()
 
@@ -820,7 +897,7 @@ def _book_completed_run(
     # OI-1851: a clean run on a cut diff it did not read the rest of reviewed
     # PART of the PR (#1915). A rejection of the part it saw still stands.
     coverage_gap = gate_depth.coverage_gap(depth)
-    partial = bool(coverage_gap) and not blocking
+    partial = bool(coverage_gap) and not blocking and not reclassified
     if partial:
         logger.warning(
             "gate_artifacts: %s run pr=%s covers part of the diff only — %s",
@@ -870,15 +947,20 @@ def _book_completed_run(
         result_payload["dispatch_id"] = real_dispatch_id
     _stamp_run_settings(result_payload, request_payload, gate)
     _stamp_verdict_source(result_payload, raw_verdict, recovery)
+    if reclassified:
+        _reclassify_payload(result_payload, gate, raw_verdict)
 
     request = GateRequest(requests_dir, request_payload, {"completed_at": now})
-    if (write_err := _write_result_record(results_dir, gate, pr_number, pr_id, result_payload, report_file, request)):
+    if (write_err := _write_result_record(
+        results_dir, gate, pr_number, pr_id, result_payload, report_file, request, reclassified=reclassified,
+    )):
         return gate_recorder.record_failure_simple(
             **_fail, reason="artifact_materialization_failed", reason_detail=write_err,
         )
 
     _write_pipeline_sidecar(reports_dir, result_payload, real_dispatch_id, gate, pr_number, pr_id)
-    _emit_register_event(gate, canonical_verdict, blocking, real_dispatch_id, pr_number, pr_id)
+    if not reclassified:
+        _emit_register_event(gate, canonical_verdict, blocking, real_dispatch_id, pr_number, pr_id)
     return result_payload
 
 

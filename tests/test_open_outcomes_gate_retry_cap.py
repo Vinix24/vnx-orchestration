@@ -74,11 +74,24 @@ def test_a_capped_obligation_is_an_open_point_of_its_own_kind(tmp_path):
     assert item["last_seen"] == "2026-10-21T13:13:18+00:00"
 
 
+@pytest.mark.parametrize("fields", [{}, {"reason_detail": None}], ids=["with-detail", "without-detail"])
+def test_a_verdict_without_findings_cap_is_listed_the_same_way(tmp_path, fields):
+    state_dir = tmp_path / "state"
+    _obligation(state_dir, "dlv-d5-vwf", reason="verdict_without_findings_retry_cap", **fields)
+
+    [item] = _section(state_dir)["items"]
+
+    assert item["kind"] == "gate_retry_cap" and item["outcome"] == "retry_cap"
+    assert item["reason"] == ("verdict_without_findings_retry_cap" if fields else DETAIL)
+
+
 @pytest.mark.parametrize("fields", [
+    {"reason": "verdict_without_findings_retry_cap", "status": "fulfilled"},
+    {"reason": "verdict_without_findings"},
     {"project_id": OTHER},
     {"reason": "gate_run_unavailable"},
     {"status": "fulfilled"},
-], ids=["other-project", "not-capped", "terminal"])
+], ids=["vwf-cap-terminal", "vwf-not-capped", "other-project", "not-capped", "terminal"])
 def test_only_this_projects_pending_obligation_at_the_cap_is_listed(tmp_path, fields):
     state_dir = tmp_path / "state"
     _obligation(state_dir, "20261021-other", **fields)

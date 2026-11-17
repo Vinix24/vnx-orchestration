@@ -187,6 +187,30 @@ class TestTheHop:
         )
         assert reader is None and [h["gate"] for h in path] == ["codex_gate"]
 
+    def test_oi2984_an_empty_chain_at_the_cap_ends_in_the_named_state_not_a_third_run(self, env, monkeypatch):
+        _run_once(env)
+        _run_once(env)
+
+        reader, path, _ = _manager()._resolve_seat_reader("codex_gate", PR, {}, {}, _PrHead(PR, HEAD_SHA))
+        assert reader is None and [(h["gate"], h["reason"]) for h in path] == [("codex_gate", CAP)]
+
+        monkeypatch.setattr(gate_request_handler, "_build_review_gate_takeover_chain", lambda: {})
+        answer = _manager().request_and_execute(
+            pr_number=PR, branch=BRANCH, review_stack=["codex_gate"], risk_class="medium",
+            changed_files=["scripts/lib/example.py"], mode="per_pr", dispatch_id=DID,
+        )
+
+        assert [run["gate"] for run in env["runs"]] == ["codex_gate", "codex_gate"]
+        exhausted = json.loads((env["results_dir"] / f"pr-{PR}-codex_gate-chain-exhausted.json").read_text())
+        assert exhausted["status"] == "chain_exhausted" and exhausted["takeover_path"][0]["reason"] == CAP
+        assert [(e["gate"], e["request_status"]) for e in answer["gates"]] == [("codex_gate", "chain_exhausted")]
+
+    def test_oi2984_an_empty_chain_below_the_cap_still_reads_its_own_seat(self, env):
+        _run_once(env)
+
+        reader, path, _ = _manager()._resolve_seat_reader("codex_gate", PR, {}, {}, _PrHead(PR, HEAD_SHA))
+        assert reader == "codex_gate" and path == []
+
     @pytest.mark.parametrize("mutate", [
         lambda r: r.pop("head_runs"),
         lambda r: r.update(head_runs="x"),

@@ -1663,6 +1663,9 @@ class GateRequestHandlerMixin:
         reads another seat of this request: it has nobody to hand the seat to,
         so the seat has no distinct reviewer (``reader`` ``None``). A gate that
         shares the builder's vendor (R7) has nobody to hand the seat to either.
+        Nor has a gate at ``verdict_without_findings_retry_cap`` on this head
+        (OI-2984, ADR-080 besluit 3): with no successor the seat ends in the
+        named chain-exhausted state, never in a third run of that gate.
         """
         refusal = self._seat_switch_refusal(gate)
         if gate in chain:
@@ -1671,9 +1674,9 @@ class GateRequestHandlerMixin:
             )
         if gate in held:
             return None, [_held_seat_hop(gate, held[gate])], None
-        vendor_hop = vendor_match_hop(gate, builder)
-        if vendor_hop is not None:
-            return None, [vendor_hop], None
+        end_hop = vendor_match_hop(gate, builder) or self._verdict_without_findings_hop(gate, pr_number, head)
+        if end_hop is not None:
+            return None, [end_hop], None
         return gate, [], refusal
 
     def _request_seat_reader(
