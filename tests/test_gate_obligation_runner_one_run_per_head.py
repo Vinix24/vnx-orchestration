@@ -36,6 +36,7 @@ for p in (ROOT / "scripts" / "lib", ROOT / "scripts", ROOT):
         sys.path.insert(0, str(p))
 
 import gate_obligation_runner as runner  # noqa: E402
+import gate_run_guard  # noqa: E402
 from gate_obligations import (  # noqa: E402
     STATUS_FULFILLED,
     STATUS_PENDING,
@@ -67,7 +68,8 @@ class _ScriptedManager:
     """``request_and_execute`` writes the next scripted result record for the declared gate; no gate runs.
 
     The record carries the head the run was launched on (``head["sha"]`` at
-    call time), as ``gate_recorder.stamp_request_identity`` stamps it.
+    call time), as ``gate_recorder.stamp_request_identity`` stamps it, and is
+    counted on the obligation as ``execute_gate`` counts it.
     """
 
     def __init__(self, state_dir: Path, results: List[Dict[str, Any]], head: Dict[str, str]) -> None:
@@ -92,6 +94,11 @@ class _ScriptedManager:
             )
             record = {"gate": gate, "pr_number": pr_number, "commit_sha": self.head["sha"], **payload}
             self._result_path(gate, pr_number).write_text(json.dumps(record), encoding="utf-8")
+            # What execute_gate, the launch point, books after a run (R10).
+            gate_run_guard.book_reviewer_run(
+                self.state_dir, dispatch_id=dispatch_id, gate=gate, pr_ref=pr_number,
+                head_sha=self.head["sha"], result=record,
+            )
         return {"pr_number": pr_number, "branch": branch, "gates": [], "has_required_failure": False}
 
 
