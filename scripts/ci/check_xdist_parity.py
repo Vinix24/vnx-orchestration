@@ -925,25 +925,31 @@ def completeness_differences(serial: Phase, parallel: Phase, expected: set) -> d
                         + [{"nodeid": n, "problem": "collection outcome in both phases"}
                            for n in _collection_nodes(serial) & _collection_nodes(parallel)])
     for phase in (serial, parallel):
-        for k, executions in phase.executions.items():
-            if len(executions) > 1:
-                out["run_more_than_once"].append(
-                    {"nodeid": phase.nodeid_by_key.get(k, f"{k[0]}::{k[1]}"), "phase": phase.name,
-                     "executions": len(executions)})
-        out["not_run"] += [{"nodeid": nodeid, "phase": phase.name}
-                           for k, nodeid in phase.nodeid_by_key.items() if k not in phase.executions]
-        for outcome in phase.manifest["collection_outcomes"]:
-            if outcome["outcome"] == "failed":
-                out["collection_outcome_failed"].append(
-                    {"nodeid": outcome["nodeid"], "phase": phase.name, "reason": outcome["reason"]})
+        phase_differences(phase, expected, out)
     for k in set(serial.executions) & set(parallel.executions):
         out["run_more_than_once"].append(
             {"nodeid": serial.nodeid_by_key.get(k, f"{k[0]}::{k[1]}"), "phases": ["serial", "parallel"]})
-    for phase in (serial, parallel):
-        out["unexpected_skip"] += [entry for entry in phase_skips(phase) if entry["nodeid"] not in expected]
-    for kind in COMPLETENESS_KINDS:
-        out[kind] = sorted(out[kind], key=lambda entry: json.dumps(entry, sort_keys=True))
-    return out
+    return _sorted_kinds(out)
+
+
+def phase_differences(phase: Phase, expected: set, out: dict) -> None:
+    """What one phase shows by itself: a test run twice or not run, a failed collection, an unexpected skip."""
+    for k, executions in phase.executions.items():
+        if len(executions) > 1:
+            out["run_more_than_once"].append(
+                {"nodeid": phase.nodeid_by_key.get(k, f"{k[0]}::{k[1]}"), "phase": phase.name,
+                 "executions": len(executions)})
+    out["not_run"] += [{"nodeid": nodeid, "phase": phase.name}
+                       for k, nodeid in phase.nodeid_by_key.items() if k not in phase.executions]
+    for outcome in phase.manifest["collection_outcomes"]:
+        if outcome["outcome"] == "failed":
+            out["collection_outcome_failed"].append(
+                {"nodeid": outcome["nodeid"], "phase": phase.name, "reason": outcome["reason"]})
+    out["unexpected_skip"] += [entry for entry in phase_skips(phase) if entry["nodeid"] not in expected]
+
+
+def _sorted_kinds(out: dict) -> dict:
+    return {kind: sorted(entries, key=lambda entry: json.dumps(entry, sort_keys=True)) for kind, entries in out.items()}
 
 
 def completeness_summary(verdict: dict) -> str:
