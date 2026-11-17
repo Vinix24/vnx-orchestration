@@ -9,7 +9,7 @@ would touch (``candidates``): it opens no file for writing and takes no lock.
 With ``--apply`` it runs ``compress_archive_round(..., manual=True)``.
 
 Exit codes:
-  0  clean
+  0  clean (a skipped outside_store entry is not divergent)
   1  any other failure (a failed read or write)
   2  usage or resolution error (unknown project, no archive directory)
   3  at least one pair is divergent (never removed, only reported)
@@ -22,7 +22,7 @@ import json
 import os
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
 
@@ -30,18 +30,43 @@ import event_archive_compress as eac
 from vnx_data_footprint_probe import DEFAULT_COMPRESS_DAYS
 from vnx_paths import resolve_central_data_dir
 
+OUTSIDE_STORE = "outside_store"
+
 EPILOG = (
     "exit codes: 0 clean; 1 any other failure; 2 usage or resolution error; "
     "3 at least one divergent pair (never removed, only reported)"
 )
 
 
-def _directories(archive: Path) -> List[Path]:
-    found = [archive]
-    for root, dirs, _files in os.walk(archive):
+def _skip_row(path: Path) -> Dict[str, Any]:
+    print(f"skipped outside_store: {path} -> {os.path.realpath(path)}", file=sys.stderr)
+    return {"path": str(path), "outcome": eac.SKIPPED, "reason": OUTSIDE_STORE,
+            "bytes_before": 0, "bytes_after": 0}
+
+
+def _directories(archive: Path) -> Tuple[List[Path], List[Dict[str, Any]]]:
+    """Real directories whose resolved path stays under the store, plus the skipped entries.
+
+    A symlinked directory, a directory resolving outside the store, and a directory
+    holding a symlinked archive file (the library's glob would follow it and cannot
+    be told to leave one file out) are skipped whole and never reach the library.
+    """
+    root, found, skipped = archive.resolve(), [], []
+    walked = [archive]
+    for cur, dirs, _files in os.walk(archive):
         dirs.sort()
-        found.extend(Path(root) / d for d in dirs)
-    return found
+        walked.extend(Path(cur) / d for d in dirs)
+    for d in walked:
+        if d.is_symlink() or not d.resolve().is_relative_to(root):
+            skipped.append(_skip_row(d))
+            continue
+        links = [f for f in sorted(d.glob("*" + eac.ARCHIVE_SUFFIX + "*"))
+                 if f.is_symlink() or not f.resolve().is_relative_to(root)]
+        if links:
+            skipped.extend(_skip_row(f) for f in links)
+            continue
+        found.append(d)
+    return found, skipped
 
 
 def _size(path: Optional[str]) -> int:
@@ -88,14 +113,14 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"no archive directory for project {args.project_id}: {archive}", file=sys.stderr)
         return 2
     try:
-        dirs = _directories(archive)
+        dirs, skipped_rows = _directories(archive)
         if args.apply:
             rnd = eac.compress_archive_round(dirs, args.days, manual=True)
-            rows, stopped = [_row(f) for f in rnd.files], rnd.stopped
+            rows, stopped = [_row(f) for f in rnd.files] + skipped_rows, rnd.stopped
         else:
             rows = [{"path": str(p), "outcome": "would_compress", "reason": None,
                      "bytes_before": _size(str(p)), "bytes_after": 0}
-                    for p in eac.candidates(dirs, args.days)]
+                    for p in eac.candidates(dirs, args.days)] + skipped_rows
             stopped = "done"
         report = _report(rows, "apply" if args.apply else "dry-run", stopped)
     except Exception as exc:  # the failure is reported and exits 1, never a clean 0

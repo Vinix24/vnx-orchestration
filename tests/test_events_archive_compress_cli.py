@@ -102,3 +102,49 @@ def test_failed_round_exits_1(store, monkeypatch, capsys):
     monkeypatch.setattr(cli.eac, "compress_archive_round", boom)
     assert cli.main(["--project-id", "demo", "--apply"]) == 1
     assert "disk read failed" in capsys.readouterr().err
+
+
+def _skipped_paths(capsys):
+    report = json.loads(capsys.readouterr().out)
+    return report, [r for r in report["files"] if r["reason"] == "outside_store"]
+
+
+@pytest.mark.parametrize("flags", [["--apply"], []])
+def test_symlinked_directory_is_never_followed(store, tmp_path, capsys, flags):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    victim = _plain(outside, "old", b'{"x":1}\n' * 50)
+    before = victim.read_bytes()
+    (store / "T9").symlink_to(outside, target_is_directory=True)
+    real = _plain(store / "T1", "real", b'{"r":1}\n' * 50)
+    assert cli.main(["--project-id", "demo", "--json", *flags]) == 0
+    report, skipped = _skipped_paths(capsys)
+    assert victim.read_bytes() == before and not list(outside.glob("*.gz"))
+    assert [s["outcome"] for s in skipped] == ["skipped"] and "T9" in skipped[0]["path"]
+    assert report["totals"]["skipped"] == 1
+    assert (not real.exists()) == bool(flags)
+
+
+def test_symlinked_file_is_never_followed(store, tmp_path, capsys):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    target = _plain(outside, "target", b'{"x":1}\n' * 50)
+    before = target.read_bytes()
+    link = store / "T1" / "link.ndjson"
+    link.symlink_to(target)
+    assert cli.main(["--project-id", "demo", "--apply", "--json"]) == 0
+    report, skipped = _skipped_paths(capsys)
+    assert target.read_bytes() == before and link.is_symlink() and not list(outside.glob("*.gz"))
+    assert not list((store / "T1").glob("*.gz"))
+    assert len(skipped) == 1 and skipped[0]["path"].endswith("link.ndjson")
+    assert report["totals"]["skipped"] == 1
+
+
+def test_real_subdirectory_is_still_compressed(store, capsys):
+    sub = store / "T1" / "deep"
+    sub.mkdir()
+    plain = _plain(sub, "a", b'{"a":1}\n' * 50)
+    assert cli.main(["--project-id", "demo", "--apply", "--json"]) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert not plain.exists() and (sub / "a.ndjson.gz").exists()
+    assert report["totals"]["skipped"] == 0
