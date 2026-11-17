@@ -83,7 +83,9 @@ phase manifests and XMLs of the same run and fails on a collected test that
 did not run, a test run more than once, a selection the two phases do not
 partition, a failed collection, or a skip whose key is not recorded in
 ``scripts/ci/xdist_expected_skips.txt``. Its verdict is
-``xdist-completeness-verdict.json``. Exit codes of ``compare`` and
+``xdist-completeness-verdict.json``. ``--shard-dir`` once per shard, in order,
+checks N shards of one run (C2b) and also fails on collected sets or plans that
+differ between shards, or a collected test in no shard or in two. Exit codes of ``compare`` and
 ``completeness``: the verdict's exit (0, 1, 2), or 0 when a compare run is not
 applicable (light profile); 2 with a reason on stderr, never a traceback, when
 an argument is malformed or the verdict or its summary cannot be written.
@@ -125,7 +127,7 @@ DIFFERENCE_KINDS = (
 )
 # phase (the file stem: junit-<phase>.xml, manifest-<phase>.json) -> the mode an
 # active manifest of that phase must record
-PHASE_MODES = {"full": "serial", "serial": "serial", "parallel": "xdist"}
+PHASE_MODES = {"full": "serial", "serial": "serial", "parallel": "xdist", "shard": "xdist"}
 PARITY_STEPS = ("checkout", "prelude", "selection", "download_reference", "download_candidate")
 # The comparison step (id ``parity``) exits after writing the verdict, so only
 # the record step after it can add its outcome; a recorded verdict carries all six.
@@ -142,6 +144,10 @@ COMPLETENESS_KINDS = (
     "unexpected_skip",
     "collection_outcome_failed",
 )
+# N shards of one run (C2b): the plan and the collection before the split, in each shard's directory
+SHARD_COMPLETENESS_KINDS = COMPLETENESS_KINDS + ("collected_differs", "source_differs")
+SHARD_PLAN_FILE = "args/shard.json"
+COLLECTED_FILE = "args/collected.json"
 CLASS_ORDER = ("fail", "xfail", "skip", "pass")
 _TEARDOWN_PREFIX = "failed on teardown with"
 _XPASS_AS_SKIPPED = "xfail-marked test passes unexpectedly"
@@ -925,25 +931,106 @@ def completeness_differences(serial: Phase, parallel: Phase, expected: set) -> d
                         + [{"nodeid": n, "problem": "collection outcome in both phases"}
                            for n in _collection_nodes(serial) & _collection_nodes(parallel)])
     for phase in (serial, parallel):
-        for k, executions in phase.executions.items():
-            if len(executions) > 1:
-                out["run_more_than_once"].append(
-                    {"nodeid": phase.nodeid_by_key.get(k, f"{k[0]}::{k[1]}"), "phase": phase.name,
-                     "executions": len(executions)})
-        out["not_run"] += [{"nodeid": nodeid, "phase": phase.name}
-                           for k, nodeid in phase.nodeid_by_key.items() if k not in phase.executions]
-        for outcome in phase.manifest["collection_outcomes"]:
-            if outcome["outcome"] == "failed":
-                out["collection_outcome_failed"].append(
-                    {"nodeid": outcome["nodeid"], "phase": phase.name, "reason": outcome["reason"]})
+        phase_differences(phase, expected, out)
     for k in set(serial.executions) & set(parallel.executions):
         out["run_more_than_once"].append(
             {"nodeid": serial.nodeid_by_key.get(k, f"{k[0]}::{k[1]}"), "phases": ["serial", "parallel"]})
-    for phase in (serial, parallel):
-        out["unexpected_skip"] += [entry for entry in phase_skips(phase) if entry["nodeid"] not in expected]
-    for kind in COMPLETENESS_KINDS:
-        out[kind] = sorted(out[kind], key=lambda entry: json.dumps(entry, sort_keys=True))
-    return out
+    return _sorted_kinds(out)
+
+
+def phase_differences(phase: Phase, expected: set, out: dict) -> None:
+    """What one phase shows by itself: a test run twice or not run, a failed collection, an unexpected skip."""
+    for k, executions in phase.executions.items():
+        if len(executions) > 1:
+            out["run_more_than_once"].append(
+                {"nodeid": phase.nodeid_by_key.get(k, f"{k[0]}::{k[1]}"), "phase": phase.name,
+                 "executions": len(executions)})
+    out["not_run"] += [{"nodeid": nodeid, "phase": phase.name}
+                       for k, nodeid in phase.nodeid_by_key.items() if k not in phase.executions]
+    for outcome in phase.manifest["collection_outcomes"]:
+        if outcome["outcome"] == "failed":
+            out["collection_outcome_failed"].append(
+                {"nodeid": outcome["nodeid"], "phase": phase.name, "reason": outcome["reason"]})
+    out["unexpected_skip"] += [entry for entry in phase_skips(phase) if entry["nodeid"] not in expected]
+
+
+def _sorted_kinds(out: dict) -> dict:
+    return {kind: sorted(entries, key=lambda entry: json.dumps(entry, sort_keys=True)) for kind, entries in out.items()}
+
+
+def read_shard(reader: PhaseReader, k: int, total: int, directory: Path) -> dict | None:
+    """Shard *k*'s plan, collected set and phases; None (the reasons in the reader's problems) when unusable."""
+    plan = read_json_object(directory / SHARD_PLAN_FILE)
+    if plan is None:
+        reader.problems.append(("missing_shard_plan", f"{directory / SHARD_PLAN_FILE} is missing or not a JSON object"))
+        return None
+    if not reader.current(SHARD_PLAN_FILE, plan):
+        return None
+    if (whole_number(plan.get("shard")) != k or whole_number(plan.get("shards")) != total
+            or not isinstance(plan.get("source"), str) or not plan["source"] or not isinstance(plan.get("assignment"), dict)):
+        reader.problems.append(("malformed_shard_plan", f"shard {plan.get('shard')!r} of {plan.get('shards')!r}, source "
+                                f"{plan.get('source')!r}; expected shard {k} of {total} with a source and an assignment"))
+        return None
+    try:
+        collected = load_manifest(directory / COLLECTED_FILE)
+    except EvidenceError as exc:
+        reader.problems.append((exc.reason, exc.detail))
+        return None
+    if not reader.current(COLLECTED_FILE, collected):
+        return None
+    if collected.get("collection_finished") is not True:
+        reader.problems.append(("collection_unfinished", "the collection before the split did not finish"))
+        return None
+    phases = [reader.load(directory, "shard")]
+    if k == 1:
+        phases.append(reader.load(directory, "serial"))
+    elif (directory / "manifest-serial.json").exists() or (directory / "junit-serial.xml").exists():
+        reader.problems.append(("serial_outside_shard_one", "serial-phase evidence; the serial list runs in shard 1 only"))
+    if None in phases:
+        return None
+    for phase in phases:
+        phase.name = f"shard-{k}" if phase.name == "shard" else f"shard-{k}-{phase.name}"
+    units = set(collected["nodeids"]) | {o["nodeid"] for o in collected["collection_outcomes"]}
+    return {"shard": k, "plan": plan, "collected": units, "phases": phases}
+
+
+def shard_differences(shards: list, expected: set) -> dict:
+    """Every way N shards of one run are not complete together."""
+    out = {kind: [] for kind in SHARD_COMPLETENESS_KINDS}
+    for shard in shards[1:]:
+        missing, extra = shards[0]["collected"] - shard["collected"], shard["collected"] - shards[0]["collected"]
+        if missing or extra:
+            out["collected_differs"].append({"shard": shard["shard"], "missing": sorted(missing), "extra": sorted(extra)})
+    if len({json.dumps([s["plan"]["source"], s["plan"]["assignment"]], sort_keys=True) for s in shards}) > 1:
+        out["source_differs"] = [{"shard": s["shard"], "source": s["plan"]["source"]} for s in shards]
+    owners, ran = {}, {}
+    for phase in (phase for shard in shards for phase in shard["phases"]):
+        for unit in set(phase.nodeids) | _collection_nodes(phase):
+            owners.setdefault(unit, []).append(phase.name)
+        for k in phase.executions:
+            ran.setdefault(k, []).append(phase)
+        phase_differences(phase, expected, out)
+    collected = set().union(*(shard["collected"] for shard in shards))
+    out["partition"] = [{"nodeid": unit, "problem": "in no shard"} for unit in collected - set(owners)]
+    out["partition"] += [{"nodeid": unit, "problem": "in more than one phase", "phases": names}
+                         for unit, names in owners.items() if len(names) > 1]
+    out["partition"] += [{"nodeid": unit, "problem": "not in the collected set", "phases": names}
+                         for unit, names in owners.items() if unit not in collected]
+    out["run_more_than_once"] += [{"nodeid": phases[0].nodeid_by_key.get(k, f"{k[0]}::{k[1]}"),
+                                   "phases": [phase.name for phase in phases]} for k, phases in ran.items() if len(phases) > 1]
+    return _sorted_kinds(out)
+
+
+def shards_completeness(reader: PhaseReader | None, dirs: list, expected: set, problems: list) -> tuple:
+    """(counts, differences or None) of N shard directories; each problem names its shard."""
+    shards = []
+    for k, directory in enumerate(dirs if reader is not None else [], start=1):
+        start = len(problems)
+        shards.append(read_shard(reader, k, len(dirs), directory))
+        problems[start:] = [(reason, f"shard {k}: {detail}") for reason, detail in problems[start:]]
+    counts = {phase.name: phase_counts(phase) for shard in shards if shard for phase in shard["phases"]}
+    usable = shards and None not in shards and not problems
+    return counts, (shard_differences(shards, expected) if usable else None)
 
 
 def completeness_summary(verdict: dict) -> str:
@@ -965,10 +1052,11 @@ def completeness_summary(verdict: dict) -> str:
 
 @dataclass
 class CompletenessInputs:
-    candidate_dir: Path
+    candidate_dir: Path | None
     constraints: Path
     expected_skips: Path
     meta: dict
+    shard_dirs: list = field(default_factory=list)
 
 
 def evaluate_completeness(inputs: CompletenessInputs) -> dict:
@@ -983,15 +1071,20 @@ def evaluate_completeness(inputs: CompletenessInputs) -> dict:
         problems.append(("unreadable_constraints", f"{inputs.constraints}: {exc}"))
     own = own_tool_problems(pins)
     problems.extend(own)
-    serial = parallel = None
+    serial = parallel = reader = None
     if not (own and own[0][0] == "pytest_unavailable"):
         reader = PhaseReader(pins, junit_key_function(),
                              (inputs.meta.get("run_id"), inputs.meta.get("run_attempt")), problems)
-        serial = reader.load(inputs.candidate_dir, "serial")
-        parallel = reader.load(inputs.candidate_dir, "parallel")
-    counts = {"serial": phase_counts(serial), "parallel": phase_counts(parallel)}
-    differences = (completeness_differences(serial, parallel, expected)
-                   if serial is not None and parallel is not None and not problems else None)
+    if inputs.shard_dirs:
+        verdict["shards"] = len(inputs.shard_dirs)
+        counts, differences = shards_completeness(reader, inputs.shard_dirs, expected, problems)
+    else:
+        if reader is not None:
+            serial = reader.load(inputs.candidate_dir, "serial")
+            parallel = reader.load(inputs.candidate_dir, "parallel")
+        counts = {"serial": phase_counts(serial), "parallel": phase_counts(parallel)}
+        differences = (completeness_differences(serial, parallel, expected)
+                       if serial is not None and parallel is not None and not problems else None)
     verdict.update(counts=counts, differences=differences,
                    invalid_evidence=[{"reason": reason, "detail": detail} for reason, detail in problems])
     has_differences = any(differences.values()) if differences else False
@@ -1002,9 +1095,10 @@ def evaluate_completeness(inputs: CompletenessInputs) -> dict:
 
 def _cmd_completeness(args) -> int:
     inputs = CompletenessInputs(
-        candidate_dir=Path(args.candidate),
+        candidate_dir=Path(args.candidate) if args.candidate else None,
         constraints=Path(args.constraints),
         expected_skips=Path(args.expected_skips),
+        shard_dirs=[Path(d) for d in args.shard_dir or []],
         meta={"head_sha": args.head_sha, "tested_sha": args.tested_sha, "run_id": args.run_id,
               "run_attempt": args.run_attempt, "event": args.event, "ref": args.ref},
     )
@@ -1150,8 +1244,10 @@ def _parser() -> argparse.ArgumentParser:
     fp.add_argument("--constraints", required=True)
     fp.add_argument("--workspace-root", required=True)
     fp.set_defaults(func=_cmd_fingerprint)
-    comp = sub.add_parser("completeness", help="check the two phases of one run against each other")
-    comp.add_argument("--candidate", required=True, help="directory with the serial and parallel manifests and XMLs")
+    comp = sub.add_parser("completeness", help="check the phases or the N shards of one run against each other")
+    where = comp.add_mutually_exclusive_group(required=True)
+    where.add_argument("--candidate", help="directory with the serial and parallel manifests and XMLs")
+    where.add_argument("--shard-dir", action="append", help="evidence directory of shard k, once per shard, in order")
     comp.add_argument("--constraints", required=True, help="scripts/ci/profile_a_constraints.txt")
     comp.add_argument("--expected-skips", required=True, help="scripts/ci/xdist_expected_skips.txt")
     comp.add_argument("--output", required=True, help=f"path of {COMPLETENESS_FILE}")

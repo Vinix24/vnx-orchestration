@@ -125,7 +125,9 @@ def _gh_download(repo: str, run_id: int, artifact: str, dest: Path) -> None:
 
 
 def _newest_run_before(api: ApiCaller, repo: str, workflow: str, branch: str, before: datetime) -> int:
-    body = api(f"repos/{repo}/actions/workflows/{workflow}/runs?branch={branch}&status=success&per_page=100")
+    # created<=cutoff in the query: the first page starts at the newest run before it, not at today's (OI-2979)
+    body = api(f"repos/{repo}/actions/workflows/{workflow}/runs?branch={branch}&status=success&per_page=100"
+               f"&created=%3C%3D{before:%Y-%m-%dT%H:%M:%SZ}")
     runs = body.get("workflow_runs") if isinstance(body, dict) else None
     if not isinstance(runs, list):
         raise SourceError("runs response has no workflow_runs list")
@@ -163,12 +165,13 @@ def select_source(repo: str, workflow: str, branch: str, before: str, artifact: 
         run_id = _newest_run_before(call, repo, workflow, branch, cutoff)
         _artifact_present(call, repo, run_id, artifact)
         Path(dest).mkdir(parents=True, exist_ok=True)
-        fetch(repo, run_id, artifact, Path(dest))
+        fresh = Path(tempfile.mkdtemp(prefix="download-", dir=str(dest)))  # never XML of an earlier download (OI-2979)
+        fetch(repo, run_id, artifact, fresh)
     except SourceError:
         raise
     except Exception as exc:  # the source is advisory: any failure is a hash fallback with a reason
         raise SourceError(f"{type(exc).__name__}: {exc}") from exc
-    xmls = sorted(Path(dest).rglob("*.xml"))
+    xmls = sorted(fresh.rglob("*.xml"))
     if not xmls:
         raise SourceError(f"artifact {artifact} of run {run_id} holds no XML")
     return run_id, xmls
