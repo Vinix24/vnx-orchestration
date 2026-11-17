@@ -10,9 +10,6 @@ real ``ReviewGateManager`` in a throwaway store; the provider lane
 from __future__ import annotations
 
 import json
-import subprocess
-import sys
-from pathlib import Path
 from typing import Any, Dict, List
 
 import pytest
@@ -20,6 +17,8 @@ import pytest
 import review_stack_support  # puts scripts/ and scripts/lib on sys.path
 from review_stack_support import BRANCH, HEAD_SHA, PR, build_project_store, isolate_config_registry
 
+import gate_obligation_runner as runner
+import gate_request_handler
 import gate_run_guard
 import review_rounds
 from gate_obligations import (
@@ -28,8 +27,12 @@ from gate_obligations import (
     STATUS_PENDING,
     obligation_path,
     register_obligation,
+    update_obligation,
 )
 from gate_request_handler import _PrHead
+from test_gate_obligation_runner_one_run_per_head import (
+    HEAD_A, _held_by_another_process, _patch, _ScriptedManager, _store,
+)
 
 CAP = REASON_VERDICT_WITHOUT_FINDINGS_RETRY_CAP
 DID = "dlv-d4b-obligation"
@@ -214,9 +217,6 @@ class TestTheHop:
 
 def _finalize(env, result: Dict[str, Any]) -> Dict[str, Any]:
     """The runner's end of a run: a temporary refusal booked its own reason, then the cap report."""
-    import gate_obligation_runner as runner
-    from gate_obligations import update_obligation
-
     path = obligation_path(env["state_dir"], DID)
     update_obligation(path, reason="gate_parked", reason_detail="temporary refusal")
     outcome: Dict[str, Any] = {"action": "pending"}
@@ -278,16 +278,8 @@ class TestTheLockAndTheLedger:
     def test_a_second_start_while_the_lock_is_held_does_not_run_and_counts_nothing(self, env):
         _request()
         lock_path = gate_run_guard.run_lock_path(env["state_dir"], pr_ref=PR, gate="codex_gate", head_sha=HEAD_SHA)
-        lock_path.parent.mkdir(parents=True, exist_ok=True)
-        holder = subprocess.Popen(
-            [sys.executable, "-c", _HOLDER, str(lock_path)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
-        )
-        assert holder.stdout.readline().strip() == "held"
-        try:
+        with _held_by_another_process(lock_path):
             answer = _manager().execute_gate(gate="codex_gate", pr_number=PR)
-        finally:
-            holder.stdin.close()
-            holder.wait(timeout=10)
 
         assert answer["status"] == "in_flight" and env["runs"] == []
         assert "head_runs" not in _record(env)
@@ -305,12 +297,40 @@ class TestTheLockAndTheLedger:
         assert ledger is None or not ledger.exists() or ledger.read_text(encoding="utf-8") == ""
 
 
-_HOLDER = """
-import fcntl, json, os, sys
-fd = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT, 0o644)
-fcntl.flock(fd, fcntl.LOCK_EX)
-os.ftruncate(fd, 0)
-os.pwrite(fd, json.dumps({"pid": os.getpid()}).encode("utf-8"), 0)
-print("held", flush=True)
-sys.stdin.read()
-"""
+
+
+class _Handover(_ScriptedManager):
+    def request_and_execute(self, *, review_stack, **kw):  # the hop: codex's seat goes to kimi
+        self.asked = list(review_stack)
+        return super().request_and_execute(review_stack=["kimi_gate"], **kw)
+
+
+@pytest.mark.parametrize("last_reason, successor, status, reason", [
+    ("verdict_without_findings", {"status": "pass"}, "fulfilled", "fulfilled_by_takeover_evidence"),
+    ("verdict_without_findings", VWF, STATUS_PENDING, CAP),
+    ("gate_execution_degenerate", VWF, STATUS_PENDING, REASON_DEGENERATE_RETRY_CAP),
+])
+def test_a_runner_tick_at_the_cap_runs_the_successor_never_the_declared_gate(
+    tmp_path, monkeypatch, last_reason, successor, status, reason,
+):
+    state_dir, head = _store(tmp_path), {"sha": HEAD_A}
+    (report := tmp_path / "kimi.md").write_text("kimi report", encoding="utf-8")
+    runs = {"head_sha": HEAD_A, "reviewer_runs": 2, "last_status": "unavailable", "last_reason": last_reason}
+    path = register_obligation(state_dir, dispatch_id=DID, gate="codex_gate", project_id="vnx-dev", pr_number=PR)
+    update_obligation(path, head_runs=runs, reason=gate_run_guard.cap_reason(runs))
+    codex = state_dir / "review_gates" / "results" / f"pr-{PR}-codex_gate.json"
+    codex.write_text(json.dumps(dict(VWF, gate="codex_gate", commit_sha=HEAD_A)), encoding="utf-8")
+    manager = _Handover(state_dir, [dict(successor, report_path=str(report), contract_hash="sha256:k")], head)
+    _patch(monkeypatch, manager, head)
+    monkeypatch.setattr(gate_request_handler, "_build_review_gate_takeover_chain", lambda: dict(CHAIN))
+
+    outcome = runner.run(state_dir)["outcomes"][0]
+
+    record = json.loads(path.read_text(encoding="utf-8"))
+    assert record["status"] == status and record["reason"] == reason and record["head_runs"] == runs
+    assert json.loads(codex.read_text()) == dict(VWF, gate="codex_gate", commit_sha=HEAD_A)
+    if last_reason == "gate_execution_degenerate":
+        assert outcome["action"] == "retry_capped" and manager.calls == []
+    else:
+        assert outcome["action"] != "retry_capped" and manager.asked == ["codex_gate"]
+        assert [call["review_stack"] for call in manager.calls] == [["kimi_gate"]]

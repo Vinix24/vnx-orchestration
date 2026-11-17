@@ -319,6 +319,7 @@ from gate_obligations import (  # noqa: E402
     REASON_NO_PR_BRANCH_GONE_UNMEASURED,
     REASON_PR_CLOSED,
     REASON_PR_MERGED,
+    REASON_VERDICT_WITHOUT_FINDINGS_RETRY_CAP,
     STATUS_FAILED,
     STATUS_FULFILLED,
     STATUS_NOT_EXECUTABLE,
@@ -3746,8 +3747,8 @@ def _recheck_under_lock(
     """``(refusal, evidence)`` for a launch that holds the run lock; both ``None``: it runs.
 
     In this order: an obligation another runner already booked is not run
-    again; without a force-rerun, an obligation at the retry cap on this head
-    is parked (:func:`_park_at_cap`), and a decided, complete-evidence verdict
+    again; without a force-rerun, an obligation at the cap on this head is
+    parked (:func:`_park_at_cap`) unless it is :func:`_passed_over`, and a decided, complete-evidence verdict
     on this head that landed since the pre-execution decision is booked
     (:func:`_book_existing_evidence`) instead of run over.
     """
@@ -3759,7 +3760,7 @@ def _recheck_under_lock(
         }, None
     if force_rerun:
         return None, None
-    if gate_run_guard.cap_reached(fresh.get("head_runs"), head_sha):
+    if gate_run_guard.cap_reached(fresh.get("head_runs"), head_sha) and not _passed_over(fresh, head_sha):
         return _park_at_cap(path, fresh, gate=gate, pr_number=pr_number, dispatch_id=dispatch_id), None
     lookup = _fulfilling_result(
         _index_gate_results(state_dir), dispatch_id, gate, pr_number=pr_number, snapshot=snapshot,
@@ -3783,16 +3784,17 @@ def _recheck_under_lock(
     return None, None
 
 
+def _passed_over(record: Dict[str, Any], head_sha: str, result: Any = None, gate: str = "") -> bool:
+    """ADR-080 besluit 3: at the verdict-without-findings cap on this head (the hop's own proof) the declared gate does not run; with ``result``, it did not run in that call."""
+    runs, cap = record.get("head_runs"), REASON_VERDICT_WITHOUT_FINDINGS_RETRY_CAP
+    ran = [e for e in (result or {}).get("gates") or [] if e.get("gate") == gate and e.get("request_status") == "requested"]
+    return record.get("reason") == cap == gate_run_guard.cap_reason(runs) and gate_run_guard.cap_reached(runs, head_sha) and not ran
+
+
 def _park_at_cap(
     path: Path, fresh: Dict[str, Any], *, gate: str, pr_number: int, dispatch_id: str,
 ) -> Dict[str, Any]:
-    """R10: the obligation stays pending under its cap reason; the gate is not run on this head.
-
-    The reason is the one of the run that reached the cap
-    (``gate_run_guard.cap_reason``): ``degenerate_retry_cap``, or
-    ``verdict_without_findings_retry_cap`` (ADR-080 besluit 3), which the
-    takeover walk reads to pass the gate over on this head.
-    """
+    """R10: the obligation stays pending under ``gate_run_guard.cap_reason``, which the request-time hop reads."""
     head_runs = fresh.get("head_runs") or {}
     reason = gate_run_guard.cap_reason(head_runs)
     detail = gate_run_guard.cap_detail(gate, pr_number, dispatch_id, head_runs)
@@ -4922,6 +4924,11 @@ def _fulfill_run_gate(
             result_file, result_status, result_reason, gate=gate, pr_number=pr_number)
 
         temp_reason, temp_detail = _temporary_refusal(gate, pr_number, result_status, result_reason)
+        if _passed_over(launch.record, head_sha_before_run, result, gate):
+            # The declared gate did not run: its record is the old one. Its seat is the successor's.
+            temp_reason, temp_detail, result_data = REASON_VERDICT_WITHOUT_FINDINGS_RETRY_CAP, (
+                f"{gate} passed over on head {head_sha_before_run[:8]} (ADR-080 besluit 3); its takeover "
+                "successor has no decided verdict on this head yet"), None
         if temp_reason is not None:
             return _fulfill_temporary_refusal(
                 path, outcome, temp_reason, temp_detail, manager=manager, gate=gate,
