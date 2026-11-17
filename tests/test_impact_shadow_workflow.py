@@ -15,6 +15,8 @@ from pathlib import Path
 import pytest
 import yaml
 
+import ci_workflow_shape as shape
+
 REPO = Path(__file__).resolve().parents[1]
 CI_DIR = REPO / "scripts" / "ci"
 WORKFLOW = REPO / ".github" / "workflows" / "vnx-ci.yml"
@@ -38,14 +40,23 @@ def step_named(job: dict, name: str) -> dict:
     return next(s for s in job["steps"] if s.get("name") == name)
 
 
+def profile_a_steps() -> list:
+    """Every step of Profile A, whichever shape the workflow has (tests/ci_workflow_shape.py)."""
+    return [entry.step for entry in shape.profile_a(WORKFLOW).steps]
+
+
+def profile_a_step(name: str) -> dict:
+    return shape.profile_a(WORKFLOW).step(name).step
+
+
 def test_step_sits_directly_after_completeness_and_before_the_evidence_upload(jobs):
-    order = names(jobs["profile-a"])
+    order = [step.get("name") for step in profile_a_steps()]
     assert order.index(STEP) == order.index(COMPLETENESS) + 1
     assert order.index(STEP) < order.index(EVIDENCE_UPLOAD)
 
 
 def test_step_cannot_turn_the_job_red(jobs):
-    step = step_named(jobs["profile-a"], STEP)
+    step = profile_a_step(STEP)
     assert step["continue-on-error"] is True
     assert step["timeout-minutes"] == 5
     assert LIGHT in step["if"] and "always()" in step["if"]
@@ -54,7 +65,7 @@ def test_step_cannot_turn_the_job_red(jobs):
 
 
 def test_step_upload_is_non_fatal(jobs):
-    uploads = [s for s in jobs["profile-a"]["steps"] if (s.get("with") or {}).get("name") == "impact-shadow"]
+    uploads = [s for s in profile_a_steps() if (s.get("with") or {}).get("name") == "impact-shadow"]
     assert len(uploads) == 1
     upload = uploads[0]
     assert upload["continue-on-error"] is True and upload["timeout-minutes"] == 5
@@ -91,9 +102,9 @@ def test_shadow_job_keeps_continue_on_error_no_needs_and_is_in_no_required_list(
 
 
 def test_shadow_step_in_profile_a_has_no_event_condition(jobs):
-    step = step_named(jobs["profile-a"], STEP)
+    step = profile_a_step(STEP)
     assert "github.event_name" not in step["if"]
-    upload = [s for s in jobs["profile-a"]["steps"] if (s.get("with") or {}).get("name") == "impact-shadow"][0]
+    upload = [s for s in profile_a_steps() if (s.get("with") or {}).get("name") == "impact-shadow"][0]
     assert "github.event_name" not in upload["if"]
 
 
@@ -113,8 +124,8 @@ def test_other_profile_a_steps_keep_their_conditions(jobs):
     shown = subprocess.run(["git", "show", "origin/main:.github/workflows/vnx-ci.yml"], cwd=REPO, capture_output=True, text=True)
     if shown.returncode != 0:
         pytest.skip("origin/main is not available")
-    before = yaml.safe_load(shown.stdout)["jobs"]["profile-a"]["steps"]
-    now = {s.get("name"): s for s in jobs["profile-a"]["steps"]}
+    before = [entry.step for entry in shape.profile_a(yaml.safe_load(shown.stdout)).steps]
+    now = {s.get("name"): s for s in profile_a_steps()}
     for old in before:
         new = now[old.get("name")]
         assert new.get("if") == old.get("if"), old.get("name")

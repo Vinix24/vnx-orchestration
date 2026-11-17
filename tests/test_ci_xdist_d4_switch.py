@@ -23,6 +23,8 @@ from pathlib import Path
 import pytest
 import yaml
 
+import ci_workflow_shape as shape
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PARITY = REPO_ROOT / "scripts" / "ci" / "check_xdist_parity.py"
 ARGS_SCRIPT = REPO_ROOT / "scripts" / "ci" / "profile_a_pytest_args.sh"
@@ -422,6 +424,10 @@ def _jobs(path: Path) -> dict:
     return yaml.safe_load(path.read_text(encoding="utf-8"))["jobs"]
 
 
+def _profile_a(path: Path = WORKFLOW) -> shape.ProfileA:
+    return shape.profile_a(path)
+
+
 def _step(job: dict, step_id: str) -> dict:
     [step] = [s for s in job["steps"] if s.get("id") == step_id]
     return step
@@ -431,7 +437,7 @@ def test_the_per_pr_workflow_no_longer_runs_a_shadow_or_parity_job():
     jobs = _jobs(WORKFLOW)
     assert "profile-a-xdist-shadow" not in jobs
     assert "xdist-parity" not in jobs
-    assert "profile-a" in jobs
+    assert _profile_a().required_job.name == shape.REQUIRED_CHECK_NAME
 
 
 def test_the_shadow_job_and_the_test_of_it_are_gone_together():
@@ -443,9 +449,9 @@ def _profile_a_job_text() -> str:
     """The `profile-a` job block of the workflow as text — the comments included, the steps too."""
     lines = WORKFLOW.read_text(encoding="utf-8").splitlines()
     try:
-        start = lines.index("  profile-a:")
+        start = lines.index(f"  {_profile_a().required_job.job_id}:")
     except ValueError:
-        raise AssertionError("vnx-ci.yml has no `profile-a` job") from None
+        raise AssertionError("vnx-ci.yml has no job block for the required Profile A check") from None
     body = lines[start + 1:]
     end = next((i for i, line in enumerate(body) if line.strip() and not line.startswith("    ")), len(body))
     return "\n".join(body[:end])
@@ -609,8 +615,8 @@ def test_every_profile_a_step_timeout_fires_inside_both_job_bounds():
     expression = _timeout_expression()
     bounds = {branch: ActionsExpression(expression, variables).value()
               for branch, variables in (("xdist", {}), ("serial", {"VNX_CI_XDIST": "0"}))}
-    job = _jobs(WORKFLOW)["profile-a"]
-    bounded = [step["timeout-minutes"] for step in job["steps"] if "timeout-minutes" in step]
+    job = _profile_a().required_job
+    bounded = [step["timeout-minutes"] for step in job.steps if "timeout-minutes" in step]
     assert bounded, "no step of profile-a carries its own timeout"
     assert all(isinstance(bound, int) for bound in bounded), bounded
     step_sum = sum(bounded)
@@ -625,7 +631,7 @@ def test_the_timeout_reads_the_same_variable_the_switch_reads():
     """One variable answers both questions: which shape runs, and how long the job may take."""
     timeout = _timeout_expression()
     switch = re.fullmatch(r"\$\{\{\s*vars\.([A-Za-z_][A-Za-z0-9_]*)\s*\}\}",
-                          _step(_jobs(WORKFLOW)["profile-a"], "suite")["env"]["VNX_CI_XDIST"])
+                          _step(_profile_a().required_job.body, "suite")["env"]["VNX_CI_XDIST"])
     assert switch is not None, "the suite step no longer reads its switch from vars.<name>"
     read = set(re.findall(r"\bvars\.([A-Za-z_][A-Za-z0-9_]*)", timeout))
     assert read == {switch.group(1)}
@@ -642,22 +648,21 @@ def test_the_profile_a_timeout_comment_names_the_serial_wall_time():
 
 
 def test_the_completeness_check_is_a_required_step_after_both_phases():
-    profile_a = _jobs(WORKFLOW)["profile-a"]
-    step = _step(profile_a, "completeness")
+    profile_a = _profile_a().required_job
+    step = _step(profile_a.body, "completeness")
     assert not step.get("continue-on-error"), "a failing completeness check must fail the job"
-    assert not profile_a.get("continue-on-error")
+    assert not profile_a.body.get("continue-on-error")
     run = step["run"]
     assert "check_xdist_parity.py\" completeness" in run or "check_xdist_parity.py completeness" in run
     assert "xdist_expected_skips.txt" in run and "xdist-completeness-verdict.json" in run
     assert "steps.suite.outputs.mode == 'xdist'" in step["if"]
-    ids = [s.get("id") for s in profile_a["steps"]]
+    ids = [s.get("id") for s in profile_a.steps]
     assert ids.index("serial") < ids.index("completeness")
     assert ids.index("parallel") < ids.index("completeness")
 
 
 def test_profile_a_reads_the_switch_from_the_repository_variable():
-    profile_a = _jobs(WORKFLOW)["profile-a"]
-    suite = _step(profile_a, "suite")
+    suite = _step(_profile_a().required_job.body, "suite")
     assert suite["env"]["VNX_CI_XDIST"] == "${{ vars.VNX_CI_XDIST }}"
     assert "profile_a_pytest_args.sh" in suite["run"]
 

@@ -23,7 +23,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-import yaml
+import ci_workflow_shape as shape
 
 REPO = Path(__file__).resolve().parents[1]
 CHECK = REPO / "scripts" / "ci" / "check_test_exclusions.py"
@@ -394,14 +394,11 @@ def test_current_tree_summary_reports_the_exclusion_list():
 
 
 def test_profile_a_runs_the_summary_into_the_step_summary():
-    workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
-    job = workflow["jobs"]["profile-a"]
-
     summary_steps = [
-        step
-        for step in job["steps"]
-        if "check_test_exclusions.py" in str(step.get("run", ""))
-        and "--summary" in str(step.get("run", ""))
+        entry.step
+        for entry in shape.profile_a(WORKFLOW).steps
+        if "check_test_exclusions.py" in str(entry.step.get("run", ""))
+        and "--summary" in str(entry.step.get("run", ""))
     ]
     assert summary_steps, (
         "the Profile A job has no step that runs check_test_exclusions.py --summary"
