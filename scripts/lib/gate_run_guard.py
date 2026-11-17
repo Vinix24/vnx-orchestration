@@ -92,6 +92,7 @@ MAX_REVIEWER_RUNS_PER_HEAD = 2
 REVIEWER_RAN_REASONS = frozenset(
     {"gate_execution_degenerate", "timeout", "stall", "stalled", VERDICT_WITHOUT_FINDINGS}
 )
+CAP_REASONS = frozenset({REASON_RETRY_CAP, REASON_VERDICT_WITHOUT_FINDINGS_RETRY_CAP})
 _PARTIAL_REVIEW_STATUS = "partial_review"
 
 FORCE_RERUN_USAGE = '--force-rerun --reason "..."'
@@ -375,12 +376,25 @@ def cap_reached(head_runs: Any, head_sha: str) -> bool:
     return runs_on_head(head_runs, head_sha) >= MAX_REVIEWER_RUNS_PER_HEAD
 
 
+def cap_reason(head_runs: Any) -> str:
+    """The cap reason of the run that reached the cap, read from its own ``head_runs.last_reason``.
+
+    The one place a cap reason is chosen: the booking (:func:`book_reviewer_run`)
+    and the obligation runner's park (``_park_at_cap``) both call it, so the
+    park never turns ``verdict_without_findings_retry_cap`` back into the
+    degenerate reason. Anything but an exact ``verdict_without_findings`` is the
+    degenerate cap.
+    """
+    last = head_runs.get("last_reason") if isinstance(head_runs, dict) else None
+    return REASON_VERDICT_WITHOUT_FINDINGS_RETRY_CAP if last == VERDICT_WITHOUT_FINDINGS else REASON_RETRY_CAP
+
+
 def cap_detail(gate: str, pr_number: Any, dispatch_id: str, head_runs: Dict[str, Any]) -> str:
     """The reason detail of an obligation at the cap: what ran, on which head, and the two ways on."""
     head = str(head_runs.get("head_sha") or "")
     last = str(head_runs.get("last_reason") or head_runs.get("last_status") or "no verdict")
     return (
-        f"{REASON_RETRY_CAP}: {gate} PR #{pr_number} head {head[:8]} ran {_run_count(head_runs)} times "
+        f"{cap_reason(head_runs)}: {gate} PR #{pr_number} head {head[:8]} ran {_run_count(head_runs)} times "
         f"without a verdict (last: {last}); the runner does not run it again on this head. A new head "
         f"resets the count; an operator rerun is gate_obligation_runner.py --dispatch-prefix {dispatch_id} "
         f"{FORCE_RERUN_USAGE}"
@@ -396,7 +410,8 @@ def book_reviewer_run(
     whoever started it. Only a run of a request that names a dispatch whose
     obligation is for this gate and this PR, still pending, on a known head,
     and in which the reviewer ran (:func:`reviewer_ran`). The run that
-    reaches the cap writes ``degenerate_retry_cap`` and its detail; it refuses
+    reaches the cap writes :func:`cap_reason` and its detail (a counted run
+    below the cap clears a cap reason an earlier head left); it refuses
     nothing, the runner decides on the next launch. An id that is no plain
     file name and an unreadable obligation count nothing and are logged.
     """
@@ -422,14 +437,12 @@ def book_reviewer_run(
     head_runs = next_head_runs(record.get("head_runs"), head_sha, result or {})
     fields: Dict[str, Any] = {"head_runs": head_runs}
     if cap_reached(head_runs, head_sha):
-        cap_reason = (
-            REASON_VERDICT_WITHOUT_FINDINGS_RETRY_CAP
-            if str((result or {}).get("reason") or "") == VERDICT_WITHOUT_FINDINGS
-            else REASON_RETRY_CAP
-        )
-        detail = cap_detail(gate, pr_ref, dispatch_id, head_runs)
-        fields.update(reason=cap_reason, reason_detail=detail.replace(REASON_RETRY_CAP, cap_reason, 1))
+        fields.update(reason=cap_reason(head_runs), reason_detail=cap_detail(gate, pr_ref, dispatch_id, head_runs))
         logger.warning("gate_run_guard: %s", fields["reason_detail"])
+    elif record.get("reason") in CAP_REASONS:
+        # A counted run below the cap (a new head starts at one) clears the cap
+        # an earlier head reached: a cap reason on the record means this head.
+        fields.update(reason=None, reason_detail=None)
     return update_obligation(path, **fields)
 
 

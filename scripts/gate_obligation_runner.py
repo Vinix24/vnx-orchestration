@@ -308,7 +308,6 @@ sys.path.insert(0, str(SCRIPT_DIR / "lib"))
 import gate_run_guard
 from gate_obligations import (  # noqa: E402
     NO_GATE_KEY,
-    REASON_DEGENERATE_RETRY_CAP,
     REASON_DISPATCH_STILL_RUNNING,
     REASON_FAILED_BY_GATE_VERDICT,
     REASON_FAILED_BY_TAKEOVER,
@@ -3787,11 +3786,19 @@ def _recheck_under_lock(
 def _park_at_cap(
     path: Path, fresh: Dict[str, Any], *, gate: str, pr_number: int, dispatch_id: str,
 ) -> Dict[str, Any]:
-    """R10: the obligation stays pending under ``degenerate_retry_cap``; the gate is not run on this head."""
-    detail = gate_run_guard.cap_detail(gate, pr_number, dispatch_id, fresh.get("head_runs") or {})
-    if fresh.get("reason") != REASON_DEGENERATE_RETRY_CAP:
-        update_obligation(path, reason=REASON_DEGENERATE_RETRY_CAP, reason_detail=detail)
-    return {"action": ACTION_RETRY_CAPPED, "detail": detail, "reason": REASON_DEGENERATE_RETRY_CAP}
+    """R10: the obligation stays pending under its cap reason; the gate is not run on this head.
+
+    The reason is the one of the run that reached the cap
+    (``gate_run_guard.cap_reason``): ``degenerate_retry_cap``, or
+    ``verdict_without_findings_retry_cap`` (ADR-080 besluit 3), which the
+    takeover walk reads to pass the gate over on this head.
+    """
+    head_runs = fresh.get("head_runs") or {}
+    reason = gate_run_guard.cap_reason(head_runs)
+    detail = gate_run_guard.cap_detail(gate, pr_number, dispatch_id, head_runs)
+    if fresh.get("reason") != reason:
+        update_obligation(path, reason=reason, reason_detail=detail)
+    return {"action": ACTION_RETRY_CAPPED, "detail": detail, "reason": reason}
 
 
 def _report_cap_reached(
@@ -3804,7 +3811,7 @@ def _report_cap_reached(
     this reads the count back, never counts again. Only a pending obligation,
     only a known head, only a run in which the reviewer ran. The temporary
     refusal booked just before wrote its own reason, so :func:`_park_at_cap`
-    writes ``degenerate_retry_cap`` back.
+    writes the cap reason back.
     """
     if not head_sha or not gate_run_guard.reviewer_ran(result_data):
         return

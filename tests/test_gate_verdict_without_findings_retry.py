@@ -212,6 +212,68 @@ class TestTheHop:
         assert _hop(env, "") is None
 
 
+def _finalize(env, result: Dict[str, Any]) -> Dict[str, Any]:
+    """The runner's end of a run: a temporary refusal booked its own reason, then the cap report."""
+    import gate_obligation_runner as runner
+    from gate_obligations import update_obligation
+
+    path = obligation_path(env["state_dir"], DID)
+    update_obligation(path, reason="gate_parked", reason_detail="temporary refusal")
+    outcome: Dict[str, Any] = {"action": "pending"}
+    runner._report_cap_reached(path, HEAD_SHA, result, outcome, gate="codex_gate", pr_number=PR, dispatch_id=DID)
+    return outcome
+
+
+class TestTheRunnerFinalization:
+    def test_the_park_keeps_the_verdict_without_findings_reason_and_the_hop(self, env):
+        _run_once(env)
+        _run_once(env)
+
+        outcome = _finalize(env, VWF)
+
+        assert outcome["action"] == "retry_capped" and outcome["reason"] == CAP
+        record = _record(env)
+        assert record["reason"] == CAP and record["reason_detail"].startswith(CAP)
+        assert _hop(env)["reason"] == CAP
+
+    def test_the_degenerate_path_still_parks_with_its_own_reason(self, env):
+        degenerate = {"status": "unavailable", "reason": "gate_execution_degenerate"}
+        env["answers"][0] = degenerate
+        _run_once(env)
+        _run_once(env)
+
+        outcome = _finalize(env, degenerate)
+
+        assert outcome["reason"] == REASON_DEGENERATE_RETRY_CAP
+        assert _record(env)["reason"] == REASON_DEGENERATE_RETRY_CAP
+        assert _hop(env) is None
+
+
+class TestTheCapBelongsToItsHead:
+    def test_a_counted_run_on_a_new_head_clears_the_old_cap_and_does_not_hop(self, env):
+        _run_once(env)
+        _run_once(env)
+        assert _record(env)["reason"] == CAP
+
+        record = gate_run_guard.book_reviewer_run(
+            env["state_dir"], dispatch_id=DID, gate="codex_gate", pr_ref=PR, head_sha=OTHER_HEAD, result=VWF,
+        )
+
+        assert record["head_runs"]["reviewer_runs"] == 1
+        assert gate_run_guard.cap_reached(record["head_runs"], OTHER_HEAD) is False
+        assert _record(env).get("reason") is None
+        assert _hop(env, OTHER_HEAD) is None
+
+    def test_a_cap_reason_without_the_cap_on_this_head_is_no_hop(self, env):
+        _run_once(env)
+        _run_once(env)
+        record = _record(env)
+        record["head_runs"] = dict(record["head_runs"], head_sha=OTHER_HEAD, reviewer_runs=1)
+        env["obligation"].write_text(json.dumps(record), encoding="utf-8")
+
+        assert _hop(env, OTHER_HEAD) is None
+
+
 class TestTheLockAndTheLedger:
     def test_a_second_start_while_the_lock_is_held_does_not_run_and_counts_nothing(self, env):
         _request()

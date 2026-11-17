@@ -34,6 +34,7 @@ from gate_recorder import (
 )
 from gate_executor import _classify_sha_binding
 from gate_lane_rows import GATE_LANE_ROWS
+import gate_run_guard
 from gate_obligations import (
     REASON_VERDICT_WITHOUT_FINDINGS_RETRY_CAP,
     iter_obligations,
@@ -1388,8 +1389,8 @@ class GateRequestHandlerMixin:
                 continue
             if record.get("reason") != REASON_VERDICT_WITHOUT_FINDINGS_RETRY_CAP:
                 continue
-            head_runs = record.get("head_runs")
-            if not isinstance(head_runs, dict) or head_runs.get("head_sha") != head_sha:
+            # The cap must be reached on THIS head, not only named there.
+            if not gate_run_guard.cap_reached(record.get("head_runs"), head_sha):
                 continue
             return {
                 "gate": gate,
