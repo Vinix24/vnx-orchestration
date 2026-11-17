@@ -83,9 +83,9 @@ phase manifests and XMLs of the same run and fails on a collected test that
 did not run, a test run more than once, a selection the two phases do not
 partition, a failed collection, or a skip whose key is not recorded in
 ``scripts/ci/xdist_expected_skips.txt``. Its verdict is
-``xdist-completeness-verdict.json``. ``--shard-dir`` once per shard, in order,
-checks N shards of one run (C2b) and also fails on collected sets or plans that
-differ between shards, or a collected test in no shard or in two. Exit codes of ``compare`` and
+``xdist-completeness-verdict.json``. ``--shard-dir`` once per shard, in order, checks N shards of one run (C2b)
+and also fails on collected sets or plans that differ between shards, or a collected test in no shard or in two.
+Exit codes of ``compare`` and
 ``completeness``: the verdict's exit (0, 1, 2), or 0 when a compare run is not
 applicable (light profile); 2 with a reason on stderr, never a traceback, when
 an argument is malformed or the verdict or its summary cannot be written.

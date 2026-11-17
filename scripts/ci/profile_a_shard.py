@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """The plan of one Profile A shard (pr-ci-onder-zes-minuten C2b), for profile_a_pytest_args.sh.
 
-Plans the files of the collection before the split (without the serial file
-entries) over N shards with test_shard_plan.py, writes shard.json and prints
-this shard's files NUL-delimited. Exit 2, no plan: an unreadable manifest or
-source file, a collected path that is not tests/<path>.py, an empty shard.
+Plans the files of the collection before the split (without the serial file entries) over N shards with
+test_shard_plan.py, writes shard.json and prints this shard's files NUL-delimited. Exit 2, no plan: an unreadable
+manifest or source file, a collected path that is not tests/<path>.py, an empty shard.
 """
 from __future__ import annotations
 
@@ -13,8 +12,7 @@ import os
 import sys
 from pathlib import Path
 
-# Sibling scripts, not a package: imported from this script's own directory.
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent))  # sibling scripts, not a package
 import check_xdist_parity as cxp
 import test_shard_plan as tsp
 

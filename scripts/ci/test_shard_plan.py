@@ -125,9 +125,8 @@ def _gh_download(repo: str, run_id: int, artifact: str, dest: Path) -> None:
 
 
 def _newest_run_before(api: ApiCaller, repo: str, workflow: str, branch: str, before: datetime) -> int:
-    # created<=cutoff in the query: the first page starts at the newest run before it, not at today's (OI-2979)
     body = api(f"repos/{repo}/actions/workflows/{workflow}/runs?branch={branch}&status=success&per_page=100"
-               f"&created=%3C%3D{before:%Y-%m-%dT%H:%M:%SZ}")
+               f"&created=%3C%3D{before:%Y-%m-%dT%H:%M:%SZ}")  # created<=cutoff: page 1 starts before it (OI-2979)
     runs = body.get("workflow_runs") if isinstance(body, dict) else None
     if not isinstance(runs, list):
         raise SourceError("runs response has no workflow_runs list")

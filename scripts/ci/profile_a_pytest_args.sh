@@ -26,12 +26,11 @@
 #                                                   so the parity check can tell
 #                                                   this attempt's emission from
 #                                                   an earlier attempt's
-#   VNX_CI_SHARD=k/N (xdist shape,   shard.args     instead of parallel.args: its
-#   1 <= k <= N <= 99; the duration                 vector with the tests root
-#   source: VNX_CI_SHARD_SOURCE,                    replaced by shard k's files;
-#   the output of test_shard_plan.py                serial.args in shard 1 only;
-#   select-source, unset = hash)     collected.json the selection collected
-#                                    shard.json     before the split, and the plan
+#   VNX_CI_SHARD=k/N (xdist shape,   shard.args     instead of parallel.args: its vector with the
+#   1 <= k <= N <= 99; the duration                 tests root replaced by shard k's files;
+#   source: VNX_CI_SHARD_SOURCE,     collected.json the selection collected before the split
+#   the output of test_shard_plan.py shard.json     the plan of profile_a_shard.py
+#   select-source, unset = hash)     (and serial.args in shard 1 only, as in the xdist shape)
 #
 # Since D4 the default is the two-phase xdist shape. Profile A and the nightly
 # serial truth of .github/workflows/vnx-ci-serial-truth.yml call this script,
@@ -270,9 +269,8 @@ check_shard() {
   [ "$2" = 1 ] || refuse "VNX_CI_SHARD needs the xdist shape, got VNX_CI_XDIST=$2"
 }
 
-# Shard k of N: collect the whole selection (the set before the split), plan it
-# with profile_a_shard.py, and give this shard the parallel vector with the
-# tests root replaced by its files. Only shard 1 carries the serial phase.
+# Shard k of N: collect the whole selection (the set before the split), plan it with profile_a_shard.py, and give
+# this shard the parallel vector with the tests root replaced by its files. Only shard 1 carries the serial phase.
 emit_shard_vectors() {
   local rc=0 entry work
   local -a plan_args=() files=()

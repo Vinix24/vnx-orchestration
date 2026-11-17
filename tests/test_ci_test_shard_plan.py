@@ -128,7 +128,6 @@ def test_select_source_asks_the_api_for_runs_created_before_the_cutoff(tmp_path)
         if "created=%3C%3D2026-11-17T12:00:00Z" in path:
             return _runs(OK_RUN)
         return _runs(*((i, "2026-11-17T13:00:00Z", "success") for i in range(100, 200)))
-
     run_id, _ = tsp.select_source(REPO, WF, BR, NOW, ART, tmp_path, api, lambda *a: (a[3] / "j.xml").write_text("<a/>"))
     assert run_id == 1
 
