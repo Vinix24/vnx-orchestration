@@ -127,15 +127,15 @@ class TestReviseIsAFail:
         assert gate_status.is_terminal(result)
         assert gate_status.has_complete_evidence(result)
 
-    def test_a_revise_without_findings_is_a_fail_with_an_explicit_reason(self, env):
-        """A3. Base: unavailable / no_verdict_block."""
+    def test_a_revise_without_findings_is_unavailable_with_an_explicit_reason(self, env):
+        """A3. Base: unavailable / no_verdict_block. D5 (ADR-080 besluit 1): a REVISE
+        reads as fail, and a fail with zero findings is booked ``unavailable`` with
+        reason ``verdict_without_findings``, never a pass."""
         result = _run(env, "deepseek_gate", _block("REVISE", []))
 
-        assert result["status"] == "completed", result.get("reason_detail")
+        assert result["status"] == "unavailable" and result["reason"] == "verdict_without_findings"
         assert gate_status.is_pass(result)[0] is False
-        assert len(result["blocking_findings"]) == 1
-        message = result["blocking_findings"][0]["message"]
-        assert "REVISE" in message and "no findings" in message
+        assert result["blocking_findings"] == [] and result["raw_verdict"] == "REVISE"
 
     def test_a_literal_fail_with_only_a_warning_is_a_fail(self, env):
         """A4. Base: completed, no blocking findings, is_pass True."""
