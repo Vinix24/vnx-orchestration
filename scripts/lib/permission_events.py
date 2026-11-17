@@ -384,28 +384,29 @@ def read_window(project_id: str, ledger: str, start: datetime, end: datetime, st
     the oldest time the store still holds, ``None`` when it holds no line: a window that starts before it is not held."""
     import permission_events_prune as prune  # late: prune imports this module
     state = _state_dir(project_id, state_dir)
-    archive, start, end = state / prune.ARCHIVE_DIR, start.astimezone(timezone.utc), end.astimezone(timezone.utc)
-    months = sorted(archive.glob(f"{prune.LEDGERS[ledger].split('.')[0]}-[0-9][0-9][0-9][0-9]-[0-9][0-9].ndjson"))
-    first = f"{start.year:04d}-{start.month:02d}"
-    older = [p for p in months if p.stem[-7:] < first]
-    paths = [p for p in months if first <= p.stem[-7:] <= f"{end.year:04d}-{end.month:02d}"] + [state / prune.LEDGERS[ledger]]
-    seen: set = set()
-    found: List[tuple] = []
-    skipped: Dict[str, int] = {}
-    oldest: Optional[datetime] = None
-    for path in (older[-1:] if older else []) + paths:  # the newest older month only proves the window start is held
-        *done, tail = (path.read_bytes() if path.exists() else b"").split(b"\n")
-        if tail.strip():
-            skipped["torn_tail"] = skipped.get("torn_tail", 0) + 1
-        for line in (ln for ln in done if ln.strip()):
-            item, why = _window_line(line, project_id, ledger)
-            if item is None:
-                skipped[why] = skipped.get(why, 0) + 1
-                continue
-            oldest = min(oldest, item[0]) if oldest else item[0]
-            if path not in older and start <= item[0] < end and line not in seen:
-                seen.add(line)
-                found.append(item)
+    with _locked(state):  # a prune between the archive reads and the live read would move lines past the reader
+        archive, start, end = state / prune.ARCHIVE_DIR, start.astimezone(timezone.utc), end.astimezone(timezone.utc)
+        months = sorted(archive.glob(f"{prune.LEDGERS[ledger].split('.')[0]}-[0-9][0-9][0-9][0-9]-[0-9][0-9].ndjson"))
+        first = f"{start.year:04d}-{start.month:02d}"
+        older = [p for p in months if p.stem[-7:] < first]
+        paths = [p for p in months if first <= p.stem[-7:] <= f"{end.year:04d}-{end.month:02d}"] + [state / prune.LEDGERS[ledger]]
+        seen: set = set()
+        found: List[tuple] = []
+        skipped: Dict[str, int] = {}
+        oldest: Optional[datetime] = None
+        for path in (older[-1:] if older else []) + paths:  # the newest older month only proves the window start is held
+            *done, tail = (path.read_bytes() if path.exists() else b"").split(b"\n")
+            if tail.strip():
+                skipped["torn_tail"] = skipped.get("torn_tail", 0) + 1
+            for line in (ln for ln in done if ln.strip()):
+                item, why = _window_line(line, project_id, ledger)
+                if item is None:
+                    skipped[why] = skipped.get(why, 0) + 1
+                    continue
+                oldest = min(oldest, item[0]) if oldest else item[0]
+                if path not in older and start <= item[0] < end and line not in seen:
+                    seen.add(line)
+                    found.append(item)
     return [obj for _when, obj in sorted(found, key=lambda p: p[0])], skipped, oldest
 
 def write_event(event: Dict[str, Any], project_id: str, state_dir: Optional[Path] = None) -> bool:
