@@ -150,7 +150,7 @@ def test_gz_appearing_between_step_1_and_2_goes_to_the_pair_rules(tmp_path, monk
     "kw,stopped,count",
     [
         ({"max_files": 2}, "max_files", 2),
-        ({"max_bytes": 15}, "max_bytes", 2),
+        ({"max_bytes": 50}, "max_bytes", 2),  # 43 bytes actually read per 10-byte file (OI-2982)
         ({"max_seconds": 2.5, "clock": itertools.count().__next__}, "max_seconds", 2),
         ({}, "done", 3),
     ],
@@ -199,3 +199,69 @@ def test_a_writer_and_the_compressor_on_one_id_end_in_one_gz_in_order(tmp_path, 
     gz = tmp_path / "d1.ndjson.gz"
     assert gzip.decompress(gz.read_bytes()).decode().splitlines() == [line(1), line(2), line(3), line(4)]
     assert _names(tmp_path) == ["d1.ndjson.gz"]  # one gz, no plain
+
+
+def test_bytes_read_counts_what_is_read_and_stops_the_round_earlier(tmp_path):
+    """OI-2982: compression and verification read the plain twice and the gz once."""
+    data = os.urandom(1000)
+    _plain(tmp_path, "a", data, mtime=OLD)
+    _plain(tmp_path, "b", data, mtime=OLD + 1)
+    result = _round(tmp_path, max_bytes=1500)  # counting the plain size once took both files
+    assert _outcomes(result) == [("a.ndjson", "compressed", None)] and result.stopped == "max_bytes"
+    assert result.bytes_read == 2 * len(data) + (tmp_path / "a.ndjson.gz").stat().st_size
+    assert (tmp_path / "b.ndjson").exists()
+
+
+def test_a_skipped_file_counts_only_what_was_read(tmp_path, monkeypatch):
+    _plain(tmp_path, "a", b"x" * 1000)
+    monkeypatch.setattr(eac, "_compress_verified", lambda path: None)
+    result = _round(tmp_path)
+    assert _outcomes(result) == [("a.ndjson", "skipped", "mismatch")] and result.bytes_read == 0
+
+
+def test_gz_changed_after_the_compare_is_changed_and_the_compare_runs_outside_the_lock(tmp_path, monkeypatch):
+    """OI-2983: the pair compare runs before the archive lock; a gz that moves after it is skipped."""
+    import fcntl
+
+    plain = _plain(tmp_path, "d1", b"one\ntwo\n")
+    gz = tmp_path / "d1.ndjson.gz"
+    real_verified, real_compare, held = eac._compress_verified, eac._compare, []
+
+    def gz_appears(path):
+        scratch = real_verified(path)
+        gz.write_bytes(gzip.compress(b"one\ntwo\n"))
+        return scratch
+
+    def probing_compare(g, p):
+        with open(tmp_path / es.ARCHIVE_LOCK_NAME, "ab") as probe:
+            try:
+                fcntl.flock(probe.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.flock(probe.fileno(), fcntl.LOCK_UN)
+                held.append(False)
+            except BlockingIOError:
+                held.append(True)
+        kind = real_compare(g, p)
+        if g == gz:
+            with open(gz, "ab") as f:
+                f.write(gzip.compress(b"three\n"))
+        return kind
+
+    monkeypatch.setattr(eac, "_compress_verified", gz_appears)
+    monkeypatch.setattr(eac, "_compare", probing_compare)
+    result = _round(tmp_path)
+    assert held and not any(held)
+    assert _outcomes(result) == [("d1.ndjson", "skipped", "changed")]
+    assert plain.read_bytes() == b"one\ntwo\n" and _names(tmp_path) == ["d1.ndjson", "d1.ndjson.gz"]
+
+
+def test_a_symlinked_plain_file_is_no_candidate_and_its_target_is_untouched(tmp_path):
+    outside = tmp_path / "outside"
+    target = _plain(outside, "t", b"keep\n")
+    directory = tmp_path / "T1"
+    directory.mkdir()
+    link = directory / "old.ndjson"
+    link.symlink_to(target)
+    assert eac.candidates([directory], 7, now=lambda: NOW) == []
+    _round(directory)
+    assert target.read_bytes() == b"keep\n" and link.is_symlink()
+    assert not (outside / "t.ndjson.gz").exists() and not (directory / "old.ndjson.gz").exists()
