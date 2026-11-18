@@ -31,7 +31,9 @@ jobs:
     # takes 52 to 54.8 minutes (OI-2523), so that branch gets 80 (OI-2525) --
     # the bridge D3c (#2378) set on 2026-11-03, kept as the rollback's bound
     # now that D4 sizes the xdist branch from the measured window.
-    timeout-minutes: ${{ vars.VNX_CI_XDIST == '0' && 80 || 38 }}
+    # An unset repository variable is null, and null == '0' is true in Actions
+    # (mixed types compare as numbers), so the variable is read through `|| '1'`.
+    timeout-minutes: ${{ (vars.VNX_CI_XDIST || '1') == '0' && 80 || 38 }}
 
     steps:
       - name: Checkout
