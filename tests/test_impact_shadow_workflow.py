@@ -265,3 +265,47 @@ def test_job_exits_zero_and_says_so_when_the_record_cannot_be_written(tree, repo
     done = run(tree / "impact_shadow_job.sh", repo, str(tmp_path / "out"), GITHUB_EVENT_NAME="push", GITHUB_STEP_SUMMARY=str(summary))
     assert done.returncode == 0
     assert summary.read_text().startswith("impact shadow job: no record (impact_shadow.py job:")
+
+
+
+@pytest.fixture()
+def sharded_tree(tree) -> Path:
+    """The shadow scripts plus the real shard_view (scripts/lib), with import-safe stubs that show the evidence read."""
+    lib = tree.parent / "lib"
+    lib.mkdir()
+    for name in ("impact_backtest.py", "impact_ledger.py"):
+        shutil.copy(REPO / "scripts" / "lib" / name, lib / name)
+    (tree / "impact_select.py").write_text(
+        "import json, sys\nif __name__ == '__main__':\n"
+        "    print(json.dumps({'paths': open(sys.argv[sys.argv.index('--paths-file') + 1]).read().split()}))\n", encoding="utf-8")
+    (tree / "impact_shadow.py").write_text(  # the real module on import, a listing of --evidence as a script
+        f"import importlib.util, pathlib, sys\nspec = importlib.util.spec_from_file_location('real', {str(CI_DIR / 'impact_shadow.py')!r})\n"
+        "real = importlib.util.module_from_spec(spec)\nspec.loader.exec_module(real)\nname = __name__\nglobals().update(vars(real))\n"
+        "if name == '__main__':\n"
+        "    print('read', *sorted(p.name for p in pathlib.Path(sys.argv[sys.argv.index('--evidence') + 1]).iterdir()))\n",
+        encoding="utf-8")
+    return tree
+
+
+def test_step_reads_the_shard_layout_flat(sharded_tree, repo, tmp_path):
+    from test_impact_backtest import RED_OUTSIDE_S, shards
+    commit(repo, "a.txt")
+    shards(tmp_path / "ev", RED_OUTSIDE_S, ("1", "1"))
+    summary = tmp_path / "summary.md"
+    done = run(sharded_tree / "impact_shadow_step.sh", repo, str(tmp_path / "ev"), str(tmp_path / "out"),
+               GITHUB_EVENT_NAME="push", GITHUB_STEP_SUMMARY=str(summary), RUNNER_TEMP=str(tmp_path))
+    assert done.returncode == 0, done.stderr
+    assert summary.read_text().split() == ["read", "junit-serial.xml", "junit-shard-1.xml", "junit-shard-2.xml",
+                                           "manifest-serial.json", "manifest-shard-1.json", "manifest-shard-2.json"]
+
+
+def test_step_writes_no_record_when_the_shard_evidence_is_incomplete(sharded_tree, repo, tmp_path):
+    from test_impact_backtest import RED_OUTSIDE_S, shards
+    commit(repo, "a.txt")
+    shards(tmp_path / "ev", RED_OUTSIDE_S, ("1", "1"))
+    (tmp_path / "ev" / "shard-2" / "manifest-shard.json").unlink()
+    summary = tmp_path / "summary.md"
+    done = run(sharded_tree / "impact_shadow_step.sh", repo, str(tmp_path / "ev"), str(tmp_path / "out"),
+               GITHUB_EVENT_NAME="push", GITHUB_STEP_SUMMARY=str(summary), RUNNER_TEMP=str(tmp_path))
+    assert done.returncode == 0
+    assert summary.read_text().strip() == "impact shadow: no record (shard evidence: ValueError: shard-2: no manifest-shard.json)"
