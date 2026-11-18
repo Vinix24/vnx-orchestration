@@ -2,7 +2,7 @@
 an archive file goes once the last day of its month lies more than 365 days behind.
 
 Move phase: the decision goes to the receipt ledger first (ADR-005); any later failure restores every live file and
-archive byte for byte, each rollback step on its own, and records "error". Lines without a timezone-aware ``ts`` and a
+archive byte for byte, each rollback step on its own (see ``_rollback``), and records "error". Lines without a timezone-aware ``ts`` and a
 torn tail stay live as they are. Removal phase, after the move phase completed: see ``_remove``.
 """
 from __future__ import annotations
@@ -137,14 +137,25 @@ def prune(project_id: str, state_dir: Optional[Path] = None, now: Optional[datet
 
 
 def _rollback(lives: Dict[Path, bytes], archives: Dict[Path, Optional[int]]) -> List[str]:
-    """Every live file back to its bytes, every archive back to its old size; each step runs, each failure is named."""
+    """Every live file back to its bytes, every archive back to its old size; each step runs, each failure is named.
+
+    When a ledger's live restore fails, its archives from this round stay as they are, since the live file may no longer
+    hold the moved lines. A line in both live and archive is a duplicate that ``_append_archive`` skips on a retry; a line
+    in neither would be loss.
+    """
     failed: List[str] = []
+    broken: Dict[str, str] = {}  # ledger key -> live file name whose restore failed
     for path, raw in lives.items():
         try:
             _write_bytes(path, raw)
         except Exception as err:
             failed.append(f"restore {path.name}: {type(err).__name__}: {err}")
+            broken.update({k: path.name for k, f in LEDGERS.items() if f == path.name})
     for path, size in archives.items():
+        owner = next((k for k in broken if path.name.startswith(k + "-")), None)
+        if owner is not None:
+            failed.append(f"archive {path.name} kept: live restore of {broken[owner]} failed")
+            continue
         try:
             os.truncate(path, size) if size is not None else path.unlink(missing_ok=True)
         except Exception as err:

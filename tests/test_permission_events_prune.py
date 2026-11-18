@@ -163,7 +163,8 @@ def test_old_scan_call_without_subcommand_still_scans_and_prune_subcommand(tmp_p
     assert scan.main(["prune", "--project-id", "../x", "--state-dir", str(state)]) == 2
 
 
-def test_rollback_finishes_when_the_first_live_restore_fails(state, monkeypatch):
+def _restore_fails(state, monkeypatch, nth):
+    """Seed both ledgers and an existing archive; the coverage write fails, then the nth live write (3: first restore)."""
     for name in LEDGER_FILES:
         _seed(state, name)
     old = state / pp.ARCHIVE_DIR / f"permission_events-{M91}.ndjson"
@@ -171,11 +172,37 @@ def test_rollback_finishes_when_the_first_live_restore_fails(state, monkeypatch)
     old.write_bytes(b'{"tag": "earlier"}\n')
     before = _snap(state)
     _fail(monkeypatch, pe, "_store_coverage", lambda a, n: n == 1)
-    _fail(monkeypatch, atomic_io, "atomic_write_text", lambda a, n: a[0].name in LEDGER_FILES and n == 3, "restore broke")
+    _fail(monkeypatch, atomic_io, "atomic_write_text", lambda a, n: a[0].name in LEDGER_FILES and n == nth, "restore broke")
     with pytest.raises(OSError, match="disk full"):
         pp.prune(PID, state, NOW)
-    assert _snap(state)[LEDGER_FILES[1]] == before[LEDGER_FILES[1]] and old.read_bytes() == before[str(old.relative_to(state))]
-    assert _cov(state)["status"] == "error" and "disk full" in _cov(state)["reason"] and "restore broke" in _cov(state)["reason"]
+    for ledger, fname in zip(pp.LEDGERS, LEDGER_FILES):  # every moved line survives in live or archive, byte for byte
+        held = (state / fname).read_bytes().splitlines(keepends=True)
+        for arch in (state / pp.ARCHIVE_DIR).glob(f"{ledger}-*.ndjson"):
+            held += arch.read_bytes().splitlines(keepends=True)
+        for days in (91, 400):
+            assert (_line(days, f"d{days}") + "\n").encode() in held, (ledger, days)
+    return before, old, _cov(state)
+
+
+def test_rollback_keeps_the_archives_of_a_ledger_whose_live_restore_fails(state, monkeypatch):
+    before, old, cov = _restore_fails(state, monkeypatch, 3)
+    assert _snap(state)[LEDGER_FILES[1]] == before[LEDGER_FILES[1]]
+    assert not list((state / pp.ARCHIVE_DIR).glob("cli_invocations-*"))
+    assert old.read_bytes().startswith(before[str(old.relative_to(state))])
+    assert cov["status"] == "error" and "disk full" in cov["reason"] and "restore broke" in cov["reason"]
+    assert f"archive permission_events-{M91}.ndjson kept: live restore of permission_events.ndjson failed" in cov["reason"]
+
+
+def test_rollback_restores_the_other_ledger_and_its_archives_when_one_restore_fails(state, monkeypatch):
+    before, old, cov = _restore_fails(state, monkeypatch, 4)  # cli_invocations fails, permission_events succeeds
+    snap = _snap(state)
+    assert snap[LEDGER_FILES[0]] == before[LEDGER_FILES[0]] and old.read_bytes() == before[str(old.relative_to(state))]
+    assert [p.name for p in (state / pp.ARCHIVE_DIR).glob("permission_events-*")] == [old.name]
+    assert {p.name for p in (state / pp.ARCHIVE_DIR).glob("cli_invocations-*")} == {
+        f"cli_invocations-{(NOW - timedelta(days=d)).strftime('%Y-%m')}.ndjson" for d in (91, 400)}
+    assert "restore cli_invocations.ndjson: OSError: restore broke" in cov["reason"]
+    assert f"archive cli_invocations-{M91}.ndjson kept: live restore of cli_invocations.ndjson failed" in cov["reason"]
+    assert "archive permission_events-" not in cov["reason"]
 
 
 def _at(days):
