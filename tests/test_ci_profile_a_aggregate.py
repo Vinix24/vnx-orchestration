@@ -232,6 +232,16 @@ def test_invalid_shard_jobs(tmp_path, capsys, jobs):
     _assert_invalid(tmp_path, capsys, shard_jobs=jobs)
 
 
+def test_unwritable_verdict_is_exit_2_without_mode(tmp_path, capsys):
+    (tmp_path / "verdict.json").mkdir()
+    needs_file = tmp_path / "needs.json"
+    needs_file.write_text(json.dumps(_needs()), encoding="utf-8")
+    rc = _main(["decide", "--needs", str(needs_file), "--shard-jobs", ",".join(SHARDS),
+                "--guards-job", "guards", "--profile", "light", "--evidence-root", str(tmp_path),
+                "--output", str(tmp_path / "verdict.json")])
+    assert rc == 2 and "mode=" not in capsys.readouterr().out
+
+
 def test_invalid_argv_returns_2(capsys):
     assert _main(["decide", "--profile", "medium"]) == 2
     assert "mode=" not in capsys.readouterr().out

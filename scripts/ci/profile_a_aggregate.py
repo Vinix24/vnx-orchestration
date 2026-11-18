@@ -165,25 +165,21 @@ def main(argv: list[str] | None = None) -> int:
         shard_jobs = parse_shard_jobs(args.shard_jobs, args.guards_job)
         verdict = decide(load_needs(args.needs), shard_jobs, args.guards_job, args.profile,
                          args.evidence_root, args.xdist_off)
+        rc = 0 if verdict["green"] else 1
     except InvalidInput as exc:
         verdict = {"schema": SCHEMA, "mode": None, "green": False,
                    "reasons": [f"invalid input: {exc}"], "shards": [], "guards": None,
                    "xdist_off": args.xdist_off, "profile": args.profile}
-        print(f"profile_a_aggregate: invalid input: {exc}", file=sys.stderr)
-        try:
-            _write(verdict, args.output, args.summary)
-        except OSError as write_exc:
-            print(f"profile_a_aggregate: verdict not written: {write_exc}", file=sys.stderr)
-        return 2
+        rc = 2
+    for reason in verdict["reasons"]:
+        print(f"profile_a_aggregate: {reason}", file=sys.stderr)
     try:
         _write(verdict, args.output, args.summary)
     except OSError as exc:
         print(f"profile_a_aggregate: verdict not written: {exc}", file=sys.stderr)
         return 2
-    if not verdict["green"]:
-        for reason in verdict["reasons"]:
-            print(f"profile_a_aggregate: {reason}", file=sys.stderr)
-        return 1
+    if rc:
+        return rc
     print(f"mode={verdict['mode']}")
     return 0
 
