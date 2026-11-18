@@ -59,7 +59,7 @@ CQS_THRESHOLD = 50.0
 
 # The PR-size thresholds (lines added+removed) are the registry keys VNX_PR_SIZE_WARN and
 # VNX_PR_SIZE_HOLD, resolved per project in _pr_size_thresholds; the registry carries the
-# only copy of the defaults (450 and 600).
+# only copy of the defaults.
 PR_SIZE_WARN_KEY = "VNX_PR_SIZE_WARN"
 PR_SIZE_HOLD_KEY = "VNX_PR_SIZE_HOLD"
 

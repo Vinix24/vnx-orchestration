@@ -285,7 +285,7 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         subsystem="governance-enforcement-stack", status="ACTIVATE"),
     # The PR-size thresholds of scripts/pre_merge_gate.check_pr_size, per project (operator
     # decision 2026-11-09: the limit is configurable, not a hard 450). Same resolution path as
-    # VNX_REVIEW_SEAT_RULE. The defaults here are the only copy of 450 and 600; a value that is
+    # VNX_REVIEW_SEAT_RULE. The defaults here are the only copy of both thresholds; a value that is
     # not a positive integer, or a WARN above HOLD, falls back to both defaults and is named
     # in the gate's detail line. It never disables the check.
     "VNX_PR_SIZE_WARN": _e(
@@ -294,12 +294,35 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         "blocking. A value that is not a positive integer, or above VNX_PR_SIZE_HOLD, falls "
         "back to 450 and is named in the gate detail.", approval=True,
         subsystem="governance-enforcement-stack", status="LIVE"),
+    # ADR-088 besluit 9: HOLD 600 -> 450, equal to WARN, so gate-check has no soft band above 450.
     "VNX_PR_SIZE_HOLD": _e(
-        "VNX_PR_SIZE_HOLD", "integer", "600", "gate",
+        "VNX_PR_SIZE_HOLD", "integer", "450", "gate",
         "PR size (lines added + removed) above which pre_merge_gate holds the merge. A value "
-        "that is not a positive integer, or below VNX_PR_SIZE_WARN, falls back to 600 and is "
+        "that is not a positive integer, or below VNX_PR_SIZE_WARN, falls back to 450 and is "
         "named in the gate detail.", approval=True,
         subsystem="governance-enforcement-stack", status="LIVE"),
+    # ADR-088 besluit 1, 3 and 8 (track pr-grootte-afgedwongen PG-0). No reader yet: the merge
+    # door reads these three from PG-1 on, so read_site_wired=False until then. The door reads
+    # the floor (layers=("project_config", "default")) and the full chain and compares; an override only tightens.
+    "VNX_PR_SIZE_ENFORCE": _e(
+        "VNX_PR_SIZE_ENFORCE", "string", "warn", "gate",
+        "How the merge door treats a PR above the size limit: off (not measured), warn (a line "
+        "on the receipt) or refuse (NO-GO). Read by the door from PG-1 on (ADR-088); no reader "
+        "yet. The reader validates the value until the registry carries allowed values: any "
+        "other value reads as refuse and is named.", approval=True,
+        subsystem="governance-enforcement-stack", status="ACTIVATE", read_site_wired=False),
+    "VNX_PR_SIZE_HOLD_SECURITY": _e(
+        "VNX_PR_SIZE_HOLD_SECURITY", "integer", "300", "gate",
+        "PR size limit (lines added + removed) when one changed path is a security path "
+        "(ADR-088 besluit 8). Read by the merge door from PG-1 on; no reader yet.",
+        approval=True,
+        subsystem="governance-enforcement-stack", status="ACTIVATE", read_site_wired=False),
+    "VNX_SECURITY_PATHS": _e(
+        "VNX_SECURITY_PATHS", "string", "", "gate",
+        "Comma-separated path prefixes this project adds to the security set of the PR-size "
+        "check. It only adds to the set built from code; a shorter list removes nothing. Read "
+        "by the merge door from PG-1 on (ADR-088 besluit 8); no reader yet.", approval=True,
+        subsystem="governance-enforcement-stack", status="ACTIVATE", read_site_wired=False),
     # The admission contract of the main window (ADR-073 besluit 3 and 6), read by
     # main_window.read_admission_config. Unset N is mode off: the gate records GO and the
     # merge behaviour is unchanged.
@@ -806,6 +829,24 @@ def set_default_project_id(project_id: Optional[str]) -> None:
     _default_project_id = project_id
 
 
+# The layers of the precedence chain, highest first, by the source name resolve_with_source
+# returns for each. One constant, so a new layer (config-een-oppervlak G2 adds a global one)
+# lands in the chain walk and in every ``layers=`` subset a reader names at the same time.
+CHAIN_LAYERS: "tuple[str, ...]" = ("override", "project_config", "env", "default")
+
+
+def _checked_layers(layers) -> frozenset:
+    """The set of ``layers``; raises ``ValueError`` on an empty set or an unknown name."""
+    if isinstance(layers, str):
+        raise ValueError(f"layers must be a sequence of layer names, not the string {layers!r}")
+    walked = frozenset(layers)
+    unknown = sorted(walked - frozenset(CHAIN_LAYERS))
+    if unknown or not walked:
+        raise ValueError(
+            f"unknown or empty layers {sorted(walked)!r}: each must be one of {CHAIN_LAYERS!r}")
+    return walked
+
+
 def _bare(key: str) -> str:
     return key[len("VNX_"):] if key.startswith("VNX_") else key
 
@@ -813,12 +854,13 @@ def _bare(key: str) -> str:
 def resolve_with_source(
     key: str, project_id: Optional[str] = None, resolver: Optional[DbResolver] = None,
     *, use_default_resolver: bool = True, strict_resolver: bool = False,
+    layers: "tuple[str, ...]" = CHAIN_LAYERS,
 ) -> "tuple[Optional[str], str]":
     """``(value, source)`` through the one precedence chain :func:`_resolve` is built on.
 
     ``source`` is ``override`` (``VNX_OVERRIDE_<BARE>``), ``project_config`` (the DB layer),
     ``env`` (``VNX_<BARE>`` as the process started), ``default`` (the registry default) or
-    ``unset`` (an unknown key with no value anywhere). With no ``resolver`` and
+    ``unset`` (no value in any layer walked). With no ``resolver`` and
     ``use_default_resolver`` the process's wired store and default project are used, as
     :func:`get` does.
 
@@ -827,30 +869,38 @@ def resolve_with_source(
     On, the chain stops there and returns ``(None, "project_config_error")``: the DB state is
     unknown, so a caller whose safe answer is "off" can tell that apart from "no row". The
     override is still read first, before the DB is consulted.
+
+    ``layers`` (default :data:`CHAIN_LAYERS`, the full chain) names the layers walked, always
+    in chain order whatever order they are given in. A reader that must tell the approved
+    floor apart from a loose override (ADR-088 besluit 3) resolves once with the floor layers
+    and once with the full chain. An empty ``layers`` or a name outside :data:`CHAIN_LAYERS`
+    raises ``ValueError``.
     """
+    walked = _checked_layers(layers)
     entry = CONFIG_REGISTRY.get(key)
     override = os.environ.get(f"VNX_OVERRIDE_{_bare(key)}")
-    if override is not None:
+    if "override" in walked and override is not None:
         return override, "override"
-    if resolver is None and use_default_resolver:
-        resolver = _db_resolver
-        project_id = project_id if project_id is not None else _default_project_id
-    if resolver is not None:
-        try:
-            db_val = resolver(project_id, key)
-        except Exception as exc:
-            if strict_resolver:
-                logging.getLogger(__name__).warning(
-                    "config_registry: project_config resolver failed for %s (%s: %s)",
-                    key, type(exc).__name__, exc)
-                return None, "project_config_error"
-            db_val = None
-        if db_val is not None:
-            return db_val, "project_config"
+    if "project_config" in walked:
+        if resolver is None and use_default_resolver:
+            resolver = _db_resolver
+            project_id = project_id if project_id is not None else _default_project_id
+        if resolver is not None:
+            try:
+                db_val = resolver(project_id, key)
+            except Exception as exc:
+                if strict_resolver:
+                    logging.getLogger(__name__).warning(
+                        "config_registry: project_config resolver failed for %s (%s: %s)",
+                        key, type(exc).__name__, exc)
+                    return None, "project_config_error"
+                db_val = None
+            if db_val is not None:
+                return db_val, "project_config"
     env_val = os.environ.get(key)
-    if env_val is not None:
+    if "env" in walked and env_val is not None:
         return env_val, "env"
-    if entry is not None:
+    if "default" in walked and entry is not None:
         return entry.default, "default"
     return None, "unset"
 

@@ -613,3 +613,85 @@ def test_injection_effectiveness_ledger_flag_stays_why_enabled():
     sub = "injection-effectiveness-eval-loop"
     assert _canonical_flags(cr)[sub] == "VNX_INJECTION_WHY_ENABLED"
     assert cr.canonical_flags()[sub] == "VNX_INJECTION_WHY_ENABLED"
+
+
+# ---------------------------------------------------------------------------
+# PR-size enforcement keys and the `layers` parameter (ADR-088, pr-grootte-afgedwongen PG-0)
+# ---------------------------------------------------------------------------
+
+_SIZE_KEY = "VNX_PR_SIZE_HOLD"
+
+
+def test_pr_size_enforcement_keys_exist_with_their_defaults_and_require_approval():
+    # Red run on origin/main: VNX_PR_SIZE_ENFORCE is unknown and HOLD is 600.
+    expected = {"VNX_PR_SIZE_ENFORCE": ("string", "warn"), "VNX_PR_SIZE_HOLD": ("integer", "450"),
+                "VNX_PR_SIZE_HOLD_SECURITY": ("integer", "300"), "VNX_SECURITY_PATHS": ("string", "")}
+    for key, (type_, default) in expected.items():
+        entry = cr.CONFIG_REGISTRY[key]
+        assert (entry.type, entry.default, entry.category) == (type_, default, "gate"), key
+        assert entry.requires_approval is True, key
+        assert cr.resolve_with_source(key) == (default, "default"), key
+    for value in ("off", "warn", "refuse"):
+        assert value in cr.CONFIG_REGISTRY["VNX_PR_SIZE_ENFORCE"].description
+    # No reader yet (PG-1 brings it), so none of the three new keys may be a canonical flag.
+    for key in ("VNX_PR_SIZE_ENFORCE", "VNX_PR_SIZE_HOLD_SECURITY", "VNX_SECURITY_PATHS"):
+        assert cr.CONFIG_REGISTRY[key].read_site_wired is False, key
+
+
+def test_layers_floor_ignores_override_and_env_the_full_chain_does_not(monkeypatch):
+    cr.set_db_resolver(lambda pid, key: "400" if key == _SIZE_KEY else None)
+    monkeypatch.setenv("VNX_OVERRIDE_PR_SIZE_HOLD", "99999")
+    monkeypatch.setenv(_SIZE_KEY, "88888")
+    assert cr.resolve_with_source(_SIZE_KEY, layers=("project_config", "default")) == (
+        "400", "project_config")
+    assert cr.resolve_with_source(_SIZE_KEY) == ("99999", "override")
+    assert cr.resolve_with_source(_SIZE_KEY, layers=("env", "default")) == ("88888", "env")
+
+
+def test_layers_walk_in_chain_order_whatever_order_they_are_given(monkeypatch):
+    cr.set_db_resolver(lambda pid, key: "400")
+    monkeypatch.setenv("VNX_OVERRIDE_PR_SIZE_HOLD", "300")
+    assert cr.resolve_with_source(_SIZE_KEY, layers=("default", "override")) == ("300", "override")
+    assert cr.resolve_with_source(_SIZE_KEY, layers=("default", "project_config")) == (
+        "400", "project_config")
+
+
+def test_layers_default_only_returns_the_registry_default(monkeypatch):
+    cr.set_db_resolver(lambda pid, key: "400")
+    monkeypatch.setenv("VNX_OVERRIDE_PR_SIZE_HOLD", "300")
+    monkeypatch.setenv(_SIZE_KEY, "350")
+    assert cr.resolve_with_source(_SIZE_KEY, layers=("default",)) == ("450", "default")
+    # A layer subset with no value in it is unset, never a value from a layer left out.
+    assert cr.resolve_with_source("VNX_NOT_A_KEY", layers=("default",)) == (None, "unset")
+
+
+@pytest.mark.parametrize("bad", [("overide",), ("default", "global"), (), "default", (None,)])
+def test_unknown_or_empty_layers_raise(bad):
+    with pytest.raises(ValueError):
+        cr.resolve_with_source(_SIZE_KEY, layers=bad)
+
+
+def test_strict_resolver_keeps_its_meaning_inside_a_layer_subset():
+    def _boom(pid, key):
+        raise RuntimeError("db down")
+    cr.set_db_resolver(_boom)
+    assert cr.resolve_with_source(_SIZE_KEY, strict_resolver=True,
+                                  layers=("project_config", "default")) == (
+        None, "project_config_error")
+    # Without project_config in the subset the resolver is never called.
+    assert cr.resolve_with_source(_SIZE_KEY, strict_resolver=True, layers=("default",)) == (
+        "450", "default")
+
+
+def test_layers_default_is_the_chain_constant_and_names_every_value_source():
+    """A new layer (config-een-oppervlak G2: global) must land in CHAIN_LAYERS and in the walk.
+    Every source resolve_with_source can return, except unset and the *_error ones, is a layer."""
+    import inspect
+    import re
+
+    assert inspect.signature(cr.resolve_with_source).parameters["layers"].default is cr.CHAIN_LAYERS
+    assert cr.CHAIN_LAYERS == ("override", "project_config", "env", "default")
+    source = inspect.getsource(cr.resolve_with_source)
+    returned = set(re.findall(r'return [^\n]*?,\s*"([a-z_]+)"', source))
+    value_sources = {s for s in returned if s != "unset" and not s.endswith("_error")}
+    assert value_sources == set(cr.CHAIN_LAYERS)
