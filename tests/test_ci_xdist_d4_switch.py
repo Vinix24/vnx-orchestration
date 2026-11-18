@@ -843,9 +843,9 @@ def _nightly_text() -> str:
 def test_every_nightly_job_runs_only_on_main():
     """A workflow_dispatch on a PR head would put these check runs on that SHA, where the merge readers look (OI-2521)."""
     jobs = _jobs(NIGHTLY)
-    for job_id in ("serial-truth", "xdist-shape", "parity"):
+    for job_id in ("serial-truth", "xdist-shape", "parity", "shard-shape", "shard-parity"):
         assert "github.ref == 'refs/heads/main'" in (jobs[job_id].get("if") or ""), job_id
-    assert "!cancelled()" in jobs["parity"]["if"], "the parity job still runs when a needed job failed"
+    assert all("!cancelled()" in jobs[j]["if"] for j in ("parity", "shard-parity")), "a parity job runs after a failed need"
 
 
 def test_every_job_of_the_nightly_carries_the_main_guard():
@@ -873,6 +873,7 @@ def test_the_serial_truth_job_allows_eighty_minutes_and_the_others_keep_theirs()
     assert jobs["serial-truth"]["timeout-minutes"] == 80
     assert jobs["xdist-shape"]["timeout-minutes"] == 35
     assert jobs["parity"]["timeout-minutes"] == 20
+    assert [jobs[j]["timeout-minutes"] for j in ("shard-parity", "shard-shape")] == [20, 38] == [20, _jobs(WORKFLOW)["profile-a-shard-1"]["timeout-minutes"]]
 
 
 def test_the_serial_truth_timeout_comment_names_the_measured_wall_time():
@@ -881,3 +882,107 @@ def test_the_serial_truth_timeout_comment_names_the_measured_wall_time():
     assert "52" in job and "54.8" in job, job
     assert "OI-2523" in job
     assert "35.4" not in job, "the comment still cites the pre-switch measurement"
+
+
+
+# --- C4b: the nightly also compares the serial truth with the four Profile A shards ----------------
+
+
+def test_the_nightly_runs_the_four_profile_a_shards_through_the_pr_shard_scripts():
+    shard = _jobs(NIGHTLY)["shard-shape"]
+    assert shard["name"] == "Shard shape (the four Profile A shards)" and "needs" not in shard
+    assert shard["strategy"] == {"fail-fast": False, "matrix": {"k": [1, 2, 3, 4]}}
+    nightly, pr = ("\n".join(s.get("run") or "" for s in job["steps"]) for job in (shard, _jobs(WORKFLOW)["profile-a-shard-1"]))
+    for call in ("test_shard_plan.py\" select-source", "--before \"$created\" --artifact profile-a-evidence",
+                 "VNX_CI_SHARD_SOURCE=", "profile_a_pytest_args.sh", "pytest_collection_manifest.py\" inactive",
+                 "profile_a_run_phase.sh\" serial", "profile_a_run_phase.sh\" shard"):
+        assert call in nightly and call in pr, call
+    plan = _step(shard, "plan")
+    assert 'VNX_CI_SHARD="$SHARD_K/4"' in plan["run"] and 'elif [ "$SHARD_K" = 1 ]' in plan["run"]
+    assert plan["env"]["SHARD_K"] == "${{ matrix.k }}" and plan["env"]["VNX_CI_XDIST"] == "1"
+    assert _step(shard, "parallel")["run"].endswith('profile_a_run_phase.sh" shard "$XDIST_TRUTH_EVIDENCE"')
+    assert shard["steps"][-1]["with"]["name"] == "vnx-shard-truth-evidence-${{ matrix.k }}"
+    assert shard["env"] == {"XDIST_PHASE": "shard"} and all(
+        _step(shard, s) == _step(_jobs(NIGHTLY)["xdist-shape"], s) for s in ("serial", "record"))
+
+
+def test_the_shard_parity_job_shares_every_step_but_the_download_with_the_two_phase_parity_job():
+    jobs = _jobs(NIGHTLY)  # one compare, record and report: criterion 6 covers both shapes under one label
+    job, parity = jobs["shard-parity"], jobs["parity"]
+    assert job["name"] == "Serial truth vs shard shape" and set(job["needs"]) == {"serial-truth", "shard-shape"}
+    assert job["env"] == {"RESULT_PROFILE_A": "${{ needs.serial-truth.result }}",
+                          "RESULT_SHADOW": "${{ needs.shard-shape.result }}", "PARITY_SHAPE": "shards"}
+    assert parity["env"]["RESULT_SHADOW"] == "${{ needs.xdist-shape.result }}" and parity["env"]["PARITY_SHAPE"] == "two_phase"
+    differ = [i for i, (a, b) in enumerate(zip(job["steps"], parity["steps"], strict=True)) if a != b]
+    assert [job["steps"][i]["id"] for i in differ] == ["download_candidate"]
+    assert job["steps"][differ[0]]["with"]["pattern"] == "vnx-shard-truth-evidence-*"
+    assert parity["steps"][-1]["with"]["name"] == "vnx-serial-truth-${{ github.job }}-verdict"
+    report = _step(parity, "report")["run"]
+    assert report.count("--label xdist-parity") == 2 and "candidate_shape" in report
+    names = [j["name"] for j in jobs.values()]  # never merge evidence: no name the merge readers select
+    assert not [n for n in names if n.startswith(("VNX CI", "Profile A", shape.REQUIRED_CHECK_NAME))], names
+
+
+def _bash_step(job: str, step_id: str, env: dict, written: Path) -> tuple:
+    base = {k: v for k, v in os.environ.items() if not k.startswith(("OUTCOME_", "XDIST_", "GITHUB_", "PARITY_", "RESULT_"))}
+    proc = subprocess.run(["bash", "-c", _step(_jobs(NIGHTLY)[job], step_id)["run"]], capture_output=True, text=True,
+                          env={**base, "GITHUB_WORKSPACE": str(REPO_ROOT), "GITHUB_RUN_ID": "7",
+                               "GITHUB_RUN_ATTEMPT": "1", "GITHUB_EVENT_NAME": "schedule", **env})
+    return proc, json.loads(written.read_text(encoding="utf-8")) if written.exists() else None
+
+
+def _compare(tmp_path: Path, shape_env: dict) -> tuple:
+    env = {"PARITY_WORK": str(tmp_path), "PARITY_PROFILE": "heavy", "PARITY_RUN_ID": "7", "PARITY_RUN_ATTEMPT": "1",
+           "PARITY_HEAD_SHA": "h", "PARITY_TESTED_SHA": "t", "PARITY_EVENT": "schedule", "PARITY_REF": "main",
+           "RESULT_PROFILE_A": "success", "RESULT_SHADOW": "success", **shape_env,
+           **{f"OUTCOME_{k}": "success" for k in ("CHECKOUT", "PRELUDE", "SELECTION", "DOWNLOAD_REFERENCE", "DOWNLOAD_CANDIDATE")}}
+    tmp_path.mkdir(exist_ok=True)
+    return _bash_step("shard-parity", "compare", env, tmp_path / "verdict" / "xdist-parity-verdict.json")
+
+
+def test_the_shards_shape_compares_four_shard_dirs_and_missing_shards_stay_invalid(tmp_path):
+    proc, verdict = _compare(tmp_path, {"PARITY_SHAPE": "shards"})
+    assert proc.returncode == 2 and (verdict["exit"], verdict["verdict"]) == (2, "invalid_evidence")
+    assert (verdict["candidate_shape"], verdict["shards"]) == ("shards", 4) and "shadow.record=missing" in verdict["step_failures"]
+
+
+@pytest.mark.parametrize("value", ["", "shard", "two-phase", "SHARDS"])
+def test_an_unknown_shape_writes_no_verdict_and_unset_is_the_two_phase_shape(tmp_path, value):
+    assert _compare(tmp_path / "unset", {})[1]["candidate_shape"] == "two_phase"
+    proc, verdict = _compare(tmp_path, {"PARITY_SHAPE": value})
+    assert proc.returncode == 2 and "is not two_phase or shards" in proc.stderr and verdict is None
+
+
+def _record(tmp_path: Path, phase: str | None, files: dict, outcomes: dict) -> tuple:
+    for name, text in files.items():
+        (tmp_path / name).write_text(text, encoding="utf-8")
+    env = {"XDIST_TRUTH_EVIDENCE": str(tmp_path), "XDIST_HEAD_SHA": "h", "XDIST_TESTED_SHA": "t",
+           **({"XDIST_PHASE": phase} if phase is not None else {}),
+           **{f"OUTCOME_{k.upper()}": v for k, v in outcomes.items()}}
+    return _bash_step("shard-shape", "record", env, tmp_path / "xdist-shadow.json")
+
+
+GREEN = {"plan": "success", "serial": "success", "parallel": "success"}
+
+
+def test_the_shard_record_names_the_shard_phase_and_the_two_phase_record_keeps_parallel(tmp_path):
+    proc, record = _record(tmp_path, "shard", {"exit-shard": "0\n", "duration-shard-s": "301\n"}, GREEN)
+    assert proc.returncode == 0 and record["verdict"] == "shadow_passed" and record["run_attempt"] == "1"
+    assert record["steps"] == {"plan": "success", "serial": "success", "shard": "success"}
+    assert record["exit_codes"] == {"serial": None, "shard": 0} and record["durations_s"] == {"serial": None, "shard": 301}
+    proc, record = _record(tmp_path, None, {"exit-parallel": "1\n"}, {**GREEN, "serial": ""})
+    assert (record["steps"]["serial"], record["exit_codes"]) == ("skipped", {"serial": None, "parallel": 1})
+
+
+@pytest.mark.parametrize("change", [{"parallel": "failure"}, {"parallel": ""}, {"parallel": "skipped"},
+                                    {"parallel": "bogus"}, {"plan": "cancelled"}, {"plan": ""},
+                                    {"serial": "failure"}, {"serial": "cancelled"}])
+def test_a_shard_step_that_did_not_succeed_records_a_failed_shadow(tmp_path, change):
+    proc, record = _record(tmp_path, "shard", {}, {**GREEN, **change})
+    assert proc.returncode == 0 and record["verdict"] == "shadow_failed"
+
+
+@pytest.mark.parametrize("phase", ["", "full", "../x", "shard/../parallel"])
+def test_an_unknown_phase_writes_no_record(tmp_path, phase):
+    proc, record = _record(tmp_path, phase, {}, GREEN)
+    assert proc.returncode == 2 and "is not parallel or shard" in proc.stderr and record is None
