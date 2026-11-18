@@ -26,6 +26,8 @@ import ci_workflow_shape as shape
 REPO_ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "vnx-ci.yml"
 PROFILE_A_JOB = "profile-a"
+# Since C3 the gates run in the guards job, which the required check needs (ADR C3a).
+GUARDS_JOB = "profile-a-guards"
 PIPE_FAIL = "set -euo pipefail"
 # GitHub accepts a boolean or an expression string here; only these spell "still blocking".
 _BLOCKING_VALUES = frozenset({"false", "0", "no"})
@@ -121,7 +123,10 @@ def gate_violations(path: Path = WORKFLOW) -> list[str]:
                 f"{path}: the {job.name!r} job sets continue-on-error "
                 f"{job.body.get('continue-on-error')!r}; every step below it is non-blocking"
             )
-    steps = [entry.step for entry in profile_a.steps]
+    try:
+        steps = [entry.step for entry in profile_a.steps]
+    except shape.WorkflowShapeError as exc:
+        return violations + [f"{path}: {exc}; unmeasured: {_gate_names()}"]
     for gate in GATES:
         violations.extend(_gate_violations(steps, gate, path))
     return violations
@@ -156,7 +161,7 @@ def _document() -> dict:
 
 
 def _steps(document: dict) -> list:
-    return document["jobs"][PROFILE_A_JOB]["steps"]
+    return document["jobs"][GUARDS_JOB]["steps"]
 
 
 def _step(document: dict, name: str) -> dict:
@@ -242,10 +247,10 @@ STRUCTURAL_BREAKS = {
     "no-jobs-mapping": (lambda doc: doc.pop("jobs"), "no jobs mapping"),
     "no-profile-a-job": (lambda doc: doc["jobs"].pop(PROFILE_A_JOB), shape.REQUIRED_CHECK_NAME),
     "job-continue-on-error": (
-        lambda doc: doc["jobs"][PROFILE_A_JOB].__setitem__("continue-on-error", True),
+        lambda doc: doc["jobs"][GUARDS_JOB].__setitem__("continue-on-error", True),
         "job sets continue-on-error",
     ),
-    "steps-not-a-list": (lambda doc: doc["jobs"][PROFILE_A_JOB].__setitem__("steps", None), "no steps list"),
+    "steps-not-a-list": (lambda doc: doc["jobs"][GUARDS_JOB].__setitem__("steps", None), "no steps list"),
     "duplicate-step": (
         lambda doc: _steps(doc).append(dict(_step(doc, GATES[1].step))),
         "appears 2 times",
