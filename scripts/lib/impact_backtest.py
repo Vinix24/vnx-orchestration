@@ -19,7 +19,9 @@ the attempt without a line, so it is tried again next time.  Only runs that conc
 
 from __future__ import annotations
 
+import json
 import re
+import shutil
 import sys
 import tarfile
 import tempfile
@@ -48,6 +50,48 @@ EVIDENCE_ARTIFACT = "profile-a-evidence"
 CANDIDATE_KIND = "pr_head"
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 _SHA = re.compile(r"[0-9a-f]{40}")
+_SHARD_DIR = re.compile(r"shard-([1-9][0-9]?)")
+
+
+def _shard_count(directory: Path) -> int:
+    try:
+        shards = json.loads((directory / "args" / "shard.json").read_text(encoding="utf-8")).get("shards")
+    except (OSError, ValueError, AttributeError) as exc:
+        raise ValueError(f"{directory.name}: no readable args/shard.json ({exc})") from exc
+    if not isinstance(shards, int) or isinstance(shards, bool):
+        raise ValueError(f"{directory.name}: args/shard.json has shards {shards!r}")
+    return shards
+
+
+def shard_view(evidence: Path, dest: Path) -> Path:
+    """The directory ``impact_shadow.read_evidence`` reads for this evidence.
+
+    The single-job layout (``manifest-<phase>.json`` at the top) is returned as it is. The sharded
+    layout of C3 (``shard-k/`` per shard) is copied flat into ``dest``: ``manifest-shard.json`` of
+    shard k becomes ``manifest-shard-k.json`` (the JUnit likewise), shard 1's serial phase keeps its
+    name. Shards that are not exactly 1..N of their own plan raise ``ValueError`` naming why.
+    """
+    evidence = Path(evidence)
+    found = sorted((int(m.group(1)), d) for d in evidence.iterdir()
+                   if (m := _SHARD_DIR.fullmatch(d.name)) and d.is_dir() and not d.is_symlink())
+    if not found:
+        return evidence
+    if [k for k, _ in found] != list(range(1, len(found) + 1)):
+        raise ValueError(f"shard directories are not shard-1..shard-N: {[d.name for _, d in found]}")
+    Path(dest).mkdir(parents=True, exist_ok=True)
+    for k, directory in found:
+        if _shard_count(directory) != len(found):
+            raise ValueError(f"shard-{k}: plan of {_shard_count(directory)} shards, {len(found)} present")
+        if not (directory / "manifest-shard.json").is_file():
+            raise ValueError(f"shard-{k}: no manifest-shard.json")
+        for source in sorted([*directory.glob("manifest-*.json"), *directory.glob("junit-*.xml")]):
+            if source.is_symlink() or not source.is_file():
+                continue
+            name = {"manifest-shard.json": f"manifest-shard-{k}.json", "junit-shard.xml": f"junit-shard-{k}.xml"}.get(source.name, source.name)
+            if (Path(dest) / name).exists():
+                raise ValueError(f"shard-{k}: {name} also in an earlier shard")
+            shutil.copyfile(source, Path(dest) / name)
+    return Path(dest)
 
 
 def default_git(argv: list) -> str:
@@ -143,7 +187,11 @@ def _record(git: ledger.Runner, run: dict, evidence_dir: Path, tmp: Path, inputs
     identity = {"run_id": run_key[0], "run_attempt": run_key[1], "base_sha": inputs["base"],
                 "candidate_sha": inputs["candidate"], "changed_paths": inputs["paths"]}
     try:
-        return impact_shadow.build_record(selection, impact_shadow.read_evidence(evidence_dir, run_key), exclusions, known, identity), None
+        evidence = impact_shadow.read_evidence(shard_view(evidence_dir, tmp / "evidence-flat"), run_key)
+    except (OSError, ValueError):
+        return None, "evidence"
+    try:
+        return impact_shadow.build_record(selection, evidence, exclusions, known, identity), None
     except (KeyError, ValueError, TypeError):
         return None, "selection"
 

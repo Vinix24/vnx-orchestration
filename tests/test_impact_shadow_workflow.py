@@ -25,6 +25,9 @@ STEP = "Impact shadow record (never fails the job)"
 COMPLETENESS = "Check the xdist completeness (required)"
 EVIDENCE_UPLOAD = "Upload Profile A evidence (JUnit XML + manifest + completeness verdict)"
 LIGHT = "steps.prelude.outputs.profile != 'light'"
+# The single-job suite steps C3 replaced by the shards and the aggregator's mode steps.
+C3_REWRITTEN = {"Run Profile A (scope-appropriate suite)", "Profile A serial phase (serial list, xdist off)",
+                "Profile A parallel phase (the rest, under pytest-xdist)", COMPLETENESS}
 
 
 @pytest.fixture(scope="module")
@@ -45,16 +48,19 @@ def profile_a_steps() -> list:
     return [entry.step for entry in shape.profile_a(WORKFLOW).steps]
 
 
-def test_step_sits_directly_after_completeness_and_before_the_evidence_upload(jobs):
-    order = [step.get("name") for step in profile_a_steps()]
-    assert order.index(STEP) == order.index(COMPLETENESS) + 1
+def test_step_sits_after_every_mode_step_and_before_the_evidence_upload(jobs):
+    """Since C3 the step is in the aggregator, after the completeness and the serial sweep (the two that write evidence)."""
+    a = shape.profile_a(WORKFLOW)
+    order, ids = [s.get("name") for s in a.required_job.steps], [s.get("id") for s in a.required_job.steps]
+    assert a.job_running(STEP) is a.required_job
+    assert order.index(STEP) == max(ids.index("completeness"), ids.index("serial-sweep")) + 1
     assert order.index(STEP) < order.index(EVIDENCE_UPLOAD)
 
 
 def test_step_cannot_turn_the_job_red(jobs):
     step = shape.profile_a(WORKFLOW).step(STEP).step
     assert step["continue-on-error"] is True
-    assert step["timeout-minutes"] == 5
+    assert step["timeout-minutes"] == 4
     assert LIGHT in step["if"] and "always()" in step["if"]
     assert "impact_shadow_step.sh" in step["run"]
     assert {"VNX_HOME", "VNX_DATA_DIR", "PROFILE_A_EVIDENCE"} <= set(step["env"])
@@ -64,7 +70,7 @@ def test_step_upload_is_non_fatal(jobs):
     uploads = [s for s in profile_a_steps() if (s.get("with") or {}).get("name") == "impact-shadow"]
     assert len(uploads) == 1
     upload = uploads[0]
-    assert upload["continue-on-error"] is True and upload["timeout-minutes"] == 5
+    assert upload["continue-on-error"] is True and upload["timeout-minutes"] == 4
     assert LIGHT in upload["if"] and "always()" in upload["if"]
     assert upload["with"]["if-no-files-found"] == "warn" and upload["with"]["overwrite"] is True
 
@@ -116,13 +122,13 @@ def test_shadow_job_steps(jobs):
 
 
 def test_other_profile_a_steps_keep_their_conditions(jobs):
-    """The shadow adds two steps and changes no `if` or `continue-on-error` of the others."""
+    """The shadow adds two steps and changes no `if` or `continue-on-error` of the others (C3 rewrote the suite steps)."""
     shown = subprocess.run(["git", "show", "origin/main:.github/workflows/vnx-ci.yml"], cwd=REPO, capture_output=True, text=True)
     if shown.returncode != 0:
         pytest.skip("origin/main is not available")
     before = [entry.step for entry in shape.profile_a(yaml.safe_load(shown.stdout)).steps]
     now = {s.get("name"): s for s in profile_a_steps()}
-    for old in before:
+    for old in [s for s in before if s.get("name") not in C3_REWRITTEN]:
         new = now[old.get("name")]
         assert new.get("if") == old.get("if"), old.get("name")
         assert new.get("continue-on-error") == old.get("continue-on-error"), old.get("name")
@@ -265,3 +271,46 @@ def test_job_exits_zero_and_says_so_when_the_record_cannot_be_written(tree, repo
     done = run(tree / "impact_shadow_job.sh", repo, str(tmp_path / "out"), GITHUB_EVENT_NAME="push", GITHUB_STEP_SUMMARY=str(summary))
     assert done.returncode == 0
     assert summary.read_text().startswith("impact shadow job: no record (impact_shadow.py job:")
+
+
+@pytest.fixture()
+def sharded_tree(tree) -> Path:
+    """The shadow scripts plus the real shard_view (scripts/lib), with import-safe stubs that show the evidence read."""
+    lib = tree.parent / "lib"
+    lib.mkdir()
+    for name in ("impact_backtest.py", "impact_ledger.py"):
+        shutil.copy(REPO / "scripts" / "lib" / name, lib / name)
+    (tree / "impact_select.py").write_text(
+        "import json, sys\nif __name__ == '__main__':\n"
+        "    print(json.dumps({'paths': open(sys.argv[sys.argv.index('--paths-file') + 1]).read().split()}))\n", encoding="utf-8")
+    (tree / "impact_shadow.py").write_text(  # the real module on import, a listing of --evidence as a script
+        f"import importlib.util, pathlib, sys\nspec = importlib.util.spec_from_file_location('real', {str(CI_DIR / 'impact_shadow.py')!r})\n"
+        "real = importlib.util.module_from_spec(spec)\nspec.loader.exec_module(real)\nname = __name__\nglobals().update(vars(real))\n"
+        "if name == '__main__':\n"
+        "    print('read', *sorted(p.name for p in pathlib.Path(sys.argv[sys.argv.index('--evidence') + 1]).iterdir()))\n",
+        encoding="utf-8")
+    return tree
+
+
+def test_step_reads_the_shard_layout_flat(sharded_tree, repo, tmp_path):
+    from test_impact_backtest import RED_OUTSIDE_S, shards
+    commit(repo, "a.txt")
+    shards(tmp_path / "ev", RED_OUTSIDE_S, ("1", "1"))
+    summary = tmp_path / "summary.md"
+    done = run(sharded_tree / "impact_shadow_step.sh", repo, str(tmp_path / "ev"), str(tmp_path / "out"),
+               GITHUB_EVENT_NAME="push", GITHUB_STEP_SUMMARY=str(summary), RUNNER_TEMP=str(tmp_path))
+    assert done.returncode == 0, done.stderr
+    assert summary.read_text().split() == ["read", "junit-serial.xml", "junit-shard-1.xml", "junit-shard-2.xml",
+                                           "manifest-serial.json", "manifest-shard-1.json", "manifest-shard-2.json"]
+
+
+def test_step_writes_no_record_when_the_shard_evidence_is_incomplete(sharded_tree, repo, tmp_path):
+    from test_impact_backtest import RED_OUTSIDE_S, shards
+    commit(repo, "a.txt")
+    shards(tmp_path / "ev", RED_OUTSIDE_S, ("1", "1"))
+    (tmp_path / "ev" / "shard-2" / "manifest-shard.json").unlink()
+    summary = tmp_path / "summary.md"
+    done = run(sharded_tree / "impact_shadow_step.sh", repo, str(tmp_path / "ev"), str(tmp_path / "out"),
+               GITHUB_EVENT_NAME="push", GITHUB_STEP_SUMMARY=str(summary), RUNNER_TEMP=str(tmp_path))
+    assert done.returncode == 0
+    assert summary.read_text().strip() == "impact shadow: no record (shard evidence: ValueError: shard-2: no manifest-shard.json)"

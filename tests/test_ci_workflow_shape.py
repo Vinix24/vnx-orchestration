@@ -19,13 +19,25 @@ def _doc(path: Path = AGGREGATOR) -> dict:
     return yaml.safe_load(path.read_text(encoding="utf-8"))
 
 
-def test_the_real_workflow_is_the_single_shape():
+def _single() -> dict:
+    """The real workflow without shards and guards: the single shape the required job had before C3."""
+    doc = copy.deepcopy(_doc(REAL))
+    for job_id in [*(f"profile-a-shard-{k}" for k in range(1, 5)), "profile-a-guards"]:
+        doc["jobs"].pop(job_id)
+    return doc
+
+
+def test_the_real_workflow_is_the_aggregator_shape():
     a = shape.profile_a(REAL)
-    assert a.shape == shape.SINGLE and [j.role for j in a.jobs] == [shape.ROLE_SINGLE]
-    assert a.required_job.name == shape.REQUIRED_CHECK_NAME
-    assert a.job_running("Side-door exhaustiveness audit") is a.required_job
-    assert a.required_job.needs == []
-    assert a.timeouts() == {a.required_job.job_id: a.required_job.timeout} and a.required_job.timeout
+    assert a.shape == shape.AGGREGATOR
+    assert [j.role for j in a.jobs] == [shape.ROLE_SHARD] * 4 + [shape.ROLE_GUARDS, shape.ROLE_AGGREGATOR]
+    assert a.required_job.name == shape.REQUIRED_CHECK_NAME and a.required_job.job_id == "profile-a"
+    assert a.job_running("Side-door exhaustiveness audit").name == "Profile A guards"
+    assert a.job_running("Legacy path gate").name == "Profile A guards"
+    timeouts = a.timeouts()
+    assert [timeouts.pop(f"profile-a-shard-{k}") for k in range(1, 5)] == [38] * 4
+    assert timeouts.pop("profile-a-guards") == 15 and "80" in timeouts.pop("profile-a") and timeouts == {}
+    assert shape.profile_a(_single()).shape == shape.SINGLE
 
 
 def test_the_aggregator_fixture_is_the_aggregator_shape():
@@ -109,14 +121,14 @@ def test_a_shape_that_is_neither_raises(mutate, expected):
 
 
 def test_a_single_job_without_a_steps_list_raises():
-    doc = copy.deepcopy(_doc(REAL))
+    doc = _single()
     doc["jobs"]["profile-a"]["steps"] = None
     with pytest.raises(shape.WorkflowShapeError, match="no steps list"):
         shape.profile_a(doc)
 
 
 def test_a_needs_value_or_a_job_that_is_not_usable_raises():
-    doc = copy.deepcopy(_doc(REAL))
+    doc = _single()
     doc["jobs"]["profile-a"]["needs"] = 7
     with pytest.raises(shape.WorkflowShapeError, match="needs value"):
         shape.profile_a(doc).required_job.needs
