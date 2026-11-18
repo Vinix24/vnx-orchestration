@@ -40,6 +40,8 @@ jobs:
     # that shape takes 52 to 54.8 minutes (OI-2523), so it gets 80 (OI-2525),
     # the bridge D3c (#2378) set on 2026-11-03. Otherwise the job only reads
     # the shards' evidence (or runs the four light docs tests): 15.
+    # An unset repository variable is null, and null == '0' is true in Actions
+    # (mixed types compare as numbers), so the variable is read through `|| '1'`.
     timeout-minutes: ${{ ((vars.VNX_CI_XDIST || '1') == '0' || inputs.xdist_off) && 80 || 15 }}
 
     steps:
