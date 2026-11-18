@@ -38,6 +38,9 @@ SCHEMA = "impact_ledger/1"
 LEDGER_NAME = "impact_shadow.ndjson"
 WORKFLOW = "VNX CI"
 PROFILE_A_JOB = "Profile A (doctor + core tests)"
+# Since C3 the job above is only the aggregator: these five are what it waits for
+# (pinned to its `needs` in .github/workflows/vnx-ci.yml by a test).
+PROFILE_A_PART_JOBS = ("Profile A guards",) + tuple(f"Profile A shard ({k}/4)" for k in range(1, 5))
 SHADOW_JOB = "Impact shadow (runs only S, never required)"
 SHADOW_ARTIFACT, JOB_ARTIFACT = "impact-shadow", "impact-shadow-job"
 # The record each artifact carries at its root: scripts/ci/impact_shadow_step.sh writes
@@ -198,6 +201,39 @@ def timing(jobs: list, name: str) -> Optional[dict]:
     return None
 
 
+def profile_a_timing(jobs: list) -> tuple:
+    """``(timing, reason)`` of the whole Profile A.
+
+    On the C3 shape (any guards or shard job present) the span runs from the earliest start of the
+    aggregator, the guards job and the four shards to the aggregator's completion; a missing job or an
+    unparseable time gives ``(None, reason)``, never a partial span. Without those jobs it is the
+    aggregator's own ``timing`` as before.
+    """
+    named = {job.get("name"): job for job in jobs if isinstance(job, dict)}
+    if not any(name in named for name in PROFILE_A_PART_JOBS):
+        single = timing(jobs, PROFILE_A_JOB)
+        if single is None:
+            return None, "job:profile-a"
+        return {**single, "shape": "single", "jobs": 1}, None
+    names = (PROFILE_A_JOB,) + PROFILE_A_PART_JOBS
+    absent = [n for n in names if n not in named]
+    if absent:
+        return None, "job:profile-a:incomplete:" + ",".join(absent)
+    starts = [parse_time(named[n].get("started_at")) for n in names]
+    ends = parse_time(named[PROFILE_A_JOB].get("completed_at"))
+    unparsed = [n for n, t in zip(names, starts) if t is None] + ([] if ends else [PROFILE_A_JOB])
+    if unparsed:
+        return None, "job:profile-a:unparseable_time:" + ",".join(unparsed)
+    first = min(zip(starts, names))[1]
+    seconds = int((ends - min(starts)).total_seconds())
+    if seconds < 0:
+        return None, "job:profile-a:negative_span"
+    aggregator = named[PROFILE_A_JOB]
+    return {"started_at": named[first].get("started_at"), "completed_at": aggregator.get("completed_at"),
+            "conclusion": aggregator.get("conclusion"), "seconds": seconds,
+            "shape": "sharded", "jobs": len(names)}, None
+
+
 def _attributed(downloaded, attempt, label: str, missing: list):
     """The record when it is this attempt's; a record stamped with another attempt is not its evidence."""
     record, problem = downloaded
@@ -218,8 +254,12 @@ def _entry(runner: Runner, repo: str, run: dict, now: datetime) -> dict:
     missing = []
     shadow = _attributed(shadow, attempt, "impact-shadow", missing)
     job = _attributed(job, attempt, "impact-shadow-job", missing)
-    profile_a, shadow_job = timing(jobs, PROFILE_A_JOB), timing(jobs, SHADOW_JOB)
-    missing += [f"job:{n}" for n, t in (("profile-a", profile_a), ("impact-shadow", shadow_job)) if t is None]
+    profile_a, profile_a_problem = profile_a_timing(jobs)
+    shadow_job = timing(jobs, SHADOW_JOB)
+    if profile_a is None:
+        missing.append(profile_a_problem)
+    if shadow_job is None:
+        missing.append("job:impact-shadow")
     return {
         "schema": SCHEMA, "run_id": run_id, "run_attempt": attempt, "head_sha": run.get("headSha"),
         "branch": run.get("headBranch"), "event": run.get("event"), "run_conclusion": run.get("conclusion"),

@@ -214,9 +214,9 @@ def _entry(gh: ledger.Runner, git: ledger.Runner, repo: str, run: dict, now: dat
                 raise
             entry["missing"].append(f"artifact:{EVIDENCE_ARTIFACT}")
             return entry
-        entry["profile_a_job"] = ledger.timing(ledger.fetch_jobs(gh, repo, run_id, attempt), ledger.PROFILE_A_JOB)
+        entry["profile_a_job"], problem = ledger.profile_a_timing(ledger.fetch_jobs(gh, repo, run_id, attempt))
         if entry["profile_a_job"] is None:
-            entry["missing"].append("job:profile-a")
+            entry["missing"].append(problem)
         record, unreadable = _record(git, run, evidence, Path(tmp), inputs)
     entry["shadow"] = record or {"schema": impact_shadow.SCHEMA, "reconstructible": False, "unreadable_inputs": [unreadable]}
     return entry

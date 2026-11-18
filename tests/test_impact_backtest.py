@@ -59,8 +59,9 @@ def shards(target: Path, cases: dict, stamp: tuple, count: int = 2) -> None:
 class Gh:
     """gh calls of the backtest; ``failing`` maps a run id to the stderr its download answers with, ``cases`` run id -> {nodeid: outcome}."""
 
-    def __init__(self, runs, cases, failing=None, sharded=False):
+    def __init__(self, runs, cases, failing=None, sharded=False, jobs=None):
         self.runs, self.cases, self.failing, self.calls, self.sharded = runs, cases, failing or {}, [], sharded
+        self.jobs = jobs
 
     def __call__(self, argv):
         self.calls.append(list(argv))
@@ -82,7 +83,7 @@ class Gh:
             junit(target / "junit-serial.xml", self.cases[run_id], stamp=(str(run_id), "1"))
             return ""
         if argv[:2] == ["gh", "api"]:
-            return json.dumps(jobs())
+            return json.dumps(self.jobs[int(argv[2].split('/')[3])] if self.jobs else jobs())
         raise AssertionError(f"unexpected gh call {argv}")
 
 
@@ -369,3 +370,14 @@ def test_the_single_job_layout_and_a_symlinked_shard_dir_are_read_in_place(tmp_p
     shards(tmp_path / "elsewhere", RED_OUTSIDE_S, ("1", "1"))
     (evidence / "shard-1").symlink_to(tmp_path / "elsewhere" / "shard-1", target_is_directory=True)
     assert bt.shard_view(evidence, tmp_path / "flat") == evidence and not (tmp_path / "flat").exists()
+
+
+def test_a_sharded_profile_a_run_gets_the_span_over_the_six_jobs(tmp_path):
+    spans = {ledger.PROFILE_A_JOB: ("09:07:00", "09:08:00"), "Profile A guards": ("09:00:20", "09:03:00")}
+    spans.update({f"Profile A shard ({k}/4)": ("09:00:30", "09:06:00") for k in range(1, 5)})
+    sharded = {"jobs": [{"name": n, "started_at": f"2026-11-10T{a}Z", "completed_at": f"2026-11-10T{b}Z",
+                         "conclusion": "failure"} for n, (a, b) in spans.items()]}
+    bt.backtest(tmp_path, Gh([run(1)], {1: RED_OUTSIDE_S}, jobs={1: sharded}), Git(["scripts/lib/core.py"]))
+    (entry,) = lines(tmp_path)
+    assert entry["profile_a_job"]["seconds"] == 460 and entry["profile_a_job"]["shape"] == "sharded"
+    assert entry["profile_a_job"]["started_at"] == "2026-11-10T09:00:20Z" and entry["missing"] == []

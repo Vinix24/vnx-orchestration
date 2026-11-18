@@ -128,6 +128,80 @@ def test_collect_does_not_attribute_a_record_of_another_attempt(tmp_path):
     assert entry["shadow"] is None and "artifact:impact-shadow:attempt_mismatch" in entry["missing"]
 
 
+def _sharded_jobs(*, drop=None, aggregator_end="10:07:00", shard_start="10:00:30", bad_time=None):
+    spec = {ledger.PROFILE_A_JOB: ("10:06:00", aggregator_end)}
+    spec["Profile A guards"] = ("10:00:10", "10:03:00")
+    for k in range(1, 5):
+        spec[f"Profile A shard ({k}/4)"] = (shard_start if k == 2 else "10:01:00", "10:05:30")
+    jobs = [{"name": ledger.SHADOW_JOB, "started_at": "2026-11-13T10:00:00Z",
+             "completed_at": "2026-11-13T10:05:00Z", "conclusion": "success"}]
+    for name, (start, end) in spec.items():
+        if name != drop:
+            job = {"name": name, "started_at": f"2026-11-13T{start}Z", "completed_at": f"2026-11-13T{end}Z",
+                   "conclusion": "success"}
+            if name == bad_time:
+                job["started_at"] = "not-a-time"
+            jobs.append(job)
+    return {"jobs": jobs}
+
+
+def _timing_of(tmp_path, jobs):
+    gh = FakeGh([_run(1)], {(1, "impact-shadow"): _shadow(1), (1, "impact-shadow-job"): _job(1)}, jobs={1: jobs})
+    ledger.collect(tmp_path, gh)
+    (entry,) = _lines(tmp_path)
+    return entry
+
+
+def test_sharded_profile_a_spans_the_six_jobs_not_the_aggregator_alone(tmp_path):
+    entry = _timing_of(tmp_path, _sharded_jobs())
+    assert entry["profile_a_job"] == {"started_at": "2026-11-13T10:00:10Z", "completed_at": "2026-11-13T10:07:00Z",
+                                      "conclusion": "success", "seconds": 410, "shape": "sharded", "jobs": 6}
+    assert entry["missing"] == []
+
+
+def test_single_job_profile_a_is_what_timing_gave_plus_the_shape(tmp_path):
+    entry = _timing_of(tmp_path, _jobs(40))
+    assert entry["profile_a_job"] == {"started_at": "2026-11-13T10:00:00Z", "completed_at": "2026-11-13T10:40:00Z",
+                                      "conclusion": "success", "seconds": 2400, "shape": "single", "jobs": 1}
+
+
+@pytest.mark.parametrize("drop", [ledger.PROFILE_A_JOB, "Profile A guards", "Profile A shard (3/4)"])
+def test_incomplete_sharded_run_gives_no_timing_and_names_the_missing_job(tmp_path, drop):
+    entry = _timing_of(tmp_path, _sharded_jobs(drop=drop))
+    assert entry["profile_a_job"] is None and entry["missing"] == [f"job:profile-a:incomplete:{drop}"]
+
+
+@pytest.mark.parametrize("name", [ledger.PROFILE_A_JOB, "Profile A shard (1/4)"])
+def test_sharded_job_without_a_parseable_time_gives_no_partial_span(tmp_path, name):
+    entry = _timing_of(tmp_path, _sharded_jobs(bad_time=name))
+    assert entry["profile_a_job"] is None and entry["missing"] == [f"job:profile-a:unparseable_time:{name}"]
+
+
+@pytest.mark.parametrize("field", ["completed_at", None])
+def test_sharded_aggregator_without_completion_or_with_a_negative_span_is_none(field):
+    jobs = _sharded_jobs()["jobs"]
+    aggregator = next(j for j in jobs if j["name"] == ledger.PROFILE_A_JOB)
+    if field:
+        aggregator[field] = None
+        expected = f"job:profile-a:unparseable_time:{ledger.PROFILE_A_JOB}"
+    else:
+        aggregator["completed_at"] = "2026-11-13T09:00:00Z"
+        expected = "job:profile-a:negative_span"
+    assert ledger.profile_a_timing(jobs) == (None, expected)
+
+
+def test_profile_a_part_jobs_are_the_needs_of_the_aggregator_by_name():
+    import yaml
+    jobs = yaml.safe_load((Path(__file__).resolve().parent.parent / ".github/workflows/vnx-ci.yml").read_text())["jobs"]
+    aggregator = next(j for j in jobs.values() if j.get("name") == ledger.PROFILE_A_JOB)
+    assert sorted(jobs[k]["name"] for k in aggregator["needs"]) == sorted(ledger.PROFILE_A_PART_JOBS)
+
+
+def test_non_dict_jobs_and_no_jobs_give_no_timing():
+    assert ledger.profile_a_timing([]) == (None, "job:profile-a")
+    assert ledger.profile_a_timing(["x", None]) == (None, "job:profile-a")
+
+
 def test_collect_names_a_missing_profile_a_job(tmp_path):
     gh = FakeGh([_run(1)], {(1, "impact-shadow"): _shadow(1), (1, "impact-shadow-job"): _job(1)}, jobs={1: _jobs(profile_a=False)})
     ledger.collect(tmp_path, gh)
