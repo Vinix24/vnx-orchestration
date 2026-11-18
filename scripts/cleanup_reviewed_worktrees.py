@@ -957,10 +957,15 @@ def compress_event_archive(repo_root: Path) -> None:
     changes the sweep's exit code. Every outcome is one or more stderr lines."""
     try:
         import vnx_paths
-        from event_archive_compress import DIVERGENT, compress_archive_round
+        from event_archive_compress import DIVERGENT, compress_archive_round, symlinked_root
         from vnx_data_footprint_probe import compress_days
 
-        archive = vnx_paths.resolve_data_root(repo_root) / "events" / "archive"
+        store_root = vnx_paths.resolve_data_root(repo_root)
+        archive = store_root / "events" / "archive"
+        link = symlinked_root(store_root, archive)
+        if link is not None:
+            print(f"cleanup_reviewed_worktrees: archiefwortel geweigerd: {link} -> {link.resolve()}", file=sys.stderr)
+            return
         dirs = _archive_dirs_inside(archive)
         result = compress_archive_round(dirs, compress_days())
     except Exception as exc:  # vnx-silent-except: fail-open by ADR-081, the failure is logged by type and message

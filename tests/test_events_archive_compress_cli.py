@@ -148,3 +148,50 @@ def test_real_subdirectory_is_still_compressed(store, capsys):
     report = json.loads(capsys.readouterr().out)
     assert not plain.exists() and (sub / "a.ndjson.gz").exists()
     assert report["totals"]["skipped"] == 0
+
+
+def _linked_store(tmp_path, monkeypatch, parent_link: bool):
+    """A store whose events/archive (or its parent events) is a symlink to a directory holding an old archive."""
+    store = tmp_path / "store"
+    store.mkdir()
+    real = tmp_path / "elsewhere"
+    holder = real / "archive" if parent_link else real
+    holder.mkdir(parents=True)
+    plain = _plain(holder, "old", b'{"a":1}\n' * 20)
+    if parent_link:
+        (store / "events").symlink_to(real, target_is_directory=True)
+    else:
+        (store / "events").mkdir()
+        (store / "events" / "archive").symlink_to(real, target_is_directory=True)
+    monkeypatch.setattr(cli, "resolve_central_data_dir", lambda pid: store)
+    return plain
+
+
+@pytest.mark.parametrize("parent_link", [False, True])
+def test_symlinked_archive_root_or_parent_is_refused(tmp_path, monkeypatch, capsys, parent_link):
+    plain = _linked_store(tmp_path, monkeypatch, parent_link)
+    before = _snapshot(plain.parent)
+    assert cli.main(["--project-id", "demo", "--apply"]) == 2
+    assert _snapshot(plain.parent) == before and not list(plain.parent.rglob("*.gz"))
+    assert "archive root refused" in capsys.readouterr().err
+
+
+def test_symlinked_archive_root_dry_run_is_refused_too(tmp_path, monkeypatch):
+    _linked_store(tmp_path, monkeypatch, False)
+    assert cli.main(["--project-id", "demo"]) == 2
+
+
+@pytest.mark.parametrize("days", ["nan", "inf", "-inf", "-1"])
+def test_non_finite_or_negative_days_is_refused(store, capsys, days):
+    plain = _plain(store, "old", b'{"a":1}\n' * 20)
+    fresh = _plain(store, "fresh", b"{}\n", mtime=time.time())
+    before = _snapshot(store)
+    assert cli.main(["--project-id", "demo", "--apply", f"--days={days}"]) == 2
+    assert _snapshot(store) == before and plain.exists() and fresh.exists()
+    assert "--days must be a finite number" in capsys.readouterr().err
+
+
+def test_normal_store_still_compresses(store):
+    plain = _plain(store, "old", b'{"a":1}\n' * 20)
+    assert cli.main(["--project-id", "demo", "--apply"]) == 0
+    assert not plain.exists() and plain.with_name("old.ndjson.gz").exists()

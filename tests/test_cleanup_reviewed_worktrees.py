@@ -616,6 +616,16 @@ class TestArchiveCompressionSweep:
         assert f"archiefmap overgeslagen: {archive / 'T2'} -> {outside.resolve()}" in err
         assert not real.exists() and real.with_name("d1.ndjson.gz").exists()
 
+    def test_a_symlinked_archive_root_is_refused_and_logged(self, fx, monkeypatch, tmp_path, capsys):
+        real = self._archive(tmp_path, "d1", b'{"a":1}\n')
+        archive = real.parent.parent
+        moved = tmp_path / "moved"
+        archive.rename(moved)
+        archive.symlink_to(moved, target_is_directory=True)
+        _, err = self._released(fx, monkeypatch, tmp_path, capsys)
+        assert (moved / "T1" / "d1.ndjson").exists() and not list(moved.rglob("*.gz"))
+        assert f"archiefwortel geweigerd: {archive}" in err and "archiefcompressie {" not in err
+
     def test_dry_run_compresses_nothing(self, fx, tmp_path):
         plain = self._archive(tmp_path, "d1", b'{"a":1}\n')
         assert crw.main(["--repo-root", str(fx.repo), "--json"]) == 0

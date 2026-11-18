@@ -265,3 +265,17 @@ def test_a_symlinked_plain_file_is_no_candidate_and_its_target_is_untouched(tmp_
     _round(directory)
     assert target.read_bytes() == b"keep\n" and link.is_symlink()
     assert not (outside / "t.ndjson.gz").exists() and not (directory / "old.ndjson.gz").exists()
+
+
+def test_symlinked_root_is_named_and_a_plain_root_is_not(tmp_path):
+    store = tmp_path / "store"
+    archive = store / "events" / "archive"
+    archive.parent.mkdir(parents=True)
+    real = tmp_path / "real"
+    real.mkdir()
+    archive.mkdir()
+    assert eac.symlinked_root(store, archive) is None
+    archive.rmdir()
+    archive.symlink_to(real, target_is_directory=True)
+    assert eac.symlinked_root(store, archive) == archive
+    assert eac.symlinked_root(store, tmp_path / "other" / "archive") == tmp_path / "other" / "archive"

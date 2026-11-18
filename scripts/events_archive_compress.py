@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import sys
 from pathlib import Path
@@ -101,13 +102,19 @@ def main(argv: Optional[List[str]] = None) -> int:
         args = ap.parse_args(argv)
     except SystemExit as exc:
         return 0 if exc.code in (0, None) else 2
-    if args.days < 0:
-        print("--days must not be negative", file=sys.stderr)
+    if not (math.isfinite(args.days) and args.days >= 0):
+        print(f"--days must be a finite number, not negative: {args.days}", file=sys.stderr)
         return 2
     try:
-        archive = resolve_central_data_dir(args.project_id) / "events" / "archive"
+        store_root = resolve_central_data_dir(args.project_id)
+        archive = store_root / "events" / "archive"
     except ValueError as exc:
         print(f"unknown project: {exc}", file=sys.stderr)
+        return 2
+    link = eac.symlinked_root(store_root, archive)
+    if link is not None:
+        print(f"archive root refused: {link} -> {os.path.realpath(link)} (symlink or outside the store)",
+              file=sys.stderr)
         return 2
     if not archive.is_dir():
         print(f"no archive directory for project {args.project_id}: {archive}", file=sys.stderr)
