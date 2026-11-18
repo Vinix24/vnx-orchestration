@@ -111,7 +111,25 @@ def test_select_source_newest_successful_run_before_timestamp(tmp_path):
                  (7, "2026-11-17T11:00:00Z", "success"), (6, "2026-11-17T10:00:00Z", "success"), (5, NOW, "success"))
     seen = []
     run_id, xmls = _select(tmp_path, runs, download=lambda *a: (seen.append(a), (a[3] / "j.xml").write_text("<a/>")))
-    assert run_id == 7 and seen[0][:3] == (REPO, 7, ART) and xmls == [tmp_path / "j.xml"]
+    assert run_id == 7 and seen[0][:3] == (REPO, 7, ART) and xmls == [seen[0][3] / "j.xml"]
+    assert seen[0][3].parent == tmp_path
+
+
+def test_select_source_returns_only_the_xml_of_this_download(tmp_path):
+    (tmp_path / "old-run.xml").write_text("<testsuite/>")  # OI-2979: left by an earlier download into --dest
+    run_id, xmls = _select(tmp_path, _runs(OK_RUN))
+    assert [p.name for p in xmls] == ["junit.xml"] and xmls[0].parent != tmp_path
+
+
+def test_select_source_asks_the_api_for_runs_created_before_the_cutoff(tmp_path):
+    def api(path):  # OI-2979: 100 newer runs fill the unfiltered first page, the older green run is behind it
+        if "/artifacts" in path:
+            return GOOD_ART
+        if "created=%3C%3D2026-11-17T12:00:00Z" in path:
+            return _runs(OK_RUN)
+        return _runs(*((i, "2026-11-17T13:00:00Z", "success") for i in range(100, 200)))
+    run_id, _ = tsp.select_source(REPO, WF, BR, NOW, ART, tmp_path, api, lambda *a: (a[3] / "j.xml").write_text("<a/>"))
+    assert run_id == 1
 
 
 OK_RUN = (1, "2026-11-17T01:00:00Z", "success")

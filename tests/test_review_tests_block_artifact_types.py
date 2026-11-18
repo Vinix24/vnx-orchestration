@@ -198,8 +198,9 @@ class TestPythonPathInTheCommand:
         assert "chosen by rule 2" in block
 
     def test_the_worktree_token_stands_in_until_the_spawn(self):
-        block = gate_runner._review_tests_block(INTERP, _hunk("tests/test_a.py"), pythonpath=["src"])
-        assert f"PYTHONPATH={gate_runner.GATE_WORKTREE_TOKEN}/src " in block
+        token = gate_runner._request_worktree_token({})
+        block = gate_runner._review_tests_block(INTERP, _hunk("tests/test_a.py"), pythonpath=["src"], worktree_token=token)
+        assert f"PYTHONPATH={token}/src " in block
 
     def test_a_refused_entry_is_text_not_command(self):
         block = gate_runner._review_tests_block(

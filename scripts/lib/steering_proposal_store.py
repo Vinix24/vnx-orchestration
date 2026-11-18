@@ -346,10 +346,28 @@ def add_revision(state_dir: Path, project_id: str, proposal: Mapping[str, Any], 
     return record
 
 
+def _settings_evidence(entry: Mapping[str, Any], applied_ref: Any, roots: Optional[Tuple[Path, Path]]) -> Dict[str, Any]:
+    """ADR-086 decision 2: the read-only check of the settings file; a failed check is a DecisionRefused."""
+    import permission_applied_check as check
+    try:
+        if roots is None:
+            from project_root import resolve_project_root
+            roots = (resolve_project_root(), Path.home())
+        return check.verify(entry, applied_ref, *roots)
+    except RuntimeError as exc:
+        raise DecisionRefused(f"applied refused, path: no project root to check against ({exc})") from exc
+    except check.Refused as exc:
+        raise DecisionRefused(f"applied refused, {exc}") from exc
+
+
 def decide(state_dir: Path, project_id: str, pid: str, decision: str, *, reason: str, decided_by: str,
-           revision: Optional[int] = None, applied_ref: str = "", now: Optional[str] = None) -> Dict[str, Any]:
+           revision: Optional[int] = None, applied_ref: str = "", now: Optional[str] = None,
+           settings_roots: Optional[Tuple[Path, Path]] = None) -> Dict[str, Any]:
     """Record an operator decision bound to a revision (default: the latest). The record is
-    appended and fsynced. ``approved`` applies nothing."""
+    appended and fsynced. ``approved`` applies nothing. ``applied`` on an approved ``permissie`` proposal first
+    passes the read-only settings check (ADR-086 decision 2; ``settings_roots`` is ``(repo, home)``, default the
+    git root of the working directory and the home dir); the record then carries ``applied_evidence`` and an
+    ``applied_at`` stamped after the check."""
     project_id = _require_project(project_id)
     if decision not in OPERATOR_DECISIONS or not _text(reason) or not _text(decided_by):
         raise DecisionRefused(f"decision must be one of {sorted(OPERATOR_DECISIONS)}, with a reason and decided_by")
@@ -361,6 +379,10 @@ def decide(state_dir: Path, project_id: str, pid: str, decision: str, *, reason:
             raise ProposalNotFound(pid)
         bound = revision if revision is not None else len(entry["revisions"])
         extra = {"applied_ref": _text(applied_ref)} if decision == "applied" else {}
+        if decision == "applied" and entry["artefact_soort"] == "permissie" and entry["status"] == "approved":
+            extra["applied_evidence"] = _settings_evidence(entry, applied_ref, settings_roots)
+            stamp = _stamp(now)  # applied_at: the moment the record is written, after the check passed
+            extra["applied_at"] = stamp
         record = _record(project_id, pid, bound, decision, stamp, reason=_text(reason), decided_by=_text(decided_by), **extra)
         _commit(state_dir, state, [record])
     return record

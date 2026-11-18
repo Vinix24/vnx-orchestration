@@ -336,7 +336,7 @@ def test_reopen_with_note_only_on_a_rejected_one_with_a_note_by_the_operator(tmp
 
 
 def test_a_hard_stop_suppresses_pending_and_approved_durably_and_counts_applied(tmp_path):
-    items = [perm(oorzaak=f"o{n}") for n in range(3)]
+    items = [perm(oorzaak=f"o{n}", kind="bouwer_allowlist" if n == 2 else "permissie") for n in range(3)]  # ADR-086: a PR ref applies no permissie
     store.reconcile(tmp_path, "vnx-dev", items, now=T0)
     pids = {e["oorzaak"]: e["proposal_id"] for e in store.proposals(tmp_path, "vnx-dev")}
     store.decide(tmp_path, "vnx-dev", pids["o1"], "approved", reason="ja", decided_by="op", now=T1)
