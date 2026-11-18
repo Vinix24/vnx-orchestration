@@ -50,11 +50,6 @@ Options:
   --json           Output runtime recovery report as JSON
   --legacy         Skip runtime recovery, only run legacy cleanup
   -h, --help       Show this help
-
-Rollback guidance:
-  If runtime recovery causes issues, disable it with:
-    python scripts/rollback_runtime_core.py rollback
-  Then run: vnx recover --legacy
 HELP
         return 0
         ;;
@@ -169,7 +164,6 @@ HELP
   if [ "${VNX_RUNTIME_PRIMARY:-1}" = "1" ] && [ "$legacy_only" != true ]; then
     log ""
     log " Runtime core: ACTIVE — canonical recovery ran above"
-    log " Rollback: python scripts/rollback_runtime_core.py rollback"
   fi
 
   log "════════════════════════════════════════════════════════════════"

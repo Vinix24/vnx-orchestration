@@ -46,7 +46,6 @@
 | System Contracts | `docs/contracts/` | Feature-level and platform contracts: `docs/contracts/BUSINESS_LIGHT_GOVERNANCE_CONTRACT.md`, `docs/contracts/CHAIN_RESIDUAL_GOVERNANCE.md`, `docs/contracts/HEADLESS_RUN_CONTRACT.md`, `docs/contracts/HEADLESS_SESSION_CONTRACT.md`, `docs/contracts/MULTI_TRACK_PARALLEL_EXECUTION_CONTRACT.md`, `docs/contracts/OPEN_ITEMS_GATE_TOGGLE_CONTRACT.md`, `docs/contracts/PRODUCTIZATION_CONTRACT.md` |
 | Receipt Operations | `docs/operations/RECEIPT_PIPELINE.md` | Receipt generation, processing, and delivery |
 | Event Streams | `docs/operations/EVENT_STREAMS.md` | Per-terminal NDJSON ring-buffer lifecycle and archive layout |
-| Runtime Rollback | `docs/operations/RUNTIME_CORE_ROLLBACK.md` | Rollback path for runtime-core cutovers |
 | Permission Policy Flip | `docs/operations/PERMISSION_POLICY_FLIP.md` | Operator runbook: read the permission posture report, the five flip conditions, and the manual steps to enable and revert enforcement |
 | Forge Gate | `docs/operations/FORGE_GATE.md` | Operator runbook for gate-enforcement-to-forge: GitHub refuses any merge to `main` without a published gate verdict on the PR head |
 | CI Cost Measurement | `docs/operations/CI_COST_METING.md` | The measurement behind ADR-073: docs-only CI before and after, the merge-chain wait, and ready-for-merge to merge, each number with its command |
