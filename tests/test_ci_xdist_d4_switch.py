@@ -810,11 +810,11 @@ def test_the_merge_readers_see_every_check_run_not_only_the_vnx_ci_workflow():
     assert gate.ci_classification(gate.LocalContext(checks=[{"name": "VNX CI", "bucket": "pass"}]))["verdict"] == "pass"
 
 
-def test_the_serial_mode_s_skipped_shard_checks_block_the_closure_verifier_and_pass_the_ci_gate():
+def test_the_serial_mode_s_skipped_shard_checks_pass_the_closure_verifier_and_the_ci_gate():
     """Xdist off: the four shard check runs conclude `skipped` on the PR head (C3).
 
-    ``closure_verifier._rollup_all_green`` reads any non-SUCCESS check run as not green, so in the serial mode it
-    blocks a closure that the run itself passes: fail-closed, not fail-open (an open item of C3, outside its files).
+    ``closure_verifier._rollup_all_green`` reads a skipped Profile A shard or guards check as green next to a green
+    aggregator, so the serial mode no longer blocks a closure that the run itself passes (OI-2993).
     The CI gate of ``deterministic_gate`` and the run-level readers (``merge_preflight_ci_check``, ``pre_merge_gate``)
     read a skipped check as advisory and the run's own conclusion.
     """
@@ -827,7 +827,7 @@ def test_the_serial_mode_s_skipped_shard_checks_block_the_closure_verifier_and_p
     names = [shape.REQUIRED_CHECK_NAME, "Profile A guards"] + [f"Profile A shard ({k}/4)" for k in range(1, 5)]
     serial = {n: "SKIPPED" if "shard" in n else "SUCCESS" for n in names}
     rollup = [{"__typename": "CheckRun", "name": n, "status": "COMPLETED", "conclusion": c} for n, c in serial.items()]
-    assert closure._rollup_all_green(rollup) is False
+    assert closure._rollup_all_green(rollup) is True
     assert closure._rollup_all_green([dict(r, conclusion="SUCCESS") for r in rollup]) is True
     checks = [{"name": n, "bucket": "skipping" if c == "SKIPPED" else "pass"} for n, c in serial.items()]
     assert gate.ci_classification(gate.LocalContext(checks=checks))["verdict"] == "pass"
