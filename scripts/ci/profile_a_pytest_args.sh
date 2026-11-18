@@ -26,6 +26,11 @@
 #                                                   so the parity check can tell
 #                                                   this attempt's emission from
 #                                                   an earlier attempt's
+#   VNX_CI_SHARD=k/N (xdist shape,   shard.args     instead of parallel.args: its vector with the
+#   1 <= k <= N <= 99; the duration                 tests root replaced by shard k's files;
+#   source: VNX_CI_SHARD_SOURCE,     collected.json the selection collected before the split
+#   the output of test_shard_plan.py shard.json     the plan of profile_a_shard.py
+#   select-source, unset = hash)     (and serial.args in shard 1 only, as in the xdist shape)
 #
 # Since D4 the default is the two-phase xdist shape. Profile A and the nightly
 # serial truth of .github/workflows/vnx-ci-serial-truth.yml call this script,
@@ -63,6 +68,7 @@ PER_TEST_TIMEOUT=180
 XDIST_WORKERS=4
 
 SERIAL_CHECK_DIR=""
+SHARD_K="" SHARD_N=""
 trap 'if [ -n "$SERIAL_CHECK_DIR" ]; then rm -rf "$SERIAL_CHECK_DIR"; fi' EXIT
 
 refuse() {
@@ -225,7 +231,8 @@ write_vector() {
   printf '\n' >&2
 }
 
-emit_xdist_vectors() {
+# Sets PARALLEL_ARGS; writes serial.args when the list has entries and $1 is yes.
+xdist_vectors() {
   local entry
   local -a serial_ignore=() deselect=() positional=()
   for entry in ${SERIAL_FILES[@]+"${SERIAL_FILES[@]}"}; do
@@ -237,13 +244,59 @@ emit_xdist_vectors() {
   for entry in ${SERIAL_ENTRIES[@]+"${SERIAL_ENTRIES[@]}"}; do
     positional+=("$ROOT/$entry")
   done
-  if [ "${#SERIAL_ENTRIES[@]}" -gt 0 ]; then
+  if [ "$1" = yes ] && [ "${#SERIAL_ENTRIES[@]}" -gt 0 ]; then
     write_vector "$OUT_DIR/serial.args" -q -p no:xdist -p no:cacheprovider "--timeout=$PER_TEST_TIMEOUT" \
       -k "$QUARANTINE_K" ${IGNORE[@]+"${IGNORE[@]}"} "${positional[@]}"
   fi
-  write_vector "$OUT_DIR/parallel.args" "${BASE_ARGS[@]}" \
+  PARALLEL_ARGS=("${BASE_ARGS[@]}" \
     ${serial_ignore[@]+"${serial_ignore[@]}"} ${deselect[@]+"${deselect[@]}"} \
-    -n "$XDIST_WORKERS" --dist loadfile --no-loadscope-reorder --max-worker-restart=0
+    -n "$XDIST_WORKERS" --dist loadfile --no-loadscope-reorder --max-worker-restart=0)
+}
+
+emit_xdist_vectors() {
+  xdist_vectors yes
+  write_vector "$OUT_DIR/parallel.args" "${PARALLEL_ARGS[@]}"
+}
+
+check_shard() {
+  case "$1" in
+    *[!0-9/]*|0*|*/0*|*/*/*|*[0-9][0-9][0-9]*) ;;
+    [1-9]*/[1-9]*) SHARD_K="${1%/*}" SHARD_N="${1#*/}" ;;
+  esac
+  if [ -z "$SHARD_N" ] || [ "$SHARD_K" -gt "$SHARD_N" ]; then
+    refuse "VNX_CI_SHARD must be k/N with 1 <= k <= N <= 99, got '$1'"
+  fi
+  [ "$2" = 1 ] || refuse "VNX_CI_SHARD needs the xdist shape, got VNX_CI_XDIST=$2"
+}
+
+# Shard k of N: collect the whole selection (the set before the split), plan it with profile_a_shard.py, and give
+# this shard the parallel vector with the tests root replaced by its files. Only shard 1 carries the serial phase.
+emit_shard_vectors() {
+  local rc=0 entry work
+  local -a plan_args=() files=()
+  [ -n "$SERIAL_CHECK_DIR" ] || SERIAL_CHECK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/profile-a-shard.XXXXXX")"
+  work="$SERIAL_CHECK_DIR"
+  (
+    cd "$ROOT"
+    PYTHONPATH="$ROOT/scripts/ci${PYTHONPATH:+:$PYTHONPATH}" pytest --collect-only -p no:xdist \
+      -p pytest_collection_manifest --collection-manifest="$OUT_DIR/collected.json" \
+      --collection-manifest-phase=collected "${BASE_ARGS[@]}"
+  ) > "$work/shard-collect.log" 2>&1 || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    cat "$work/shard-collect.log" >&2
+    refuse "VNX_CI_SHARD=$SHARD_K/$SHARD_N: collecting the selection before the split failed (pytest exit $rc)"
+  fi
+  for entry in ${SERIAL_ENTRIES[@]+"${SERIAL_ENTRIES[@]}"}; do
+    plan_args+=(--serial-entry "$entry")
+  done
+  if ! python3 "$ROOT/scripts/ci/profile_a_shard.py" --collected "$OUT_DIR/collected.json" \
+      --source "${VNX_CI_SHARD_SOURCE:-}" --shard "$SHARD_K" --shards "$SHARD_N" \
+      --output "$OUT_DIR/shard.json" ${plan_args[@]+"${plan_args[@]}"} > "$work/shard-files"; then
+    refuse "VNX_CI_SHARD=$SHARD_K/$SHARD_N: the shard plan was refused"
+  fi
+  while IFS= read -r -d '' entry; do files+=("$ROOT/$entry"); done < "$work/shard-files"
+  if [ "$SHARD_K" = 1 ]; then xdist_vectors yes; else xdist_vectors no; fi
+  write_vector "$OUT_DIR/shard.args" -q "${files[@]}" "${PARALLEL_ARGS[@]:2}"
 }
 
 main() {
@@ -258,13 +311,15 @@ main() {
     0|1) ;;
     *) refuse "VNX_CI_XDIST must be 0 or 1, got '$mode'" ;;
   esac
+  [ -z "${VNX_CI_SHARD:-}" ] || check_shard "$VNX_CI_SHARD" "$mode"
   if ! vnx_resolve_project_root "${BASH_SOURCE[0]}"; then
     printf 'profile_a_pytest_args: cannot resolve the project root\n' >&2
     exit 1
   fi
   ROOT="$VNX_PROJECT_ROOT"
   mkdir -p "$OUT_DIR"
-  rm -f "$OUT_DIR/full.args" "$OUT_DIR/serial.args" "$OUT_DIR/parallel.args" "$OUT_DIR/run.json"
+  rm -f "$OUT_DIR/full.args" "$OUT_DIR/serial.args" "$OUT_DIR/parallel.args" "$OUT_DIR/run.json" \
+    "$OUT_DIR/shard.args" "$OUT_DIR/shard.json" "$OUT_DIR/collected.json"
   build_ignore
   BASE_ARGS=(-q "$ROOT/tests" -p no:cacheprovider "--timeout=$PER_TEST_TIMEOUT" -k "$QUARANTINE_K" ${IGNORE[@]+"${IGNORE[@]}"})
   if [ "$mode" = 0 ]; then
@@ -275,7 +330,7 @@ main() {
     if [ "${#SERIAL_ENTRIES[@]}" -gt 0 ]; then
       check_serial_collection
     fi
-    emit_xdist_vectors
+    if [ -n "$SHARD_N" ]; then emit_shard_vectors; else emit_xdist_vectors; fi
   fi
   write_stamp
 }

@@ -3,7 +3,7 @@
 #
 # Usage: bash scripts/ci/profile_a_run_phase.sh PHASE EVIDENCE_DIR
 #
-# PHASE is full, serial or parallel. Reads the argument vector that
+# PHASE is full, serial, parallel or shard. Reads the argument vector that
 # scripts/ci/profile_a_pytest_args.sh wrote to EVIDENCE_DIR/args/PHASE.args and
 # runs `pytest` with it plus the evidence arguments, so Profile A and the xdist
 # shadow write their evidence the same way:
@@ -29,7 +29,7 @@
 set -euo pipefail
 
 usage() {
-  printf 'usage: profile_a_run_phase.sh full|serial|parallel EVIDENCE_DIR\n' >&2
+  printf 'usage: profile_a_run_phase.sh full|serial|parallel|shard EVIDENCE_DIR\n' >&2
   exit 2
 }
 
@@ -37,7 +37,7 @@ usage() {
 PHASE="$1"
 EVIDENCE="$2"
 case "$PHASE" in
-  full|serial|parallel) ;;
+  full|serial|parallel|shard) ;;
   *) usage ;;
 esac
 ARGS_FILE="$EVIDENCE/args/$PHASE.args"
