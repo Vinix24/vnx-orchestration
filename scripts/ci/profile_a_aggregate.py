@@ -1,23 +1,11 @@
 #!/usr/bin/env python3
 """Profile A aggregator: the fail-closed decision over shards and guards.
 
-Track ``pr-ci-onder-zes-minuten``, C3. The required check ``Profile A (doctor +
-core tests)`` becomes an aggregator over ``Profile A shard (k/N)`` jobs and a
-``Profile A guards`` job. ``decide`` reads ``${{ toJSON(needs) }}`` and is
-green only on positive evidence, in one of three modes:
-
-* ``light``: xdist on, every shard ``success`` with profile ``light``, and the
-  aggregator's own classifier says ``light``.
-* ``sharded``: xdist on, every shard ``success`` with profile ``heavy``, the
-  aggregator says ``heavy``, and ``<evidence-root>/shard-k/`` holds a file for
-  every k.
-* ``serial`` (the way back, ``VNX_CI_XDIST=0``): every shard ``skipped``.
-
-In every mode the guards job must be ``success``. Anything else is red (exit
-1) and the verdict names every reason. Invalid input is exit 2. Only exit 0
-prints ``mode=<mode>`` for ``$GITHUB_OUTPUT``. The content of the evidence
-(a test in two shards or none, a differing source) is checked by
-``check_xdist_parity.py completeness``, not here.
+Track ``pr-ci-onder-zes-minuten``, C3. ``decide`` reads ``${{ toJSON(needs) }}``
+and is green (exit 0, stdout ``mode=<light|sharded|serial>``) only on positive
+evidence; see ``decide`` for the three modes. Anything else is red (exit 1)
+with every reason named; invalid input is exit 2. Evidence content
+(completeness) is ``check_xdist_parity.py completeness``, not this script.
 """
 
 from __future__ import annotations
@@ -89,6 +77,10 @@ def _has_file(directory: Path) -> bool:
 
 def decide(needs: dict, shard_jobs: list[str], guards_job: str, profile: str,
            evidence_root: Path, xdist_off: bool) -> dict:
+    """Green modes, each with guards ``success``: ``light`` (shards ``success``,
+    profile ``light``), ``sharded`` (shards ``success``, profile ``heavy``, a
+    file under ``shard-k/`` for every k), ``serial`` (``xdist_off``, shards
+    ``skipped``)."""
     reasons: list[str] = []
     shards = []
     for k, job_id in enumerate(shard_jobs, start=1):

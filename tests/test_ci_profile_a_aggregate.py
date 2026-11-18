@@ -1,10 +1,4 @@
-"""Tests for scripts/ci/profile_a_aggregate.py (pr-ci-onder-zes-minuten C3).
-
-The aggregator is fail-closed: green only on positive evidence (every shard
-and the guards job ``success`` with matching profiles and, when heavy,
-evidence per shard), or the serial way back. Everything else is red and names
-every reason; invalid input exits 2. Neither prints a ``mode=`` line.
-"""
+"""Tests for scripts/ci/profile_a_aggregate.py (pr-ci-onder-zes-minuten C3)."""
 
 from __future__ import annotations
 
