@@ -219,6 +219,25 @@ def _remote_branch_exists(branch: str, project_root: Path) -> bool:
     return result.returncode == 0 and bool(result.stdout.strip())
 
 
+# Profile A of .github/workflows/vnx-ci.yml: the aggregator and the jobs it ``needs``. In the serial mode
+# (VNX_CI_XDIST=0 / xdist_off) the four shard jobs conclude SKIPPED while the aggregator is green.
+# tests/test_closure_verifier.py pins these names to the workflow.
+_PROFILE_A_AGGREGATOR = "Profile A (doctor + core tests)"
+_PROFILE_A_NEEDED_JOBS = frozenset(
+    {f"Profile A shard ({k}/4)" for k in range(1, 5)} | {"Profile A guards"}
+)
+
+
+def _profile_a_aggregator_green(rollup: List[Dict[str, Any]]) -> bool:
+    return any(
+        item.get("__typename") == "CheckRun"
+        and item.get("name") == _PROFILE_A_AGGREGATOR
+        and item.get("status") == "COMPLETED"
+        and item.get("conclusion") == "SUCCESS"
+        for item in rollup
+    )
+
+
 def _rollup_all_green(rollup: List[Dict[str, Any]]) -> bool:
     """Decide whether a GitHub statusCheckRollup represents an all-green CI state.
 
@@ -239,6 +258,14 @@ def _rollup_all_green(rollup: List[Dict[str, Any]]) -> bool:
         typename = item.get("__typename") or ""
         if typename == "CheckRun":
             recognised += 1
+            if (
+                item.get("status") == "COMPLETED"
+                and item.get("conclusion") == "SKIPPED"
+                and item.get("name") in _PROFILE_A_NEEDED_JOBS
+                and _profile_a_aggregator_green(rollup)
+            ):
+                # A skipped Profile A shard/guards job counts only next to a green aggregator.
+                continue
             if item.get("status") != "COMPLETED" or item.get("conclusion") != "SUCCESS":
                 return False
         elif typename == "StatusContext":
