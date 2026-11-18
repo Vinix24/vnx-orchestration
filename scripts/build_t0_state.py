@@ -125,8 +125,21 @@ log = logging.getLogger(__name__)
 
 _SCRIPT_DIR = Path(__file__).resolve().parent
 _LIB_DIR = _SCRIPT_DIR / "lib"
-if str(_LIB_DIR) not in sys.path:
-    sys.path.insert(0, str(_LIB_DIR))
+
+
+def _prefer_lib_path() -> None:
+    """Put scripts/lib at sys.path[0], also when PYTHONPATH already listed it.
+
+    Run as a script, sys.path[0] is scripts/, where daily_metrics.py shadows the
+    scripts/lib/daily_metrics package unless scripts/lib comes first.
+    """
+    lib = str(_LIB_DIR)
+    while lib in sys.path:
+        sys.path.remove(lib)
+    sys.path.insert(0, lib)
+
+
+_prefer_lib_path()
 
 from health_status import worst_status  # noqa: E402
 from event_outcome_semantics import COMPLETION_EVENT_TYPES  # noqa: E402
@@ -930,9 +943,7 @@ def _build_dream_reviews(state_dir: Path, project_id: str) -> Dict[str, Any]:
     if not pid:
         return empty
     try:
-        lib_dir = str(_SCRIPT_DIR / "lib")
-        if lib_dir not in sys.path:
-            sys.path.insert(0, lib_dir)
+        _prefer_lib_path()
         from dream_liveness import read_reviews
         return read_reviews(_resolve_dream_data_root(state_dir), pid, now=_now_utc())
     except Exception:
@@ -2648,8 +2659,7 @@ def _reconcile_tracks_fresh(
     marker.update(_autoclose_health(store))
     t0 = time.monotonic()
     try:
-        if str(_LIB_DIR) not in sys.path:
-            sys.path.insert(0, str(_LIB_DIR))
+        _prefer_lib_path()
         from track_reconciler import reconcile_all_tracks
 
         results = reconcile_all_tracks(store, pid, repo_root=_PROJECT_ROOT)
@@ -3387,6 +3397,7 @@ def _write_all_state_outputs(
     effective_root = project_root if project_root is not None else _PROJECT_ROOT
     try:
         sys.path.insert(0, str(effective_root / "scripts"))
+        _prefer_lib_path()
         from build_project_status import write_project_status
         write_project_status(state_dir)
     except Exception as exc:
@@ -3397,8 +3408,7 @@ def _write_all_state_outputs(
 def _emit_build_signal(output_path: Path, elapsed: float) -> None:
     """Emit state mutation event (best-effort)."""
     try:
-        if str(_LIB_DIR) not in sys.path:
-            sys.path.insert(0, str(_LIB_DIR))
+        _prefer_lib_path()
         from state_mutation import emit_state_mutation
         size_bytes = output_path.stat().st_size if output_path.exists() else 0
         emit_state_mutation(
