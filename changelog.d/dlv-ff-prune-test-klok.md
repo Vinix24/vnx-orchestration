@@ -1,0 +1,1 @@
+- `tests/test_permission_events_prune.py` pins the clock of the `prune` CLI call to the test's fixed `NOW`, so the 90-day boundary no longer moves with the real date (fix-forward for the red Profile A on main since 18-11).

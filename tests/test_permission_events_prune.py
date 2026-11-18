@@ -158,6 +158,8 @@ def test_old_scan_call_without_subcommand_still_scans_and_prune_subcommand(tmp_p
     assert rc == 0 and "B1 " in capsys.readouterr().out
     assert "B1" in json.loads((st / "permission_coverage.json").read_text())["sources"]
     _seed(state, LEDGER_FILES[0])
+    real_prune = pp.prune  # the CLI prunes on the real clock; the seed is relative to NOW, so pin it
+    monkeypatch.setattr(pp, "prune", lambda pid, state_dir=None, now=None: real_prune(pid, state_dir, now or NOW))
     assert scan.main(["prune", "--project-id", PID, "--state-dir", str(state)]) == 0
     assert "permission_events moved 2 removed 1 (ok)" in capsys.readouterr().out
     assert scan.main(["prune", "--project-id", "../x", "--state-dir", str(state)]) == 2
