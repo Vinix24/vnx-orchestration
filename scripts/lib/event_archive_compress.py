@@ -4,14 +4,16 @@
 ``RoundResult`` (``files``: one ``FileResult`` each, ``stopped``: ``done`` or
 the budget that ran out, ``summary()``, ``has_divergent``). It takes only
 ``<dir>/.archive.lock``, never a live-stream lock (fixed order: live, then
-archive), and only for stat, replace and unlink: compression and its
-verification run before it, so a writer never waits for them.
+archive), and only for stat, replace and unlink: compression, its
+verification and every pair compare run before it, so a writer never waits for
+them. ``bytes_read`` counts the bytes those reads actually took from disk.
 """
 
 from __future__ import annotations
 
 import fcntl
 import gzip
+import io
 import os
 import shutil
 import stat
@@ -19,6 +21,7 @@ import tempfile
 import time
 import zlib
 from collections import Counter
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Optional, Tuple, Union
@@ -63,6 +66,24 @@ class RoundResult:
                 "bytes_before": sum(f.plain_size for f in done), "bytes_after": after}
 
 
+_READS: ContextVar[Optional[List[int]]] = ContextVar("event_archive_reads", default=None)
+
+
+class _CountedIO(io.FileIO):
+    """A raw file whose reads add to the round's counter (OI-2982)."""
+
+    def readinto(self, buffer) -> Optional[int]:
+        count = super().readinto(buffer)
+        acc = _READS.get()
+        if acc is not None and count:
+            acc[0] += count
+        return count
+
+
+def _open_counted(path: Path) -> io.BufferedReader:
+    return io.BufferedReader(_CountedIO(path, "r"), CHUNK)
+
+
 def _snap(path: Path) -> Optional[Tuple[int, int, int]]:
     try:
         st = os.stat(path)
@@ -73,7 +94,7 @@ def _snap(path: Path) -> Optional[Tuple[int, int, int]]:
 
 def _compare(gz: Path, plain: Path) -> str:
     """``equal``, ``prefix`` (the gz decompresses to a prefix of the plain) or ``different``; an unreadable gz raises."""
-    with gzip.open(gz, "rb") as g, open(plain, "rb") as p:
+    with _open_counted(gz) as raw, gzip.GzipFile(fileobj=raw, mode="rb") as g, _open_counted(plain) as p:
         while True:
             chunk = g.read(CHUNK)
             other = p.read(len(chunk) or 1)
@@ -97,7 +118,7 @@ def _compress_verified(plain: Path) -> Optional[Path]:
     try:
         with os.fdopen(fd, "wb") as raw:
             with gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=0) as gz_f:
-                with open(plain, "rb") as src:
+                with _open_counted(plain) as src:
                     while chunk := src.read(CHUNK):
                         gz_f.write(chunk)
             raw.flush()
@@ -139,6 +160,15 @@ def _settle(plain: Path, free_space: Callable[[Path], int]) -> FileResult:
             res.reason = "mismatch"
             return res
     try:
+        gz_seen = _snap(gz)
+        if gz_seen != gz_snap:
+            # A gz appeared or changed meanwhile: the pair rules, compared BEFORE the
+            # lock (OI-2983); under it only the snapshots of this compare are re-checked.
+            kind = _kind(gz, plain) if gz_seen else None
+            if (gz_seen is None and gz_snap is not None) or (kind in (None, "prefix") and scratch is None):
+                res.reason = "changed"
+                return res
+            gz_snap = gz_seen
         with open(plain.parent / ARCHIVE_LOCK_NAME, "ab") as lock_f:
             try:
                 fcntl.flock(lock_f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -161,18 +191,12 @@ def _divergent(res: FileResult, gz: Path) -> FileResult:
 
 
 def _replace_under_lock(res, plain, gz, snap, gz_snap, kind, scratch) -> FileResult:
-    if _snap(plain) != snap:
+    """Only stat, replace and unlink: a file that moved since its compare is ``changed``."""
+    if _snap(plain) != snap or _snap(gz) != gz_snap:
         res.reason = "changed"
         return res
-    gz_now = _snap(gz)
-    if gz_now != gz_snap:
-        # A gz appeared or changed meanwhile: the pair rules, read under the lock.
-        kind = _kind(gz, plain) if gz_now else None
-        if kind == "different":
-            return _divergent(res, gz)
-        if gz_now is None or (kind == "prefix" and scratch is None):
-            res.reason = "changed"
-            return res
+    if kind == "different":
+        return _divergent(res, gz)
     if kind == "equal":
         plain.unlink()
         _fsync_dir(plain.parent)
@@ -190,10 +214,16 @@ def _replace_under_lock(res, plain, gz, snap, gz_snap, kind, scratch) -> FileRes
     return res
 
 
+def _contained(directory: Path, pattern: str) -> List[Path]:
+    """Files matching *pattern* that are not symlinks and resolve inside *directory*."""
+    root = directory.resolve()
+    return [p for p in directory.glob(pattern) if not p.is_symlink() and p.resolve().is_relative_to(root)]
+
+
 def candidates(directories: Iterable[Path], days: float, now: Callable[[], float] = time.time) -> List[Path]:
     """Plain archive files with an mtime more than *days* old, oldest first."""
     cutoff, found = now() - days * 86400, []
-    for path in (p for d in directories for p in Path(d).glob("*" + ARCHIVE_SUFFIX)):
+    for path in (p for d in directories for p in _contained(Path(d), "*" + ARCHIVE_SUFFIX)):
         snap = _snap(path)
         if snap is not None and path.is_file() and snap[2] / 1e9 < cutoff:
             found.append((snap[2], path))
@@ -222,24 +252,29 @@ def compress_archive_round(
     """
     if isinstance(directories, (str, Path)):
         directories = [directories]
-    result = RoundResult()
+    result, reads = RoundResult(), [0]
     start, handled = clock(), 0
-    for plain in candidates([Path(d) for d in directories], days, now):
-        if handled >= max_files:
-            result.stopped = "max_files"
-        elif result.bytes_read >= max_bytes:
-            result.stopped = "max_bytes"
-        elif clock() - start >= max_seconds:
-            result.stopped = "max_seconds"
-        if result.stopped != "done":
-            break
-        size = (_snap(plain) or (0, 0, 0))[1]
-        if not manual and size > max_file_bytes:
-            result.files.append(FileResult(str(plain), SKIPPED, "too_large", plain_size=size))
-            continue
-        outcome = _settle(plain, free_space)
-        result.files.append(outcome)
-        if outcome.reason != "no_space":
-            handled += 1
-            result.bytes_read += size
+    token = _READS.set(reads)
+    try:
+        for plain in candidates([Path(d) for d in directories], days, now):
+            result.bytes_read = reads[0]
+            if handled >= max_files:
+                result.stopped = "max_files"
+            elif result.bytes_read >= max_bytes:
+                result.stopped = "max_bytes"
+            elif clock() - start >= max_seconds:
+                result.stopped = "max_seconds"
+            if result.stopped != "done":
+                break
+            size = (_snap(plain) or (0, 0, 0))[1]
+            if not manual and size > max_file_bytes:
+                result.files.append(FileResult(str(plain), SKIPPED, "too_large", plain_size=size))
+                continue
+            outcome = _settle(plain, free_space)
+            result.files.append(outcome)
+            if outcome.reason != "no_space":
+                handled += 1
+    finally:
+        _READS.reset(token)
+        result.bytes_read = reads[0]
     return result

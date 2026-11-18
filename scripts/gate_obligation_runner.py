@@ -308,7 +308,6 @@ sys.path.insert(0, str(SCRIPT_DIR / "lib"))
 import gate_run_guard
 from gate_obligations import (  # noqa: E402
     NO_GATE_KEY,
-    REASON_DEGENERATE_RETRY_CAP,
     REASON_DISPATCH_STILL_RUNNING,
     REASON_FAILED_BY_GATE_VERDICT,
     REASON_FAILED_BY_TAKEOVER,
@@ -320,6 +319,7 @@ from gate_obligations import (  # noqa: E402
     REASON_NO_PR_BRANCH_GONE_UNMEASURED,
     REASON_PR_CLOSED,
     REASON_PR_MERGED,
+    REASON_VERDICT_WITHOUT_FINDINGS_RETRY_CAP,
     STATUS_FAILED,
     STATUS_FULFILLED,
     STATUS_NOT_EXECUTABLE,
@@ -3748,7 +3748,7 @@ def _recheck_under_lock(
 
     In this order: an obligation another runner already booked is not run
     again; without a force-rerun, an obligation at the retry cap on this head
-    is parked (:func:`_park_at_cap`), and a decided, complete-evidence verdict
+    is parked (:func:`_park_at_cap`) unless :func:`_passed_over`, and a decided, complete-evidence verdict
     on this head that landed since the pre-execution decision is booked
     (:func:`_book_existing_evidence`) instead of run over.
     """
@@ -3760,7 +3760,7 @@ def _recheck_under_lock(
         }, None
     if force_rerun:
         return None, None
-    if gate_run_guard.cap_reached(fresh.get("head_runs"), head_sha):
+    if gate_run_guard.cap_reached(fresh.get("head_runs"), head_sha) and not _passed_over(fresh, head_sha):
         return _park_at_cap(path, fresh, gate=gate, pr_number=pr_number, dispatch_id=dispatch_id), None
     lookup = _fulfilling_result(
         _index_gate_results(state_dir), dispatch_id, gate, pr_number=pr_number, snapshot=snapshot,
@@ -3784,14 +3784,30 @@ def _recheck_under_lock(
     return None, None
 
 
+def _passed_over(record: Dict[str, Any], head_sha: str, result: Any = None, gate: str = "") -> bool:
+    """ADR-080 besluit 3: at the verdict-without-findings cap on this head (the hop's own proof) the declared gate does not run; with ``result``, it did not run in that call."""
+    runs, cap = record.get("head_runs"), REASON_VERDICT_WITHOUT_FINDINGS_RETRY_CAP
+    ran = [e for e in (result or {}).get("gates") or [] if e.get("gate") == gate and e.get("request_status") == "requested"]
+    return record.get("reason") == cap == gate_run_guard.cap_reason(runs) and gate_run_guard.cap_reached(runs, head_sha) and not ran
+
+
+def _temporary_refusal_or_hop(record, head_sha: str, result: Any, declared: Tuple[str, str, Any], gate: str, pr_number):
+    """:func:`_temporary_refusal` of the declared record, or, when the seat went on (:func:`_passed_over`), the cap reason: that record is old and is not judged."""
+    if _passed_over(record, head_sha, result, gate):
+        return REASON_VERDICT_WITHOUT_FINDINGS_RETRY_CAP, f"{gate} passed over on head {head_sha[:8]} (ADR-080 besluit 3); its successor has no verdict yet", None
+    return (*_temporary_refusal(gate, pr_number, declared[0], declared[1]), declared[2])
+
+
 def _park_at_cap(
     path: Path, fresh: Dict[str, Any], *, gate: str, pr_number: int, dispatch_id: str,
 ) -> Dict[str, Any]:
-    """R10: the obligation stays pending under ``degenerate_retry_cap``; the gate is not run on this head."""
-    detail = gate_run_guard.cap_detail(gate, pr_number, dispatch_id, fresh.get("head_runs") or {})
-    if fresh.get("reason") != REASON_DEGENERATE_RETRY_CAP:
-        update_obligation(path, reason=REASON_DEGENERATE_RETRY_CAP, reason_detail=detail)
-    return {"action": ACTION_RETRY_CAPPED, "detail": detail, "reason": REASON_DEGENERATE_RETRY_CAP}
+    """R10: the obligation stays pending under ``gate_run_guard.cap_reason``, which the request-time hop reads."""
+    head_runs = fresh.get("head_runs") or {}
+    reason = gate_run_guard.cap_reason(head_runs)
+    detail = gate_run_guard.cap_detail(gate, pr_number, dispatch_id, head_runs)
+    if fresh.get("reason") != reason:
+        update_obligation(path, reason=reason, reason_detail=detail)
+    return {"action": ACTION_RETRY_CAPPED, "detail": detail, "reason": reason}
 
 
 def _report_cap_reached(
@@ -3804,7 +3820,7 @@ def _report_cap_reached(
     this reads the count back, never counts again. Only a pending obligation,
     only a known head, only a run in which the reviewer ran. The temporary
     refusal booked just before wrote its own reason, so :func:`_park_at_cap`
-    writes ``degenerate_retry_cap`` back.
+    writes the cap reason back.
     """
     if not head_sha or not gate_run_guard.reviewer_ran(result_data):
         return
@@ -4914,7 +4930,8 @@ def _fulfill_run_gate(
         _drop_provider_not_installed_result(
             result_file, result_status, result_reason, gate=gate, pr_number=pr_number)
 
-        temp_reason, temp_detail = _temporary_refusal(gate, pr_number, result_status, result_reason)
+        temp_reason, temp_detail, result_data = _temporary_refusal_or_hop(
+            launch.record, head_sha_before_run, result, (result_status, result_reason, result_data), gate, pr_number)
         if temp_reason is not None:
             return _fulfill_temporary_refusal(
                 path, outcome, temp_reason, temp_detail, manager=manager, gate=gate,

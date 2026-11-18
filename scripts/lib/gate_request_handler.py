@@ -34,6 +34,12 @@ from gate_recorder import (
 )
 from gate_executor import _classify_sha_binding
 from gate_lane_rows import GATE_LANE_ROWS
+import gate_run_guard
+from gate_obligations import (
+    REASON_VERDICT_WITHOUT_FINDINGS_RETRY_CAP,
+    iter_obligations,
+    obligation_matches_pr,
+)
 from gate_result_parser import evidence_error
 from gate_status import REQUEST_ORIGIN_DOOR, decided_verdict, has_complete_evidence
 from governance_emit import _classify_lane_log_text
@@ -1364,6 +1370,37 @@ class GateRequestHandlerMixin:
             current = next_gate
             current_refusal = self._seat_switch_refusal(current)
 
+    def _verdict_without_findings_hop(
+        self, gate: str, pr_number: int, head: _PrHead,
+    ) -> Optional[Dict[str, Any]]:
+        """The hop of a gate whose obligation reached ``verdict_without_findings_retry_cap`` on this head.
+
+        ADR-080 besluit 3: two runs on one head ended in a verdict without a
+        finding, so the seat goes to the next reviewer of the takeover order.
+        A hop at request time, never a record. A record about another head, an
+        unknown head or no store skips nothing; an unreadable obligation raises
+        (``iter_obligations``), it is never read as "not capped".
+        """
+        state_dir = getattr(self, "state_dir", None)
+        if state_dir is None:
+            return None
+        for _path, record in iter_obligations(Path(state_dir)):
+            if record.get("gate") != gate or not obligation_matches_pr(record, pr_number):
+                continue
+            if record.get("reason") != REASON_VERDICT_WITHOUT_FINDINGS_RETRY_CAP:
+                continue
+            head_sha = head.sha()  # looked up only once a capped record matched
+            # The cap must be reached on THIS head; an unknown head skips nothing.
+            if not head_sha or not gate_run_guard.cap_reached(record.get("head_runs"), head_sha):
+                continue
+            return {
+                "gate": gate,
+                "reason": REASON_VERDICT_WITHOUT_FINDINGS_RETRY_CAP,
+                "status": "unavailable",
+                "detail": str(record.get("reason_detail") or REASON_VERDICT_WITHOUT_FINDINGS_RETRY_CAP),
+            }
+        return None
+
     def _candidate_hop(
         self, current: str, current_refusal: Optional[SwitchDecision], pr_number: int,
         *, head: _PrHead, held: Dict[str, str],
@@ -1378,6 +1415,9 @@ class GateRequestHandlerMixin:
         """
         if current in held:
             return _held_seat_hop(current, held[current]), False
+        capped_hop = self._verdict_without_findings_hop(current, pr_number, head)
+        if capped_hop is not None:
+            return capped_hop, False
         hop: Optional[Dict[str, Any]] = None
         consult_reachability = True
         existing_result = self._read_existing_gate_result(current, pr_number)
@@ -1623,6 +1663,9 @@ class GateRequestHandlerMixin:
         reads another seat of this request: it has nobody to hand the seat to,
         so the seat has no distinct reviewer (``reader`` ``None``). A gate that
         shares the builder's vendor (R7) has nobody to hand the seat to either.
+        Nor has a gate at ``verdict_without_findings_retry_cap`` on this head
+        (OI-2984, ADR-080 besluit 3): with no successor the seat ends in the
+        named chain-exhausted state, never in a third run of that gate.
         """
         refusal = self._seat_switch_refusal(gate)
         if gate in chain:
@@ -1631,9 +1674,9 @@ class GateRequestHandlerMixin:
             )
         if gate in held:
             return None, [_held_seat_hop(gate, held[gate])], None
-        vendor_hop = vendor_match_hop(gate, builder)
-        if vendor_hop is not None:
-            return None, [vendor_hop], None
+        end_hop = vendor_match_hop(gate, builder) or self._verdict_without_findings_hop(gate, pr_number, head)
+        if end_hop is not None:
+            return None, [end_hop], None
         return gate, [], refusal
 
     def _request_seat_reader(

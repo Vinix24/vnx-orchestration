@@ -161,6 +161,12 @@ REASON_GATE_PARKED_TIMEOUT = f"{REASON_GATE_PARKED}_timeout"
 # the count; an operator rerun needs ``--force-rerun --reason``.
 REASON_DEGENERATE_RETRY_CAP = "degenerate_retry_cap"
 
+# The same cap, reached by a run that said blocked or fail with no finding
+# (reason ``verdict_without_findings``, ADR-080 besluit 3). Writer:
+# scripts/lib/gate_run_guard.py; reader: ``_walk_takeover_chain`` in
+# scripts/lib/gate_request_handler.py, which passes the gate over for this head.
+REASON_VERDICT_WITHOUT_FINDINGS_RETRY_CAP = "verdict_without_findings_retry_cap"
+
 # Distinct sentinel gate key for explicit no-gate records (dispatch
 # 20260816-gate-never-skippable). Deliberately NOT a member of the Gate enum: a
 # no-gate dispatch is not declaring any gate, but the freshness scanner needs a
@@ -671,6 +677,7 @@ __all__ = [
     "REASON_GATE_PARKED",
     "REASON_GATE_PARKED_TIMEOUT",
     "REASON_DEGENERATE_RETRY_CAP",
+    "REASON_VERDICT_WITHOUT_FINDINGS_RETRY_CAP",
     "TERMINAL_STATUSES",
     "NO_GATE_KEY",
     "obligations_dir",

@@ -205,18 +205,28 @@ class TestGateArtifactsRegisterEmit:
             "Explicit verdict='pass' must override severity-derived gate_failed"
         )
 
-    def test_codex_gate_verdict_fail_with_no_findings_emits_gate_failed(self, artifact_env):
-        """codex verdict='fail' must emit gate_failed even when there are no findings."""
+    def test_codex_gate_verdict_fail_with_no_findings_registers_no_verdict(self, artifact_env):
+        """D5 (ADR-080 besluit 1): a fail with zero findings is no verdict.
+
+        It is booked ``unavailable`` / ``verdict_without_findings`` and, like
+        every other run without a verdict, emits no register event.
+        """
         payload = _make_payload(gate="codex_gate", pr_number=42)
         stdout = _codex_stream({"verdict": "fail", "findings": [], "residual_risk": None})
         result = _run(artifact_env, payload, stdout=stdout)
 
+        assert result["status"] == "unavailable" and result["reason"] == "verdict_without_findings"
+        assert _read_register_events(artifact_env) == []
+
+    def test_codex_gate_verdict_fail_with_one_advisory_finding_emits_gate_failed(self, artifact_env):
+        """A fail with one finding, advisory included, stays a fail (OI-1938) and registers gate_failed."""
+        payload = _make_payload(gate="codex_gate", pr_number=42)
+        finding = {"severity": "low", "file": "scripts/a.py", "line": 1, "summary": "a nit"}
+        stdout = _codex_stream({"verdict": "fail", "findings": [finding], "residual_risk": None})
+        result = _run(artifact_env, payload, stdout=stdout)
+
         assert result["status"] == "completed"
-        events = _read_register_events(artifact_env)
-        assert len(events) == 1, f"Expected 1 event; got: {events}"
-        assert events[0]["event"] == "gate_failed", (
-            "Explicit verdict='fail' must emit gate_failed even with no findings"
-        )
+        assert [e["event"] for e in _read_register_events(artifact_env)] == ["gate_failed"]
 
     def test_codex_gate_missing_verdict_falls_back_to_severity(self, artifact_env):
         """When the findings reader returns no verdict object, classification falls back to severity.

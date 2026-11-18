@@ -19,6 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
 
 import operator_steering_source as source
 import permission_events as pe
+import permission_events_prune as prune_mod
 import permission_events_sources as sources
 from vnx_paths import project_id_from_state_dir
 
@@ -118,7 +119,28 @@ def run_scan(project_id: str, since: str, projects_root: Path, state_dir: Option
     return 0
 
 
+def main_prune(argv: List[str]) -> int:
+    parser = argparse.ArgumentParser(prog="permission_events_scan.py prune", description="ADR-075 decision 6: lines older than 90 days move to the archive")
+    parser.add_argument("--project-id", required=True)
+    parser.add_argument("--state-dir", help="project state dir (default: central store of the project)")
+    args = parser.parse_args(argv)
+    try:
+        entry = prune_mod.prune(args.project_id, Path(args.state_dir) if args.state_dir else None)
+    except (ValueError, PermissionError) as exc:
+        print(f"prune refused: {exc}", file=sys.stderr)
+        return 2
+    except Exception as exc:  # the round restored both ledgers and wrote status error into the coverage
+        print(f"prune failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 1
+    for name, rep in entry["ledgers"].items():
+        print(f"{name} moved {rep['moved']} removed {rep['removed_archives']} ({rep['removed_reason']}) unparseable_ts {rep['unparseable_ts']}")
+    return 0
+
+
 def main(argv: Optional[List[str]] = None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    if argv[:1] == ["prune"]:
+        return main_prune(argv[1:])
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--project-id", required=True)
     parser.add_argument("--since", default="7d", help="<N>d or <N>h (default 7d)")

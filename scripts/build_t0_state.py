@@ -60,6 +60,9 @@ Schema 2.2 change (D5 fabric-state-herstel, live work):
     ``conflicts/`` directory that exists but cannot be listed is not zero:
     its count is ``null`` with a ``*_unmeasured_reason`` and it degrades
     system_health, so the dispatch guard reads WAIT, never GO.
+  - t0_index.json schema ``t0_index/1.6`` (permissieblokkades-leren L6) adds ``permission_proposals``: the open
+    proposals and notifications of the proposal store, at most 5 plus ``more``; an unreadable store is
+    ``available: false`` with a reason.
   - t0_index.json schema ``t0_index/1.5`` (besluitenregister B4) adds ``besluiten`` (counts, ids; titles in the state).
   - t0_index.json schema ``t0_index/1.4`` (operator-vragen-tot-antwoord Q5) adds
     ``operator_inbox``: the open points of the operator queue, at most 5 plus
@@ -1359,6 +1362,12 @@ def _build_open_outcomes(state_dir: Path, project_id: str) -> Dict[str, Any]:
 
 
 _INDEX_OPEN_OUTCOME_REASON_MAX = 60
+
+
+def _permission_open_view(state_dir: Path, project_id: str) -> Dict[str, Any]:
+    """Open permission proposals plus notifications, read only (permissieblokkades-leren L6)."""
+    import permission_chain  # type: ignore[import]
+    return permission_chain.open_view(state_dir, project_id)
 
 
 def _open_outcomes_index_summary(oo: Optional[Dict[str, Any]]) -> Dict[str, Any]:
@@ -2954,6 +2963,7 @@ def build_t0_state(
     memory_ledger = _build_memory_ledger(state_dir)  # geheugen-in-de-store M4
     operator_inbox = _build_operator_inbox(project_id, state_dir)  # operator-vragen-tot-antwoord Q5
     besluiten = _build_besluiten(project_id, state_dir)  # besluitenregister B4
+    permission_proposals = _permission_open_view(state_dir, project_id)  # permissieblokkades-leren L6
     elapsed = time.monotonic() - start
     system_health = _build_system_health(
         state_dir, db_ok, db_health=db_health,
@@ -2977,6 +2987,7 @@ def build_t0_state(
         "live_work": live_work,
         "recent_receipts": recent_receipts,
         "open_outcomes": open_outcomes,
+        "permission_proposals": permission_proposals,
         "git_context": git_context,
         "system_health": system_health,
         "pr_queue": pr_queue,
@@ -3141,7 +3152,7 @@ def _build_t0_index(state: Dict[str, Any]) -> Dict[str, Any]:
     pr_queue = state.get("pr_queue") or {}
     pr_unavailable = pr_queue.get("available") is False
     index = {
-        "schema": "t0_index/1.5",
+        "schema": "t0_index/1.6",
         "timestamp": state.get("generated_at", ""),
         "git_branch": git_ctx.get("branch", ""),
         "git_head": raw_head[:7],
@@ -3165,6 +3176,8 @@ def _build_t0_index(state: Dict[str, Any]) -> Dict[str, Any]:
         "operator_inbox": state.get("operator_inbox")
         or {"status": "error", "reason": "operator_inbox missing from the state"},
         "besluiten": _besluiten_index(state.get("besluiten")),
+        "permission_proposals": state.get("permission_proposals")
+        or {"available": False, "reason": "permission_proposals missing from the state"},
     }
     if pr_unavailable:
         index["pr_queue_unavailable"] = pr_queue.get("reason") or "unknown"
