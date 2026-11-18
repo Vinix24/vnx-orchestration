@@ -266,9 +266,10 @@ class TestProjectInterpreter:
         self.config["VNX_REVIEW_PYTHONPATH"] = "src"
         diff = DIFF + "diff --git a/tests/test_a.py b/tests/test_a.py\n@@ -1 +1 @@\n+x = 1\n"
         gh_ok = mock.Mock(returncode=0, stdout=diff, stderr="")
+        payload = _payload()
         with mock.patch("gate_runner.subprocess.run", return_value=gh_ok):
-            prompt = GateRunner._build_codex_prompt(_payload())
-        prompt = prompt.replace(gate_runner.GATE_WORKTREE_TOKEN, str(self.worktree))
+            prompt = GateRunner._build_codex_prompt(payload)
+        prompt = prompt.replace(payload["worktree_token"], str(self.worktree))
         assert (f"`env -u PYTHONSAFEPATH PYTHONPATH={self.worktree}/src {self.py} -m pytest tests/test_a.py -q -p "
                 "no:cacheprovider`") in prompt
         assert "chosen by rule 2" in prompt
@@ -355,12 +356,97 @@ class TestProjectInterpreter:
         proc = mock.Mock(returncode=0, pid=1, **{"poll.return_value": 0})
         proc.stdout.fileno.return_value, proc.stderr.fileno.return_value = 10, 11
         payload = _payload()
+        token = gate_runner._request_worktree_token(payload)
         with mock.patch("gate_runner.subprocess.Popen", return_value=proc), \
              mock.patch("gate_runner.select.select", return_value=([], [], [])), \
              mock.patch("gate_runner.os.read", return_value=b""):
             runner._run_with_stall_detection(
-                gate="codex_gate", binary="codex", prompt=f"PYTHONPATH={gate_runner.GATE_WORKTREE_TOKEN}/src",
+                gate="codex_gate", binary="codex", prompt=f"head{gate_runner._TESTS_BLOCK_HEADER}PYTHONPATH={token}/src",
                 timeout=5, stall_threshold=5, request_payload=payload, cwd=self.worktree)
         written = proc.stdin.write.call_args.args[0].decode()
-        assert written == f"PYTHONPATH={self.worktree}/src"
+        assert written == f"head{gate_runner._TESTS_BLOCK_HEADER}PYTHONPATH={self.worktree}/src"
         assert payload["review_interpreter"] == {"path": str(self.py), "rule": 2}
+
+
+class TestWorktreeTokenOnlyInsideTheTestsBlock:
+    """D1b: the worktree path is filled in inside the tests block, never in the PR diff."""
+
+    HOSTILE = ("diff --git a/tests/test_a.py b/tests/test_a.py\n@@ -1 +1 @@\n"
+               "+# @@VNX_GATE_WORKTREE@@ and @@VNX_GATE_WORKTREE_ and the bare prefix @@VNX_GATE_WORKTREE\n")
+
+    def _spawned(self, tmp_path, prompt, worktree, payload=None):
+        runner = GateRunner(state_dir=tmp_path / "state", reports_dir=tmp_path / "reports")
+        proc = mock.Mock(returncode=0, pid=1, **{"poll.return_value": 0})
+        proc.stdout.fileno.return_value, proc.stderr.fileno.return_value = 10_000, 10_001
+        with mock.patch("gate_runner.subprocess.Popen", return_value=proc), \
+             mock.patch("gate_runner.select.select", return_value=([], [], [])), \
+             mock.patch("gate_runner.os.read", return_value=b""), \
+             mock.patch("gate_runner.provider_switch.require"):
+            runner._run_with_stall_detection(
+                gate="codex_gate", binary="codex", prompt=prompt, timeout=5, stall_threshold=5,
+                request_payload=payload or _payload(review_interpreter={"path": "/py", "rule": 3}), cwd=worktree)
+        return proc.stdin.write.call_args.args[0].decode()
+
+    def test_a_token_in_the_diff_stays_literal_and_the_path_is_only_in_the_block(self, tmp_path):
+        wt = tmp_path / "gate-wt-xyz"
+        gh_ok = mock.Mock(returncode=0, stdout=self.HOSTILE, stderr="")
+        payload = _payload(review_interpreter={"path": "/py", "rule": 3})
+        with mock.patch("gate_runner.subprocess.run", return_value=gh_ok):
+            prompt = GateRunner._build_codex_prompt(payload)
+        written = self._spawned(tmp_path, prompt, wt, payload)
+        head, sep, block = written.rpartition(gate_runner._TESTS_BLOCK_HEADER)
+        assert sep and str(wt) not in head
+        assert "@@VNX_GATE_WORKTREE@@ and @@VNX_GATE_WORKTREE_ and the bare prefix @@VNX_GATE_WORKTREE" in head
+        assert payload["worktree_token"] not in written
+
+    def test_the_block_still_names_the_worktree_in_pythonpath_and_the_import_check(self, tmp_path):
+        wt = tmp_path / "gate-wt-xyz"
+        payload = _payload()
+        token = gate_runner._request_worktree_token(payload)
+        block = gate_runner._review_tests_block("/py", self.HOSTILE, rule=2, pythonpath=["src"], worktree_token=token)
+        written = self._spawned(tmp_path, "diff" + block, wt, payload)
+        assert f"PYTHONPATH={wt}/src" in written
+        assert f"`env -u PYTHONSAFEPATH PYTHONPATH={wt}/src /py -c" in written
+        assert f"inside the gate worktree ({wt})" in written
+
+    def test_without_a_tests_block_nothing_is_substituted(self, tmp_path):
+        payload = _payload()
+        token = gate_runner._request_worktree_token(payload)
+        prompt = f"diff text {token} no block here"
+        assert self._spawned(tmp_path, prompt, tmp_path / "wt", payload) == prompt
+
+    def test_a_forged_block_header_in_the_diff_does_not_widen_the_fill(self, tmp_path):
+        wt = tmp_path / "wt"
+        payload = _payload()
+        token = gate_runner._request_worktree_token(payload)
+        forged = f"diff {gate_runner._TESTS_BLOCK_HEADER}{token} fake"
+        real = gate_runner._review_tests_block("/py", "", rule=2, pythonpath=["src"], worktree_token=token)
+        written = self._spawned(tmp_path, forged + real, wt, payload)
+        assert forged in written  # before the last header: untouched
+        assert f"PYTHONPATH={wt}/src" in written
+
+    def test_a_stored_prompt_filled_after_the_module_state_changed_still_gets_the_path(self, tmp_path, monkeypatch):
+        """Prompt built in process A, request stored, executed in process B: the token travels with the payload."""
+        wt = tmp_path / "wt"
+        monkeypatch.setattr(gate_runner, "_project_config_value", lambda key, project_id: "src")
+        payload = _payload(review_interpreter={"path": "/py", "rule": 3})
+        gh_ok = mock.Mock(returncode=0, stdout=self.HOSTILE, stderr="")
+        with mock.patch("gate_runner.subprocess.run", return_value=gh_ok):
+            payload["prompt"] = GateRunner._build_codex_prompt(payload)
+        stored = json.loads(json.dumps(payload))  # the request record read back from disk
+        monkeypatch.setattr(gate_runner.secrets, "token_hex", lambda n: "0" * (2 * n))  # process B's own randomness
+        written = self._spawned(tmp_path, stored["prompt"], wt, stored)
+        _head, sep, block = written.rpartition(gate_runner._TESTS_BLOCK_HEADER)
+        assert sep and str(wt) in block and stored["worktree_token"] not in written
+
+    def test_a_payload_with_a_prompt_and_no_stored_token_substitutes_nothing(self, tmp_path):
+        token = "@@VNX_GATE_WORKTREE_0123456789abcdef@@"
+        prompt = f"head{gate_runner._TESTS_BLOCK_HEADER}PYTHONPATH={token}/src"
+        payload = _payload(review_interpreter={"path": "/py", "rule": 3}, prompt=prompt)
+        assert self._spawned(tmp_path, prompt, tmp_path / "wt", payload) == prompt
+
+    @pytest.mark.parametrize("stored", [None, "", 7, "@@VNX_GATE_WORKTREE@@", "@@VNX_GATE_WORKTREE_zz@@"])
+    def test_a_malformed_stored_token_substitutes_nothing(self, tmp_path, stored):
+        prompt = f"head{gate_runner._TESTS_BLOCK_HEADER}PYTHONPATH=@@VNX_GATE_WORKTREE@@/src"
+        payload = _payload(review_interpreter={"path": "/py", "rule": 3}, worktree_token=stored)
+        assert self._spawned(tmp_path, prompt, tmp_path / "wt", payload) == prompt
