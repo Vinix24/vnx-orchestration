@@ -21,6 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import cli_invocations
 from atomic_io import atomic_write_text
+import permission_effect
 import permission_events as pe
 import permission_proposals as proposals_lib
 
@@ -135,6 +136,7 @@ def run_permission_chain(state_dir: Path, project_id: str, projects_root: Path, 
 INDEX_LIMIT = 5
 OPEN_STATUS = ("pending", "approved")
 MELDING = proposals_lib.MELDING
+CHAIN_KINDS = (permission_effect.KIND, MELDING)  # the steering store also holds feature and skill proposals
 
 
 def _span(text: str) -> str:
@@ -151,7 +153,7 @@ def open_view(state_dir: Path, project_id: str, limit: int = INDEX_LIMIT) -> Dic
     except Exception as exc:  # the section reports the failure; the build carries on
         return {"available": False, "reason": f"proposal store unreadable: {type(exc).__name__}"}
     items = []
-    for entry in (e for e in entries if e["status"] in OPEN_STATUS and e.get("revisions")):
+    for entry in (e for e in entries if e["status"] in OPEN_STATUS and e.get("revisions") and e.get("artefact_soort") in CHAIN_KINDS):
         text, kind = entry["revisions"][-1]["voorstel"], entry["artefact_soort"]
         item = {"proposal_id": entry["proposal_id"], "kind": kind, "form": _span(text)}
         item.update(reason=text[:160] if kind == MELDING else None, rule=None if kind == MELDING else item["form"])

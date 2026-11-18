@@ -188,3 +188,34 @@ def test_build_digest_includes_the_section(state, monkeypatch):
     state.mkdir(parents=True)
     _report(state)
     assert "─── Permissievoorstellen ───" in digest.build_digest()[1]
+
+
+def test_open_view_counts_only_permission_proposals_and_notifications_not_skill_proposals(state):
+    _persist(state, *[_item(n, "skill", f"Add skill `s{n}`") for n in range(5)], _item(9))
+    view = chain.open_view(state, "vnx-dev")
+    assert view["available"] and view["total"] == 1 and view["more"] == 0
+    assert [i["kind"] for i in view["items"]] == ["permissie"]
+    text = chain.digest_section(state, "vnx-dev")
+    assert "Bash(cmd9:*)" in text and "skill" not in text and "en nog" not in text
+
+
+def test_permission_open_view_returns_an_error_block_when_open_view_raises(state, monkeypatch):
+    def boom(*a, **k):
+        raise RuntimeError("store exploded")
+    monkeypatch.setattr(chain, "open_view", boom)
+    view = bts._permission_open_view(state, "vnx-dev")
+    assert view["available"] is False and view["reason"] == "RuntimeError: store exploded"
+    assert bts._build_t0_index({"permission_proposals": view})["permission_proposals"]["available"] is False
+
+
+def test_permission_open_view_returns_an_error_block_when_the_import_fails(state, monkeypatch):
+    monkeypatch.setitem(sys.modules, "permission_chain", None)
+    view = bts._permission_open_view(state, "vnx-dev")
+    assert view["available"] is False and view["reason"].startswith("ModuleNotFoundError: ")
+
+
+def test_permission_open_view_reason_is_cut_at_200_characters(state, monkeypatch):
+    def long(*a, **k):
+        raise ValueError("x" * 500)
+    monkeypatch.setattr(chain, "open_view", long)
+    assert len(bts._permission_open_view(state, "vnx-dev")["reason"]) == 200
