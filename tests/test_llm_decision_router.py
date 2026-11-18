@@ -146,33 +146,29 @@ def test_multiple_decisions_all_logged(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# test_backend_selection_via_env
+# test_backend_selection
 # ---------------------------------------------------------------------------
 
-def test_backend_selection_via_env_dryrun(tmp_path, monkeypatch):
-    """VNX_DECISION_BACKEND=dry-run selects dry-run backend."""
-    monkeypatch.setenv("VNX_DECISION_BACKEND", "dry-run")
-    router = DecisionRouter(data_dir=tmp_path)
+def test_backend_selection_dryrun(tmp_path):
+    """backend="dry-run" selects dry-run backend."""
+    router = DecisionRouter(data_dir=tmp_path, backend="dry-run")
     assert router.backend == Backend.DRY_RUN
 
 
-def test_backend_selection_via_env_ollama(tmp_path, monkeypatch):
-    """VNX_DECISION_BACKEND=ollama selects ollama backend."""
-    monkeypatch.setenv("VNX_DECISION_BACKEND", "ollama")
-    router = DecisionRouter(data_dir=tmp_path)
+def test_backend_selection_ollama(tmp_path):
+    """backend="ollama" selects ollama backend."""
+    router = DecisionRouter(data_dir=tmp_path, backend="ollama")
     assert router.backend == Backend.OLLAMA
 
 
-def test_backend_selection_via_env_claude_cli(tmp_path, monkeypatch):
-    """VNX_DECISION_BACKEND=claude-cli selects claude-cli backend."""
-    monkeypatch.setenv("VNX_DECISION_BACKEND", "claude-cli")
-    router = DecisionRouter(data_dir=tmp_path)
+def test_backend_selection_claude_cli(tmp_path):
+    """backend="claude-cli" selects claude-cli backend."""
+    router = DecisionRouter(data_dir=tmp_path, backend="claude-cli")
     assert router.backend == Backend.CLAUDE_CLI
 
 
-def test_backend_default_is_dryrun(tmp_path, monkeypatch):
-    """Unset VNX_DECISION_BACKEND → dry-run."""
-    monkeypatch.delenv("VNX_DECISION_BACKEND", raising=False)
+def test_backend_default_is_dryrun(tmp_path):
+    """No backend argument → dry-run."""
     router = DecisionRouter(data_dir=tmp_path)
     assert router.backend == Backend.DRY_RUN
 

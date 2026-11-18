@@ -8,7 +8,6 @@ vnx_resolve_project_root "${BASH_SOURCE[0]:-$0}"
 vnx_resolve_data_dir
 vnx_resolve_state_dir
 vnx_resolve_dispatch_dir
-export VNX_CODEX_HEADLESS_ENABLED=1
 
 RC=0
 RESULT=$(python3 scripts/review_gate_manager.py request-and-execute "$@" 2>&1) || RC=$?

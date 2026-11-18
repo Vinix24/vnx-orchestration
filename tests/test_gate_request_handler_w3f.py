@@ -47,9 +47,6 @@ def manager_env(tmp_path, monkeypatch):
     monkeypatch.setenv("VNX_PIDS_DIR", str(data_dir / "pids"))
     monkeypatch.setenv("VNX_LOCKS_DIR", str(data_dir / "locks"))
     monkeypatch.setenv("VNX_DB_DIR", str(data_dir / "database"))
-    monkeypatch.setenv("VNX_GEMINI_REVIEW_ENABLED", "0")
-    monkeypatch.setenv("VNX_CODEX_HEADLESS_ENABLED", "0")
-    monkeypatch.setenv("VNX_CLAUDE_GITHUB_REVIEW_ENABLED", "0")
     return {
         "project_root": project_root,
         "state_dir": state_dir,
@@ -83,7 +80,6 @@ class TestCommitShaInPayloads:
 
     def test_codex_request_payload_includes_commit_sha(self, manager_env, monkeypatch):
         monkeypatch.chdir(manager_env["project_root"])
-        monkeypatch.setenv("VNX_CODEX_HEADLESS_ENABLED", "0")
         manager = _make_manager()
 
         with patch("governance_receipts.emit_governance_receipt"):
@@ -125,7 +121,6 @@ class TestCommitShaInPayloads:
 
     def test_claude_github_request_payload_includes_commit_sha(self, manager_env, monkeypatch):
         monkeypatch.chdir(manager_env["project_root"])
-        monkeypatch.setenv("VNX_CLAUDE_GITHUB_REVIEW_ENABLED", "0")
         manager = _make_manager()
 
         with patch("governance_receipts.emit_governance_receipt"):
@@ -150,7 +145,6 @@ class TestCommitShaInPayloads:
         """commit_sha must come from the PR head on GitHub (``gh pr view headRefOid``),
         never from the local checkout HEAD (``git rev-parse HEAD``)."""
         monkeypatch.chdir(manager_env["project_root"])
-        monkeypatch.setenv("VNX_GEMINI_REVIEW_ENABLED", "0")
         manager = _make_manager()
 
         fake_head_oid = "e" * 40
@@ -190,7 +184,6 @@ class TestCommitShaInPayloads:
     def test_gemini_contract_payload_includes_commit_sha(self, manager_env, monkeypatch):
         """_build_gemini_contract_payload must embed commit_sha."""
         monkeypatch.chdir(manager_env["project_root"])
-        monkeypatch.setenv("VNX_GEMINI_REVIEW_ENABLED", "0")
 
         from review_contract import ReviewContract
         manager = _make_manager()
@@ -246,7 +239,7 @@ class TestMarkGateUnavailableDispatchId:
     def test_not_executable_result_includes_dispatch_id_for_codex(self, manager_env, monkeypatch):
         """codex_gate unavailable: result record must include dispatch_id."""
         monkeypatch.chdir(manager_env["project_root"])
-        monkeypatch.setenv("VNX_CODEX_HEADLESS_ENABLED", "0")
+        monkeypatch.setattr("review_gate_manager.shutil.which", lambda tool: None)
         manager = _make_manager()
         dispatch_id = "20260501-oi1128-test-B"
 
@@ -269,7 +262,7 @@ class TestMarkGateUnavailableDispatchId:
     def test_not_executable_result_omits_dispatch_id_when_not_provided(self, manager_env, monkeypatch):
         """When dispatch_id is not provided, not_executable result omits it."""
         monkeypatch.chdir(manager_env["project_root"])
-        monkeypatch.setenv("VNX_GEMINI_REVIEW_ENABLED", "0")
+        monkeypatch.setattr("review_gate_manager.shutil.which", lambda tool: None)
         manager = _make_manager()
 
         with patch("governance_receipts.emit_governance_receipt"):
@@ -325,7 +318,6 @@ class TestContractFlowDispatchIdTopLevel:
 
     def test_gemini_contract_always_has_dispatch_id_when_provided(self, manager_env, monkeypatch):
         monkeypatch.chdir(manager_env["project_root"])
-        monkeypatch.setenv("VNX_GEMINI_REVIEW_ENABLED", "0")
 
         from review_contract import ReviewContract
         manager = _make_manager()
@@ -351,7 +343,6 @@ class TestContractFlowDispatchIdTopLevel:
     def test_gemini_contract_has_dispatch_id_even_when_empty(self, manager_env, monkeypatch):
         """When dispatch_id='', it must still appear at top-level (not absent)."""
         monkeypatch.chdir(manager_env["project_root"])
-        monkeypatch.setenv("VNX_GEMINI_REVIEW_ENABLED", "0")
 
         from review_contract import ReviewContract
         manager = _make_manager()
@@ -378,7 +369,6 @@ class TestContractFlowDispatchIdTopLevel:
 
     def test_claude_github_contract_has_dispatch_id_at_top_level(self, manager_env, monkeypatch):
         monkeypatch.chdir(manager_env["project_root"])
-        monkeypatch.setenv("VNX_CLAUDE_GITHUB_REVIEW_ENABLED", "0")
 
         from review_contract import ReviewContract
         manager = _make_manager()
@@ -408,7 +398,6 @@ class TestContractFlowDispatchIdTopLevel:
 
     def test_claude_github_contract_has_dispatch_id_even_when_empty(self, manager_env, monkeypatch):
         monkeypatch.chdir(manager_env["project_root"])
-        monkeypatch.setenv("VNX_CLAUDE_GITHUB_REVIEW_ENABLED", "0")
 
         from review_contract import ReviewContract
         manager = _make_manager()

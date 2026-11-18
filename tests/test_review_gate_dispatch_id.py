@@ -50,9 +50,6 @@ def _codex_only(monkeypatch) -> None:
 
     monkeypatch.setattr(rgm.shutil, "which", lambda tool: "/usr/bin/fake" if tool == "codex" else None)
     monkeypatch.setattr(gate_request_handler, "get_pr_head_sha", lambda _pr: "")
-    monkeypatch.setenv("VNX_GEMINI_REVIEW_ENABLED", "0")
-    monkeypatch.setenv("VNX_CODEX_HEADLESS_ENABLED", "1")
-    monkeypatch.setenv("VNX_CLAUDE_GITHUB_REVIEW_ENABLED", "0")
 
 
 _SENTINEL = "_warned_review_gate_no_dispatch_id"
@@ -304,7 +301,6 @@ def test_request_gemini_with_contract_propagates_dispatch_id(review_env, monkeyp
     monkeypatch.setattr(rgm, "emit_governance_receipt", fake_emit)
     monkeypatch.setattr("gate_request_handler.render_gemini_prompt", lambda c: "mocked prompt")
     monkeypatch.setattr(rgm.shutil, "which", lambda tool: "/usr/bin/fake")
-    monkeypatch.setenv("VNX_GEMINI_REVIEW_ENABLED", "1")
 
     contract = ReviewContract(
         pr_id="PR-99",
@@ -341,7 +337,6 @@ def test_request_claude_github_with_contract_propagates_dispatch_id(review_env, 
         return {"append_status": "appended", "idempotency_key": "k"}
 
     monkeypatch.setattr(rgm, "emit_governance_receipt", fake_emit)
-    monkeypatch.setenv("VNX_CLAUDE_GITHUB_REVIEW_ENABLED", "0")
 
     contract = ReviewContract(
         pr_id="PR-99",
@@ -419,9 +414,6 @@ def test_request_reviews_propagates_pr_id_for_codex_gate(review_env, monkeypatch
 
     monkeypatch.setattr(rgm, "emit_governance_receipt", fake_emit)
     monkeypatch.setattr(rgm.shutil, "which", lambda tool: "/usr/bin/fake" if tool == "codex" else None)
-    monkeypatch.setenv("VNX_GEMINI_REVIEW_ENABLED", "0")
-    monkeypatch.setenv("VNX_CODEX_HEADLESS_ENABLED", "1")
-    monkeypatch.setenv("VNX_CLAUDE_GITHUB_REVIEW_ENABLED", "0")
 
     manager = rgm.ReviewGateManager()
     manager.request_reviews(

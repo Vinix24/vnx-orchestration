@@ -370,7 +370,6 @@ def test_request_and_execute_runs_no_switched_off_seat(store, monkeypatch):
 
     monkeypatch.setattr(review_gate_manager.ReviewGateManager, "execute_gate", fake_execute_gate)
     monkeypatch.setattr(review_gate_manager.ReviewGateManager, "_codex_headless_available", lambda self: True)
-    monkeypatch.setenv("VNX_CODEX_HEADLESS_ENABLED", "1")
     monkeypatch.setenv("VNX_REVIEW_GATE_TAKEOVER_CHAIN", "")
     set_switches(kimi=False)
 
@@ -416,7 +415,6 @@ def executor(store, launches, monkeypatch):
     monkeypatch.setattr(review_gate_manager.ReviewGateManager, "execute_gate", fake_execute_gate)
     monkeypatch.setattr(gate_recorder, "get_pr_head_sha", executor_head)
     monkeypatch.setattr(gate_request_handler, "get_pr_head_sha", handler_head)
-    monkeypatch.setenv("VNX_CODEX_HEADLESS_ENABLED", "1")
     set_switches(kimi=False)
 
     def run():

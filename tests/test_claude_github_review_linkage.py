@@ -38,6 +38,7 @@ from review_contract import (
     ReviewContract,
 )
 import gate_recorder
+import gate_request_handler as grh
 import review_gate_manager as rgm
 
 
@@ -264,7 +265,6 @@ class TestFromRequestPayload:
 class TestRequestClaudeGitHubWithContract:
     def test_not_configured_when_env_disabled(self, review_env, monkeypatch, sample_contract):
         monkeypatch.setattr(rgm, "emit_governance_receipt", lambda *a, **kw: None)
-        monkeypatch.setenv("VNX_CLAUDE_GITHUB_REVIEW_ENABLED", "0")
 
         manager = rgm.ReviewGateManager()
         receipt = manager.request_claude_github_with_contract(contract=sample_contract)
@@ -277,7 +277,7 @@ class TestRequestClaudeGitHubWithContract:
 
     def test_not_configured_when_gh_missing(self, review_env, monkeypatch, sample_contract):
         monkeypatch.setattr(rgm, "emit_governance_receipt", lambda *a, **kw: None)
-        monkeypatch.setenv("VNX_CLAUDE_GITHUB_REVIEW_ENABLED", "1")
+        monkeypatch.setattr(grh, "CLAUDE_GITHUB_REVIEW_ENABLED", True)
         monkeypatch.setattr(rgm.shutil, "which", lambda _: None)
 
         manager = rgm.ReviewGateManager()
@@ -288,9 +288,8 @@ class TestRequestClaudeGitHubWithContract:
 
     def test_configured_dry_run_when_trigger_not_set(self, review_env, monkeypatch, sample_contract):
         monkeypatch.setattr(rgm, "emit_governance_receipt", lambda *a, **kw: None)
-        monkeypatch.setenv("VNX_CLAUDE_GITHUB_REVIEW_ENABLED", "1")
+        monkeypatch.setattr(grh, "CLAUDE_GITHUB_REVIEW_ENABLED", True)
         monkeypatch.setattr(rgm.shutil, "which", lambda tool: "/usr/bin/gh" if tool == "gh" else None)
-        monkeypatch.setenv("VNX_CLAUDE_GITHUB_REVIEW_TRIGGER", "0")
 
         manager = rgm.ReviewGateManager()
         receipt = manager.request_claude_github_with_contract(contract=sample_contract)
@@ -302,10 +301,9 @@ class TestRequestClaudeGitHubWithContract:
 
     def test_requested_when_trigger_set_and_gh_succeeds(self, review_env, monkeypatch, sample_contract):
         monkeypatch.setattr(rgm, "emit_governance_receipt", lambda *a, **kw: None)
-        monkeypatch.setenv("VNX_CLAUDE_GITHUB_REVIEW_ENABLED", "1")
+        monkeypatch.setattr(grh, "CLAUDE_GITHUB_REVIEW_ENABLED", True)
         monkeypatch.setattr(rgm.shutil, "which", lambda tool: "/usr/bin/gh" if tool == "gh" else None)
-        monkeypatch.setenv("VNX_CLAUDE_GITHUB_REVIEW_TRIGGER", "1")
-        monkeypatch.setenv("VNX_CLAUDE_GITHUB_REVIEW_COMMENT", "@claude review")
+        monkeypatch.setattr(grh, "CLAUDE_GITHUB_REVIEW_TRIGGER", True)
 
         captured: Dict[str, list] = {"argv": []}
 
@@ -335,9 +333,9 @@ class TestRequestClaudeGitHubWithContract:
 
     def test_blocked_when_trigger_set_but_gh_fails(self, review_env, monkeypatch, sample_contract):
         monkeypatch.setattr(rgm, "emit_governance_receipt", lambda *a, **kw: None)
-        monkeypatch.setenv("VNX_CLAUDE_GITHUB_REVIEW_ENABLED", "1")
+        monkeypatch.setattr(grh, "CLAUDE_GITHUB_REVIEW_ENABLED", True)
         monkeypatch.setattr(rgm.shutil, "which", lambda tool: "/usr/bin/gh" if tool == "gh" else None)
-        monkeypatch.setenv("VNX_CLAUDE_GITHUB_REVIEW_TRIGGER", "1")
+        monkeypatch.setattr(grh, "CLAUDE_GITHUB_REVIEW_TRIGGER", True)
         # subprocess.run is mocked below; pin the project id so state-root
         # resolution never runs ``git remote`` through the mock (CI has none set).
         monkeypatch.setenv("VNX_PROJECT_ID", "vnx-test")
@@ -362,9 +360,9 @@ class TestRequestClaudeGitHubWithContract:
         """Triggering gh pr comment without a real PR number must block, not
         silently target the governance pr_id (e.g. "PR-4")."""
         monkeypatch.setattr(rgm, "emit_governance_receipt", lambda *a, **kw: None)
-        monkeypatch.setenv("VNX_CLAUDE_GITHUB_REVIEW_ENABLED", "1")
+        monkeypatch.setattr(grh, "CLAUDE_GITHUB_REVIEW_ENABLED", True)
         monkeypatch.setattr(rgm.shutil, "which", lambda tool: "/usr/bin/gh" if tool == "gh" else None)
-        monkeypatch.setenv("VNX_CLAUDE_GITHUB_REVIEW_TRIGGER", "1")
+        monkeypatch.setattr(grh, "CLAUDE_GITHUB_REVIEW_TRIGGER", True)
 
         # No ``gh pr comment`` call must be issued when pr_number is missing.
         # Other subprocess.run calls (e.g. path resolution via ``git rev-parse``)
@@ -391,7 +389,6 @@ class TestRequestClaudeGitHubWithContract:
 
     def test_request_persisted_to_disk_with_contract_hash(self, review_env, monkeypatch, sample_contract):
         monkeypatch.setattr(rgm, "emit_governance_receipt", lambda *a, **kw: None)
-        monkeypatch.setenv("VNX_CLAUDE_GITHUB_REVIEW_ENABLED", "0")
 
         manager = rgm.ReviewGateManager()
         manager.request_claude_github_with_contract(contract=sample_contract)
@@ -413,7 +410,6 @@ class TestRequestClaudeGitHubWithContract:
         so closure_verifier._find_gate_result can locate the explicit state.
         """
         monkeypatch.setattr(rgm, "emit_governance_receipt", lambda *a, **kw: None)
-        monkeypatch.setenv("VNX_CLAUDE_GITHUB_REVIEW_ENABLED", "0")
 
         manager = rgm.ReviewGateManager()
         manager.request_claude_github_with_contract(contract=sample_contract)
@@ -432,7 +428,6 @@ class TestRequestClaudeGitHubWithContract:
             rgm, "emit_governance_receipt",
             lambda event, **kw: receipts.append({"event": event, **kw})
         )
-        monkeypatch.setenv("VNX_CLAUDE_GITHUB_REVIEW_ENABLED", "0")
 
         manager = rgm.ReviewGateManager()
         manager.request_claude_github_with_contract(contract=sample_contract)
@@ -569,9 +564,6 @@ class TestReviewContractLinkageAcrossStack:
     def test_all_three_gates_produce_auditable_state(self, review_env, monkeypatch, sample_contract):
         """Simulate a full review stack request and verify all three gates are linkable."""
         monkeypatch.setattr(rgm, "emit_governance_receipt", lambda *a, **kw: None)
-        monkeypatch.setenv("VNX_GEMINI_REVIEW_ENABLED", "0")
-        monkeypatch.setenv("VNX_CODEX_HEADLESS_ENABLED", "0")
-        monkeypatch.setenv("VNX_CLAUDE_GITHUB_REVIEW_ENABLED", "0")
 
         manager = rgm.ReviewGateManager()
 
@@ -591,7 +583,6 @@ class TestReviewContractLinkageAcrossStack:
     def test_not_configured_state_is_explicit_not_silent(self, review_env, monkeypatch, sample_contract):
         """Ensure absence is never silent — state is always one of the known values."""
         monkeypatch.setattr(rgm, "emit_governance_receipt", lambda *a, **kw: None)
-        monkeypatch.setenv("VNX_CLAUDE_GITHUB_REVIEW_ENABLED", "0")
 
         manager = rgm.ReviewGateManager()
         receipt = manager.request_claude_github_with_contract(contract=sample_contract)
@@ -605,9 +596,8 @@ class TestReviewContractLinkageAcrossStack:
         self, review_env, monkeypatch, sample_contract
     ):
         monkeypatch.setattr(rgm, "emit_governance_receipt", lambda *a, **kw: None)
-        monkeypatch.setenv("VNX_CLAUDE_GITHUB_REVIEW_ENABLED", "1")
+        monkeypatch.setattr(grh, "CLAUDE_GITHUB_REVIEW_ENABLED", True)
         monkeypatch.setattr(rgm.shutil, "which", lambda tool: "/usr/bin/gh" if tool == "gh" else None)
-        monkeypatch.setenv("VNX_CLAUDE_GITHUB_REVIEW_TRIGGER", "0")
 
         manager = rgm.ReviewGateManager()
         receipt = manager.request_claude_github_with_contract(contract=sample_contract)
@@ -634,9 +624,9 @@ class TestRequestClaudeGitHubInvalidPrNumber:
 
     def test_string_pr_number_is_rejected(self, review_env, monkeypatch, sample_contract):
         monkeypatch.setattr(rgm, "emit_governance_receipt", lambda *a, **kw: None)
-        monkeypatch.setenv("VNX_CLAUDE_GITHUB_REVIEW_ENABLED", "1")
+        monkeypatch.setattr(grh, "CLAUDE_GITHUB_REVIEW_ENABLED", True)
         monkeypatch.setattr(rgm.shutil, "which", lambda tool: "/usr/bin/gh" if tool == "gh" else None)
-        monkeypatch.setenv("VNX_CLAUDE_GITHUB_REVIEW_TRIGGER", "1")
+        monkeypatch.setattr(grh, "CLAUDE_GITHUB_REVIEW_TRIGGER", True)
 
         gh_calls: list = []
 
@@ -667,9 +657,9 @@ class TestRequestClaudeGitHubInvalidPrNumber:
 
     def test_zero_pr_number_is_rejected(self, review_env, monkeypatch, sample_contract):
         monkeypatch.setattr(rgm, "emit_governance_receipt", lambda *a, **kw: None)
-        monkeypatch.setenv("VNX_CLAUDE_GITHUB_REVIEW_ENABLED", "1")
+        monkeypatch.setattr(grh, "CLAUDE_GITHUB_REVIEW_ENABLED", True)
         monkeypatch.setattr(rgm.shutil, "which", lambda tool: "/usr/bin/gh" if tool == "gh" else None)
-        monkeypatch.setenv("VNX_CLAUDE_GITHUB_REVIEW_TRIGGER", "1")
+        monkeypatch.setattr(grh, "CLAUDE_GITHUB_REVIEW_TRIGGER", True)
         monkeypatch.setenv("VNX_PROJECT_ID", "vnx-test")
 
         gh_calls: list = []
@@ -696,9 +686,9 @@ class TestRequestClaudeGitHubInvalidPrNumber:
         # ``bool`` is a subclass of ``int`` in Python; True == 1. Reject it
         # explicitly so callers can't sneak ``True`` through type checks.
         monkeypatch.setattr(rgm, "emit_governance_receipt", lambda *a, **kw: None)
-        monkeypatch.setenv("VNX_CLAUDE_GITHUB_REVIEW_ENABLED", "1")
+        monkeypatch.setattr(grh, "CLAUDE_GITHUB_REVIEW_ENABLED", True)
         monkeypatch.setattr(rgm.shutil, "which", lambda tool: "/usr/bin/gh" if tool == "gh" else None)
-        monkeypatch.setenv("VNX_CLAUDE_GITHUB_REVIEW_TRIGGER", "1")
+        monkeypatch.setattr(grh, "CLAUDE_GITHUB_REVIEW_TRIGGER", True)
 
         gh_calls: list = []
 
@@ -740,7 +730,6 @@ class TestRecordClaudeGitHubReceiptHashFallback:
     ):
         # Step 1: persist a contract-driven request payload that carries the
         # canonical contract_hash (typical production flow).
-        monkeypatch.setenv("VNX_CLAUDE_GITHUB_REVIEW_ENABLED", "0")
         monkeypatch.setattr(rgm, "emit_governance_receipt", lambda *a, **kw: None)
         manager = rgm.ReviewGateManager()
         manager.request_claude_github_with_contract(contract=sample_contract)

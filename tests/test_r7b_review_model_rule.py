@@ -29,7 +29,7 @@ from providers import model_normalizer, provider_registry
 
 _MODEL_ENVS = (
     "VNX_DEEPSEEK_GATE_MODEL", "VNX_CLAUDE_GATE_MODEL", "VNX_KIMI_GATE_MODEL", "VNX_GLM_GATE_MODEL",
-    "VNX_CODEX_HEADLESS_MODEL", "VNX_CODEX_MODEL",
+    "VNX_CODEX_MODEL",
 )
 
 

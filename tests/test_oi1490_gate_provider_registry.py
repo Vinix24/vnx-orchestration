@@ -519,7 +519,6 @@ def test_request_time_path_binary_gate_keeps_its_behaviour(monkeypatch):
     import gate_result_parser
 
     monkeypatch.setattr(gate_result_parser.shutil, "which", lambda _b: None)
-    monkeypatch.setenv("VNX_CODEX_HEADLESS_ENABLED", "1")
 
     reason, detail = _classify("codex_gate")
 

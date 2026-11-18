@@ -403,7 +403,7 @@ class TestSkipRationaleCompleteness:
     def test_skip_record_has_provider_check_detail(self, cert_env, monkeypatch):
         """Skip-rationale must include binary_found, env_flag, env_value."""
         monkeypatch.setattr("shutil.which", lambda b: None)
-        monkeypatch.setenv("VNX_CODEX_HEADLESS_ENABLED", "0")
+        monkeypatch.setenv("VNX_CODEX_HEADLESS_ENABLED", "0")  # still read by gate_result_parser (follow-up PR)
 
         runner = GateRunner(
             state_dir=cert_env["state_dir"],

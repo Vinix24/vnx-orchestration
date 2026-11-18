@@ -40,8 +40,6 @@ def review_env(tmp_path, monkeypatch):
 def test_request_reviews_queues_codex_and_skips_unconfigured_optional(review_env, monkeypatch):
     monkeypatch.setattr(rgm, "emit_governance_receipt", lambda *args, **kwargs: None)
     monkeypatch.setattr(rgm.shutil, "which", lambda tool: "/usr/bin/fake" if tool == "codex" else None)
-    monkeypatch.setenv("VNX_CODEX_HEADLESS_ENABLED", "1")
-    monkeypatch.setenv("VNX_CLAUDE_GITHUB_REVIEW_ENABLED", "0")
 
     manager = rgm.ReviewGateManager()
     result = manager.request_reviews(
@@ -63,7 +61,6 @@ def test_request_reviews_queues_codex_and_skips_unconfigured_optional(review_env
 def test_codex_final_gate_blocks_when_required_but_not_available(review_env, monkeypatch):
     monkeypatch.setattr(rgm, "emit_governance_receipt", lambda *args, **kwargs: None)
     monkeypatch.setattr(rgm.shutil, "which", lambda tool: None)
-    monkeypatch.setenv("VNX_CODEX_HEADLESS_ENABLED", "0")
 
     manager = rgm.ReviewGateManager()
     result = manager.request_reviews(
@@ -138,7 +135,6 @@ def test_record_result_canonicalizes_relative_report_path(review_env, monkeypatc
 def test_record_result_uses_request_report_path_when_report_path_omitted(review_env, monkeypatch):
     monkeypatch.setattr(rgm, "emit_governance_receipt", lambda *args, **kwargs: None)
     monkeypatch.setattr(rgm.shutil, "which", lambda tool: "/usr/bin/fake" if tool == "codex" else None)
-    monkeypatch.setenv("VNX_CODEX_HEADLESS_ENABLED", "1")
 
     manager = rgm.ReviewGateManager()
     requested = manager.request_reviews(
@@ -199,7 +195,6 @@ def test_record_result_rejects_pass_without_report_path_or_request(review_env, m
 def test_changed_files_auto_computed_from_branch(review_env, monkeypatch):
     """When --changed-files is empty and --branch is set, git diff is invoked."""
     monkeypatch.setattr(rgm, "emit_governance_receipt", lambda *args, **kwargs: None)
-    monkeypatch.setenv("VNX_GEMINI_REVIEW_ENABLED", "1")
 
     captured_changed_files: list = []
 
@@ -237,7 +232,6 @@ def test_changed_files_auto_computed_from_branch(review_env, monkeypatch):
 def test_changed_files_override_preserves_explicit(review_env, monkeypatch):
     """When --changed-files is provided, no auto-compute git call is made."""
     monkeypatch.setattr(rgm, "emit_governance_receipt", lambda *args, **kwargs: None)
-    monkeypatch.setenv("VNX_GEMINI_REVIEW_ENABLED", "1")
 
     captured_changed_files: list = []
 

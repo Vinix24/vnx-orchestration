@@ -23,7 +23,7 @@ Gate requests transition to `queued` but no automatic runner executes them. The 
 
 **Defect 2: Unavailable Provider Without Skip Record**
 
-When Codex is unavailable (`VNX_CODEX_HEADLESS_ENABLED=0` or `codex` not in PATH), the gate request records `status: blocked` with `reason: codex_headless_not_available`. But this is a request-time classification, not an execution outcome. There is no structured skip-rationale audit record that T0 can use to distinguish "provider unavailable at request time" from "provider available but execution failed."
+When Codex is unavailable (`codex` not in PATH), the gate request records `status: blocked` with `reason: codex_headless_not_available`. But this is a request-time classification, not an execution outcome. There is no structured skip-rationale audit record that T0 can use to distinguish "provider unavailable at request time" from "provider available but execution failed."
 
 **Defect 3: Stall Without Timeout**
 
@@ -254,7 +254,7 @@ A skip-rationale record is required when a gate transitions to `not_executable`.
   "gate": "codex_gate",
   "pr_id": "PR-0",
   "reason": "provider_not_installed",
-  "reason_detail": "codex binary not found in PATH. VNX_CODEX_HEADLESS_ENABLED=0.",
+  "reason_detail": "codex binary not found in PATH.",
   "provider_check": {
     "binary_name": "codex",
     "binary_found": false,

@@ -171,7 +171,7 @@ _PARENT_REAP_TERMINAL_ID = "plan-gate-parent"
 # default seat and, on BLOCK, the escalation seat (compose_panel); an operator names any
 # other seats with --panel-seats.
 # NOTE: a panelist that flakes (a down proxy, an uninstalled CLI, or an unparseable verdict) is
-# RETRIED once (VNX_PANEL_RETRY, see run_panel) and, if it still yields no readable verdict,
+# RETRIED once (PANEL_RETRY_COUNT, see run_panel) and, if it still yields no readable verdict,
 # ABSTAINS as a non-scoring lane instead of vetoing — so a single down lane no longer forces a
 # REVISE (apply_panel_rule's liveness quorum). Keep every provider here runnable anyway; the
 # retry only rescues transient flakes. glm-harness requires the local litellm proxy on :4141.
@@ -272,7 +272,6 @@ SEAT_STATUSES: frozenset = frozenset({
 # below DEFAULT_SEAT_TIMEOUT_SECONDS: the re-extraction re-reads a report that
 # already exists and emits one small JSON block — it does no review work, so a
 # lane that cannot answer that in two minutes is not going to answer at all.
-# Same env-knob style as VNX_PANEL_RETRY / VNX_PLAN_GATE_SEAT_TIMEOUT.
 DEFAULT_REEXTRACTION_TIMEOUT_SECONDS = 120
 
 # At most ONE re-extraction per seat per round. The budget is spent on the first
@@ -874,24 +873,14 @@ _VERDICT_CONTRACT = (
 # That yields ~449k chars of headroom; DEFAULT_MAX_DOC_CHARS is set to a round 400_000 —
 # 6.7x the previous cap, comfortably inside the computed margin even under the pessimistic
 # 2-bytes/char assumption (400_000 * 2 = 800_000 doc bytes + 150_000 overhead = 950_000,
-# still ~98KB under ARG_MAX). Overridable via VNX_PLAN_GATE_MAX_DOC_CHARS (same pattern as
-# VNX_PANEL_RETRY) for an exceptional oversized plan.
+# still ~98KB under ARG_MAX).
 DEFAULT_MAX_DOC_CHARS = 400_000
-MAX_DOC_CHARS = DEFAULT_MAX_DOC_CHARS  # the no-override default; effective cap is _max_doc_chars()
+MAX_DOC_CHARS = DEFAULT_MAX_DOC_CHARS  # the cap; callers read it through _max_doc_chars()
 
 
 def _max_doc_chars() -> int:
-    """Effective plan-doc truncation cap: ``VNX_PLAN_GATE_MAX_DOC_CHARS`` override, default
-    ``DEFAULT_MAX_DOC_CHARS``. A malformed or non-positive value falls back to the default —
-    same override pattern as ``_panel_retry_count``."""
-    raw = os.environ.get("VNX_PLAN_GATE_MAX_DOC_CHARS", "").strip()
-    if not raw:
-        return DEFAULT_MAX_DOC_CHARS
-    try:
-        value = int(raw)
-    except ValueError:
-        return DEFAULT_MAX_DOC_CHARS
-    return value if value > 0 else DEFAULT_MAX_DOC_CHARS
+    """Effective plan-doc truncation cap: always ``DEFAULT_MAX_DOC_CHARS``."""
+    return DEFAULT_MAX_DOC_CHARS
 
 
 def _sanitize_doc(doc_text: str) -> str:
@@ -1070,23 +1059,14 @@ def build_verdict_reextraction_instruction(report_text: str) -> str:
 
 
 def _reextraction_timeout(explicit: "int | None" = None) -> int:
-    """The second extraction's deadline (``VNX_PLAN_GATE_REEXTRACT_TIMEOUT``, default 120).
+    """The second extraction's deadline (default 120 seconds).
 
-    Same resolution contract as ``_seat_timeout``: an explicit caller value wins outright,
-    then the env var when it is a valid positive int, then the default. A malformed or
-    non-positive value falls back to the default rather than widening the deadline to
-    infinity or clamping a real value away.
+    Same resolution contract as ``_seat_timeout``: an explicit caller value wins outright
+    (floored at 1), else the default.
     """
     if explicit is not None:
         return max(1, int(explicit))
-    raw = os.environ.get("VNX_PLAN_GATE_REEXTRACT_TIMEOUT", "").strip()
-    if not raw:
-        return DEFAULT_REEXTRACTION_TIMEOUT_SECONDS
-    try:
-        val = int(raw)
-    except ValueError:
-        return DEFAULT_REEXTRACTION_TIMEOUT_SECONDS
-    return val if val >= 1 else DEFAULT_REEXTRACTION_TIMEOUT_SECONDS
+    return DEFAULT_REEXTRACTION_TIMEOUT_SECONDS
 
 
 def _strip_trailing_commas(text: str) -> str:
@@ -1812,52 +1792,39 @@ def _run_provider_lane_child(
         )
 
 
+PANEL_RETRY_COUNT = 1
+
+
 def _panel_retry_count() -> int:
-    """Extra attempts for a flaked panelist (``VNX_PANEL_RETRY``, default 1, clamped >= 0).
+    """Extra attempts for a flaked panelist (a fixed 1).
 
     A panelist whose verdict is unparseable (parse_error) or that failed to dispatch is a
     transient-flake suspect (the codex verdict-JSON flake, the glm parse flake). It is retried
     up to this many times before it falls through to the abstain/non-scoring path — recovering
-    the flake without letting one down lane force a REVISE. A malformed value falls back to 1.
+    the flake without letting one down lane force a REVISE.
     """
-    raw = os.environ.get("VNX_PANEL_RETRY", "").strip()
-    if not raw:
-        return 1
-    try:
-        return max(0, int(raw))
-    except ValueError:
-        return 1
+    return PANEL_RETRY_COUNT
 
 
 # The per-seat deadline default. Before OI-1068 this was a bare literal (900) baked into
 # run_panel's signature with no override knob, so a seat that could not meet a 900s deadline
 # booked a fabricated abstention with no way to widen it — on mission-control the opus lane
-# hit three consecutive timeouts in one afternoon. VNX_PLAN_GATE_SEAT_TIMEOUT is the knob, in
-# the same env-var style as VNX_PANEL_RETRY; run_panel resolves to this when the caller does
-# not pass an explicit timeout (CLI flag / direct kwarg).
+# hit three consecutive timeouts in one afternoon. The deadline is now the CLI flag
+# (``--seat-timeout``) or this constant; run_panel resolves to this when the caller does
+# not pass an explicit timeout.
 DEFAULT_SEAT_TIMEOUT_SECONDS = 900
 
 
 def _seat_timeout(explicit: "int | None" = None) -> int:
-    """Resolve a panelist's per-seat deadline (``VNX_PLAN_GATE_SEAT_TIMEOUT``, default 900).
+    """Resolve a panelist's per-seat deadline (default 900 seconds).
 
-    Same env-var style as ``_panel_retry_count`` (``VNX_PANEL_RETRY``): a caller that already
-    resolved a value — the CLI flag ``--seat-timeout`` — passes it as ``explicit`` and it wins
-    outright (None means "no explicit value, read the env"). The env var, when set and a valid
-    positive int, overrides the default; a malformed or non-positive value falls back to the
-    default rather than silently widening the deadline to infinity or clamping a real value
-    away. Returned value is always a positive int (>= 1).
+    A caller that already resolved a value — the CLI flag ``--seat-timeout`` — passes it as
+    ``explicit`` and it wins outright (None means "no explicit value, use the default").
+    Returned value is always a positive int (>= 1).
     """
     if explicit is not None:
         return max(1, int(explicit))
-    raw = os.environ.get("VNX_PLAN_GATE_SEAT_TIMEOUT", "").strip()
-    if not raw:
-        return DEFAULT_SEAT_TIMEOUT_SECONDS
-    try:
-        val = int(raw)
-    except ValueError:
-        return DEFAULT_SEAT_TIMEOUT_SECONDS
-    return val if val >= 1 else DEFAULT_SEAT_TIMEOUT_SECONDS
+    return DEFAULT_SEAT_TIMEOUT_SECONDS
 
 
 # The two parse outcomes in which a report carries no verdict fence at all (R6). A
@@ -2443,15 +2410,15 @@ def run_panel(
 
     ``timeout_seconds`` (OI-1068): the per-seat deadline a panelist has before its
     lane times out and the seat books a fabricated abstention. ``None`` (the
-    default) resolves to ``VNX_PLAN_GATE_SEAT_TIMEOUT`` (default 900) via
-    ``_seat_timeout`` — the same env-var-knob style as ``VNX_PANEL_RETRY``. An
+    default) resolves to ``DEFAULT_SEAT_TIMEOUT_SECONDS`` (900) via
+    ``_seat_timeout``. An
     explicit kwarg (the ``--seat-timeout`` CLI flag) wins outright. Only the
     default dispatcher consumes it; an injected ``dispatcher`` ignores it.
 
     ``reextract_dispatcher`` (OI-1434): the lane the SECOND extraction runs on for a
     seat that reviewed in prose. When ``run_panel`` builds its own dispatcher it
     builds a second one at the much shorter re-extraction deadline
-    (``VNX_PLAN_GATE_REEXTRACT_TIMEOUT``, default 120) — the extraction re-reads an
+    (``DEFAULT_REEXTRACTION_TIMEOUT_SECONDS``, 120) — the extraction re-reads an
     existing report and emits one JSON block, so it has no business holding a
     900-second seat deadline. That second lane is built LAZILY, on the first seat
     that needs it, so a round in which every seat emits its fence builds exactly

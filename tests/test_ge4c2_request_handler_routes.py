@@ -25,6 +25,7 @@ sys.path.insert(0, str(VNX_ROOT / "scripts"))
 sys.path.insert(0, str(VNX_ROOT / "scripts" / "lib"))
 
 import gate_recorder
+import gate_request_handler as grh
 import review_stack_support
 from atomic_io import slot_lock
 from gate_request_handler import REVIEW_REQUEST_RECEIPT_FIELDS
@@ -112,8 +113,7 @@ def _pr_slot(env, gate):
 def _stack(env):
     manager = _manager()
     with mock.patch("review_gate_manager.shutil.which", side_effect=lambda t: "/usr/bin/fake" if t == "codex" else None), \
-            mock.patch.dict(os.environ, {"VNX_CODEX_HEADLESS_ENABLED": "1", "VNX_GEMINI_REVIEW_ENABLED": "0",
-                                         "VNX_CLAUDE_GITHUB_REVIEW_ENABLED": "0", "VNX_CI_GATE_REQUIRED": "0"}):
+            mock.patch.dict(os.environ, {"VNX_CI_GATE_REQUIRED": "0"}):
         manager.request_reviews(
             pr_number=PR, branch=BRANCH, review_stack=["codex_gate"], risk_class="medium",
             changed_files=["scripts/lib/gate_request_handler.py"], mode="per_pr",
@@ -123,14 +123,13 @@ def _stack(env):
 def _gemini(env):
     manager = _manager()
     with mock.patch("gate_request_handler.render_gemini_prompt", lambda _c: "rendered prompt"), \
-            mock.patch("review_gate_manager.shutil.which", return_value="/usr/bin/fake"), \
-            mock.patch.dict(os.environ, {"VNX_GEMINI_REVIEW_ENABLED": "1"}):
+            mock.patch("review_gate_manager.shutil.which", return_value="/usr/bin/fake"):
         manager.request_gemini_with_contract(contract=_contract(), mode="per_pr", dispatch_id="dlv-golden-gemini")
 
 
 def _claude_github(env):
     manager = _manager()
-    with mock.patch.dict(os.environ, {"VNX_CLAUDE_GITHUB_REVIEW_ENABLED": "0"}):
+    with mock.patch.object(grh, "CLAUDE_GITHUB_REVIEW_ENABLED", False):
         manager.request_claude_github_with_contract(contract=_contract(), mode="per_pr",
                                                     dispatch_id="dlv-golden-claude-gh")
 
@@ -179,7 +178,7 @@ def test_the_four_call_paths_emit_the_same_event_from_one_emitter():
 
 def test_r10_the_mirror_books_one_record_no_receipt_and_a_refusal_changes_no_request(env):
     manager = _manager()
-    with mock.patch.dict(os.environ, {"VNX_CLAUDE_GITHUB_REVIEW_ENABLED": "0"}):
+    with mock.patch.object(grh, "CLAUDE_GITHUB_REVIEW_ENABLED", False):
         manager.request_claude_github_with_contract(contract=_contract(), dispatch_id="dlv-r10")
     request_slot, result_slot = _request_slot(env), env["results_dir"] / _request_slot(env).name
     request, mirror = _json(request_slot), _json(result_slot)
@@ -190,7 +189,7 @@ def test_r10_the_mirror_books_one_record_no_receipt_and_a_refusal_changes_no_req
 
     result_slot.write_text('{"state": "not_conf', encoding="utf-8")
     before_request = request_slot.read_bytes()
-    with mock.patch.dict(os.environ, {"VNX_CLAUDE_GITHUB_REVIEW_ENABLED": "0"}):
+    with mock.patch.object(grh, "CLAUDE_GITHUB_REVIEW_ENABLED", False):
         manager.request_claude_github_with_contract(contract=_contract(), dispatch_id="dlv-r10")
     assert result_slot.read_text(encoding="utf-8") == '{"state": "not_conf'
     assert request_slot.read_bytes() == before_request, "a refused mirror changes no request"
@@ -268,7 +267,7 @@ def test_r11_an_annotation_with_no_record_on_disk_invents_none(env):
 
 def _request_codex(env):
     manager = _manager()
-    with mock.patch.dict(os.environ, {"VNX_CODEX_HEADLESS_ENABLED": "0"}):
+    with mock.patch("review_gate_manager.shutil.which", return_value=None):
         return manager._request_codex(PR, BRANCH, "medium", ["a.py"], "per_pr", "dlv-q6")
 
 
@@ -276,8 +275,7 @@ def _request_seat_reader(env):
     from gate_request_handler import _PrHead
 
     manager = _manager()
-    with mock.patch("review_gate_manager.shutil.which", side_effect=lambda t: "/usr/bin/fake" if t == "codex" else None), \
-            mock.patch.dict(os.environ, {"VNX_CODEX_HEADLESS_ENABLED": "1"}):
+    with mock.patch("review_gate_manager.shutil.which", side_effect=lambda t: "/usr/bin/fake" if t == "codex" else None):
         return manager._request_seat_reader(
             "codex_gate", None, [], pr_number=PR, branch=BRANCH, risk_class="medium", changed_files=["a.py"],
             mode="per_pr", dispatch_id="dlv-q6", head=_PrHead(PR, HEAD), seat_fields={"seat": "codex_gate"},
@@ -300,14 +298,14 @@ def _book_switched_off_seat(env):
 def _gemini_contract_request(env):
     manager = _manager()
     with mock.patch("gate_request_handler.render_gemini_prompt", lambda _c: "rendered prompt"), \
-            mock.patch.dict(os.environ, {"VNX_GEMINI_REVIEW_ENABLED": "0"}):
+            mock.patch("review_gate_manager.shutil.which", return_value=None):
         manager.request_gemini_with_contract(contract=_contract(), dispatch_id="dlv-q7")
     return _request_slot(env, "gemini_review")
 
 
 def _claude_github_contract_request(env):
     manager = _manager()
-    with mock.patch.dict(os.environ, {"VNX_CLAUDE_GITHUB_REVIEW_ENABLED": "0"}):
+    with mock.patch.object(grh, "CLAUDE_GITHUB_REVIEW_ENABLED", False):
         manager.request_claude_github_with_contract(contract=_contract(), dispatch_id="dlv-q7")
     return _request_slot(env)
 
@@ -333,7 +331,7 @@ WRITERS = {
 
 def _request_claude_github_request(env):
     manager = _manager()
-    with mock.patch.dict(os.environ, {"VNX_CLAUDE_GITHUB_REVIEW_ENABLED": "0"}):
+    with mock.patch.object(grh, "CLAUDE_GITHUB_REVIEW_ENABLED", False):
         return manager._request_claude_github(PR, BRANCH, "medium", ["a.py"], "per_pr", "dlv-q6")
 
 
@@ -375,16 +373,14 @@ def test_no_request_write_uses_a_bare_write_text(env, monkeypatch, row):
 
 def _request_codex_available(env):
     manager = _manager()
-    with mock.patch("review_gate_manager.shutil.which", side_effect=lambda t: "/usr/bin/fake" if t == "codex" else None), \
-            mock.patch.dict(os.environ, {"VNX_CODEX_HEADLESS_ENABLED": "1"}):
+    with mock.patch("review_gate_manager.shutil.which", side_effect=lambda t: "/usr/bin/fake" if t == "codex" else None):
         return manager._request_codex(PR, BRANCH, "medium", ["a.py"], "per_pr", "dlv-q7")
 
 
 def _gemini_contract_request_available(env):
     manager = _manager()
     with mock.patch("gate_request_handler.render_gemini_prompt", lambda _c: "rendered prompt"), \
-            mock.patch("review_gate_manager.shutil.which", side_effect=lambda t: "/usr/bin/fake" if t == "gemini" else None), \
-            mock.patch.dict(os.environ, {"VNX_GEMINI_REVIEW_ENABLED": "1"}):
+            mock.patch("review_gate_manager.shutil.which", side_effect=lambda t: "/usr/bin/fake" if t == "gemini" else None):
         manager.request_gemini_with_contract(contract=_contract(), dispatch_id="dlv-q7")
     return _request_slot(env, "gemini_review")
 
@@ -423,7 +419,7 @@ def test_two_threads_on_one_request_path_never_interleave(env):
             seen.append("first holds")
             path.write_text(json.dumps({"gate": "claude_github_optional", "status": "first"}), encoding="utf-8")
 
-    with mock.patch.dict(os.environ, {"VNX_CLAUDE_GITHUB_REVIEW_ENABLED": "0"}):
+    with mock.patch.object(grh, "CLAUDE_GITHUB_REVIEW_ENABLED", False):
         thread = threading.Thread(target=slow_write)
         thread.start()
         thread.join(5)

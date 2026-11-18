@@ -687,17 +687,26 @@ def _held_reviewers(requested: Iterable[Dict[str, Any]]) -> Dict[str, str]:
     }
 
 
+# The claude-github optional review is off and stays off: no flag turns it on, so
+# ``_claude_github_configured`` is False and the trigger comment is never posted.
+# The three names are module constants so the configured and trigger paths stay
+# testable by patching them.
+CLAUDE_GITHUB_REVIEW_ENABLED = False
+CLAUDE_GITHUB_REVIEW_TRIGGER = False
+CLAUDE_GITHUB_REVIEW_COMMENT = "@claude review"
+
+
 class GateRequestHandlerMixin:
     """Mixin providing gate request creation methods for ReviewGateManager."""
 
     def _gemini_available(self) -> bool:
-        return os.environ.get("VNX_GEMINI_REVIEW_ENABLED", "1") != "0" and shutil.which("gemini") is not None
+        return shutil.which("gemini") is not None
 
     def _codex_headless_available(self) -> bool:
-        return os.environ.get("VNX_CODEX_HEADLESS_ENABLED", "1") != "0" and shutil.which("codex") is not None
+        return shutil.which("codex") is not None
 
     def _claude_github_configured(self) -> bool:
-        return os.environ.get("VNX_CLAUDE_GITHUB_REVIEW_ENABLED", "0") == "1" and shutil.which("gh") is not None
+        return CLAUDE_GITHUB_REVIEW_ENABLED and shutil.which("gh") is not None
 
     def _ci_gate_available(self) -> bool:
         import config_runtime
@@ -2498,7 +2507,7 @@ class GateRequestHandlerMixin:
         """
         if not configured:
             return (STATE_NOT_CONFIGURED, "claude_github_not_configured", None)
-        if os.environ.get("VNX_CLAUDE_GITHUB_REVIEW_TRIGGER", "0") != "1":
+        if not CLAUDE_GITHUB_REVIEW_TRIGGER:
             return (STATE_CONFIGURED_DRY_RUN, None, None)
         invalid = self._validate_pr_number_for_github(pr_number, contract_pr_id)
         if invalid is not None:
@@ -2641,7 +2650,7 @@ class GateRequestHandlerMixin:
 
         configured = self._claude_github_configured()
         requested_at = _utc_now()
-        comment_body = os.environ.get("VNX_CLAUDE_GITHUB_REVIEW_COMMENT", "@claude review")
+        comment_body = CLAUDE_GITHUB_REVIEW_COMMENT
 
         state, reason, stderr_detail = self._determine_claude_github_state(
             configured, contract.pr_id, comment_body, pr_number=pr_number,
@@ -2664,7 +2673,7 @@ class GateRequestHandlerMixin:
         # Model from env only; empty string means "use the registry's
         # openai.default_model", resolved in gate_runner._build_gate_cmd (OI-2062).
         # ~/.codex/config.toml never decides the gate's model.
-        model = os.environ.get("VNX_CODEX_HEADLESS_MODEL") or os.environ.get("VNX_CODEX_MODEL") or ""
+        model = os.environ.get("VNX_CODEX_MODEL") or ""
         requested_at = _utc_now()
         payload = {
             "gate": "codex_gate",
@@ -2822,8 +2831,8 @@ class GateRequestHandlerMixin:
         pr_number: int,
     ) -> None:
         payload["status"] = "queued"
-        if os.environ.get("VNX_CLAUDE_GITHUB_REVIEW_TRIGGER", "0") == "1":
-            comment = os.environ.get("VNX_CLAUDE_GITHUB_REVIEW_COMMENT", "@claude review")
+        if CLAUDE_GITHUB_REVIEW_TRIGGER:
+            comment = CLAUDE_GITHUB_REVIEW_COMMENT
             proc = subprocess.run(
                 ["gh", "pr", "comment", str(pr_number), "--body", comment],
                 capture_output=True,

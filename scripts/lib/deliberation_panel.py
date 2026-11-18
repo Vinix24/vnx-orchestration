@@ -341,7 +341,7 @@ class DeliberationResult:
 # model-emitted sentinel were both considered and rejected — fragile, or dependent on
 # model cooperation. The backstop here exists only to cap a single seat's raw report
 # before the per-seat distill is applied; hitting it must never be silent (see _clip).
-_REPORT_BACKSTOP = int(os.environ.get("VNX_PANEL_REPORT_BACKSTOP", "40000"))
+_REPORT_BACKSTOP = 40000
 
 
 def _clip(text: str, tag: str, limit: int = _REPORT_BACKSTOP) -> str:
@@ -349,7 +349,7 @@ def _clip(text: str, tag: str, limit: int = _REPORT_BACKSTOP) -> str:
     logged loudly — silent degradation is the exact bug this replaces."""
     if len(text) > limit:
         logger.warning(
-            "panel digest: report for %s clipped at %d chars (was %d) — raise VNX_PANEL_REPORT_BACKSTOP",
+            "panel digest: report for %s clipped at %d chars (was %d)",
             tag, limit, len(text),
         )
         return text[:limit]
@@ -378,7 +378,7 @@ def _clip(text: str, tag: str, limit: int = _REPORT_BACKSTOP) -> str:
 # FIRST, so a fixed-length cut anywhere downstream can only ever trim the context tail, never
 # the task. The budget is therefore the second line of defence, not the only one — raising it
 # is bounded risk. Hitting it is always logged loudly (see _distill), never silent.
-_SEAT_DISTILLATE_BUDGET = int(os.environ.get("VNX_PANEL_SEAT_DISTILLATE_BUDGET", "12000"))
+_SEAT_DISTILLATE_BUDGET = 12000
 
 
 def _digest(fan_out: List[Dict[str, str]], limit: int = _REPORT_BACKSTOP) -> str:
@@ -399,9 +399,7 @@ def _digest(fan_out: List[Dict[str, str]], limit: int = _REPORT_BACKSTOP) -> str
         text = (fo.get("text") or "").strip()
         text = _clip(text, fo.get("provider", "?"), limit)
         seat = f"{fo.get('provider', '?')} / {fo.get('lens', '?')}"
-        text = _distill(
-            text, seat, _SEAT_DISTILLATE_BUDGET, env_hint="VNX_PANEL_SEAT_DISTILLATE_BUDGET"
-        )
+        text = _distill(text, seat, _SEAT_DISTILLATE_BUDGET, budget_name="_SEAT_DISTILLATE_BUDGET")
         parts.append(f"[{fo['provider']} / {fo['lens']}]\n{text}")
     return "\n\n".join(parts)
 
@@ -423,14 +421,14 @@ def _digest(fan_out: List[Dict[str, str]], limit: int = _REPORT_BACKSTOP) -> str
 # contrarian/verify document leads with its framing and ends with its conclusion, so a
 # head-first cut would keep the framing and drop the verdict — the same silent degradation
 # the per-seat cut fixes, one stage later.
-_DISTILLATE_BUDGET = int(os.environ.get("VNX_PANEL_DISTILLATE_BUDGET", "12000"))
+_DISTILLATE_BUDGET = 12000
 
 
 def _distill(
     text: str,
     tag: str,
     limit: int = _DISTILLATE_BUDGET,
-    env_hint: str = "VNX_PANEL_DISTILLATE_BUDGET",
+    budget_name: str = "_DISTILLATE_BUDGET",
 ) -> str:
     """Bound prior-stage material before a downstream stage's prompt carries it forward.
 
@@ -438,8 +436,8 @@ def _distill(
     synthesis) so the prompt stays bounded regardless of how many hops a piece of text has
     already passed through — the cascading-verbatim growth is exactly the OI-809 bug. The
     fan-out digest is instead bounded per seat at assembly time by _digest() under
-    _SEAT_DISTILLATE_BUDGET (OI-820). ``env_hint`` names the budget's env var in the log so
-    an operator raises the right one.
+    _SEAT_DISTILLATE_BUDGET (OI-820). ``budget_name`` names the budget constant in the log so
+    a reader knows which cut applied.
 
     A cut keeps the HEAD and the TAIL, never the head alone. A panel report opens with the
     question and framing, then echoes the shared context, and only THEN carries the analysis
@@ -456,8 +454,8 @@ def _distill(
     omitted = len(t) - limit
     logger.warning(
         "panel distillate: %s trimmed to %d chars for the downstream stage (was %d; "
-        "%d middle chars omitted) — raise %s if this loses signal",
-        tag, limit, len(t), omitted, env_hint,
+        "%d middle chars omitted) — budget %s",
+        tag, limit, len(t), omitted, budget_name,
     )
     head_budget = limit // 2
     tail_budget = limit - head_budget

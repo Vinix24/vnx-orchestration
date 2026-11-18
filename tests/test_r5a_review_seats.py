@@ -467,7 +467,6 @@ def runs(env, monkeypatch):
     ``during[gate]`` runs while that gate reviews: time passing for the rest of the store."""
     import review_gate_manager
 
-    monkeypatch.setenv("VNX_CODEX_HEADLESS_ENABLED", "1")
     outcomes: Dict[str, Dict[str, Any]] = {}
     during: Dict[str, Callable[[], None]] = {}
     ran: List[str] = []

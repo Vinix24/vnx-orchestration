@@ -327,9 +327,6 @@ def manager_env(tmp_path, monkeypatch):
     monkeypatch.setenv("VNX_PIDS_DIR", str(data_dir / "pids"))
     monkeypatch.setenv("VNX_LOCKS_DIR", str(data_dir / "locks"))
     monkeypatch.setenv("VNX_DB_DIR", str(data_dir / "database"))
-    monkeypatch.setenv("VNX_GEMINI_REVIEW_ENABLED", "0")
-    monkeypatch.setenv("VNX_CODEX_HEADLESS_ENABLED", "0")
-    monkeypatch.setenv("VNX_CLAUDE_GITHUB_REVIEW_ENABLED", "0")
     return {
         "project_root": project_root,
         "state_dir": state_dir,
@@ -354,6 +351,7 @@ class TestNotExecutableRecordCarriesScope:
         import gate_request_handler
         fake_head_oid = "01f54411d975e39f41cb2b0d005fd8dcd5aad04a"
         monkeypatch.setattr(gate_request_handler, "get_pr_head_sha", lambda pr_number: fake_head_oid)
+        monkeypatch.setattr(gate_request_handler.shutil, "which", lambda tool: None)
 
         import review_gate_manager as rgm
         manager = rgm.ReviewGateManager()

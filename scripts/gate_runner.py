@@ -1844,8 +1844,7 @@ class GateRunner:
             # gate's model (OI-2062: it said gpt-5.5, which codex refuses on a
             # ChatGPT login). Order: env override, payload, openai.default_model.
             model = provider_registry.resolve_codex_model(
-                explicit=os.environ.get("VNX_CODEX_HEADLESS_MODEL")
-                or os.environ.get("VNX_CODEX_MODEL")
+                explicit=os.environ.get("VNX_CODEX_MODEL")
                 or request_payload.get("model"),
             )
             # OI-2288: the effort too, so config.toml decides neither. Stamped on

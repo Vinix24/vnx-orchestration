@@ -529,7 +529,6 @@ class TestRecordResultAdvisoryBlockingIntegration:
     def test_request_gemini_with_contract_persists_prompt(self, manager, monkeypatch):
         import review_gate_manager as rgm
         monkeypatch.setattr(rgm.shutil, "which", lambda tool: "/usr/bin/fake" if tool == "gemini" else None)
-        monkeypatch.setenv("VNX_GEMINI_REVIEW_ENABLED", "1")
 
         contract = _make_minimal_contract()
         payload = manager.request_gemini_with_contract(contract=contract, mode="per_pr")
@@ -551,14 +550,13 @@ class TestRecordResultAdvisoryBlockingIntegration:
     def test_request_gemini_with_contract_blocked_when_gemini_unavailable(self, manager, monkeypatch):
         import review_gate_manager as rgm
         monkeypatch.setattr(rgm.shutil, "which", lambda tool: None)
-        monkeypatch.setenv("VNX_GEMINI_REVIEW_ENABLED", "0")
 
         contract = _make_minimal_contract()
         payload = manager.request_gemini_with_contract(contract=contract)
-        # Unavailable gemini now emits 'not_executable' (was 'blocked'); with the
-        # review flag disabled the reason is 'provider_disabled'.
+        # Unavailable gemini emits 'not_executable' (was 'blocked'); with no gemini
+        # binary on PATH the reason is 'provider_not_installed'.
         assert payload["status"] == "not_executable"
-        assert payload["reason"] == "provider_disabled"
+        assert payload["reason"] == "provider_not_installed"
 
     def test_request_gemini_with_contract_raises_on_missing_field(self, manager):
         bad_contract = _make_minimal_contract(pr_id="")

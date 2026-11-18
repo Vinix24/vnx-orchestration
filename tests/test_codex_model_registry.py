@@ -81,7 +81,7 @@ def tmp_registry(tmp_path, monkeypatch):
     """A registry whose openai.default_model differs from the shipped one."""
     path = _write_registry(tmp_path / "registry.yaml", default_model=TMP_MODEL)
     monkeypatch.setattr(provider_registry, "_REGISTRY_PATH", path)
-    for name in ("VNX_CODEX_HEADLESS_MODEL", "VNX_CODEX_MODEL", "VNX_CODEX_DEFAULT_MODEL"):
+    for name in ("VNX_CODEX_MODEL", "VNX_CODEX_DEFAULT_MODEL"):
         monkeypatch.delenv(name, raising=False)
     return path
 
@@ -154,14 +154,12 @@ def test_gate_cmd_env_and_payload_precedence(runner, tmp_registry, monkeypatch):
     assert _model_arg(runner._build_gate_cmd("codex_gate", "codex", payload)) == ['model="from-payload"']
     monkeypatch.setenv("VNX_CODEX_MODEL", "from-codex-model")
     assert _model_arg(runner._build_gate_cmd("codex_gate", "codex", payload)) == ['model="from-codex-model"']
-    monkeypatch.setenv("VNX_CODEX_HEADLESS_MODEL", "from-headless")
-    assert _model_arg(runner._build_gate_cmd("codex_gate", "codex", payload)) == ['model="from-headless"']
 
 
 def test_gate_cmd_fails_closed_without_registry_default(runner, tmp_path, monkeypatch):
     path = _write_registry(tmp_path / "registry.yaml", default_model=None)
     monkeypatch.setattr(provider_registry, "_REGISTRY_PATH", path)
-    for name in ("VNX_CODEX_HEADLESS_MODEL", "VNX_CODEX_MODEL"):
+    for name in ("VNX_CODEX_MODEL",):
         monkeypatch.delenv(name, raising=False)
     with pytest.raises(provider_registry.CodexModelResolutionError):
         runner._build_gate_cmd("codex_gate", "codex", {})
@@ -716,7 +714,7 @@ def _unresolvable_registry(kind: str, tmp_path, monkeypatch) -> Path:
         path = tmp_path / "registry-dir"
         path.mkdir()
     monkeypatch.setattr(provider_registry, "_REGISTRY_PATH", path)
-    for name in ("VNX_CODEX_HEADLESS_MODEL", "VNX_CODEX_MODEL", "VNX_CODEX_DEFAULT_MODEL"):
+    for name in ("VNX_CODEX_MODEL", "VNX_CODEX_DEFAULT_MODEL"):
         monkeypatch.delenv(name, raising=False)
     return path
 
@@ -1001,7 +999,7 @@ def _malformed_registry(kind: str, tmp_path, monkeypatch) -> Path:
         text += _OTHER_SECTION_NULL_MAX_TOKENS
     path.write_text(text, encoding="utf-8")
     monkeypatch.setattr(provider_registry, "_REGISTRY_PATH", path)
-    for name in ("VNX_CODEX_HEADLESS_MODEL", "VNX_CODEX_MODEL", "VNX_CODEX_DEFAULT_MODEL"):
+    for name in ("VNX_CODEX_MODEL", "VNX_CODEX_DEFAULT_MODEL"):
         monkeypatch.delenv(name, raising=False)
     return path
 

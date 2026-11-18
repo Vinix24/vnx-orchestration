@@ -38,7 +38,7 @@ def gate_model(gate: str) -> Optional[str]:
 
     A gate in :data:`MODEL_DEFAULTS` runs the value of its env var, else its
     default. ``codex_gate`` is picked the way ``gate_runner`` picks it: the
-    ``VNX_CODEX_HEADLESS_MODEL`` / ``VNX_CODEX_MODEL`` override, else the
+    ``VNX_CODEX_MODEL`` override, else the
     registry's ``openai.default_model``; a registry that cannot name one leaves
     the model unknown. Any other gate (``ci_gate``, ``wiring_gate``) calls no
     model. The one reader of the reviewer's model (``review_vendor``, R7b): no
@@ -50,7 +50,7 @@ def gate_model(gate: str) -> Optional[str]:
     if gate == "codex_gate":
         from providers import provider_registry  # after the scripts/lib path guard above
 
-        override = (os.environ.get("VNX_CODEX_HEADLESS_MODEL") or os.environ.get("VNX_CODEX_MODEL") or "").strip()
+        override = (os.environ.get("VNX_CODEX_MODEL") or "").strip()
         try:
             return provider_registry.resolve_codex_model(explicit=override) or None
         except provider_registry.CodexModelResolutionError:

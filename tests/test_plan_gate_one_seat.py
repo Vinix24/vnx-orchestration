@@ -153,7 +153,6 @@ def _write_config(tmp_path: Path, *, max_rounds: int) -> Path:
 def gate(tmp_path, monkeypatch):
     """A seeded track, an isolated seat ledger and a config with ``max_rounds`` set per test."""
     monkeypatch.delenv("VNX_DATA_DIR", raising=False)
-    monkeypatch.delenv("VNX_PANEL_RETRY", raising=False)
     state_dir = _bootstrap(tmp_path)
     tracks.create_track(state_dir, "feat-p2", "p1", "t", "shipped", phase="queued")
     assert planning_cli._seed_plan_blocker(state_dir, "feat-p2", "p1")

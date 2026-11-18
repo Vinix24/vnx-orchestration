@@ -177,9 +177,6 @@ class TestRequestHandlerDispatchId:
         monkeypatch.setenv("VNX_PIDS_DIR", str(data_dir / "pids"))
         monkeypatch.setenv("VNX_LOCKS_DIR", str(data_dir / "locks"))
         monkeypatch.setenv("VNX_DB_DIR", str(data_dir / "database"))
-        monkeypatch.setenv("VNX_GEMINI_REVIEW_ENABLED", "0")
-        monkeypatch.setenv("VNX_CODEX_HEADLESS_ENABLED", "0")
-        monkeypatch.setenv("VNX_CLAUDE_GITHUB_REVIEW_ENABLED", "0")
 
         return {
             "project_root": project_root,
@@ -286,9 +283,6 @@ class TestCLIDispatchIdArg:
         monkeypatch.setenv("VNX_PIDS_DIR", str(data_dir / "pids"))
         monkeypatch.setenv("VNX_LOCKS_DIR", str(data_dir / "locks"))
         monkeypatch.setenv("VNX_DB_DIR", str(data_dir / "database"))
-        monkeypatch.setenv("VNX_GEMINI_REVIEW_ENABLED", "0")
-        monkeypatch.setenv("VNX_CODEX_HEADLESS_ENABLED", "0")
-        monkeypatch.setenv("VNX_CLAUDE_GITHUB_REVIEW_ENABLED", "0")
 
         sys.path.insert(0, str(SCRIPTS_DIR))
         import importlib
@@ -334,9 +328,6 @@ class TestCLIDispatchIdArg:
         monkeypatch.setenv("VNX_PIDS_DIR", str(data_dir / "pids"))
         monkeypatch.setenv("VNX_LOCKS_DIR", str(data_dir / "locks"))
         monkeypatch.setenv("VNX_DB_DIR", str(data_dir / "database"))
-        monkeypatch.setenv("VNX_GEMINI_REVIEW_ENABLED", "0")
-        monkeypatch.setenv("VNX_CODEX_HEADLESS_ENABLED", "0")
-        monkeypatch.setenv("VNX_CLAUDE_GITHUB_REVIEW_ENABLED", "0")
 
         sys.path.insert(0, str(SCRIPTS_DIR))
         import importlib

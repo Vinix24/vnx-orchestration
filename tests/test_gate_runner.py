@@ -778,7 +778,6 @@ class TestRequestNormalization:
         import review_gate_manager as rgm
         monkeypatch.setattr(rgm, "emit_governance_receipt", lambda *a, **kw: None)
         monkeypatch.setattr(rgm.shutil, "which", lambda tool: "/usr/bin/fake" if tool == "codex" else None)
-        monkeypatch.setenv("VNX_CODEX_HEADLESS_ENABLED", "1")
 
         manager = rgm.ReviewGateManager()
         result = manager.request_reviews(
@@ -797,7 +796,6 @@ class TestRequestNormalization:
         import review_gate_manager as rgm
         monkeypatch.setattr(rgm, "emit_governance_receipt", lambda *a, **kw: None)
         monkeypatch.setattr(rgm.shutil, "which", lambda tool: None)
-        monkeypatch.setenv("VNX_CODEX_HEADLESS_ENABLED", "0")
 
         manager = rgm.ReviewGateManager()
         result = manager.request_reviews(
@@ -817,7 +815,6 @@ class TestRequestNormalization:
         import review_gate_manager as rgm
         monkeypatch.setattr(rgm, "emit_governance_receipt", lambda *a, **kw: None)
         monkeypatch.setattr(rgm.shutil, "which", lambda tool: None)
-        monkeypatch.setenv("VNX_CODEX_HEADLESS_ENABLED", "0")
 
         manager = rgm.ReviewGateManager()
         manager.request_reviews(
@@ -838,11 +835,10 @@ class TestRequestNormalization:
 
 @pytest.mark.usefixtures("fixed_review_interpreter")
 class TestCodexGateExecution:
-    """Codex gate execution path with VNX_CODEX_HEADLESS_ENABLED=1."""
+    """Codex gate execution path with the codex binary on PATH."""
 
     def test_codex_enabled_completes_with_review_output(self, gate_env, monkeypatch):
         monkeypatch.setattr("shutil.which", lambda b: "/usr/bin/fake")
-        monkeypatch.setenv("VNX_CODEX_HEADLESS_ENABLED", "1")
 
         runner = GateRunner(
             state_dir=gate_env["state_dir"],
@@ -900,7 +896,6 @@ class TestCodexGateExecution:
     def test_codex_enabled_uses_correct_timeout(self, gate_env, monkeypatch):
         """Codex gate uses 600s timeout (not gemini's 300s)."""
         monkeypatch.setattr("shutil.which", lambda b: "/usr/bin/fake")
-        monkeypatch.setenv("VNX_CODEX_HEADLESS_ENABLED", "1")
         monkeypatch.setenv("VNX_CODEX_GATE_TIMEOUT", "5")
         monkeypatch.setenv("VNX_CODEX_STALL_THRESHOLD", "2")
 
@@ -955,8 +950,7 @@ class TestCodexGateExecution:
     def test_codex_model_passed_via_config_flag(self, gate_env, monkeypatch):
         """Codex gate passes model via -c flag (not --model like gemini)."""
         monkeypatch.setattr("shutil.which", lambda b: "/usr/bin/fake")
-        monkeypatch.setenv("VNX_CODEX_HEADLESS_ENABLED", "1")
-        monkeypatch.setenv("VNX_CODEX_HEADLESS_MODEL", "gpt-5.4")
+        monkeypatch.setenv("VNX_CODEX_MODEL", "gpt-5.4")
 
         runner = GateRunner(
             state_dir=gate_env["state_dir"],
@@ -1848,7 +1842,6 @@ class TestReviewInterpreterResolvedOncePerRun:
         outside.mkdir()
         monkeypatch.chdir(outside)  # the runner's cwd is outside the project
         monkeypatch.delenv("VNX_REVIEW_PYTHON", raising=False)
-        monkeypatch.setenv("VNX_CODEX_HEADLESS_ENABLED", "1")
         monkeypatch.setattr("shutil.which", lambda b: "/usr/bin/fake")
         monkeypatch.setattr(gate_runner, "_project_config_value", lambda key, project_id: "")
         monkeypatch.setattr(gate_runner, "_project_review_python", lambda project_id: "", raising=False)
