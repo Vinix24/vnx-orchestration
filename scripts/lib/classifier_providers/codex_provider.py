@@ -26,9 +26,7 @@ class CodexProvider(ClassifierProvider):
         flat_cost_usd: Optional[float] = None,
     ) -> None:
         self.timeout_seconds = int(
-            timeout_seconds
-            if timeout_seconds is not None
-            else os.environ.get("VNX_CODEX_TIMEOUT", _DEFAULT_TIMEOUT)
+            timeout_seconds if timeout_seconds is not None else _DEFAULT_TIMEOUT
         )
         try:
             self.flat_cost_usd = float(
