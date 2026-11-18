@@ -582,10 +582,34 @@ class ActionsExpression:
         return value != ""
 
     @staticmethod
-    def _equal(left, right) -> bool:
-        if left is None or right is None:
-            return left is right
-        return str(left) == str(right)
+    def _kind(value) -> str:
+        return "null" if value is None else "bool" if isinstance(value, bool) else "number" if isinstance(value, int) else "string"
+
+    @staticmethod
+    def _number(value) -> float:
+        if value is None or value == "":
+            return 0.0
+        try:
+            return float(value)
+        except ValueError:
+            return float("nan")
+
+    @classmethod
+    def _equal(cls, left, right) -> bool:
+        """GitHub's loose `==`: same kind compares as is (strings case-insensitively), mixed kinds as numbers,
+        so an unset ``vars.<name>`` (null) equals ``'0'`` (run 44234967120)."""
+        if cls._kind(left) == cls._kind(right):
+            return left.lower() == right.lower() if isinstance(left, str) else left == right
+        return cls._number(left) == cls._number(right)
+
+
+def test_the_expression_reader_compares_like_github():
+    """null == '0' is true on GitHub; that is why "xdist off" reads the variable through `|| '1'`."""
+    assert ActionsExpression("${{ vars.X == '0' }}", {}).value() is True
+    assert ActionsExpression("${{ (vars.X || '1') == '0' }}", {}).value() is False
+    assert ActionsExpression("${{ (vars.X || '1') == '0' }}", {"X": "0"}).value() is True
+    assert ActionsExpression("${{ vars.X == 'abc' }}", {"X": "ABC"}).value() is True
+    assert ActionsExpression("${{ vars.X == '1' }}", {"X": "x"}).value() is False
 
 
 # The merge window D4 round 5 sizes the xdist bound from: the runs
@@ -596,7 +620,7 @@ WINDOW_LONGEST_WALL_S = 1134
 # The branches of "xdist off" (C3): the repository variable, the workflow_dispatch input, or neither.
 OFF = ({"VNX_CI_XDIST": "0"}, {"inputs.xdist_off": True}, {"VNX_CI_XDIST": "0", "inputs.xdist_off": False})
 ON = ({}, {"VNX_CI_XDIST": "1"}, {"inputs.xdist_off": False}, {"VNX_CI_XDIST": ""})
-XDIST_OFF = "(vars.VNX_CI_XDIST == '0' || inputs.xdist_off)"
+XDIST_OFF = "((vars.VNX_CI_XDIST || '1') == '0' || inputs.xdist_off)"
 
 
 def test_profile_a_timeout_follows_the_switch_on_every_branch():

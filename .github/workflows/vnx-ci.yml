@@ -6,8 +6,10 @@ on:
   pull_request:
   # The way back without touching the repository variable (C3, criterion 7):
   # xdist_off does what VNX_CI_XDIST=0 does. "xdist off" is the one expression
-  # (vars.VNX_CI_XDIST == '0' || inputs.xdist_off), in the shard `if:`, the
-  # aggregator's timeout and its --xdist-off flag.
+  # ((vars.VNX_CI_XDIST || '1') == '0' || inputs.xdist_off), in the shard `if:`, the
+  # aggregator's timeout and its --xdist-off flag. An unset variable is null, and
+  # `null == '0'` is true (GitHub compares mixed types as numbers, 0 == 0), so
+  # the variable is read through `|| '1'` (run 44234967120 skipped every shard).
   workflow_dispatch:
     inputs:
       xdist_off:
@@ -38,7 +40,7 @@ jobs:
     # that shape takes 52 to 54.8 minutes (OI-2523), so it gets 80 (OI-2525),
     # the bridge D3c (#2378) set on 2026-11-03. Otherwise the job only reads
     # the shards' evidence (or runs the four light docs tests): 15.
-    timeout-minutes: ${{ (vars.VNX_CI_XDIST == '0' || inputs.xdist_off) && 80 || 15 }}
+    timeout-minutes: ${{ ((vars.VNX_CI_XDIST || '1') == '0' || inputs.xdist_off) && 80 || 15 }}
 
     steps:
       - name: Checkout
@@ -90,7 +92,7 @@ jobs:
         id: aggregate
         env:
           NEEDS_JSON: ${{ toJSON(needs) }}
-          XDIST_OFF: ${{ (vars.VNX_CI_XDIST == '0' || inputs.xdist_off) && 'true' || 'false' }}
+          XDIST_OFF: ${{ ((vars.VNX_CI_XDIST || '1') == '0' || inputs.xdist_off) && 'true' || 'false' }}
           CI_PROFILE: ${{ steps.prelude.outputs.profile }}
           PROFILE_A_EVIDENCE: ${{ runner.temp }}/profile-a-evidence
         run: |
@@ -373,7 +375,7 @@ jobs:
   # D4's xdist bound (2 x 1134 s, run 41827919472), until C5 recalibrates it.
   profile-a-shard-1:
     name: Profile A shard (1/4)
-    if: ${{ !(vars.VNX_CI_XDIST == '0' || inputs.xdist_off) }}
+    if: ${{ !((vars.VNX_CI_XDIST || '1') == '0' || inputs.xdist_off) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 38
     permissions: {contents: read, actions: read}
@@ -465,7 +467,7 @@ jobs:
 
   profile-a-shard-2:
     name: Profile A shard (2/4)
-    if: ${{ !(vars.VNX_CI_XDIST == '0' || inputs.xdist_off) }}
+    if: ${{ !((vars.VNX_CI_XDIST || '1') == '0' || inputs.xdist_off) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 38
     permissions: {contents: read, actions: read}
@@ -475,7 +477,7 @@ jobs:
 
   profile-a-shard-3:
     name: Profile A shard (3/4)
-    if: ${{ !(vars.VNX_CI_XDIST == '0' || inputs.xdist_off) }}
+    if: ${{ !((vars.VNX_CI_XDIST || '1') == '0' || inputs.xdist_off) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 38
     permissions: {contents: read, actions: read}
@@ -485,7 +487,7 @@ jobs:
 
   profile-a-shard-4:
     name: Profile A shard (4/4)
-    if: ${{ !(vars.VNX_CI_XDIST == '0' || inputs.xdist_off) }}
+    if: ${{ !((vars.VNX_CI_XDIST || '1') == '0' || inputs.xdist_off) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 38
     permissions: {contents: read, actions: read}
