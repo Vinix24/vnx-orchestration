@@ -211,7 +211,7 @@ def test_permission_open_view_returns_an_error_block_when_open_view_raises(state
 def test_permission_open_view_returns_an_error_block_when_the_import_fails(state, monkeypatch):
     monkeypatch.setitem(sys.modules, "permission_chain", None)
     view = bts._permission_open_view(state, "vnx-dev")
-    assert view["available"] is False and view["reason"].startswith("ImportError")
+    assert view["available"] is False and view["reason"].startswith("ModuleNotFoundError: ")
 
 
 def test_permission_open_view_reason_is_cut_at_200_characters(state, monkeypatch):
