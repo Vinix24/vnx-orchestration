@@ -8,12 +8,14 @@ import yaml
 from review_stack_support import isolate_config_registry
 
 import config_registry
+import config_runtime
 import gate_profile
 from dispatch_spec import ReviewGateConfigError
 from forge_protection_drift import YamlFetchResult
 from gate_profile import BranchProtectionUnreadable, ci_requirement
 
 APP = 4869217
+_AUTOWIRE = config_runtime.autowire
 
 
 def _none(_project_id, _key):
@@ -88,11 +90,17 @@ def test_a_flag_neither_true_nor_false_refuses(tmp_path, monkeypatch, raw):
         _req(tmp_path)
 
 
-def test_an_unreadable_config_store_refuses(tmp_path):
-    def broken(_p, _k):
-        raise OSError("db locked")
+def _broken(_p, _k):
+    raise OSError("db locked")
+
+
+@pytest.mark.parametrize("wired", [False, True])
+def test_an_unreadable_config_store_refuses(tmp_path, monkeypatch, wired):
+    monkeypatch.setenv("VNX_CI_GATE_REQUIRED", "0")
+    (tmp_path / "runtime_coordination.db").write_bytes(b"corrupt database")
+    assert not wired or _AUTOWIRE(tmp_path, "of-2c-repro")
     with pytest.raises(ReviewGateConfigError, match="cannot be read"):
-        ci_requirement(None, resolver=broken, config_path=_dials(tmp_path, 1), project_root=tmp_path / "proj")
+        ci_requirement(resolver=None if wired else _broken, config_path=_dials(tmp_path, 1), project_root=tmp_path)
 
 
 @pytest.mark.parametrize("level, asks", [(1, False), (0, False), (2, True), (3, True)])
@@ -108,9 +116,13 @@ class TestBranchProtection:
     def _flag_off(self, monkeypatch):
         monkeypatch.setenv("VNX_CI_GATE_REQUIRED", "0")
 
-    def test_only_project_copy_with_a_ci_context_requires(self, tmp_path):
-        path = _write(tmp_path / "proj", ".vnx/branch_protection.yaml", _protection(["Profile A", "vnx-gate/door"]))
-        assert _req(tmp_path) == (True, [f"branch_protection:{path}"])
+    @pytest.mark.parametrize("rel, contexts, asks", [  # project copy, fabric fallback, vnx-gate only
+        (".vnx/branch_protection.yaml", ["Profile A", "vnx-gate/door"], True),
+        ("scripts/forge/branch_protection.yaml", ["VNX CI"], True),
+        (".vnx/branch_protection.yaml", ["vnx-gate/review", "vnx-gate/door"], False)])
+    def test_one_copy(self, tmp_path, rel, contexts, asks):
+        path = _write(tmp_path / "proj", rel, _protection(contexts))
+        assert _req(tmp_path) == (asks, [f"branch_protection:{path}"] if asks else [])
 
     def test_both_paths_absent_asks_nothing(self, tmp_path):
         (tmp_path / "proj").mkdir()
@@ -125,23 +137,10 @@ class TestBranchProtection:
         _write(root, "scripts/forge/branch_protection.yaml", _protection(["vnx-gate/review"]))
         assert _req(tmp_path) == (True, [f"branch_protection:{project}"])
 
-    def test_fabric_path_is_the_fallback(self, tmp_path):
-        path = _write(tmp_path / "proj", "scripts/forge/branch_protection.yaml", _protection(["VNX CI"]))
-        assert _req(tmp_path) == (True, [f"branch_protection:{path}"])
-
-    def test_vnx_gate_contexts_alone_are_not_ci(self, tmp_path):
-        _write(tmp_path / "proj", ".vnx/branch_protection.yaml", _protection(["vnx-gate/review", "vnx-gate/door"]))
-        assert _req(tmp_path) == (False, [])
-
-    @pytest.mark.parametrize("text", ["branch: [unclosed", "branch: main\n", ""])
-    def test_invalid_yaml_raises_the_named_error(self, tmp_path, text):
-        _write(tmp_path / "proj", ".vnx/branch_protection.yaml", text)
+    @pytest.mark.parametrize("data", [b"branch: [unclosed", b"branch: main\n", b"", b"\xff\xfe\x00bad"])
+    def test_invalid_or_undecodable_yaml_raises_the_named_error(self, tmp_path, data):
+        _write(tmp_path / "proj", ".vnx/branch_protection.yaml", "x").write_bytes(data)
         with pytest.raises(BranchProtectionUnreadable, match="branch_protection_unreadable"):
-            _req(tmp_path)
-
-    def test_undecodable_file_is_unreadable_not_absent(self, tmp_path):
-        _write(tmp_path / "proj", ".vnx/branch_protection.yaml", "x").write_bytes(b"\xff\xfe\x00bad")
-        with pytest.raises(BranchProtectionUnreadable):
             _req(tmp_path)
 
     def test_prefetched_main_copy_is_used_instead_of_the_checkout(self, tmp_path):

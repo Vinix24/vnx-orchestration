@@ -372,6 +372,8 @@ class BranchProtectionUnreadable(ReviewGateConfigError):
 def _flag_source(project_id: Optional[str], resolver) -> Optional[str]:
     """Source 1: the resolution source when ``VNX_CI_GATE_REQUIRED`` is true, the registry
     default included. A value that is neither true nor false, or an unreadable store, raises."""
+    if resolver is None and (strict := config_runtime.strict_resolver()) is not None:  # autowire's: no row
+        resolver, project_id = strict[0], project_id if project_id is not None else strict[1]
     raw, source = config_registry.resolve_with_source(
         CI_GATE_KEY, project_id, resolver, use_default_resolver=resolver is None, strict_resolver=True,
     )
