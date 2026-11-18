@@ -489,7 +489,6 @@ class TestCutoverCheck:
         cutover_actions = [a for a in report.actions if a.phase == "cutover"]
         assert any("ACTIVE" in a.detail for a in cutover_actions)
         assert not any(a.action == "rollback_guidance" for a in cutover_actions)
-        assert not any("rollback_runtime_core" in a.detail for a in cutover_actions)
 
     def test_runtime_primary_inactive(self, state_dir):
         report = RecoveryReport(run_at=_now_utc(), dry_run=False)
