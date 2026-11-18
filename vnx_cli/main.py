@@ -1161,8 +1161,7 @@ def _register_plan_gate_verbs(subs: argparse.Action) -> None:
         type=int,
         default=None,
         help="per-seat deadline in seconds before a panelist times out and books a "
-             "fabricated abstention (OI-1068). Defaults to VNX_PLAN_GATE_SEAT_TIMEOUT "
-             "(default 900) — the same env-var-knob style as VNX_PANEL_RETRY.",
+             "fabricated abstention (OI-1068). Defaults to 900.",
     )
     p_prun.add_argument(
         "--dispatch-paths",
@@ -1269,7 +1268,7 @@ def _register_plan_gate_verbs(subs: argparse.Action) -> None:
         type=int,
         default=None,
         help="per-seat deadline in seconds before a panelist times out and books a "
-             "fabricated abstention (OI-1068). Defaults to VNX_PLAN_GATE_SEAT_TIMEOUT.",
+             "fabricated abstention (OI-1068). Defaults to 900.",
     )
     p_pbatch.add_argument(
         "--dispatch-paths",
