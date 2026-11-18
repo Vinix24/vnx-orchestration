@@ -214,6 +214,28 @@ def _replace_under_lock(res, plain, gz, snap, gz_snap, kind, scratch) -> FileRes
     return res
 
 
+def symlinked_root(store_root: Path, archive: Path) -> Optional[Path]:
+    """The first symlink on the way from *archive* up to *store_root* (the archive itself first).
+
+    Also returns *archive* when it is not lexically under *store_root* or when it
+    resolves outside the resolved store root: a root that cannot be shown to lie
+    inside the store is refused, never walked.
+    """
+    store_root, archive = Path(store_root), Path(archive)
+    try:
+        relative = archive.relative_to(store_root)
+    except ValueError:
+        return archive
+    current = archive
+    for _ in range(len(relative.parts)):
+        if current.is_symlink():
+            return current
+        current = current.parent
+    if not archive.resolve().is_relative_to(store_root.resolve()):
+        return archive
+    return None
+
+
 def _contained(directory: Path, pattern: str) -> List[Path]:
     """Files matching *pattern* that are not symlinks and resolve inside *directory*."""
     root = directory.resolve()
