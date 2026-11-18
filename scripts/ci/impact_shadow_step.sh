@@ -26,6 +26,18 @@ if [ -z "$EVIDENCE" ] || [ -z "$OUT_DIR" ]; then
   no_record "usage: impact_shadow_step.sh EVIDENCE_DIR OUT_DIR"
 fi
 bash "$CI_DIR/impact_shadow_inputs.sh" "$OUT_DIR" || no_record "inputs script exit $?"
+
+# The sharded Profile A (C3) keeps each shard's evidence under shard-k/;
+# impact_backtest.shard_view copies it flat into the phase names
+# impact_shadow.py reads. The single-job layout is read as it is.
+if compgen -G "$EVIDENCE/shard-*/" > /dev/null; then
+  FLAT="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/impact-shadow-evidence.XXXXXX")" || no_record "no temp dir"
+  PYTHONPATH="$CI_DIR/../lib${PYTHONPATH:+:$PYTHONPATH}" python3 -c \
+    'import sys; from impact_backtest import shard_view; shard_view(sys.argv[1], sys.argv[2])' \
+    "$EVIDENCE" "$FLAT" 2> "$OUT_DIR/shards.err" \
+    || no_record "shard evidence: $(tail -n 1 "$OUT_DIR/shards.err" 2>/dev/null)"
+  EVIDENCE="$FLAT"
+fi
 if [ ! -s "$OUT_DIR/selection.json" ]; then
   no_record "$(cat "$OUT_DIR/selection-error.txt" 2>/dev/null || printf 'no selection')"
 fi

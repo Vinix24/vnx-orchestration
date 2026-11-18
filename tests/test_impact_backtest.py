@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import io
 import json
+import re
 import sys
 import tarfile
 import tempfile
 from pathlib import Path
+
+import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "scripts" / "lib"))
@@ -40,11 +43,24 @@ def jobs(conclusion="failure"):
                       "completed_at": "2026-11-10T09:40:00Z", "conclusion": conclusion}]}
 
 
+def shards(target: Path, cases: dict, stamp: tuple, count: int = 2) -> None:
+    """The C3 artifact: shard-k/ per shard with its plan and phase, shard 1 also the serial phase (NODEIDS[0])."""
+    split = {1: NODEIDS[1:2], 2: NODEIDS[2:]}
+    for k in range(1, count + 1):
+        directory = target / f"shard-{k}"
+        (directory / "args").mkdir(parents=True)
+        (directory / "args" / "shard.json").write_text(json.dumps({"shard": k, "shards": 2}), encoding="utf-8")
+        manifest(directory / "manifest-shard.json", "shard", split[k], stamp=stamp)
+        junit(directory / "junit-shard.xml", {n: cases[n] for n in split[k]}, stamp=stamp)
+    manifest(target / "shard-1" / "manifest-serial.json", "serial", NODEIDS[:1], stamp=stamp)
+    junit(target / "shard-1" / "junit-serial.xml", {NODEIDS[0]: cases[NODEIDS[0]]}, stamp=stamp)
+
+
 class Gh:
     """gh calls of the backtest; ``failing`` maps a run id to the stderr its download answers with, ``cases`` run id -> {nodeid: outcome}."""
 
-    def __init__(self, runs, cases, failing=None):
-        self.runs, self.cases, self.failing, self.calls = runs, cases, failing or {}, []
+    def __init__(self, runs, cases, failing=None, sharded=False):
+        self.runs, self.cases, self.failing, self.calls, self.sharded = runs, cases, failing or {}, [], sharded
 
     def __call__(self, argv):
         self.calls.append(list(argv))
@@ -59,6 +75,9 @@ class Gh:
                 raise ledger.RunnerError(argv, 1, self.failing[run_id])
             if run_id not in self.cases:
                 raise ledger.RunnerError(argv, 1, "no valid artifacts found to download")
+            if self.sharded:
+                shards(target, self.cases[run_id], (str(run_id), "1"))
+                return ""
             manifest(target / "manifest-serial.json", "serial", NODEIDS, stamp=(str(run_id), "1"))
             junit(target / "junit-serial.xml", self.cases[run_id], stamp=(str(run_id), "1"))
             return ""
@@ -285,3 +304,68 @@ def test_links_in_the_archive_are_left_out_of_the_old_tree(tmp_path):
     with tarfile.open(archive) as tar:
         tar.extractall(tree, filter=bt._regular_only)
     assert not (tree / "scripts" / "escape").exists()
+
+
+RED_OUTSIDE_S = {"tests/test_other.py::t": "fail", "tests/test_core.py::t": "pass", "tests/test_plain.py::t": "pass"}
+
+
+def test_a_sharded_artifact_gives_the_record_of_the_single_job_layout(tmp_path):
+    bt.backtest(tmp_path / "single", Gh([run(1)], {1: RED_OUTSIDE_S}), Git(["scripts/lib/core.py"]))
+    bt.backtest(tmp_path / "sharded", Gh([run(1)], {1: RED_OUTSIDE_S}, sharded=True), Git(["scripts/lib/core.py"]))
+    (single,), (sharded,) = lines(tmp_path / "single"), lines(tmp_path / "sharded")
+    assert sharded["shadow"]["reconstructible"] is True and sharded["shadow"]["attempt_valid"] is True
+    assert sharded["shadow"]["sets"] == single["shadow"]["sets"]
+    assert sharded["shadow"]["sets"]["misses"] == ["tests/test_other.py::t"]
+
+
+def _break_shards(how: str):
+    def mutate(target: Path) -> None:
+        if how == "shard-gone":
+            for path in sorted((target / "shard-2").rglob("*"), reverse=True):
+                path.rmdir() if path.is_dir() else path.unlink()
+            (target / "shard-2").rmdir()
+            (target / "shard-3").mkdir()
+        elif how == "last-shard-gone":
+            (target / "shard-1" / "args" / "shard.json").write_text(json.dumps({"shards": 3}), encoding="utf-8")
+        elif how == "plan-unreadable":
+            (target / "shard-2" / "args" / "shard.json").write_text("{not json", encoding="utf-8")
+        elif how == "plan-shards-not-a-number":
+            (target / "shard-2" / "args" / "shard.json").write_text(json.dumps({"shards": "2"}), encoding="utf-8")
+        elif how == "no-shard-manifest":
+            (target / "shard-2" / "manifest-shard.json").unlink()
+        elif how == "serial-twice":
+            manifest(target / "shard-2" / "manifest-serial.json", "serial", NODEIDS[:1])
+    return mutate
+
+
+@pytest.mark.parametrize("how, why", [
+    ("shard-gone", "not shard-1..shard-N"), ("last-shard-gone", "plan of 3 shards"),
+    ("plan-unreadable", "no readable args/shard.json"), ("plan-shards-not-a-number", "has shards '2'"),
+    ("no-shard-manifest", "no manifest-shard.json"), ("serial-twice", "also in an earlier shard"),
+])
+def test_incomplete_shard_evidence_is_refused_by_name_and_the_backtest_line_names_the_evidence(tmp_path, how, why):
+    evidence = tmp_path / "ev"
+    shards(evidence, RED_OUTSIDE_S, ("1", "1"))
+    _break_shards(how)(evidence)
+    with pytest.raises(ValueError, match=re.escape(why)):
+        bt.shard_view(evidence, tmp_path / "flat")
+    gh = Gh([run(1)], {1: RED_OUTSIDE_S}, sharded=True)
+    original = gh.__call__
+
+    def broken(argv):
+        out = original(argv)
+        if argv[:3] == ["gh", "run", "download"]:
+            _break_shards(how)(Path(argv[7]))
+        return out
+    bt.backtest(tmp_path / "state", broken, Git(["scripts/lib/core.py"]))
+    (entry,) = lines(tmp_path / "state")
+    assert entry["shadow"] == {"schema": "impact_shadow/1", "reconstructible": False, "unreadable_inputs": ["evidence"]}
+
+
+def test_the_single_job_layout_and_a_symlinked_shard_dir_are_read_in_place(tmp_path):
+    evidence = tmp_path / "ev"
+    evidence.mkdir()
+    assert bt.shard_view(evidence, tmp_path / "flat") == evidence
+    shards(tmp_path / "elsewhere", RED_OUTSIDE_S, ("1", "1"))
+    (evidence / "shard-1").symlink_to(tmp_path / "elsewhere" / "shard-1", target_is_directory=True)
+    assert bt.shard_view(evidence, tmp_path / "flat") == evidence and not (tmp_path / "flat").exists()
