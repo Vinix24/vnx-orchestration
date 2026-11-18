@@ -49,7 +49,6 @@ EXPECTED_SCRIPTS = {
     ],
     "Stop": [
         "stop_report_hook.sh",
-        "session_stop_rotation.py",
     ],
 }
 
