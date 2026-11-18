@@ -135,7 +135,7 @@ class TestVerifyPr:
         _commit(repo, "scripts/x.py", "x = 1\n")
         _override(repo, base, key)
         _extra_trail_entry(repo, key)
-        monkeypatch.setenv("VNX_ATTEST_OVERRIDE_BUDGET", "1")
+        monkeypatch.setattr("attest_override.DEFAULT_OVERRIDE_BUDGET", 1)
         assert _vp(repo, base, key) == (1, "override REJECTED: override budget exhausted (2/1)")
 
     def test_override_trail_reset_against_base(self, repo, key):

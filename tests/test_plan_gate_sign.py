@@ -28,11 +28,11 @@ pytestmark = pytest.mark.skipif(shutil.which("ssh-keygen") is None, reason="ssh-
 def e(tmp_path, monkeypatch):
     """A throw-away key, an allowed_signers file and an operator shell, all on tmp_path."""
     subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(tmp_path / "k")], check=True)
-    (tmp_path / "allowed_signers").write_text(f'{IDENTITY} namespaces="vnx-attestation" {(tmp_path / "k.pub").read_text()}')
+    (tmp_path / ".vnx-attest").mkdir()  # the signer file is the only source (no env override)
+    (tmp_path / ".vnx-attest" / "allowed_signers").write_text(f'{IDENTITY} namespaces="vnx-attestation" {(tmp_path / "k.pub").read_text()}')
     for name in (*actor_class.DISPATCH_MARKERS, *actor_class.TERMINAL_MARKERS, actor_class.ROLE_MARKER, "VNX_PROCESS_OWNER"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(actor_class, "_stdin_isatty", lambda: True)
-    monkeypatch.setenv("VNX_ALLOWED_SIGNERS", str(tmp_path / "allowed_signers"))
     monkeypatch.setenv("VNX_PROJECT_ROOT", str(tmp_path))
     return tmp_path
 
@@ -48,7 +48,7 @@ def _sign(root, identity=IDENTITY):
 
 
 def _grant(root):
-    return plan_gate_enforcement.verify_promotion_grant(TRACK, PROJECT, root, root / "allowed_signers")
+    return plan_gate_enforcement.verify_promotion_grant(TRACK, PROJECT, root, root / ".vnx-attest" / "allowed_signers")
 
 
 def test_operator_signs_chain_stays_valid_and_newer_unsigned_pass_wins(e, monkeypatch):
@@ -81,7 +81,7 @@ def test_refusal_writes_nothing_and_grant_stays_unsigned(e, monkeypatch, capsys,
     if case == "t0":
         monkeypatch.setenv(actor_class.ROLE_MARKER, "orchestrator")
     if case == "no_signers_file":
-        monkeypatch.setenv("VNX_ALLOWED_SIGNERS", str(e / "missing"))
+        (e / ".vnx-attest" / "allowed_signers").unlink()
     assert _sign(e, identity="stranger@example.invalid" if case == "identity" else IDENTITY) == code
     assert message in capsys.readouterr().err
     assert ((e / LEDGER).read_bytes() if before else (e / LEDGER).exists()) == (before or False)
@@ -105,10 +105,11 @@ def test_horizon_sign_reads_the_ledger_of_the_selected_project_dir(e, monkeypatc
     from vnx_cli.commands import horizon
     proj, cwd = tmp_path_factory.mktemp("proj"), tmp_path_factory.mktemp("cwd")
     _pass(proj)
+    shutil.copy(e / ".vnx-attest" / "allowed_signers", proj / ".vnx-attest" / "allowed_signers")
     monkeypatch.delenv("VNX_PROJECT_ROOT")
     monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
     monkeypatch.setenv("VNX_DATA_DIR", str(cwd / "data"))
     monkeypatch.chdir(cwd)
     args = argparse.Namespace(project_dir=str(proj), project_id=PROJECT, json=False, track_id=TRACK, key=str(e / "k"), identity=IDENTITY)
     assert horizon._cmd_plan_gate_sign(args) == 0 and not (cwd / LEDGER).exists()
-    assert plan_gate_enforcement.verify_promotion_grant(TRACK, PROJECT, proj, e / "allowed_signers") is Grant.VERIFIED
+    assert plan_gate_enforcement.verify_promotion_grant(TRACK, PROJECT, proj, proj / ".vnx-attest" / "allowed_signers") is Grant.VERIFIED
