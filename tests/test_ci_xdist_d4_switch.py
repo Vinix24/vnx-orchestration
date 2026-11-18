@@ -481,14 +481,14 @@ def _timeout_comment() -> str:
 
 
 _ACTIONS_TOKEN = re.compile(r"(?P<space>\s+)|(?P<string>'(?:[^']|'')*')|(?P<number>\d+)"
-                            r"|(?P<name>[A-Za-z_][A-Za-z0-9_.]*)|(?P<operator>&&|\|\||==|\(|\))")
+                            r"|(?P<name>[A-Za-z_][A-Za-z0-9_.]*)|(?P<operator>&&|\|\||==|!|\(|\))")
 
 
 class ActionsExpression:
     """The subset of the GitHub Actions expression language a job timeout uses.
 
-    `||`, `&&` and `==` over string and number literals, `vars.<name>` and
-    parentheses, with GitHub's operand-returning `&&`/`||` and its truthiness
+    `||`, `&&`, `==` and `!` over string and number literals, `vars.<name>`,
+    `inputs.<name>` (keyed ``inputs.<name>`` in the variables) and parentheses, with GitHub's operand-returning `&&`/`||` and its truthiness
     (null, 0 and the empty string are false, every other value — `'0'` included —
     is true). A token or a form it does not know raises, so a rewritten
     expression can never be read as a number it does not produce.
@@ -555,6 +555,8 @@ class ActionsExpression:
 
     def _parse_primary(self):
         kind, text = self._take()
+        if (kind, text) == ("operator", "!"):
+            return not self._truthy(self._parse_primary())
         if (kind, text) == ("operator", "("):
             value = self._parse_or()
             if self._take() != ("operator", ")"):
@@ -566,9 +568,9 @@ class ActionsExpression:
             return int(text)
         if kind == "name":
             scope, _, name = text.partition(".")
-            if scope != "vars" or not name:
-                raise AssertionError(f"only `vars.<name>` is supported, not {text!r}")
-            return self.variables.get(name)
+            if scope not in ("vars", "inputs") or not name:
+                raise AssertionError(f"only `vars.<name>` and `inputs.<name>` are supported, not {text!r}")
+            return self.variables.get(name if scope == "vars" else text)
         raise AssertionError(f"unexpected token {text!r}")
 
     @staticmethod
@@ -580,15 +582,47 @@ class ActionsExpression:
         return value != ""
 
     @staticmethod
-    def _equal(left, right) -> bool:
-        if left is None or right is None:
-            return left is right
-        return str(left) == str(right)
+    def _kind(value) -> str:
+        return "null" if value is None else "bool" if isinstance(value, bool) else "number" if isinstance(value, int) else "string"
+
+    @staticmethod
+    def _number(value) -> float:
+        if value is None or value == "":
+            return 0.0
+        try:
+            return float(value)
+        except ValueError:
+            return float("nan")
+
+    @classmethod
+    def _equal(cls, left, right) -> bool:
+        """GitHub's loose `==`: same kind compares as is (strings case-insensitively), mixed kinds as numbers,
+        so an unset ``vars.<name>`` (null) equals ``'0'`` (run 44234967120)."""
+        if cls._kind(left) == cls._kind(right):
+            return left.lower() == right.lower() if isinstance(left, str) else left == right
+        return cls._number(left) == cls._number(right)
+
+
+def test_the_expression_reader_compares_like_github():
+    """null == '0' is true on GitHub; that is why "xdist off" reads the variable through `|| '1'`."""
+    assert ActionsExpression("${{ vars.X == '0' }}", {}).value() is True
+    assert ActionsExpression("${{ (vars.X || '1') == '0' }}", {}).value() is False
+    assert ActionsExpression("${{ (vars.X || '1') == '0' }}", {"X": "0"}).value() is True
+    assert ActionsExpression("${{ vars.X == 'abc' }}", {"X": "ABC"}).value() is True
+    assert ActionsExpression("${{ vars.X == '1' }}", {"X": "x"}).value() is False
 
 
 # The merge window D4 round 5 sizes the xdist bound from: the runs
 # `xdist_parity_history.py --last-d3-merge 983c944f` reads on 2026-11-05.
 WINDOW_LONGEST_WALL_S = 1134
+
+
+def test_the_single_job_timeout_is_38_unless_the_variable_is_the_string_zero():
+    """An unset variable is null and null == '0' on GitHub: it must still get 38, not the serial 80."""
+    expression = _timeout_expression()
+    assert ActionsExpression(expression, {}).value() == 38, expression
+    assert ActionsExpression(expression, {"VNX_CI_XDIST": "0"}).value() == 80, expression
+    assert ActionsExpression(expression, {"VNX_CI_XDIST": "1"}).value() == 38, expression
 
 
 def test_profile_a_timeout_follows_the_switch_on_every_branch():
