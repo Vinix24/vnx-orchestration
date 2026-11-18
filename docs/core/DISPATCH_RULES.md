@@ -148,9 +148,9 @@ cap, the takeover chain and the plan-gate seats.
   because its registry entry is marked `approval=True` (`scripts/lib/config_registry.py:205-215`).
   The `vnx` CLI has no config subcommand: write the row through that surface.
 - **Precedence, per value.** `VNX_OVERRIDE_<BARE>` > the `project_config` row > the enforcement layer
-  (the two stacks only) > the profile > `VNX_<BARE>` > the registry default
-  (`config_registry.resolve_with_source`, `scripts/lib/config_registry.py:685`). The profile
-  deliberately outranks a bare env var; an operator value on a field's own key, `override` or row,
+  (the two stacks only) > the profile > the global file `~/.vnx/config.json` (ADR-087) > `VNX_<BARE>`
+  > the registry default (`config_registry.resolve_with_source`, `scripts/lib/config_registry.py`).
+  The profile deliberately outranks a bare env var and a global value; an operator value on a field's own key, `override` or row,
   outranks the profile (`scripts/lib/gate_profile.py:173`).
 - **What each profile does.** `standard` contributes nothing: every reader keeps its own chain, so an
   unset key and `standard` are today's behaviour (`gate_profile.PROFILE_TABLE`,

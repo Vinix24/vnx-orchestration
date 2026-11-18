@@ -690,7 +690,7 @@ def test_layers_default_is_the_chain_constant_and_names_every_value_source():
     import re
 
     assert inspect.signature(cr.resolve_with_source).parameters["layers"].default is cr.CHAIN_LAYERS
-    assert cr.CHAIN_LAYERS == ("override", "project_config", "env", "default")
+    assert cr.CHAIN_LAYERS == ("override", "project_config", "global_config", "env", "default")
     source = inspect.getsource(cr.resolve_with_source)
     returned = set(re.findall(r'return [^\n]*?,\s*"([a-z_]+)"', source))
     value_sources = {s for s in returned if s != "unset" and not s.endswith("_error")}

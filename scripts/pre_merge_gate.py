@@ -601,9 +601,9 @@ def _pr_size_thresholds(
     values, invalid = {}, []
     for key, (raw, source) in resolved.items():
         values[key] = _positive_int(raw)
-        if source == "project_config_error":
+        if source in cr.ERROR_SOURCES:
             invalid.append(
-                f"project_config_error {key}: the project store could not be read, "
+                f"{source} {key}: the {source[:-len('_config_error')]} config could not be read, "
                 f"default {defaults[key]}")
         elif values[key] is None:
             invalid.append(f"invalid {key}: {raw!r}, default {defaults[key]}")

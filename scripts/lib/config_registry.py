@@ -19,12 +19,15 @@ activation like this one, not an accident to guard against.
 
 Precedence (highest first), implemented by `get()`:
   1. ``VNX_OVERRIDE_<BARE>`` env var — the operator emergency brake (e.g. VNX_OVERRIDE_SCOUT_PREPASS).
-  2. ``project_config`` DB value — the UI-set value (wired in a later PR; injected via ``db_resolver``).
-  3. ``VNX_<BARE>`` env var — the process-start value (today's behaviour; never broken).
-  4. the registry default.
+  2. ``project_config`` DB value — the UI-set value (injected via ``db_resolver``); skipped for a
+     key with scope ``global``.
+  3. ``global_config`` — the machine-wide value in ``~/.vnx/config.json`` (``config_global``,
+     ADR-087; ``VNX_GLOBAL_CONFIG_FILE`` moves it). Needs no store.
+  4. ``VNX_<BARE>`` env var — the process-start value.
+  5. the registry default.
 
-Until the DB layer lands, ``db_resolver`` is None and step 2 is skipped — so this module is a
-behaviour-preserving overlay on the env-only world.
+A stored value (project or global) beats an exported env value; ``VNX_OVERRIDE_<BARE>`` overrules
+one process. Without a wired store step 2 is skipped; without a global file step 3 is.
 
 SUBSYSTEM COCKPIT METADATA. ``subsystem`` and ``status`` are pure display metadata for the
 framework-status cockpit (`docs/core/SUBSYSTEMS.md`): which subsystem a flag belongs to, and that
@@ -38,10 +41,11 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Tuple
 
 # The only status values a cockpit row may declare (dispatch: framework-status-audit-and-cockpit PR-1).
 ALLOWED_STATUSES = frozenset(("LIVE", "PARK", "CUT", "ACTIVATE", "SCOPE", "COCKPIT"))
+ALLOWED_SCOPES = frozenset(("project", "global"))
 
 
 @dataclass(frozen=True)
@@ -66,12 +70,26 @@ class ConfigEntry:
     # or canonical_flags() raises rather than silently picking by dict order.
     read_site_wired: bool = True
     cockpit_canonical: bool = False
+    # ADR-087 decision 2. "project" (every key today): a project_config row beats the global
+    # value. "global": only the global file counts; the resolver ignores a project row.
+    scope: str = "project"
+    # Enum keys only; None means no check. The write-side check is G3 (config_store_db._coerce).
+    allowed_values: Optional[Tuple[str, ...]] = None
+
+    def __post_init__(self) -> None:
+        if self.scope not in ALLOWED_SCOPES:
+            raise ValueError(f"{self.key}: scope {self.scope!r} is not one of {sorted(ALLOWED_SCOPES)}")
+        if self.allowed_values is not None and (
+                not isinstance(self.allowed_values, tuple) or not self.allowed_values
+                or not all(isinstance(v, str) for v in self.allowed_values)):
+            raise ValueError(f"{self.key}: allowed_values must be a non-empty tuple of strings")
 
 
 def _e(key, type_, default, category, description, *, writable=True, approval=False, planned=False,
-       subsystem=None, status=None, read_site_wired=True, cockpit_canonical=False):
+       subsystem=None, status=None, read_site_wired=True, cockpit_canonical=False, scope="project",
+       allowed_values=None):
     return ConfigEntry(key, type_, default, category, description, writable, approval, planned,
-                        subsystem, status, read_site_wired, cockpit_canonical)
+                        subsystem, status, read_site_wired, cockpit_canonical, scope, allowed_values)
 
 
 # The inventory. Defaults verified against the read-sites (codex review finding: defaults must
@@ -832,7 +850,14 @@ def set_default_project_id(project_id: Optional[str]) -> None:
 # The layers of the precedence chain, highest first, by the source name resolve_with_source
 # returns for each. One constant, so a new layer (config-een-oppervlak G2 adds a global one)
 # lands in the chain walk and in every ``layers=`` subset a reader names at the same time.
-CHAIN_LAYERS: "tuple[str, ...]" = ("override", "project_config", "env", "default")
+CHAIN_LAYERS: "tuple[str, ...]" = ("override", "project_config", "global_config", "env", "default")
+
+# The sources a strict read returns for a layer it could not read: never a value, never "off".
+ERROR_SOURCES = frozenset(("project_config_error", "global_config_error"))
+
+# One WARNING per unreadable global file (path, reason) and per ignored project row (project, key).
+_WARNED_GLOBAL_UNREADABLE: set = set()
+_WARNED_IGNORED_PROJECT_ROW: set = set()
 
 
 def _checked_layers(layers) -> frozenset:
@@ -859,7 +884,8 @@ def resolve_with_source(
     """``(value, source)`` through the one precedence chain :func:`_resolve` is built on.
 
     ``source`` is ``override`` (``VNX_OVERRIDE_<BARE>``), ``project_config`` (the DB layer),
-    ``env`` (``VNX_<BARE>`` as the process started), ``default`` (the registry default) or
+    ``global_config`` (``~/.vnx/config.json`` via ``config_global``, ADR-087), ``env``
+    (``VNX_<BARE>`` as the process started), ``default`` (the registry default) or
     ``unset`` (no value in any layer walked). With no ``resolver`` and
     ``use_default_resolver`` the process's wired store and default project are used, as
     :func:`get` does.
@@ -868,7 +894,10 @@ def resolve_with_source(
     treated as "no row" and the chain falls through to env/default, as :func:`get` always did.
     On, the chain stops there and returns ``(None, "project_config_error")``: the DB state is
     unknown, so a caller whose safe answer is "off" can tell that apart from "no row". The
-    override is still read first, before the DB is consulted.
+    override is still read first, before the DB is consulted. An unreadable global file is
+    handled the same way: strict stops on ``(None, "global_config_error")``; not strict falls
+    through to env with one WARNING per process. A missing global file is no value. A key with
+    scope ``global`` skips the project layer; a project row for it is ignored with a WARNING.
 
     ``layers`` (default :data:`CHAIN_LAYERS`, the full chain) names the layers walked, always
     in chain order whatever order they are given in. A reader that must tell the approved
@@ -885,7 +914,9 @@ def resolve_with_source(
         if resolver is None and use_default_resolver:
             resolver = _db_resolver
             project_id = project_id if project_id is not None else _default_project_id
-        if resolver is not None:
+        if resolver is not None and entry is not None and entry.scope == "global":
+            _warn_ignored_project_row(key, project_id, resolver)
+        elif resolver is not None:
             try:
                 db_val = resolver(project_id, key)
             except Exception as exc:
@@ -897,6 +928,21 @@ def resolve_with_source(
                 db_val = None
             if db_val is not None:
                 return db_val, "project_config"
+    if "global_config" in walked and entry is not None:
+        import config_global
+        try:
+            global_val = config_global.get(key)
+        except config_global.GlobalConfigUnreadable as exc:
+            if strict_resolver:
+                logging.getLogger(__name__).warning("config_registry: %s", exc)
+                return None, "global_config_error"
+            if (str(exc.path), exc.reason) not in _WARNED_GLOBAL_UNREADABLE:
+                _WARNED_GLOBAL_UNREADABLE.add((str(exc.path), exc.reason))
+                logging.getLogger(__name__).warning(
+                    "config_registry: %s; falling through to env and the default", exc)
+            global_val = None
+        if global_val is not None:
+            return global_val, "global_config"
     env_val = os.environ.get(key)
     if "env" in walked and env_val is not None:
         return env_val, "env"
@@ -905,13 +951,31 @@ def resolve_with_source(
     return None, "unset"
 
 
+def _warn_ignored_project_row(key: str, project_id: Optional[str], resolver: DbResolver) -> None:
+    """One WARNING per (project, key) when a scope-global key has a project row; never raises."""
+    if (project_id, key) in _WARNED_IGNORED_PROJECT_ROW:
+        return
+    try:
+        row = resolver(project_id, key)
+    except Exception as exc:
+        # Only a diagnostic: the project layer does not apply to a global key either way.
+        logging.getLogger(__name__).debug("config_registry: no project-row check for global key %s "
+                                          "(%s: %s)", key, type(exc).__name__, exc)
+        return
+    if row is not None:
+        _WARNED_IGNORED_PROJECT_ROW.add((project_id, key))
+        logging.getLogger(__name__).warning(
+            "config_registry: project %s has a project_config row for %s, which has scope "
+            "global; the row is ignored (only the global file counts)", project_id, key)
+
+
 def _resolve(key: str, project_id: Optional[str], resolver: Optional[DbResolver]) -> Optional[str]:
-    """The precedence chain: override > ``resolver``'s DB value > env > registry default.
+    """The precedence chain: override > ``resolver``'s DB value > global file > env > default.
 
     ``resolver`` is the step-2 DB layer in play, or ``None`` for the env-only
     world. Shared by :func:`get` (the process's wired store) and
     :func:`get_for_project` (a store the caller names), so the order of the
-    four sources cannot drift between them. The order lives in
+    five sources cannot drift between them. The order lives in
     :func:`resolve_with_source`; this returns its value.
     """
     return resolve_with_source(key, project_id, resolver, use_default_resolver=False)[0]
