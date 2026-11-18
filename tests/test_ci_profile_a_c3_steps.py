@@ -94,7 +94,7 @@ if args[:2] == ["api", "repos/o/r/actions/runs/7"]:
 elif mode == "created-only":
     sys.exit(1)
 elif args[0] == "api" and "/workflows/" in args[1]:
-    print(json.dumps({"workflow_runs": [{"id": 5, "conclusion": "success", "created_at": "2026-11-18T09:00:00Z"}]}))
+    print(json.dumps({"workflow_runs": [{"id": 5, "conclusion": "success", "created_at": "2026-11-18T09:00:00Z", "updated_at": "2026-11-18T09:05:00Z"}]}))
 elif args[0] == "api":
     print(json.dumps({"artifacts": [{"name": "profile-a-evidence", "expired": False}]}))
 elif args[:2] == ["run", "download"]:
