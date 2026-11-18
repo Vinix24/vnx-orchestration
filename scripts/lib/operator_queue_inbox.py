@@ -6,7 +6,6 @@ source shows the answer is never in the result. ``push_due`` decides and reserve
 
 from __future__ import annotations
 
-import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional
@@ -143,11 +142,7 @@ def present(project_id: str, point_ids: List[str], *, kanaal: str, sessie: str, 
 
 
 def _interval_h() -> float:
-    try:
-        value = float(os.environ.get("VNX_INBOX_PUSH_INTERVAL_H", "4"))
-    except ValueError:  # vnx-silent-except: a bad value is the default
-        return 4.0
-    return value if value > 0 else 4.0
+    return 4.0
 
 
 def _chooser(now: datetime):

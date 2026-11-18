@@ -52,10 +52,10 @@ def _isolate_pin_scan_roots(monkeypatch, tmp_path):
     whatever machine runs the suite on every test that exercises
     ``_collect_protected_versions``/``_prune_old_versions`` — slow, and liable
     to pick up unrelated real ``.vnx-version`` pins. Tests that want to
-    exercise the scan explicitly override via ``monkeypatch.setenv`` or an
+    exercise the scan explicitly override ``DEFAULT_PIN_SCAN_ROOT`` or pass an
     explicit ``pin_scan_roots=``/``scan_roots=`` argument.
     """
-    monkeypatch.setenv("VNX_PIN_SCAN_ROOTS", str(tmp_path / "empty-pin-scan-root"))
+    monkeypatch.setattr(update_module, "DEFAULT_PIN_SCAN_ROOT", tmp_path / "empty-pin-scan-root")
 
 
 def _git_repo(path: Path) -> Path:
@@ -740,7 +740,7 @@ def _version_dirs(root: Path, names, *, oldest_first=True):
 def _empty_registry(tmp_path, monkeypatch):
     """Point the fleet registry at a nonexistent path for hermetic tests."""
     missing = tmp_path / "no-such-registry.json"
-    monkeypatch.setenv("VNX_PROJECT_REGISTRY", str(missing))
+    monkeypatch.setattr(update_module, "DEFAULT_REGISTRY_PATH", missing)
     return missing
 
 
@@ -801,7 +801,6 @@ def test_prune_protects_versions_from_protected_versions_file(tmp_path, monkeypa
 
 def test_prune_protects_fleet_registry_pins(tmp_path, monkeypatch):
     """A pin in any registered consumer project's .vnx-version protects the dir."""
-    monkeypatch.delenv("VNX_PROJECT_REGISTRY", raising=False)
     consumer = tmp_path / "consumer-project"
     consumer.mkdir()
     (consumer / ".vnx-version").write_text("v1.0.1\n", encoding="utf-8")
@@ -832,7 +831,6 @@ def test_prune_protects_fleet_registry_pins(tmp_path, monkeypatch):
 
 def test_prune_protection_sources_union(tmp_path, monkeypatch):
     """Registry + protected-versions file + --protect-pins all union together."""
-    monkeypatch.delenv("VNX_PROJECT_REGISTRY", raising=False)
     consumer = tmp_path / "consumer-project"
     consumer.mkdir()
     (consumer / ".vnx-version").write_text("v1.0.1\n", encoding="utf-8")
@@ -1021,7 +1019,6 @@ def test_collect_protected_versions_normalizes_v_prefix(tmp_path, monkeypatch):
 
 
 def test_load_fleet_pins_skips_missing_and_malformed(tmp_path, monkeypatch):
-    monkeypatch.delenv("VNX_PROJECT_REGISTRY", raising=False)
     pinned = tmp_path / "pinned-project"
     pinned.mkdir()
     (pinned / ".vnx-version").write_text("v2.0.0\n", encoding="utf-8")
@@ -1054,7 +1051,6 @@ def test_load_fleet_pins_skips_missing_and_malformed(tmp_path, monkeypatch):
 
 def test_prune_aborts_on_malformed_fleet_registry(tmp_path, monkeypatch, capsys):
     """Registry EXISTS but JSON parse fails => fail CLOSED: nothing pruned."""
-    monkeypatch.delenv("VNX_PROJECT_REGISTRY", raising=False)
     registry = tmp_path / "projects.json"
     registry.write_text("{ not valid json", encoding="utf-8")
     names = ["v1.0.1", "v1.0.2", "v1.0.3", "v1.0.4", "v1.0.5"]
@@ -1145,7 +1141,6 @@ def test_prune_aborts_on_unreadable_protected_versions_file(tmp_path, monkeypatc
 
 def test_prune_abort_dry_run_warns_without_audit(tmp_path, monkeypatch, capsys):
     """Dry-run also aborts pruning, but (like all dry-run paths) writes no audit."""
-    monkeypatch.delenv("VNX_PROJECT_REGISTRY", raising=False)
     registry = tmp_path / "projects.json"
     registry.write_text("{ not valid json", encoding="utf-8")
     names = ["v1.0.1", "v1.0.2", "v1.0.3", "v1.0.4", "v1.0.5"]
@@ -1184,7 +1179,6 @@ def test_prune_absent_sources_still_prunes_unprotected(tmp_path, monkeypatch):
 
 
 def test_load_fleet_pins_raises_on_malformed_registry(tmp_path, monkeypatch):
-    monkeypatch.delenv("VNX_PROJECT_REGISTRY", raising=False)
     registry = tmp_path / "projects.json"
     registry.write_text("{ not valid json", encoding="utf-8")
 
@@ -1226,7 +1220,7 @@ def test_vnx_update_dry_run_threads_protect_pins(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 # OI-1379: disk-scan protection source (4). The fleet registry (source 1)
 # only protects REGISTERED consumer projects; a project that pins a version
-# but was never registered is invisible to it. VNX_PIN_SCAN_ROOTS bounds a
+# but was never registered is invisible to it. DEFAULT_PIN_SCAN_ROOT bounds a
 # disk scan for stray .vnx-version files outside the registry.
 # ---------------------------------------------------------------------------
 
@@ -1243,7 +1237,7 @@ def test_prune_protects_pin_found_via_disk_scan(tmp_path, monkeypatch):
     consumer.mkdir(parents=True)
     pin_file = consumer / ".vnx-version"
     pin_file.write_text("v1.0.1\n", encoding="utf-8")
-    monkeypatch.setenv("VNX_PIN_SCAN_ROOTS", str(scan_root))
+    monkeypatch.setattr(update_module, "DEFAULT_PIN_SCAN_ROOT", scan_root)
 
     audit_log = tmp_path / "events" / "central_install.ndjson"
     buf = io.StringIO()
@@ -1264,7 +1258,7 @@ def test_prune_protects_pin_found_via_disk_scan(tmp_path, monkeypatch):
 
 
 def test_prune_disk_scan_ignores_pins_outside_configured_roots(tmp_path, monkeypatch):
-    """A pin outside every configured VNX_PIN_SCAN_ROOTS entry does NOT
+    """A pin outside every configured pin scan root does NOT
     protect its version — the scan boundary is explicit, not a silent
     catch-all over the whole filesystem."""
     names = ["v1.0.1", "v1.0.2", "v1.0.3", "v1.0.4", "v1.0.5"]
@@ -1275,7 +1269,7 @@ def test_prune_disk_scan_ignores_pins_outside_configured_roots(tmp_path, monkeyp
     unscanned = tmp_path / "outside-scan" / "some-project"
     unscanned.mkdir(parents=True)
     (unscanned / ".vnx-version").write_text("v1.0.1\n", encoding="utf-8")
-    monkeypatch.setenv("VNX_PIN_SCAN_ROOTS", str(scanned_root))
+    monkeypatch.setattr(update_module, "DEFAULT_PIN_SCAN_ROOT", scanned_root)
 
     _prune_old_versions(
         tmp_path, keep_last=3, dry_run=False,
@@ -1299,7 +1293,7 @@ def test_prune_aborts_on_unreadable_pin_scan_root(tmp_path, monkeypatch, capsys)
     scan_root = tmp_path / "locked-scan-root"
     scan_root.mkdir()
     scan_root.chmod(0o000)
-    monkeypatch.setenv("VNX_PIN_SCAN_ROOTS", str(scan_root))
+    monkeypatch.setattr(update_module, "DEFAULT_PIN_SCAN_ROOT", scan_root)
     audit_log = tmp_path / "events" / "central_install.ndjson"
 
     try:
@@ -1333,7 +1327,7 @@ def test_prune_dry_run_prints_disk_scan_protection_reason(tmp_path, monkeypatch)
     consumer.mkdir(parents=True)
     pin_file = consumer / ".vnx-version"
     pin_file.write_text("v1.0.1\n", encoding="utf-8")
-    monkeypatch.setenv("VNX_PIN_SCAN_ROOTS", str(scan_root))
+    monkeypatch.setattr(update_module, "DEFAULT_PIN_SCAN_ROOT", scan_root)
 
     buf = io.StringIO()
     with redirect_stdout(buf):
@@ -1371,7 +1365,7 @@ def test_prune_ignores_pin_under_vnx_data_but_protects_sibling_project_pin(tmp_p
     real_pin = real_project / ".vnx-version"
     real_pin.write_text("v1.0.2\n", encoding="utf-8")
 
-    monkeypatch.setenv("VNX_PIN_SCAN_ROOTS", str(scan_root))
+    monkeypatch.setattr(update_module, "DEFAULT_PIN_SCAN_ROOT", scan_root)
 
     buf = io.StringIO()
     with redirect_stdout(buf):
@@ -1395,8 +1389,7 @@ def test_prune_ignores_pin_under_vnx_data_but_protects_sibling_project_pin(tmp_p
 
 
 def test_resolve_pin_scan_roots_defaults_to_home(monkeypatch):
-    monkeypatch.delenv("VNX_PIN_SCAN_ROOTS", raising=False)
-    assert _resolve_pin_scan_roots() == [Path.home()]
+    assert _resolve_pin_scan_roots() == [update_module.DEFAULT_PIN_SCAN_ROOT]
 
 
 def test_resolve_pin_scan_roots_parses_colon_separated_list(tmp_path):

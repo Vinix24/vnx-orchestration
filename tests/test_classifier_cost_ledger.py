@@ -40,7 +40,7 @@ TOKENS = {"input_uncached": 4000, "cache_hit": 10000, "cache_write_5m": 0, "cach
 FAKE_CLAUDE = r'''#!/usr/bin/env python3
 import json, os, sys
 args = sys.argv[1:]
-target = os.path.join(os.environ["VNX_CLAUDE_PROJECTS_DIR"], "-fake-worktree")
+target = os.path.join(os.path.join(os.path.expanduser("~"), ".claude", "projects"), "-fake-worktree")
 os.makedirs(target, exist_ok=True)
 path = os.path.join(target, args[args.index("--session-id") + 1] + ".jsonl")
 with open(path, "w", encoding="utf-8") as fh:
@@ -58,17 +58,19 @@ sys.stdout.write(%r)
 def store(tmp_path, monkeypatch):
     data = tmp_path / "store"
     (data / "state").mkdir(parents=True)
-    projects, bin_dir = tmp_path / "claude-projects", tmp_path / "bin"
-    projects.mkdir()
+    home = tmp_path / "home"
+    projects, bin_dir = home / ".claude" / "projects", tmp_path / "bin"
+    projects.mkdir(parents=True)
     bin_dir.mkdir()
     (bin_dir / "claude").write_text(FAKE_CLAUDE, encoding="utf-8")
     (bin_dir / "claude").chmod(0o755)
     env = {"VNX_DATA_DIR": data, "VNX_DATA_DIR_EXPLICIT": "1", "VNX_STATE_DIR": data / "state",
-           "VNX_PROJECT_ID": PROJECT, "VNX_CLAUDE_PROJECTS_DIR": projects,
+           "VNX_PROJECT_ID": PROJECT,
            "DEEPSEEK_API_KEY": "sk-test-k4b1-not-a-real-key",
            "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}"}
     for key, value in env.items():
         monkeypatch.setenv(key, str(value))
+    monkeypatch.setenv("HOME", str(home))  # the harvest reads ~/.claude/projects
     return SimpleNamespace(ledger=data / "events" / "provider_costs.ndjson")
 
 

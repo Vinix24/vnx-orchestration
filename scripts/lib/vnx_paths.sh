@@ -384,15 +384,9 @@ fi
 # relying on hardcoded version-pinned paths.
 
 # Resolve the directory containing the node binary.
-# Search order: VNX_NODE_PATH env override > nvm current > nvm installed versions > system PATH.
+# Search order: nvm current > nvm installed versions > system PATH.
 # Prints the directory path to stdout. Returns 1 if node is not found.
 _resolve_node_path() {
-  # Explicit override
-  if [ -n "${VNX_NODE_PATH:-}" ] && [ -x "${VNX_NODE_PATH}/node" ]; then
-    echo "$VNX_NODE_PATH"
-    return 0
-  fi
-
   # nvm: current default
   local nvm_dir="${NVM_DIR:-$HOME/.nvm}"
   if [ -d "$nvm_dir/versions/node" ]; then

@@ -140,7 +140,7 @@ def test_push_due_interval_and_closed(sdir, monkeypatch):
     assert [p["point_id"] for p in inbox.push_due(PID, sessie="s", now=NOW, state_dir=sdir)] == [pid]
     assert inbox.push_due(PID, sessie="s", now="2026-11-15T15:59:00Z", state_dir=sdir) == []
     assert len(inbox.push_due(PID, sessie="s", now="2026-11-15T16:00:00Z", state_dir=sdir)) == 1
-    monkeypatch.setenv("VNX_INBOX_PUSH_INTERVAL_H", "1")
+    monkeypatch.setattr(inbox, "_interval_h", lambda: 1.0)
     assert len(inbox.push_due(PID, sessie="s", now="2026-11-15T17:00:00Z", state_dir=sdir)) == 1
     assert len(_reserved(sdir)) == 3
 

@@ -740,7 +740,7 @@ class TestPremigrateBackupRotation:
 
     def test_rotation_keeps_exactly_n_files(self, tmp_path: Path,
                                              monkeypatch: pytest.MonkeyPatch) -> None:
-        """When VNX_PREMIGRATE_BACKUP_KEEP is set, rotation prunes excess
+        """Rotation prunes excess
         premigrate backups after a successful backup."""
         from db_backup_rotation import rotate_backups
 
