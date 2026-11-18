@@ -357,6 +357,58 @@ def read_events(project_id: str, state_dir: Optional[Path] = None) -> tuple:
                 events.append(event)
     return events, skipped
 
+def _window_line(line: bytes, project_id: str, ledger: str) -> tuple:
+    """((ts, line), None) or (None, skip reason) for one line of ``read_window``."""
+    if ledger == "permission_events":
+        obj, why = _read_line(line, project_id)
+    else:
+        try:
+            obj = json.loads(line.decode("utf-8"))
+        except ValueError:  # vnx-silent-except: counted by the caller as unparseable, no content kept
+            obj = None
+        why = None if isinstance(obj, dict) and obj.get("project_id") == project_id else (
+            "foreign_project" if isinstance(obj, dict) and isinstance(obj.get("project_id"), str) else "unparseable")
+    if why:
+        return None, why
+    try:
+        when = datetime.fromisoformat(str(obj["ts"]).replace("Z", "+00:00"))
+    except (KeyError, ValueError):  # vnx-silent-except: counted by the caller as bad_ts, never placed in a window
+        return None, "bad_ts"
+    return ((when.astimezone(timezone.utc), obj), None) if when.tzinfo is not None else (None, "bad_ts")
+
+def read_window(project_id: str, ledger: str, start: datetime, end: datetime, state_dir: Optional[Path] = None) -> tuple:
+    """``(lines, skipped, held_from)`` of one ledger for ``start <= ts < end``, read only, over the live file and the
+    archive month files of ``prune`` (ADR-075 decision 6, ADR-086 decision 4) that can hold the window: in time order,
+    a line both in the archive and live (a retried prune round) once. A torn tail, an unparseable line, a foreign
+    ``project_id`` or a ``ts`` without a timezone is skipped and counted per reason, never raised. ``held_from`` is
+    the oldest time the store still holds, ``None`` when it holds no line: a window that starts before it is not held."""
+    import permission_events_prune as prune  # late: prune imports this module
+    state = _state_dir(project_id, state_dir)
+    with _locked(state):  # a prune between the archive reads and the live read would move lines past the reader
+        archive, start, end = state / prune.ARCHIVE_DIR, start.astimezone(timezone.utc), end.astimezone(timezone.utc)
+        months = sorted(archive.glob(f"{prune.LEDGERS[ledger].split('.')[0]}-[0-9][0-9][0-9][0-9]-[0-9][0-9].ndjson"))
+        first = f"{start.year:04d}-{start.month:02d}"
+        older = [p for p in months if p.stem[-7:] < first]
+        paths = [p for p in months if first <= p.stem[-7:] <= f"{end.year:04d}-{end.month:02d}"] + [state / prune.LEDGERS[ledger]]
+        seen: set = set()
+        found: List[tuple] = []
+        skipped: Dict[str, int] = {}
+        oldest: Optional[datetime] = None
+        for path in (older[-1:] if older else []) + paths:  # the newest older month only proves the window start is held
+            *done, tail = (path.read_bytes() if path.exists() else b"").split(b"\n")
+            if tail.strip():
+                skipped["torn_tail"] = skipped.get("torn_tail", 0) + 1
+            for line in (ln for ln in done if ln.strip()):
+                item, why = _window_line(line, project_id, ledger)
+                if item is None:
+                    skipped[why] = skipped.get(why, 0) + 1
+                    continue
+                oldest = min(oldest, item[0]) if oldest else item[0]
+                if path not in older and start <= item[0] < end and line not in seen:
+                    seen.add(line)
+                    found.append(item)
+    return [obj for _when, obj in sorted(found, key=lambda p: p[0])], skipped, oldest
+
 def write_event(event: Dict[str, Any], project_id: str, state_dir: Optional[Path] = None) -> bool:
     """Append one event; False when its event_id was already in the ledger."""
     return write_events([event], project_id, state_dir) == 1

@@ -120,6 +120,11 @@ def run_permission_chain(state_dir: Path, project_id: str, projects_root: Path, 
                       build_counts=built[2], persist=outcome)
     except Exception as exc:  # the chain must never fail dream: the failure is written as status error with the step
         report.update(status="error", reden=f"{step}: {type(exc).__name__}")
+    try:  # ADR-086: the effect per applied permissie rule; its failure is one error entry, never the chain's
+        import permission_effect
+        report["effect"] = permission_effect.section(Path(state_dir), project_id, stamp)
+    except Exception as exc:  # an import or an unexpected raise still leaves the rest of the report written
+        report["effect"] = [{"outcome": "error", "reden": type(exc).__name__}]
     try:
         _write_report(state_dir, report)
     except OSError as exc:  # vnx-silent-except: dream still must not fail; the error goes to stderr
