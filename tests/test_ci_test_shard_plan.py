@@ -36,7 +36,7 @@ def _xml(tmp_path: Path, cases: list[tuple]) -> Path:
 
 
 def _runs(*rows):
-    return {"workflow_runs": [{"id": i, "created_at": c, "conclusion": k} for i, c, k in rows]}
+    return {"workflow_runs": [{"id": i, "created_at": c, "updated_at": c, "conclusion": k} for i, c, k in rows]}
 
 
 def _select(tmp_path, runs, arts=GOOD_ART, before=NOW, download=None):
@@ -130,6 +130,33 @@ def test_select_source_asks_the_api_for_runs_created_before_the_cutoff(tmp_path)
         return _runs(*((i, "2026-11-17T13:00:00Z", "success") for i in range(100, 200)))
     run_id, _ = tsp.select_source(REPO, WF, BR, NOW, ART, tmp_path, api, lambda *a: (a[3] / "j.xml").write_text("<a/>"))
     assert run_id == 1
+
+
+def _run(i, created, updated):
+    return {"id": i, "created_at": created, "updated_at": updated, "conclusion": "success"}
+
+
+def _pick(tmp_path, rows):
+    def api(path):
+        return GOOD_ART if "/artifacts" in path else {"workflow_runs": rows}
+    return tsp.select_source(REPO, WF, BR, NOW, ART, tmp_path, api, lambda *a: (a[3] / "j.xml").write_text("<a/>"))[0]
+
+
+def test_two_shards_pick_the_same_run_when_a_run_completes_between_them(tmp_path):
+    five = _run(5, "2026-11-17T10:00:00Z", "2026-11-17T10:10:00Z")
+    six_done = _run(6, "2026-11-17T11:00:00Z", "2026-11-17T12:05:00Z")  # created before, finished after the cutoff
+    assert _pick(tmp_path, [five]) == 5  # shard 1: run 6 still running, not in the success answer
+    assert _pick(tmp_path, [six_done, five]) == 5  # shard 3: run 6 turned green after the cutoff
+
+
+def test_completed_before_cutoff_wins_and_missing_updated_at_is_skipped(tmp_path):
+    older = _run(4, "2026-11-17T09:00:00Z", "2026-11-17T09:10:00Z")
+    newer = _run(6, "2026-11-17T11:00:00Z", "2026-11-17T11:30:00Z")
+    assert _pick(tmp_path, [older, newer]) == 6
+    no_stamp = {"id": 7, "created_at": "2026-11-17T11:40:00Z", "conclusion": "success"}
+    assert _pick(tmp_path, [older, newer, no_stamp]) == 6
+    for bad in (None, "not a time", "2026-11-17T11:45:00"):
+        assert _pick(tmp_path, [older, {**no_stamp, "updated_at": bad}]) == 4
 
 
 OK_RUN = (1, "2026-11-17T01:00:00Z", "success")

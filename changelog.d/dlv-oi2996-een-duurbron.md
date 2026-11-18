@@ -1,0 +1,1 @@
+- `scripts/ci/test_shard_plan.py` `select-source` now counts only successful runs that were created and also completed (`updated_at`) before the cutoff, so every Profile A shard picks the same duration source even when a main run turns green while the shards are selecting; a run without a parseable `updated_at` does not count (OI-2996).

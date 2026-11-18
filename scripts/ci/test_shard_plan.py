@@ -139,7 +139,11 @@ def _newest_run_before(api: ApiCaller, repo: str, workflow: str, branch: str, be
             created = _parse_ts(run.get("created_at"))
         except (ValueError, AttributeError):  # no usable created_at: this run cannot be proven earlier
             continue
-        if isinstance(run_id, int) and not isinstance(run_id, bool) and created < before:
+        try:  # completed before the cutoff too: a later re-run moves updated_at, so a run only drops out, never in
+            completed = _parse_ts(run.get("updated_at"))
+        except (ValueError, AttributeError):  # no usable updated_at: completion cannot be proven earlier
+            continue
+        if isinstance(run_id, int) and not isinstance(run_id, bool) and created < before and completed <= before:
             best = max(best or (created, run_id), (created, run_id))
     if best is None:
         raise SourceError("no successful run before the timestamp")
