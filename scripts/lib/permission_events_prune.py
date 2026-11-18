@@ -1,14 +1,18 @@
-"""ADR-075 decision 6, first step: under the writers' lock, ledger lines older than 90 days move to the archive, as bytes.
+"""ADR-075 decision 6 under the writers' lock: ledger lines older than 90 days move to the archive, as bytes, and then
+an archive file goes once the last day of its month lies more than 365 days behind.
 
-The decision goes to the receipt ledger first (ADR-005); any later failure restores every live file and archive byte for
-byte and records "error". Lines without a timezone-aware ``ts`` and a torn tail stay live as they are. No archive removal.
+Move phase: the decision goes to the receipt ledger first (ADR-005); any later failure restores every live file and
+archive byte for byte, each rollback step on its own, and records "error". Lines without a timezone-aware ``ts`` and a
+torn tail stay live as they are. Removal phase, after the move phase completed: see ``_remove``.
 """
 from __future__ import annotations
 
 import json
 import os
+import re
+import stat
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -18,6 +22,8 @@ import permission_events as pe
 LEDGERS = {"permission_events": "permission_events.ndjson", "cli_invocations": "cli_invocations.ndjson"}
 LIVE_DAYS = 90
 ARCHIVE_DIR = Path("archive") / "permission_events"
+KEEP_DAYS = 365
+ARCHIVE_NAME = re.compile(r"^(permission_events|cli_invocations)-(\d{4})-(\d{2})\.ndjson$")
 
 
 def _ts(line: bytes) -> Optional[datetime]:
@@ -62,8 +68,7 @@ def _plan(state: Path, ledger: str, now: datetime) -> Tuple[bytes, Optional[byte
             oldest = min(oldest, when) if oldest else when
         live.append(kept)
     count = sum(len(v) for v in moved.values())
-    report = {"moved": count, "removed_archives": 0, "removed_reason": "removal_not_enabled", "unparseable_ts": bad,
-              "oldest_live_ts": oldest.isoformat() if oldest else None}
+    report = {"moved": count, "unparseable_ts": bad, "oldest_live_ts": oldest.isoformat() if oldest else None}
     return raw, (b"".join(live) if count else None), moved, report
 
 
@@ -75,12 +80,16 @@ def _store(state: Path, project_id: str, entry: Dict[str, Any]) -> None:
 
 
 def _record_decision(state: Path, project_id: str, now: datetime, plans: Dict[str, tuple]) -> str:
-    """Append the round's decision to the canonical receipt ledger; anything but "appended" raises."""
-    import append_receipt  # late: the receipt stack is only needed for a round that moves lines
+    ledgers = {n: {str(a.relative_to(state)): len(ls) for a, ls in p[2].items()} for n, p in plans.items()}
+    return _append_decision(state, project_id, now, "prune", ",".join(LEDGERS.values()), ledgers=ledgers)
+
+
+def _append_decision(state: Path, project_id: str, now: datetime, trigger: str, file: str, **detail: Any) -> str:
+    """Append one decision to the canonical receipt ledger; anything but "appended" raises."""
+    import append_receipt  # late: the receipt stack is only needed for a round that changes something
     receipt = {"timestamp": now.isoformat().replace("+00:00", "Z"), "event_type": "state_mutation",
                "receipt_kind": "state_mutation", "terminal": "T0", "source": "permission_events_prune",
-               "file": ",".join(LEDGERS.values()), "trigger": "prune", "project_id": project_id, "round_id": uuid.uuid4().hex,
-               "ledgers": {n: {str(a.relative_to(state)): len(ls) for a, ls in p[2].items()} for n, p in plans.items()}}
+               "file": file, "trigger": trigger, "project_id": project_id, "round_id": uuid.uuid4().hex, **detail}
     result = append_receipt.append_receipt_payload(receipt, receipts_file=str(state / "t0_receipts.ndjson"),
                                                    skip_enrichment=True)
     if getattr(result, "status", None) != "appended":
@@ -111,10 +120,95 @@ def prune(project_id: str, state_dir: Optional[Path] = None, now: Optional[datet
                 entry["ledgers"][name] = rep
             _store(state, project_id, entry)
         except BaseException as exc:
-            for path, raw in lives.items():  # every live file back to its bytes, every archive back to its old size
-                _write_bytes(path, raw)
-            for path, size in archives.items():
-                os.truncate(path, size) if size is not None else path.unlink(missing_ok=True)
-            _store(state, project_id, {"status": "error", "updated": now.isoformat(), "reason": f"{type(exc).__name__}: {exc}"[:200]})
-            raise  # a failing error write raises its own exception, chained to this one
+            failed = _rollback(lives, archives)
+            reason = "".join([f"{type(exc).__name__}: {exc}", *(f"; rollback failed: {f}" for f in failed)])
+            try:
+                _store(state, project_id, {"status": "error", "updated": now.isoformat(), "reason": reason[:1000]})
+            except Exception as err:
+                raise exc from err  # the original failure stays the one raised, the failed error write its cause
+            raise
+        entry["removal"] = _remove(state, project_id, now)
+        for name, rep in entry["ledgers"].items():
+            prefix = str(ARCHIVE_DIR / name) + "-"
+            rep["removed_archives"] = sum(rel.startswith(prefix) for rel in entry["removal"]["removed"])
+            rep["removed_reason"] = entry["removal"]["status"]
+        _store(state, project_id, entry)
         return entry
+
+
+def _rollback(lives: Dict[Path, bytes], archives: Dict[Path, Optional[int]]) -> List[str]:
+    """Every live file back to its bytes, every archive back to its old size; each step runs, each failure is named."""
+    failed: List[str] = []
+    for path, raw in lives.items():
+        try:
+            _write_bytes(path, raw)
+        except Exception as err:
+            failed.append(f"restore {path.name}: {type(err).__name__}: {err}")
+    for path, size in archives.items():
+        try:
+            os.truncate(path, size) if size is not None else path.unlink(missing_ok=True)
+        except Exception as err:
+            failed.append(f"archive {path.name}: {type(err).__name__}: {err}")
+    return failed
+
+
+def _expired(year: int, month: int, now: datetime) -> bool:
+    """True when the month is valid and its last day lies more than KEEP_DAYS days before ``now`` (UTC dates)."""
+    if not 1 <= month <= 12:
+        return False
+    try:
+        last = date(year + month // 12, month % 12 + 1, 1) - timedelta(days=1)
+    except (ValueError, OverflowError):  # vnx-silent-except: a month outside the calendar is never a removal candidate
+        return False
+    return (now.astimezone(timezone.utc).date() - last).days > KEEP_DAYS
+
+
+def _refusal(raw: bytes, year: int, month: int) -> Optional[str]:
+    """The first reason the content forbids removal, or None when every line has a ``ts`` in the file's own month."""
+    if raw and not raw.endswith(b"\n"):
+        return "torn_tail"
+    for line in (ln for ln in raw.split(b"\n") if ln.strip()):
+        when = _ts(line)
+        if when is None:
+            return "unparseable_ts"
+        if (when.year, when.month) != (year, month):
+            return "ts_outside_month"
+    return None
+
+
+def _remove(state: Path, project_id: str, now: datetime) -> Dict[str, Any]:
+    """Removal phase (caller holds the lock): an expired archive file goes only when it is a regular file inside the store
+    (lstat, never stat; a symlinked archive dir refuses the phase) and every line has a ``ts`` in the file's month.
+
+    The decision is appended first; a failed append removes nothing. There is no rollback of a removal: each file was
+    checked and recorded before it went. A failing unlink stops the phase as "error" and names what was not removed.
+    """
+    adir, rep, go = state / ARCHIVE_DIR, {"status": "ok", "removed": [], "refused": []}, {}
+    try:
+        if (state / "archive").is_symlink() or adir.is_symlink() or (
+                adir.exists() and not adir.resolve(strict=True).is_relative_to(state.resolve(strict=True))):
+            return {**rep, "status": "refused", "reason": "archive_dir_not_in_store"}
+        for path in sorted(adir.iterdir()) if adir.exists() else []:
+            m = ARCHIVE_NAME.fullmatch(path.name)
+            if not m or not _expired(int(m[2]), int(m[3]), now):
+                continue
+            rel = str(path.relative_to(state))
+            if not stat.S_ISREG(os.lstat(path).st_mode):
+                rep["refused"].append({"path": rel, "reason": "not_a_regular_file"})
+                continue
+            with open(path, "rb", opener=lambda p, f: os.open(p, f | os.O_NOFOLLOW)) as fh:
+                raw = fh.read()
+            reason = _refusal(raw, int(m[2]), int(m[3]))
+            if reason:
+                rep["refused"].append({"path": rel, "reason": reason})
+            else:
+                go[rel] = {"bytes": len(raw), "lines": sum(bool(ln.strip()) for ln in raw.split(b"\n"))}
+        if go:
+            rep["round_id"] = _append_decision(state, project_id, now, "prune_remove", str(ARCHIVE_DIR), files=go)
+        for rel in sorted(go):
+            (state / rel).unlink(missing_ok=True)  # already gone is no error
+            rep["removed"].append(rel)
+    except Exception as exc:
+        return {**rep, "status": "error", "reason": f"{type(exc).__name__}: {exc}"[:300],
+                "not_removed": sorted(set(go) - set(rep["removed"]))}
+    return rep
