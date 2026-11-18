@@ -1366,8 +1366,11 @@ _INDEX_OPEN_OUTCOME_REASON_MAX = 60
 
 def _permission_open_view(state_dir: Path, project_id: str) -> Dict[str, Any]:
     """Open permission proposals plus notifications, read only (permissieblokkades-leren L6)."""
-    import permission_chain  # type: ignore[import]
-    return permission_chain.open_view(state_dir, project_id)
+    try:
+        import permission_chain  # type: ignore[import]
+        return permission_chain.open_view(state_dir, project_id)
+    except Exception as exc:  # vnx-silent-except: a bad section must not break the build; it says why
+        return {"available": False, "reason": f"{type(exc).__name__}: {exc}"[:200]}
 
 
 def _open_outcomes_index_summary(oo: Optional[Dict[str, Any]]) -> Dict[str, Any]:
