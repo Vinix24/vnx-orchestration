@@ -1029,6 +1029,167 @@ def test_the_cli_exits_2_with_a_reason_when_the_summary_cannot_be_appended(ev, c
     assert json.loads(output.read_text(encoding="utf-8"))["exit"] == 0, "the verdict itself is written first"
 
 
+# --- the shard shape (C4a): the serial truth against the four Profile A shards of one run ------------------
+
+F = "tests/test_d.py::test_four"
+SHARD_SPLIT = {1: [A, B], 2: [C, D], 3: [E], 4: [F]}
+SHARD_ASSIGNMENT = {"tests/test_a.py": 1, "tests/test_b.py": 2, "tests/test_c.py": 3, "tests/test_d.py": 4}
+
+
+def _json(path: Path, doc: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(doc), encoding="utf-8")
+
+
+def sharded(ev: Evidence) -> dict:
+    """A reference of five files' tests and the four shards that split it exactly, as {shard: [(nodeid, case)]}."""
+    ev.ref_manifest, ev.ref_cases = manifest("full", ALL + [F]), baseline() + [(F, PASS)]
+    cases = dict(ev.ref_cases)
+    return {k: [(n, cases[n]) for n in nodeids] for k, nodeids in SHARD_SPLIT.items()}
+
+
+def write_shards(ev: Evidence, shards: dict, assignments: dict | None = None) -> list:
+    """Each shard's plan, collection and phase as the shard jobs upload them; shard 1 also its serial phase and the shadow record."""
+    dirs = [ev.tmp / f"shard-{k}" for k in shards]
+    for (k, cases), d in zip(shards.items(), dirs):
+        _json(d / "args/shard.json", {"schema": "vnx-ci-shard/1", **ev.run, "shard": k, "shards": len(shards),
+                                      "source": "junit:1", "assignment": (assignments or {}).get(k, SHARD_ASSIGNMENT)})
+        _json(d / "args/collected.json", {**manifest("serial", ALL + [F]), "phase": "collected", **ev.run})
+        write_phase(d, "shard", manifest("shard", [n for n, _ in cases]), cases, ev.stamp_of)
+    write_phase(dirs[0], "serial", ev.serial_manifest, ev.serial_cases, ev.stamp_of)
+    _json(dirs[0] / cxp.SHADOW_RECORD_FILE, {**ev.shadow_record, **ev.stamp_of("shadow")})
+    return dirs
+
+
+def shard_verdict(ev: Evidence, dirs: list) -> dict:
+    ev.write()
+    return cxp.evaluate(ev.inputs(candidate_dir=None, shard_dirs=dirs))
+
+
+def _partition(verdict: dict) -> dict:
+    return {(e["nodeid"], e["problem"]): e.get("phases") for e in verdict["differences"]["partition"]}
+
+
+def test_four_shards_that_split_the_reference_exactly_are_parity(ev):
+    verdict = shard_verdict(ev, write_shards(ev, sharded(ev)))
+    assert (verdict["exit"], verdict["verdict"], verdict["invalid_evidence"]) == (0, "parity", [])
+    assert (verdict["candidate_shape"], verdict["shards"], verdict["selection_fingerprint"]) == ("shards", 4, None)
+    assert set(verdict["counts"]) == {"reference", "serial", "shard 1/4", "shard 2/4", "shard 3/4", "shard 4/4"}
+    assert verdict["step_failures"] == [] and verdict["shadow"]["record"] == "present"
+
+
+def test_the_two_phase_verdict_gains_only_its_shape(ev):
+    verdict = ev.verdict()
+    assert verdict["candidate_shape"] == "two_phase" and "shards" not in verdict
+    assert {e["problem"] for e in cxp.compare_partition(*_phases_with_b_twice(ev))} == {"in both candidate phases"}
+
+
+def _phases_with_b_twice(ev: Evidence) -> tuple:
+    reader = cxp.PhaseReader(PINS, KEY, (ev.run["run_id"], ev.run["run_attempt"]), [])
+    ev.serial_manifest, ev.serial_cases = manifest("serial", [B]), [(B, PASS)]
+    ev.write()
+    serial, parallel = reader.load(ev.candidate, "serial"), reader.load(ev.candidate, "parallel")
+    return reader.load(ev.reference, "full"), [serial, parallel]
+
+
+def test_a_test_in_two_shards_names_both_shards(ev):
+    shards = sharded(ev)
+    shards[3] = shards[2] + shards[3]
+    dirs = write_shards(ev, shards, {3: {**SHARD_ASSIGNMENT, "tests/test_b.py": 3}})
+    verdict = shard_verdict(ev, dirs)
+    assert verdict["exit"] == 1 and verdict["invalid_evidence"] == []
+    assert _partition(verdict) == {(n, "in more than one candidate phase"): ["shard 2/4", "shard 3/4"] for n in (C, D)}
+
+
+def test_a_test_in_shard_ones_serial_phase_and_a_shard_names_both(ev):
+    shards = sharded(ev)
+    ev.serial_manifest, ev.serial_cases = manifest("serial", [A]), [(A, PASS)]
+    verdict = shard_verdict(ev, write_shards(ev, shards))
+    assert verdict["exit"] == 1
+    assert _partition(verdict) == {(A, "in more than one candidate phase"): ["serial", "shard 1/4"]}
+
+
+def test_a_reference_test_in_no_shard_breaks_the_partition(ev):
+    shards = sharded(ev)
+    shards[4] = []
+    no_d = {f: n for f, n in SHARD_ASSIGNMENT.items() if n != 4}
+    verdict = shard_verdict(ev, write_shards(ev, shards, {k: no_d for k in shards}))
+    assert verdict["exit"] == 1
+    assert _partition(verdict) == {(F, "in no candidate phase"): None}
+    assert [e["nodeid"] for e in verdict["differences"]["not_run_in_candidate"]] == [F]
+
+
+def test_a_shard_test_outside_the_reference_names_its_shard(ev):
+    shards = sharded(ev)
+    ev.ref_manifest, ev.ref_cases = manifest("full", ALL), baseline()
+    verdict = shard_verdict(ev, write_shards(ev, shards))
+    assert verdict["exit"] == 1
+    assert _partition(verdict) == {(F, "not in the reference selection"): ["shard 4/4"]}
+
+
+def test_green_in_shard_four_and_red_in_the_serial_truth_is_an_outcome_difference(ev):
+    shards = sharded(ev)
+    ev.ref_cases[-1] = (F, FAIL)
+    verdict = shard_verdict(ev, write_shards(ev, shards))
+    assert verdict["exit"] == 1
+    assert _only(verdict, "outcome_class_differs") == [
+        {"nodeid": F, "key": list(KEY(F)), "reference": "fail", "candidate": "pass"}]
+
+
+@pytest.mark.parametrize("damage, reason", [
+    (lambda ds: (ds[0] / "manifest-serial.json").unlink(), "missing_manifest"),
+    (lambda ds: shutil.rmtree(ds[2]), "missing_shard_plan"),
+    (lambda ds: (ds[1] / "manifest-shard.json").unlink(), "missing_manifest"),
+    (lambda ds: (ds[3] / "args/collected.json").write_text("{", encoding="utf-8"), "unparsable_manifest"),
+    (lambda ds: _json(ds[1] / "args/shard.json", {"shard": None}), "stale_evidence"),
+    (lambda ds: _json(ds[1] / "args/shard.json", {"run_id": "99", "run_attempt": "1", "shard": None}),
+     "malformed_shard_plan"),
+], ids=["shard-1-without-serial", "shard-dir-missing", "shard-without-manifest", "collected-unparsable",
+        "plan-without-stamp", "plan-shard-none"])
+def test_unusable_shard_evidence_is_invalid_never_a_pass(ev, damage, reason):
+    dirs = write_shards(ev, sharded(ev))
+    damage(dirs)
+    verdict = shard_verdict(ev, dirs)
+    assert (verdict["exit"], verdict["verdict"], verdict["differences"]) == (2, "invalid_evidence", None)
+    assert reason in _reasons(verdict)
+    assert all(p["detail"].startswith("shard ") for p in verdict["invalid_evidence"])
+
+
+def _shard_cli(ev: Evidence, dirs: list, *extra: str) -> tuple:
+    ev.write()
+    output, summary = ev.tmp / "out" / cxp.VERDICT_FILE, ev.tmp / "summary.md"
+    code = cxp.main(["compare", "--reference", str(ev.reference), "--constraints", str(ev.constraints),
+                     "--output", str(output), "--summary", str(summary), "--profile", "heavy",
+                     "--run-id", ev.run["run_id"], "--run-attempt", ev.run["run_attempt"],
+                     *[a for d in dirs for a in ("--shard-dir", str(d))], *extra])
+    return code, json.loads(output.read_text(encoding="utf-8")), summary.read_text(encoding="utf-8")
+
+
+def test_the_cli_compares_the_shards_in_order_and_ignores_the_args_dir(ev):
+    dirs = write_shards(ev, sharded(ev))
+    code, verdict, summary = _shard_cli(ev, dirs, "--args-dir", str(ev.tmp / "no-such-args"))
+    assert (code, verdict["candidate_shape"], verdict["shards"]) == (0, "shards", 4)
+    assert "Candidate: 4 Profile A shards" in summary
+    code, verdict, _ = _shard_cli(ev, dirs[::-1])
+    assert code == 2 and "malformed_shard_plan" in _reasons(verdict), "shard k must be the k-th --shard-dir"
+
+
+def test_the_cli_exits_2_when_shard_one_has_no_serial_phase(ev):
+    dirs = write_shards(ev, sharded(ev))
+    (dirs[0] / "junit-serial.xml").unlink(missing_ok=True)
+    (dirs[0] / "manifest-serial.json").unlink()
+    code, verdict, _ = _shard_cli(ev, dirs)
+    assert code == 2 and "missing_manifest" in _reasons(verdict)
+
+
+@pytest.mark.parametrize("shape", [["--candidate", "c", "--shard-dir", "s"], []], ids=["both", "neither"])
+def test_compare_needs_exactly_one_candidate_shape(tmp_path, capsys, shape):
+    with pytest.raises(SystemExit) as exc:
+        cxp.main(["compare", "--reference", "r", "--constraints", "c", "--output", str(tmp_path / "v.json"), *shape])
+    assert exc.value.code == 2 and not (tmp_path / "v.json").exists()
+    assert "--candidate" in capsys.readouterr().err
+
+
 # --- the selection fingerprint ---------------------------------------------------------------------------
 
 
