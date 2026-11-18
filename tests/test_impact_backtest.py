@@ -83,7 +83,7 @@ class Gh:
             junit(target / "junit-serial.xml", self.cases[run_id], stamp=(str(run_id), "1"))
             return ""
         if argv[:2] == ["gh", "api"]:
-            return json.dumps(self.jobs[int(argv[2].split('/')[3])] if self.jobs else jobs())
+            return json.dumps(self.jobs[int(argv[2].split('/')[5])] if self.jobs else jobs())
         raise AssertionError(f"unexpected gh call {argv}")
 
 
