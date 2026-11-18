@@ -803,6 +803,26 @@ class TestRunAllChecksAndHalt:
         payload = json.loads(halt_path.read_text())
         assert payload["triggered"][0]["check_id"] == "x"
 
+    def test_write_halt_file_separates_scoped_out_from_triggered(self, tmp_path):
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        blocking = StopConditionResult("provider_exhausted", CheckStatus.TRIGGERED, "bad")
+        other = StopConditionResult("repeated_gate_failure_cause", CheckStatus.TRIGGERED, "other gate")
+        halt_path = write_halt_file(
+            state_dir, [blocking, other], scoped_out=[other], scope={"providers": ["kimi"], "gates": ["glm_gate"]},
+        )
+        payload = json.loads(halt_path.read_text())
+        assert [t["check_id"] for t in payload["triggered"]] == ["provider_exhausted"]
+        assert payload["scoped_out"][0]["check_id"] == "repeated_gate_failure_cause"
+        assert payload["scoped_out"][0]["scope"] == {"providers": ["kimi"], "gates": ["glm_gate"]}
+        assert [c.get("scope") for c in payload["all_checks"]] == [None, "scoped_out"]
+
+    def test_write_halt_file_default_has_empty_scoped_out(self, tmp_path):
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        halt_path = write_halt_file(state_dir, [StopConditionResult("x", CheckStatus.TRIGGERED, "bad")])
+        assert json.loads(halt_path.read_text())["scoped_out"] == []
+
 
 # ── central-mode path gate (OI: un-grandfathered violation, PR #1754 review) ─
 #
