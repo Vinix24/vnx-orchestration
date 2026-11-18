@@ -1,4 +1,5 @@
 {
+ "candidate_shape": "two_phase",
  "counts": null,
  "differences": null,
  "event": "pull_request",
