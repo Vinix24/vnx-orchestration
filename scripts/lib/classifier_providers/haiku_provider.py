@@ -9,7 +9,6 @@ the margin, so the record's ``cost_usd`` is 0; there is no flat estimate.
 
 from __future__ import annotations
 
-import os
 import shutil
 import subprocess
 import time
@@ -35,11 +34,9 @@ class HaikuProvider(ClassifierProvider):
         model: Optional[str] = None,
         timeout_seconds: Optional[int] = None,
     ) -> None:
-        self.model = model or os.environ.get("VNX_HAIKU_MODEL", _DEFAULT_MODEL)
+        self.model = model or _DEFAULT_MODEL
         self.timeout_seconds = int(
-            timeout_seconds
-            if timeout_seconds is not None
-            else os.environ.get("VNX_HAIKU_TIMEOUT", _DEFAULT_TIMEOUT)
+            timeout_seconds if timeout_seconds is not None else _DEFAULT_TIMEOUT
         )
 
     def is_present(self) -> bool:

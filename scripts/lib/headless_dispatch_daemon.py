@@ -194,10 +194,9 @@ def _run_governance_pre_check(
         logger.debug("governance_enforcement.yaml not found — skipping pre-check")
         return False, [], None
 
-    mode = os.environ.get("VNX_GOVERNANCE_MODE", "") or None
     enforcer = GovernanceEnforcer()
     try:
-        enforcer.load_config(DEFAULT_CONFIG_PATH, mode_override=mode)
+        enforcer.load_config(DEFAULT_CONFIG_PATH)
     except Exception as exc:
         logger.warning("Failed to load governance config: %s — skipping pre-check", exc)
         return False, [], None
@@ -428,10 +427,10 @@ def _deliver(
     scripts_lib = _repo_root() / "scripts" / "lib"
     sys.path.insert(0, str(scripts_lib))
 
-    # worker-provider-kimi-flip (20260723): mirrors pool_worker_runner.py's VNX_DISPATCH_MODEL
+    # worker-provider-kimi-flip (20260723): mirrors pool_worker_runner.py's fixed
     # fallback, which stays kimi-k3. The registry default in vnx_workers.default.yaml is
     # claude/sonnet; the two are decided separately.
-    model = os.environ.get("VNX_DISPATCH_MODEL", "kimi-k3")
+    model = "kimi-k3"
 
     # Track effective lease target — updated if reroute + lease swap occurs
     eff_terminal = original_terminal if original_terminal is not None else meta.target_terminal

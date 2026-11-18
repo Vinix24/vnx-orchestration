@@ -162,8 +162,7 @@ def _await_report(proc: subprocess.Popen, report_path: Path) -> None:
 def no_inherited_timeouts(monkeypatch):
     """No deadline, stall or model override from the shell running the tests."""
     for key in (
-        "VNX_TOTAL_DEADLINE", "VNX_CHUNK_TIMEOUT", "VNX_KIMI_TIMEOUT",
-        "VNX_KIMI_STALL_THRESHOLD", "VNX_KIMI_MODEL", "VNX_KIMI_GATE_MODEL",
+        "VNX_TOTAL_DEADLINE", "VNX_CHUNK_TIMEOUT", "VNX_KIMI_MODEL", "VNX_KIMI_GATE_MODEL",
     ):
         monkeypatch.delenv(key, raising=False)
 

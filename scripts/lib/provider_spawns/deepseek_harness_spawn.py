@@ -92,15 +92,12 @@ _HARNESS_SCRUB_KEYS: frozenset = frozenset({"ANTHROPIC_API_KEY", "CLAUDE_CODE_OA
 def resolve_harness_model(model: Optional[str] = None) -> str:
     """Return the DeepSeek model id for the harness lane.
 
-    Honours an explicit ``model`` argument, then the ``VNX_DEEPSEEK_HARNESS_MODEL``
-    env override, then the v4-pro default.  Empty/whitespace values are ignored.
+    Honours an explicit ``model`` argument, then the v4-pro default.
+    Empty/whitespace values are ignored.
     """
     explicit = (model or "").strip()
     if explicit:
         return explicit
-    env_model = (os.environ.get("VNX_DEEPSEEK_HARNESS_MODEL", "") or "").strip()
-    if env_model:
-        return env_model
     return DEFAULT_DEEPSEEK_HARNESS_MODEL
 
 

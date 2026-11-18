@@ -60,16 +60,15 @@ _HARNESS_SCRUB_KEYS: frozenset = frozenset({"ANTHROPIC_API_KEY", "CLAUDE_CODE_OA
 
 
 def resolve_harness_model(model: Optional[str] = None) -> str:
-    """GLM model id for the proxy. Explicit arg → VNX_GLM_HARNESS_MODEL → glm-5.2."""
+    """GLM model id for the proxy. Explicit arg → glm-5.2."""
     explicit = (model or "").strip()
     if explicit and explicit != "sonnet":
         return explicit
-    env_model = (os.environ.get("VNX_GLM_HARNESS_MODEL", "") or "").strip()
-    return env_model or DEFAULT_GLM_HARNESS_MODEL
+    return DEFAULT_GLM_HARNESS_MODEL
 
 
 def _proxy_url() -> str:
-    return (os.environ.get("VNX_GLM_PROXY_URL", "") or "").strip() or DEFAULT_GLM_PROXY_URL
+    return DEFAULT_GLM_PROXY_URL
 
 
 def _proxy_key() -> str:
@@ -159,7 +158,7 @@ def spawn_glm_harness(
     Raises ``provider_switch.ProviderDisabledError`` before the proxy probe when the operator
     switched glm off for the project ``extra_env`` carries (``VNX_PROJECT_ID``).
     ``spawn_claude`` decides glm again: this lane names the family of its redirect
-    (``base_url_family``), so a ``VNX_GLM_PROXY_URL`` on any host or port is decided as glm,
+    (``base_url_family``), so a proxy URL on any host or port is decided as glm,
     never refused as a host the switch's host map does not know.
     """
     provider_switch.require("glm-harness", consumer="glm_harness_spawn",

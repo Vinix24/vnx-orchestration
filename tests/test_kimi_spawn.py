@@ -1509,22 +1509,13 @@ class TestSpawnKimiChunkStallFloor(unittest.TestCase):
         fake_proc.stderr = io.BytesIO(b"")
         fake_proc.wait = MagicMock(return_value=0)
 
-        # Remove the spawn-specific stall env so the default path is exercised.
-        saved = {
-            k: os.environ.pop(k)
-            for k in ("VNX_KIMI_STALL_THRESHOLD", "VNX_KIMI_TIMEOUT")
-            if k in os.environ
-        }
-        try:
-            with patch("provider_spawns.kimi_spawn._start_kimi_subprocess") as mock_start, \
-                 patch("provider_spawns.kimi_spawn._KimiNormalizerHost.drain_stream", fake_drain):
-                mock_start.return_value = (fake_proc, None)
-                spawn_kimi(
-                    "prompt", dispatch_id="d1", terminal_id="T1",
-                    chunk_timeout=chunk_timeout, total_deadline=total_deadline,
-                )
-        finally:
-            os.environ.update(saved)
+        with patch("provider_spawns.kimi_spawn._start_kimi_subprocess") as mock_start, \
+             patch("provider_spawns.kimi_spawn._KimiNormalizerHost.drain_stream", fake_drain):
+            mock_start.return_value = (fake_proc, None)
+            spawn_kimi(
+                "prompt", dispatch_id="d1", terminal_id="T1",
+                chunk_timeout=chunk_timeout, total_deadline=total_deadline,
+            )
         return captured
 
     def test_long_deadline_floors_default_stall(self):
@@ -1533,37 +1524,6 @@ class TestSpawnKimiChunkStallFloor(unittest.TestCase):
             chunk_timeout=1200.0, total_deadline=3600.0,
         )
         self.assertEqual(captured["chunk_timeout"], 1800.0)
-        self.assertEqual(captured["total_deadline"], 3600.0)
-
-    def test_spawn_specific_env_override_skips_floor(self):
-        """VNX_KIMI_STALL_THRESHOLD explicitly set retains top precedence."""
-        captured = {}
-
-        def fake_drain(
-            self, process, terminal_id, dispatch_id, event_store, *,
-            chunk_timeout, total_deadline, raw_tee_path=None,
-        ):
-            captured["chunk_timeout"] = chunk_timeout
-            captured["total_deadline"] = total_deadline
-            return iter(())
-
-        fake_proc = MagicMock()
-        fake_proc.returncode = 0
-        fake_proc.poll.return_value = 0
-        fake_proc.stdout = io.BytesIO(b"")
-        fake_proc.stderr = io.BytesIO(b"")
-        fake_proc.wait = MagicMock(return_value=0)
-
-        with patch("provider_spawns.kimi_spawn._start_kimi_subprocess") as mock_start, \
-             patch("provider_spawns.kimi_spawn._KimiNormalizerHost.drain_stream", fake_drain), \
-             patch.dict(os.environ, {"VNX_KIMI_STALL_THRESHOLD": "30.0"}, clear=False):
-            mock_start.return_value = (fake_proc, None)
-            spawn_kimi(
-                "prompt", dispatch_id="d1", terminal_id="T1",
-                chunk_timeout=1200.0, total_deadline=3600.0,
-            )
-
-        self.assertEqual(captured["chunk_timeout"], 30.0)
         self.assertEqual(captured["total_deadline"], 3600.0)
 
 

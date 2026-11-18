@@ -163,16 +163,11 @@ materialized seed (the reference starting point) and award the naive baseline
 (~3.5/5) to a worker that did **nothing**
 ([`scorer.py:284-319`](runners/scorer.py)). A no-show deserves a zero.
 
-### Deliverable-on-failure, gated by real wallclock
+### Deliverable-on-failure is not scored
 Some harness lanes produce a **correct** deliverable but the `claude` CLI exits
 `rc=1` (the open model doesn't close the agentic loop cleanly), so
-`dispatch_result.success` is `False` even though the work is done. The
-`VNX_BENCH_SCORE_DELIVERABLE_ON_FAILURE` flag lets the scorer fall through and
-verify the on-disk deliverable instead of auto-DNF — **but only when the cell
-actually ran** (`_ran_for_real = wallclock >= 5.0s`,
-[`scorer.py:296-304`](runners/scorer.py)). An immediate-exit (rate-limit,
-session-create failure) makes no real attempt and leaves only the seed, so it
-stays a DNF. This credits genuine work without ever crediting a no-op.
+`dispatch_result.success` is `False`. The scorer records that cell as a DNF: there is no
+switch that makes it verify the on-disk deliverable instead.
 
 ### Retry on infra failure, with backoff
 [`_run_with_retry()`](runners/run_field_tests.py#L291) retries a DNF cell up to

@@ -1044,10 +1044,9 @@ class TestGateTimeoutConfig:
         monkeypatch.setenv("VNX_CODEX_STALL_THRESHOLD", "30")
         assert gate_stall_threshold("codex_gate") == 30
 
-    def test_env_override_kimi_stall_threshold(self, monkeypatch):
+    def test_kimi_stall_threshold_is_the_fixed_default(self):
         from headless_adapter import gate_stall_threshold
-        monkeypatch.setenv("VNX_KIMI_STALL_THRESHOLD", "30")
-        assert gate_stall_threshold("kimi_gate") == 30
+        assert gate_stall_threshold("kimi_gate") == 300
 
     def test_unknown_gate_uses_defaults(self):
         from headless_adapter import gate_timeout, gate_stall_threshold

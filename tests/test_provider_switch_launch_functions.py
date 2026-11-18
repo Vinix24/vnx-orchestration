@@ -499,10 +499,10 @@ def test_spawn_claude_refuses_a_label_that_is_not_a_switchable_family(label, swi
 @pytest.mark.parametrize("proxy_url", ["http://127.0.0.1:5151", "https://glm-gateway.example.internal:8443"])
 def test_a_configured_glm_proxy_reaches_its_launch_with_glm_on(proxy_url, switch_file, primitives,
                                                                tmp_path, monkeypatch):
-    """The operator's VNX_GLM_PROXY_URL, on a loopback port other than 4141 or on a custom
+    """A configured glm proxy URL, on a loopback port other than 4141 or on a custom
     gateway host, is decided as glm, never refused as a host the map does not know."""
     from provider_spawns import glm_harness_spawn
-    monkeypatch.setenv("VNX_GLM_PROXY_URL", proxy_url)
+    monkeypatch.setattr(glm_harness_spawn, "_proxy_url", lambda: proxy_url)
     monkeypatch.setattr(glm_harness_spawn, "_proxy_reachable", lambda url, timeout=3.0: True)
     switch_off(switch_file, "deepseek")
 

@@ -356,7 +356,7 @@ def dispatch(
         # Resolve the materialized worktree whenever a VALID one exists — even on the
         # rc!=0-with-report path. glm-harness produces a correct deliverable but the
         # claude CLI exits rc=1 (cosmetic loop-close via the litellm proxy); attaching
-        # its worktree here lets VNX_BENCH_SCORE_DELIVERABLE_ON_FAILURE verify the real
+        # its worktree here lets the scorer verify the real
         # on-disk deliverable instead of falling back to REPO_ROOT (which would verify
         # the untouched seed -> bogus correctness 0). _resolve_provider_workdir already
         # refuses REPO_ROOT / missing cell dirs, so this is safe on the failure path.
