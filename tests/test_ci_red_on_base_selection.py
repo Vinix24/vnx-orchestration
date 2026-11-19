@@ -111,6 +111,8 @@ def test_profile_output_is_unchanged_against_origin_main(tree, tmp_path):
     old = tmp_path / "old" / "scripts"
     shutil.copytree(_CI_DIR, old / "ci")
     shutil.copytree(_CI_DIR.parent / "release", old / "release")
+    # The classifier scans <root>/tests for literal docs paths; the copy needs the same corpus.
+    (tmp_path / "old" / "tests").symlink_to(REPO_ROOT / "tests", target_is_directory=True)
     old_script = old / "ci" / "classify_ci_profile.py"
     old_script.write_text(subprocess.run(
         ["git", "-C", str(REPO_ROOT), "show", "origin/main:scripts/ci/classify_ci_profile.py"],
