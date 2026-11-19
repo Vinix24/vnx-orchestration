@@ -38,14 +38,14 @@ BEFORE proposing any design, fix, or implementation:
 1. **Consult relevant ADRs** in `docs/governance/decisions/`. Special attention to:
    - ADR-005 (NDJSON audit ledger as primary observability)
    - ADR-007 (multi-tenant project_id stamping; composite keys for central state DBs)
-   - ADR-010 (subprocess adapter as canonical Claude routing)
+   - ADR-024 (single-entry dispatch door decides the lane; ADR-010 is superseded in part by it)
    List any ADR that applies to the task and how it constrains your solution.
 
-2. **Consult relevant memory** in `~/.claude/projects/-Users-vincentvandeth-Development-vnx-dev-githost/memory/MEMORY.md` — particularly entries about past architectural incidents.
+2. **Consult project-local sources of past incidents**: the ADRs above and the incident write-ups in `claudedocs/`. Do not read user-global Claude memory (`~/.claude/projects/...`) and never repeat memory content in a report or review.
 
 3. **Check P4-style incident docs** in `claudedocs/` for analogous failures (e.g., `2026-05-09-p4-migration-architecture-lessons.md` for multi-tenant migration patterns).
 
-4. **State your foundational read aloud** at the start of your response. Example: "ADR-007 applies: new tabel X needs composite PK over project_id. Per P4 §4.2, single-column UNIQUE is a smell. Memory [[adr-007-multitenant-composite-keys]] confirms."
+4. **State your foundational read aloud** at the start of your response. Example: "ADR-007 applies: new tabel X needs composite PK over project_id. Per P4 §4.2, single-column UNIQUE is a smell."
 
 Skipping STEP 0 is a process violation, not a shortcut. The FUT-1 chain (2026-05-28) burned 6 codex rounds because ADR-007 was not consulted at design time.
 
@@ -70,6 +70,18 @@ Skipping STEP 0 is a process violation, not a shortcut. The FUT-1 chain (2026-05
 - **Integration**: API contracts, dependency versions
 - **Performance**: Memory leaks, N+1 queries, blocking ops
 
+### Test and CI failures
+
+Pick the entry by symptom; each ends in a fix, not a rerun.
+
+- **Order dependency.** Symptom: green alone, red in the suite. A duration-based shard layout shifts when a file is added, so an old polluter wakes up in someone else's PR. Tell-apart: the file passes by itself and fails with its CI shard. Fix: reproduce with the exact file list in CI order, bisect with the failing file last, name the polluter and the line, and restore what it changed in its own teardown (`sys.path`, `sys.modules`, env, cwd, module globals). Add a regression test that runs the minimal pair in a subprocess.
+- **Flake versus deterministic.** The same test failing twice at the same run position is deterministic, not a flake: find the cause. When an aggregation step checks completeness, rerun the whole workflow, never only the failed jobs.
+- **Interpreter mismatch.** CI runs another Python minor than your laptop. Run `py_compile` with the CI version (a PEP 701 f-string passes 3.12 and fails 3.11).
+- **Platform difference.** Green on macOS, red on Linux: file descriptor numbers in a mock collide with real pipes (use high numbers), path case. A platform skip counts as not measured, not as green.
+- **Cancelled is often a timeout.** Compare the job duration with the job's timeout before calling it noise.
+- **Shared writes into the repo tree.** A test that writes into the checkout (`build/`, caches) collides with others. Use `tmp_path`. When cleanup fails, name the foreign entries in the error; do not delete them.
+- **A test that starts a real external CLI** because an env override is ignored. Check the process list or the stub's log, not only the exit code.
+
 ## Success Criteria
 - Bug reproducible → fixed → tested
 - No new issues introduced
@@ -87,10 +99,6 @@ Skipping STEP 0 is a process violation, not a shortcut. The FUT-1 chain (2026-05
 
 For report generation, see: `@.claude/skills/debugger/template.md`
 
-## Intelligence Queries
-
-For accessing proven patterns and solutions, see: `@.claude/skills/debugger/scripts/intelligence.sh`
-
 ---
 
 ## Skill Activation Announcement
@@ -98,7 +106,7 @@ For accessing proven patterns and solutions, see: `@.claude/skills/debugger/scri
 **MANDATORY — first line of every response after skill load:**
 
 ```
-Skill actief: debugger
+🔧 Skill actief: debugger
 ```
 
 No exceptions. This must appear before any other content.
