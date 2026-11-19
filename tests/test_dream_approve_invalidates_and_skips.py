@@ -49,8 +49,7 @@ def _env(monkeypatch, tmp_path_factory):
 
 @pytest.fixture
 def db(tmp_path) -> Path:
-    path = tmp_path / "state" / "quality_intelligence.db"
-    path.parent.mkdir(parents=True)
+    path = tmp_path / "state" / "quality_intelligence.db"; path.parent.mkdir(parents=True)
     sqlite3.connect(str(path)).executescript(_SCHEMA)
     _make_fresh_receipts(tmp_path / ".vnx-data")
     return path
@@ -62,8 +61,7 @@ def _sql(db: Path, query: str, *args):
 
 
 def _approve(tmp_path, db, entries):
-    state = tmp_path / ".vnx-data" / "state" / "dream"
-    state.mkdir(parents=True, exist_ok=True)
+    state = tmp_path / ".vnx-data" / "state" / "dream"; state.mkdir(parents=True, exist_ok=True)
     cons = {"merged": [], "archived": [], "flagged": [], "dropped": [{"id": i, "table": t} for t, i in entries]}
     (state / "c1-pending-review.json").write_text(json.dumps(
         {"cycle_id": "c1", "project_id": P, "consolidation": cons, "requires_operator_review": True}))
