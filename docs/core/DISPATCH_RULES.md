@@ -113,6 +113,8 @@ The lock is one flock per project, the file `main_admission.lock` in the state d
 
 `--override-main "<reason>"` covers only this gate, never the CI gate (`--override-reason`). An empty reason is refused. The reason lands on the receipt. The way back on a red main is a revert PR or a fix-forward PR merged with `--override-main revert_or_fix_forward`.
 
+`--override-morning-pause "<reason>"` covers only the `morning_pause` preflight (it runs between `main` and `door`, ADR-095): inside the morning pause a merge is refused without it, an empty reason is refused, and every refusal and override is one line in the morning-round ledger.
+
 Who sets the key: Vincent, or the T0 with his approval-id, through `config_store_db.set_config` (it writes an audit row). A builder never does.
 
 The probe `vnx main-window status [--json]` (`scripts/main_window_cli.py`) is read-only. It prints `verdict`, `mode`, `reason`, `base` (sha and run), `running` and `first red`, plus `config:` lines for an invalid config; `--json` gives the full admission record. Exit 0 is GO (also mode off), 1 NO-GO, 2 the probe could not run. A merge chain asks the probe and starts a merge only on GO. The door stays the guardrail, so a running window gives no string of `pr_merge_refused` receipts.
