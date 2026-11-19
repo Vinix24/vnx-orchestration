@@ -186,18 +186,28 @@ cmd_start() {
   fi
   # Resolve the T0 provider once. Workers are spawned on demand outside startup.
   local VNX_PROVIDER="${VNX_T0_PROVIDER:-${VNX_PROVIDER:-claude_code}}"
-  local gemini_model="${VNX_GEMINI_MODEL:-gemini-2.5-pro}"
+  local gemini_model="gemini-2.5-pro"
   local codex_model="${VNX_CODEX_MODEL:-gpt-5.1-codex-mini}"
-  local t0_flags="${VNX_T0_FLAGS:-}"
+  local t0_flags=""
 
   # Skip-permissions flags (from preset/custom config)
   local t0_skip="${VNX_T0_SKIP_PERMISSIONS:-0}"
 
   # Queue popup toggle (from preset/custom config)
-  local queue_popup_enabled="${VNX_QUEUE_POPUP_ENABLED:-1}"
+  # Read through the one config surface (stored value > env > registry default), by this
+  # fabric's own binary and never PATH. A failed read stops the start naming the key.
+  local queue_popup_enabled
+  queue_popup_enabled="$("$VNX_HOME/bin/vnx" config get --raw VNX_QUEUE_POPUP_ENABLED)" || {
+    err "vnx config get --raw VNX_QUEUE_POPUP_ENABLED failed; start stopped"
+    return 1
+  }
+  if [ -z "$queue_popup_enabled" ]; then
+    err "VNX_QUEUE_POPUP_ENABLED has no value; start stopped"
+    return 1
+  fi
   export VNX_QUEUE_POPUP_ENABLED="$queue_popup_enabled"
 
-  local t0_model="${VNX_T0_MODEL:-default}"
+  local t0_model="default"
   local t0_cmd=""
   local t0_provider_for_state="claude_code"
   local t0_provider_label="Claude"
