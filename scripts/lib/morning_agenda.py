@@ -31,12 +31,13 @@ def decide_command(source: str, point_id: str, ref: str) -> Optional[str]:
     """The command that carries out the decision, as the source dictates; None where the source has no command."""
     if source in ("decision", "question"):
         return f'vnx inbox answer {point_id} --quote "..."'
+    bare = ref.split(":", 1)[-1]  # the snapshot ref is "<form>:<id>" (dlv:<id>, edit:<n>, dream:<id>); the CLIs take the id
     if source == "promote":
-        return f"vnx promote {ref.split(':', 1)[-1]}"
+        return f"vnx deliverable promote {bare}"
     if source == "dream":
-        return f"vnx dream review {ref}"
+        return f"vnx dream review {bare} --approve"  # without --approve/--reject the command waits on stdin
     if source == "analyzer":
-        return f"python3 scripts/apply_suggested_edits.py {ref}"
+        return f"python3 scripts/apply_suggested_edits.py accept {bare}"
     return None
 
 

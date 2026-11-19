@@ -57,7 +57,7 @@ def test_json_matches_the_pinned_schema(env):
     proj, fleet = by_id[pids["proj"]], by_id[pids["fleet"]]
     assert (proj["status"], proj["classification"], proj["advice"], proj["source"]) == ("open", "project", "approve it", "dream")
     assert (fleet["status"], fleet["classification"], fleet["advice"]) == ("decided", "fleet", None)
-    assert proj["decide_command"] == "vnx dream review dream:one"
+    assert proj["decide_command"] == "vnx dream review one --approve"
     assert fleet["decide_command"].startswith(f"vnx inbox answer {pids['fleet']} --quote")
     assert isinstance(proj["age_seconds"], int) and proj["age_seconds"] >= 0
 
@@ -108,6 +108,56 @@ def test_point_missing_from_the_ledger_is_not_shown_as_open(env):
 
 
 def test_decide_command_by_source():
-    assert ma.decide_command("analyzer", "p", "edit:1") == "python3 scripts/apply_suggested_edits.py edit:1"
-    assert ma.decide_command("promote", "p", "dlv:abc") == "vnx promote abc"
+    assert ma.decide_command("analyzer", "p", "edit:1") == "python3 scripts/apply_suggested_edits.py accept 1"
+    assert ma.decide_command("promote", "p", "dlv:abc") == "vnx deliverable promote abc"
+    assert ma.decide_command("dream", "p", "dream:c1") == "vnx dream review c1 --approve"
     assert ma.decide_command("steering", "p", "x") is None
+
+
+@pytest.mark.parametrize("source,ref", [("promote", "dlv:abc"), ("analyzer", "edit:1"), ("dream", "dream:c1"),
+                                         ("decision", "oi:7"), ("question", "antwoord:0123456789ab")])
+def test_every_decide_command_parses_in_the_real_cli(source, ref, monkeypatch):
+    cmd = ma.decide_command(source, "p1", ref)
+    assert cmd, source
+    import shlex
+    argv = shlex.split(cmd)
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+    if argv[:2] == ["vnx", "deliverable"]:
+        import planning_cli
+        ns = planning_cli._build_parser().parse_args(argv[1:])
+        assert (ns.action, ns.dispatch_id) == ("promote", "abc")
+    elif argv[:2] == ["vnx", "inbox"]:
+        import inbox_cli
+        ns = inbox_cli._parser().parse_args(argv[2:])
+        assert (ns.cmd, ns.point_id) == ("answer", "p1")
+    elif argv[:2] == ["vnx", "dream"]:
+        import argparse
+        import vnx_cli.main as vm
+        captured = {}
+        real = argparse.ArgumentParser.parse_args
+
+        def grab(self, args=None, namespace=None):
+            captured["ns"] = real(self, args, namespace)
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr(argparse.ArgumentParser, "parse_args", grab)
+        monkeypatch.setattr(sys, "argv", argv)
+        with pytest.raises(KeyboardInterrupt):
+            vm.main()
+        ns = captured["ns"]
+        assert (ns.cycle_id, ns.approve, ns.reject) == ("c1", True, False)
+    else:
+        import argparse
+        import apply_suggested_edits as ase
+        captured = {}
+        real = argparse.ArgumentParser.parse_args
+
+        def grab(self, args=None, namespace=None):
+            captured["ns"] = real(self, args, namespace)
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr(argparse.ArgumentParser, "parse_args", grab)
+        monkeypatch.setattr(sys, "argv", argv[1:])
+        with pytest.raises(KeyboardInterrupt):
+            ase.main()
+        assert (captured["ns"].command, captured["ns"].ids) == ("accept", "1")

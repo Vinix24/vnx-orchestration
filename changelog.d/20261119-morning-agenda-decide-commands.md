@@ -1,0 +1,1 @@
+- The morning agenda prints decide commands that exist: vnx deliverable promote, apply_suggested_edits.py accept, vnx dream review --approve (ochtendronde D2c)
