@@ -29,6 +29,7 @@ try:
     from project_scope import current_project_id
 except ImportError:
     from project_scope import current_project_id  # type: ignore
+from config_runtime import central_db_flag as _central_db_flag
 from pattern_activation import injectable_clause, state_dir_of
 
 try:
@@ -61,7 +62,7 @@ def query_failure_prevention(
     project_id_fn: Optional[Callable[[], Optional[str]]] = None,
 ) -> List[IntelligenceItem]:
     """3-state dispatcher: per-project | central | shadow (metric 3, antipatterns)."""
-    flag = os.environ.get("VNX_USE_CENTRAL_DB", "")
+    flag = _central_db_flag()
     if flag == "":
         return _query_per_project(db, task_class, scope_tags, has_column_fn)
     if flag == "1":

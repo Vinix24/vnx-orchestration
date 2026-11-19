@@ -5,18 +5,12 @@
 # Receives hook JSON on stdin, writes an extraction trigger file to
 # the report_pipeline state directory for the next pipeline stage.
 #
-# Gate: VNX_AUTO_REPORT=1 must be set; otherwise no-op.
+# Gate: the registry key VNX_AUTO_REPORT, read by the Python process below (a hook never
+# calls `vnx config`); disabled or unreadable = no-op.
 # Non-blocking: must complete in < 5s.
 # Exit 0 always (never block the session stop).
 
 set -euo pipefail
-
-# ── Env-var gate ─────────────────────────────────────────────────────────────
-if [ "${VNX_AUTO_REPORT:-0}" != "1" ]; then
-    # Disabled — emit skipped output and exit silently
-    printf '{"skipped":true,"skip_reason":"VNX_AUTO_REPORT not set"}\n'
-    exit 0
-fi
 
 # ── Read and parse stdin JSON ─────────────────────────────────────────────────
 STDIN_JSON=$(cat)
@@ -66,6 +60,23 @@ if [ -z "$PROJECT_ROOT" ]; then
 fi
 
 VNX_DATA="${VNX_DATA_DIR:-$PROJECT_ROOT/.vnx-data}"
+
+# ── Registry gate (decided by Python, config-een-oppervlak PR-7) ─────────────
+# Exit 0 = enabled, 3 = disabled; anything else = the read failed (skip, and say so).
+GATE_EXIT=0
+VNX_DATA_DIR="$VNX_DATA" VNX_STATE_DIR="${VNX_STATE_DIR:-$VNX_DATA/state}" python3 -c '
+import sys
+sys.path.insert(0, sys.argv[1])
+import config_runtime
+sys.exit(0 if config_runtime.get_bool("VNX_AUTO_REPORT") else 3)
+' "$PROJECT_ROOT/scripts/lib" 2>/dev/null || GATE_EXIT=$?
+if [ "$GATE_EXIT" -eq 3 ]; then
+    printf '{"skipped":true,"skip_reason":"VNX_AUTO_REPORT disabled"}\n'
+    exit 0
+elif [ "$GATE_EXIT" -ne 0 ]; then
+    printf '{"skipped":true,"skip_reason":"VNX_AUTO_REPORT could not be read (gate exit %s)"}\n' "$GATE_EXIT" >&2
+    exit 0
+fi
 
 # ── Detect active dispatch ────────────────────────────────────────────────────
 ACTIVE_DIR="$VNX_DATA/dispatches/active"
