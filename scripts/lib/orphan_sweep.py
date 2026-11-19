@@ -764,7 +764,9 @@ def sweep(
         :class:`OrphanSweepResult` — per-object failures are recorded in
         ``errors`` and never abort the run.
     """
-    import crash_recovery_sweep
+    from lib_module import load_lib_module
+
+    crash_recovery_sweep = load_lib_module("crash_recovery_sweep")
 
     root = _resolve_repo_root(repo_root)
     data_dir, state_dir, central_resolve_error = _sweep_resolve_stores(root, data_dir, state_dir)
