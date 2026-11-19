@@ -47,7 +47,7 @@ def test_raw_two_keys_in_order(monkeypatch):
 
 
 def test_raw_unset_key_is_empty_line():
-    code, out, _ = _run(["get", "--raw", "VNX_SMTP_HOST", KEY_A])
+    code, out, _ = _run(["get", "--raw", "VNX_DIGEST_EMAIL", KEY_A])
     assert code == 0 and out.split("\n")[0] == ""
 
 
