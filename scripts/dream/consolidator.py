@@ -276,6 +276,20 @@ def _matching_cycle(
     return None
 
 
+def _unchanged_input_skip(
+    conn: sqlite3.Connection, patterns: dict[str, list[dict]], cycle_id: str, project_id: str,
+    data_root: Path,
+) -> "dict[str, Any] | None":
+    """A skipped result when a waiting or the last reviewed cycle read the same input, else None."""
+    digest = _input_hash(patterns)
+    match = _matching_cycle(conn, project_id, data_root, digest)
+    if match is None:
+        return None
+    return _skip_cycle(cycle_id, project_id, data_root, _REASON_UNCHANGED_INPUT,
+                       f"input_hash {digest[:12]} equals cycle {match}",
+                       matching_cycle_id=match, input_hash=digest)
+
+
 def _filter_restricted_rows(
     patterns: dict[str, list[dict]], boundary: "content_class.Boundary"
 ) -> tuple[dict[str, list[dict]], dict[str, int]]:
@@ -826,15 +840,10 @@ def run_dream_cycle(
         if skipped is None:
             skipped = _pre_consolidation_skip(
                 patterns, cycle_id, project_id, _data_root, restricted_rows_dropped, provider)
+        if skipped is None:
+            skipped = _unchanged_input_skip(conn, patterns, cycle_id, project_id, _data_root)
         if skipped is not None:
             return skipped
-        digest = _input_hash(patterns)
-        match = _matching_cycle(conn, project_id, _data_root, digest)
-        if match is not None:
-            return _skip_cycle(
-                cycle_id, project_id, _data_root, _REASON_UNCHANGED_INPUT,
-                f"input_hash {digest[:12]} equals cycle {match}",
-                matching_cycle_id=match, input_hash=digest)
 
         consolidation, timed_out = _run_consolidation(
             patterns, cycle_id, project_id, provider, timeout, _data_root)
@@ -843,8 +852,7 @@ def run_dream_cycle(
 
         return _complete_cycle(
             conn, consolidation, patterns, cycle_id, project_id, provider, probe_health,
-            restricted_rows_dropped, proposal_only, dry_run, _data_root,
-            digest, _unfiltered_tables(conn))
+            restricted_rows_dropped, proposal_only, dry_run, _data_root)
     finally:
         conn.close()
 
@@ -871,10 +879,9 @@ def _complete_cycle(
     conn: sqlite3.Connection, consolidation: dict[str, Any], patterns: dict[str, list[dict]],
     cycle_id: str, project_id: str, provider: str, probe_health: str,
     restricted_rows_dropped: dict[str, int], proposal_only: bool, dry_run: bool, data_root: Path,
-    input_hash: str, tables_without_valid_until: list[str],
-) -> dict[str, Any]:
-    """Write the review, emit ``dream_cycle_completed`` (before the DB write), book the row, return the result."""
+XX, emit ``dream_cycle_completed`` (before the DB write), book the row, return the result."""
     total_input = sum(len(v) for v in patterns.values())
+    input_hash, tables_without_valid_until = _input_hash(patterns), _unfiltered_tables(conn)
     review_path = _write_pending_review(
         data_root, cycle_id, project_id, total_input,
         restricted_rows_dropped, probe_health, consolidation, proposal_only,
