@@ -25,8 +25,6 @@ APPROVED_WRITERS = {
     # capture_audit.py: books a state_mutation receipt via append_receipt_payload before
     # `bind` writes its JSON (ADR-005, track learning-capture-fragmentation, capture PR-2 split 3).
     "capture_audit.py",
-    # apply_suggested_edits.py: books a state_mutation receipt via append_receipt_payload
-    # when `accept` approves a suggested edit (ADR-005 amendment 2026-09-26, ochtendronde D3c).
     "apply_suggested_edits.py",
 }
 
