@@ -54,7 +54,7 @@ _ATTEMPT_TYPES = {
 _REVIEW_TYPES = {"dream_cycle_approved", "dream_cycle_rejected"}
 _OUTPUT_KEYS = ("merged_count", "dropped_count", "archived_count", "flagged_count")
 _ALLOWED_REASONS = {"insufficient_data", "content_restricted_project",
-                    "content_restricted_all_rows"}
+                    "content_restricted_all_rows", "unchanged_input"}
 _BLOCKED_REASONS = {"scheduler_disabled", "probe_not_ok", "provider_switched_off",
                     "dream_provider_unknown"}
 

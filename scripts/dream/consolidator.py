@@ -25,6 +25,7 @@ started/completed events and the returned dict.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import sqlite3
@@ -196,14 +197,34 @@ def _emit_dream_event(event: dict[str, Any], data_root: Path) -> None:
     with event_path.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(event) + "\n")
 
+# Per table the column that says a row changed; part of the input hash.
+_TABLE_UPDATED_COL: dict[str, str] = {
+    "success_patterns": "last_used", "antipatterns": "last_seen", "intelligence_injections": "injected_at"}
+_REASON_UNCHANGED_INPUT: str = "unchanged_input"
+
+
+def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    return {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+
+
+def _unfiltered_tables(conn: sqlite3.Connection) -> list[str]:
+    """Input tables that exist without ``valid_until``: read without the validity filter."""
+    return [t for t in _TABLE_SORT_COL
+            if (cols := _table_columns(conn, t)) and "valid_until" not in cols]
+
 
 def _fetch_patterns(conn: sqlite3.Connection, project_id: str) -> dict[str, list[dict]]:
-    """Fetch recent patterns for consolidation input, scoped to project_id (ADR-007)."""
+    """Fetch recent valid patterns, scoped to project_id (ADR-007).
+
+    A table with ``valid_until`` is read with ``AND valid_until IS NULL`` (approved rows drop
+    out); a table without it keeps the old query (``_unfiltered_tables`` names those).
+    """
     results: dict[str, list[dict]] = {}
     for table, sort_col in _TABLE_SORT_COL.items():
         try:
+            valid_filter = " AND valid_until IS NULL" if "valid_until" in _table_columns(conn, table) else ""
             rows = conn.execute(
-                f"SELECT * FROM {table} WHERE project_id = ?"
+                f"SELECT * FROM {table} WHERE project_id = ?{valid_filter}"
                 f" ORDER BY {sort_col} DESC LIMIT 200",
                 (project_id,),
             )
@@ -211,6 +232,58 @@ def _fetch_patterns(conn: sqlite3.Connection, project_id: str) -> dict[str, list
         except sqlite3.OperationalError:
             results[table] = []
     return results
+
+
+def _input_hash(patterns: dict[str, list[dict]]) -> str:
+    """sha256 over the sorted ``(table, id, sort col, updated col)`` of every input row."""
+    keys = sorted([t, r.get("id"), r.get(_TABLE_SORT_COL[t]), r.get(_TABLE_UPDATED_COL[t])]
+                  for t, rows in patterns.items() for r in rows)
+    return hashlib.sha256(_compact_json(keys).encode("utf-8")).hexdigest()
+
+
+def _review_with_hash(path: Path, project_id: str, digest: str) -> "dict | None":
+    """The ``project_id`` review at ``path`` whose string ``input_hash`` is ``digest``, else None.
+
+    Missing, unparseable, foreign or hash-less reviews never match: the cycle runs.
+    """
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (ValueError, OSError):
+        return None
+    if not isinstance(data, dict) or data.get("project_id") != project_id:
+        return None
+    stored = data.get("input_hash")
+    return data if isinstance(stored, str) and stored == digest else None
+
+
+def _matching_cycle(
+    conn: sqlite3.Connection, project_id: str, data_root: Path, digest: str
+) -> "str | None":
+    """The cycle_id of a waiting review or the last reviewed cycle with input hash ``digest``."""
+    state_dir = data_root / "state" / "dream"
+    for path in sorted(state_dir.glob("*-pending-review.json")):
+        review = _review_with_hash(path, project_id, digest)
+        if review is not None and review.get("requires_operator_review") is True:
+            return str(review.get("cycle_id") or path.name)
+    last = conn.execute(
+        "SELECT cycle_id FROM dream_cycles WHERE project_id = ? AND status = 'reviewed'"
+        " ORDER BY completed_at DESC LIMIT 1", (project_id,)).fetchone()
+    if last is not None and _review_with_hash(
+            state_dir / f"{last[0]}-pending-review.json", project_id, digest):
+        return str(last[0])
+    return None
+
+
+def _unchanged_input_skip(
+    conn: sqlite3.Connection, patterns: dict[str, list[dict]], cycle_id: str, project_id: str,
+    data_root: Path,
+) -> "dict[str, Any] | None":
+    """Skipped result when a waiting or the last reviewed cycle read the same input, else None."""
+    digest = _input_hash(patterns)
+    match = _matching_cycle(conn, project_id, data_root, digest)
+    return None if match is None else _skip_cycle(
+        cycle_id, project_id, data_root, _REASON_UNCHANGED_INPUT,
+        f"input_hash {digest[:12]} equals cycle {match}", matching_cycle_id=match, input_hash=digest)
 
 
 def _filter_restricted_rows(
@@ -649,6 +722,8 @@ def _write_pending_review(
     probe_health: str,
     consolidation: dict[str, Any],
     proposal_only: bool,
+    input_hash: str,
+    tables_without_valid_until: list[str],
 ) -> Path:
     """Write the pending-review JSON (stamped with ``created_at``) and return its path."""
     review_dir = data_root / "state" / "dream"
@@ -660,6 +735,8 @@ def _write_pending_review(
         "created_at": _utc_timestamp(),
         "input_count": total_input,
         "restricted_rows_dropped": restricted_rows_dropped,
+        "input_hash": input_hash,
+        "tables_without_valid_until": tables_without_valid_until,
         "probe_health": probe_health,
         "consolidation": consolidation,
         "requires_operator_review": True,
@@ -759,6 +836,8 @@ def run_dream_cycle(
         if skipped is None:
             skipped = _pre_consolidation_skip(
                 patterns, cycle_id, project_id, _data_root, restricted_rows_dropped, provider)
+        if skipped is None:
+            skipped = _unchanged_input_skip(conn, patterns, cycle_id, project_id, _data_root)
         if skipped is not None:
             return skipped
 
@@ -799,9 +878,11 @@ def _complete_cycle(
 ) -> dict[str, Any]:
     """Write the review, emit ``dream_cycle_completed`` (before the DB write), book the row, return the result."""
     total_input = sum(len(v) for v in patterns.values())
+    input_hash, tables_without_valid_until = _input_hash(patterns), _unfiltered_tables(conn)
     review_path = _write_pending_review(
         data_root, cycle_id, project_id, total_input,
         restricted_rows_dropped, probe_health, consolidation, proposal_only,
+        input_hash, tables_without_valid_until,
     )
     counts = {
         name: len(consolidation.get(key, []))
@@ -817,6 +898,8 @@ def _complete_cycle(
             "probe_health": probe_health,
             "input_count": total_input,
             "restricted_rows_dropped": restricted_rows_dropped,
+            "input_hash": input_hash,
+            "tables_without_valid_until": tables_without_valid_until,
             **counts,
             "review_path": str(review_path),
         },
@@ -830,6 +913,8 @@ def _complete_cycle(
         "probe_health": probe_health,
         "input_count": total_input,
         "restricted_rows_dropped": restricted_rows_dropped,
+        "input_hash": input_hash,
+        "tables_without_valid_until": tables_without_valid_until,
         **counts,
         "review_path": str(review_path),
     }
