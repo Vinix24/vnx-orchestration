@@ -164,7 +164,7 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         "nothing and the worker registry decides.", subsystem="headless-dispatch-routing", status="ACTIVATE", read_site_wired=False),
     "VNX_ENFORCEMENT_PROFILE": _e(
         "VNX_ENFORCEMENT_PROFILE", "string", "shadow", "gate",
-        "Enforcement profile: shadow (default) | enforced.", approval=True, subsystem="governance-enforcement-stack", status="ACTIVATE", read_site_wired=False,
+        "Enforcement profile: shadow (default) | enforced.", approval=True, subsystem="governance-enforcement-stack", status="ACTIVATE", read_site_wired=True,
         allowed_values=("shadow", "enforced")),
     "VNX_ACCOUNT_DIRS": _e(
         "VNX_ACCOUNT_DIRS", "string", "[]", "dispatch",

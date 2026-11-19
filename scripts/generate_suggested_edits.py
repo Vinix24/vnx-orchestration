@@ -334,7 +334,7 @@ def generate_digest_section(edits: list) -> str:
         "Review met: `vnx suggest review`",
         "Accepteer: `vnx suggest accept 1,3,5`",
         "Afwijzen:  `vnx suggest reject 2,4`",
-        "Toepassen: `vnx suggest apply`",
+        "Accepteren: `vnx suggest accept <ids>` zet een dispatch klaar, de T0 vuurt hem",
         "",
     ]
 

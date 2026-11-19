@@ -1,0 +1,1 @@
+- `vnx inbox ask --ref pr:<n>` (bron `besluit` only) with `--ceiling` and `--reason`: a higher ceiling opens the next revision and lapses the earlier one; the point closes as answered only on an `answer` line and lapses on a merged or closed PR (ADR-088 decision 6).

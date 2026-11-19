@@ -60,7 +60,7 @@ def test_row_has_the_declared_shape(key):
     type_, default, scope, allowed = ROWS[key]
     entry = cr.CONFIG_REGISTRY[key]
     assert (entry.type, entry.default, entry.scope, entry.allowed_values) == (type_, default, scope, allowed)
-    assert entry.read_site_wired is False and entry.writable_from_ui is True
+    assert entry.read_site_wired is (key == "VNX_ENFORCEMENT_PROFILE") and entry.writable_from_ui is True
     if allowed:
         assert entry.default in allowed
 

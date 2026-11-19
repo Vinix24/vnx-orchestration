@@ -18,6 +18,7 @@ Wave 6 PR-6.4 — ADR-018 pluggable scaling policies.
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import logging
 import os
@@ -35,13 +36,33 @@ if str(_LIB_DIR) not in sys.path:
 
 from pool_decision_engine import Membership, PoolConfig, PoolState  # noqa: E402
 from pool_scaling_policies.cost_aware_v1 import cost_aware_v1      # noqa: E402
-from cost_tracker import (                                           # noqa: E402
-    recent_cost_per_hour,
-    recent_costs,
-    _distribute_workers,
-    _read_last_lines,
-    _resolve_receipts_path,
-)
+
+# Two modules share the bare name ``cost_tracker`` (scripts/cost_tracker.py and
+# scripts/lib/cost_tracker.py). Load the lib one by path so an earlier import of the
+# other one in the same process cannot shadow it, and pin it in sys.modules while
+# this file's tests run (cost_aware_v1 imports it lazily by bare name).
+_SPEC = importlib.util.spec_from_file_location("cost_tracker", _LIB_DIR / "cost_tracker.py")
+_LIB_COST_TRACKER = importlib.util.module_from_spec(_SPEC)
+_PREVIOUS = sys.modules.get("cost_tracker")
+sys.modules["cost_tracker"] = _LIB_COST_TRACKER  # dataclasses resolve their module here while it executes
+try:
+    _SPEC.loader.exec_module(_LIB_COST_TRACKER)
+finally:
+    if _PREVIOUS is None:
+        sys.modules.pop("cost_tracker", None)
+    else:
+        sys.modules["cost_tracker"] = _PREVIOUS
+recent_cost_per_hour = _LIB_COST_TRACKER.recent_cost_per_hour
+recent_costs = _LIB_COST_TRACKER.recent_costs
+_distribute_workers = _LIB_COST_TRACKER._distribute_workers
+_read_last_lines = _LIB_COST_TRACKER._read_last_lines
+_resolve_receipts_path = _LIB_COST_TRACKER._resolve_receipts_path
+
+
+@pytest.fixture(autouse=True)
+def _pin_lib_cost_tracker(monkeypatch):
+    monkeypatch.setitem(sys.modules, "cost_tracker", _LIB_COST_TRACKER)
+
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "fixtures"))
 from pool_state_fixtures import make_member, make_state  # noqa: E402
