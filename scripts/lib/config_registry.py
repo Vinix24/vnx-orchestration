@@ -861,14 +861,6 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         "Morning pause (ADR-095): firing and merging stop from the start time until the morning "
         "points are decided, at the latest at the deadline. Off by default; D4 turns it on.",
         subsystem="morning-pause", status="PARK", cockpit_canonical=True),
-    # blast-radius-en-afhankelijkheden B3 (ADR-096 decision 6): read by scripts/lib/blast_radius.py
-    # through config_runtime. Directories (comma-separated) that do not count as blast radius when
-    # named as a whole directory. It is the subsystem's canonical flag until the mode key (B4b) arrives.
-    "VNX_BLAST_RADIUS_GENERIC_DIRS": _e(
-        "VNX_BLAST_RADIUS_GENERIC_DIRS", "string", "tests,changelog.d,docs", "dispatch",
-        "Blast radius (ADR-096): comma-separated repo-relative directories that do not count as "
-        "overlap when a spec names them as a whole directory. A file inside one still counts.",
-        subsystem="blast-radius", status="PARK", cockpit_canonical=True),
 
 }
 

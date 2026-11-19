@@ -1,1 +1,1 @@
-- `scripts/lib/blast_radius.py`: pure blast-radius core (normalisation, incomplete scope, generic directories, overlap, self-exclusion) and the `VNX_BLAST_RADIUS_GENERIC_DIRS` registry key; nothing calls it yet (blast-radius-en-afhankelijkheden B3, ADR-096).
+- `scripts/lib/blast_radius.py`: pure blast-radius core (normalisation, incomplete scope, generic directories, overlap, self-exclusion); nothing calls it yet (blast-radius-en-afhankelijkheden B3, ADR-096).

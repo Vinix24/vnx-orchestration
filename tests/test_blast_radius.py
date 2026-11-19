@@ -8,7 +8,6 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts" / "lib"))
 
 import blast_radius as br  # noqa: E402
-import config_registry as cr  # noqa: E402
 
 GENERIC = ("tests", "changelog.d", "docs")
 
@@ -144,33 +143,15 @@ def test_undeclared_other_still_overlaps(repo):
     assert res["dlv-q"].outcome == br.OVERLAP
 
 
-# --- registry key via config_runtime -------------------------------------------------------
-def test_registry_row_shape():
-    e = cr.CONFIG_REGISTRY[br.GENERIC_DIRS_KEY]
-    assert (e.type, e.default, e.scope) == ("string", "tests,changelog.d,docs", "project")
+# --- generic dirs are a parameter ----------------------------------------------------------
+def test_default_generic_dirs_is_the_constant(repo):
+    assert br.DEFAULT_GENERIC_DIRS == GENERIC
+    other = S("dlv-q", ["docs/", "a.py"])
+    res = br.check(S("dlv-c", ["docs/", "b.py"]), [other], repo)
+    assert res[0].outcome == br.CLEAR
 
 
-@pytest.fixture
-def clean_config(monkeypatch, tmp_path):
-    monkeypatch.setenv("VNX_GLOBAL_CONFIG_FILE", str(tmp_path / "none.json"))
-    for k in (br.GENERIC_DIRS_KEY, "VNX_OVERRIDE_BLAST_RADIUS_GENERIC_DIRS"):
-        monkeypatch.delenv(k, raising=False)
-    cr.set_db_resolver(None)
-    yield
-    cr.set_db_resolver(None)
-
-
-def test_default_read_through_config_runtime(clean_config):
-    assert br.generic_dirs() == GENERIC
-
-
-def test_stored_value_overrides_the_default(clean_config, monkeypatch):
-    monkeypatch.setattr(cr, "_default_project_id", "proj-a")
-    monkeypatch.setattr("config_runtime.autowire", lambda *a, **k: True)
-    cr.set_db_resolver(lambda project_id, key: " vendor/ , tests " if key == br.GENERIC_DIRS_KEY else None)
-    assert br.generic_dirs() == ("vendor", "tests")
-
-
-def test_unresolved_value_is_a_failure_not_an_empty_list():
-    with pytest.raises(ValueError, match=br.GENERIC_DIRS_KEY):
-        br.generic_dirs(lambda key: None)
+def test_passed_generic_dirs_win(repo):
+    other = S("dlv-q", ["docs/", "a.py"])
+    res = br.check(S("dlv-c", ["docs/", "b.py"]), [other], repo, generic=("vendor",))
+    assert res[0].outcome == br.OVERLAP

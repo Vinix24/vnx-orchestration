@@ -1,7 +1,7 @@
 """blast_radius — pure core of the file-level blast radius (ADR-096 decisions 5-8 and 10).
 
-Inputs are path lists and identities, outputs are values. The only I/O is reading the generic
-directory list through ``config_runtime``. Sources (live work, open PRs) are B4a, the door is B4b.
+Inputs are path lists and identities, outputs are values. It reads no configuration: the generic
+directory list is a parameter. Sources (live work, open PRs) are B4a, the door is B4b.
 
 Unknown is a value of its own: an incomplete scope never reads as "no overlap".
 """
@@ -10,9 +10,9 @@ from __future__ import annotations
 import posixpath
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Iterable, List, Optional, Sequence, Tuple
+from typing import Iterable, List, Optional, Sequence, Tuple
 
-GENERIC_DIRS_KEY = "VNX_BLAST_RADIUS_GENERIC_DIRS"
+DEFAULT_GENERIC_DIRS: Tuple[str, ...] = ("tests", "changelog.d", "docs")
 
 OVERLAP = "overlap"
 CLEAR = "clear"
@@ -86,17 +86,6 @@ def normalise(paths: Iterable[str], repo_root: "str | Path") -> Tuple[str, ...]:
     return tuple(out)
 
 
-def generic_dirs(get: Optional[Callable[[str], Optional[str]]] = None) -> Tuple[str, ...]:
-    """The generic directory list from the registry key (read through config_runtime)."""
-    if get is None:
-        import config_runtime
-        get = config_runtime.get
-    value = get(GENERIC_DIRS_KEY)
-    if value is None:
-        raise ValueError(f"{GENERIC_DIRS_KEY} resolved to None")
-    return tuple(d.strip().strip("/") for d in value.split(",") if d.strip().strip("/"))
-
-
 def scope_of(paths: Optional[Sequence[str]], repo_root: "str | Path",
              generic: Sequence[str]) -> Scope:
     """Normalise, drop whole generic directories; no paths left means ``incomplete``."""
@@ -142,9 +131,8 @@ def _is_predecessor(candidate: Subject, other: Subject) -> bool:
 
 
 def check(candidate: Subject, others: Iterable[Subject], repo_root: "str | Path",
-          generic: Optional[Sequence[str]] = None) -> List[Result]:
+          generic: Sequence[str] = DEFAULT_GENERIC_DIRS) -> List[Result]:
     """One Result per non-excluded other; self and declared predecessors are left out."""
-    generic = generic_dirs() if generic is None else generic
     mine = scope_of(candidate.paths, repo_root, generic)
     results: List[Result] = []
     for other in others:
