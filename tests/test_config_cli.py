@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 from pathlib import Path
@@ -123,3 +124,104 @@ def test_subprocess_raw_stdout_only_values(tmp_path):
     proc = subprocess.run([sys.executable, str(REPO / "scripts" / "config_cli.py"), "get", "--raw",
                            KEY_A, "--project-id", "tproj"], capture_output=True, text=True, env=env)
     assert proc.returncode == 0 and proc.stdout == "alpha\n"
+
+
+# --- set / unset (PR-10b) -----------------------------------------------------------------------
+PROJ, GLOB, APPROVAL = "VNX_REVIEW_ROUND_CAP", "VNX_OLLAMA_HOST", "VNX_ENFORCEMENT_PROFILE"
+
+
+@pytest.fixture
+def store(tmp_path, monkeypatch):
+    """A temp data dir: ``mode.json`` beside ``state/runtime_coordination.db``; a temp global file."""
+    state = tmp_path / "data" / "state"
+    state.mkdir(parents=True)
+    sqlite3.connect(str(state / "runtime_coordination.db")).close()
+    monkeypatch.setenv("VNX_GLOBAL_CONFIG_FILE", str(tmp_path / "home" / "config.json"))
+    for k in (PROJ, GLOB, APPROVAL):
+        monkeypatch.delenv(k, raising=False)
+        monkeypatch.delenv(f"VNX_OVERRIDE_{k[4:]}", raising=False)
+    _mode(state, "operator")
+    return state
+
+
+def _mode(state, mode):
+    (state.parent / "mode.json").write_text(json.dumps({"mode": mode, "schema_version": 1}))
+
+
+def _w(state, *argv):
+    out, err = [], []
+    code = config_cli.main(list(argv), project_id="p1", state_dir=state, out=out.append, err=err.append)
+    return code, "\n".join(out), "\n".join(err)
+
+
+def _audit(state):
+    """``(project audit rows, global audit lines)``: what a refused write must leave unchanged."""
+    conn = sqlite3.connect(str(state / "runtime_coordination.db"))
+    try:
+        has = conn.execute("SELECT 1 FROM sqlite_master WHERE name='project_config_audit'").fetchone()
+        rows = conn.execute("SELECT operation, reason, changed_by FROM project_config_audit"
+                            " ORDER BY id").fetchall() if has else []
+    finally:
+        conn.close()
+    log = Path(os.environ["VNX_GLOBAL_CONFIG_FILE"]).parent / "config_audit.ndjson"
+    return rows, (log.read_text().splitlines() if log.exists() else [])
+
+
+def test_set_then_get_then_unset_brings_back_default(store):
+    code, out, _ = _w(store, "set", PROJ, "5", "--reason", "fewer rounds")
+    assert code == 0 and out.startswith(f"{PROJ}=5  [project_config]")
+    assert _w(store, "get", "--raw", PROJ)[1] == "5"
+    code, out, _ = _w(store, "unset", PROJ, "--reason", "back to default")
+    assert code == 0 and out.startswith(f"{PROJ}=3  [default]")
+    assert _audit(store)[0] == [("set", "fewer rounds", "operator"), ("unset", "back to default", "operator")]
+
+
+def test_global_set_and_unset(store):
+    code, out, _ = _w(store, "set", GLOB, "http://h:1", "--global", "--reason", "remote ollama")
+    assert code == 0 and out.startswith(f"{GLOB}=http://h:1  [global_config]")
+    code, out, _ = _w(store, "unset", GLOB, "--global", "--reason", "local again")
+    assert code == 0 and "[global_config]" not in out
+    lines = [json.loads(line) for line in _audit(store)[1]]
+    assert [(r["operation"], r["reason"], r["actor"]) for r in lines] == [
+        ("set", "remote ollama", "operator"), ("unset", "local again", "operator")]
+
+
+@pytest.mark.parametrize("mode", ["starter", None])
+def test_not_operator_refuses_and_writes_nothing(store, mode):
+    if mode:
+        _mode(store, mode)
+    else:
+        (store.parent / "mode.json").unlink()
+    for argv in (["set", PROJ, "5"], ["unset", GLOB, "--global"]):
+        code, out, err = _w(store, *argv, "--reason", "r")
+        assert code == 4 and out == "" and "vnx init --operator" in err
+    assert _audit(store) == ([], []) and not Path(os.environ["VNX_GLOBAL_CONFIG_FILE"]).exists()
+
+
+@pytest.mark.parametrize("argv, code, needle", [
+    (["set", PROJ, "5", "--reason", "  "], 4, "blank"),
+    (["set", APPROVAL, "enforced", "--reason", "r"], 4, "approval_id"),
+    (["set", APPROVAL, "bogus", "--reason", "r", "--approval-id", "a1"], 4, "not one of"),
+    (["set", GLOB, "x", "--reason", "r"], 4, "global key"),
+    (["set", PROJ, "5", "--global", "--reason", "r"], 4, "drop --global"),
+    (["set", "VNX_ANALYZER_LLM", "bogus", "--global", "--reason", "r"], 4, "not one of"),
+    (["unset", "VNX_NO_SUCH_KEY", "--reason", "r"], 2, "unknown key"),
+])
+def test_refusals_leave_audit_unchanged(store, argv, code, needle):
+    got, out, err = _w(store, *argv)
+    assert got == code and out == "" and needle in err
+    assert _audit(store) == ([], [])
+
+
+def test_unreadable_global_file_refuses(store):
+    gfile = Path(os.environ["VNX_GLOBAL_CONFIG_FILE"])
+    gfile.parent.mkdir(parents=True)
+    gfile.write_text("{not json")
+    code, out, err = _w(store, "set", GLOB, "h", "--global", "--reason", "r")
+    assert code == 3 and out == "" and "unreadable" in err and gfile.read_text() == "{not json"
+
+
+def test_missing_project_db_refuses(store):
+    (store / "runtime_coordination.db").unlink()
+    code, out, err = _w(store, "set", PROJ, "5", "--reason", "r")
+    assert code == 3 and "does not exist" in err and not (store / "runtime_coordination.db").exists()
