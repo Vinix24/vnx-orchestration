@@ -142,7 +142,8 @@ def test_canonical_flags_unchanged_for_every_main_subsystem():
         del sys.modules[spec.name]
     old = {e.subsystem: k for k, e in snap.CONFIG_REGISTRY.items() if e.subsystem}
     now = _canonical_flags(cr)
-    assert {k: v for k, v in now.items() if k != "morning-pause"} == old
+    # every subsystem origin/main knows keeps its flag; a missing one shows as None
+    assert {k: now.get(k) for k in old} == old
     assert now["morning-pause"] == "VNX_MORNING_PAUSE_ENABLED"
     assert {k: v for k, v in cr.canonical_flags().items() if k in old} == snap.canonical_flags()
     assert cr.canonical_flags()["morning-pause"] == "VNX_MORNING_PAUSE_ENABLED"
