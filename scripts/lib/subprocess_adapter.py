@@ -1113,6 +1113,12 @@ class SubprocessAdapter:
     # Auto-Report Pipeline Trigger
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _auto_report_enabled() -> bool:
+        import config_runtime
+
+        return config_runtime.get_bool("VNX_AUTO_REPORT")
+
     def trigger_report_pipeline(
         self,
         terminal_id: str,
@@ -1134,9 +1140,7 @@ class SubprocessAdapter:
 
         Non-blocking — does not invoke any subprocess or LLM.
         """
-        import config_runtime
-
-        if not config_runtime.get_bool("VNX_AUTO_REPORT"):
+        if not self._auto_report_enabled():
             return False
 
         terminal_map = {"T1": "A", "T2": "B", "T3": "C"}
