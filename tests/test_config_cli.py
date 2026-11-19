@@ -46,7 +46,8 @@ def test_raw_two_keys_in_order(monkeypatch):
     assert _run(["get", "--raw", KEY_B, KEY_A])[:2] == (0, "beta\nalpha")
 
 
-def test_raw_unset_key_is_empty_line():
+def test_raw_unset_key_is_empty_line(monkeypatch):
+    monkeypatch.delenv("VNX_DIGEST_EMAIL", raising=False)
     code, out, _ = _run(["get", "--raw", "VNX_DIGEST_EMAIL", KEY_A])
     assert code == 0 and out.split("\n")[0] == ""
 
