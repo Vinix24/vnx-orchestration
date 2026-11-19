@@ -21,6 +21,9 @@ deviation from the "put it in 0032" review suggestion):
 ADR-007 (tenant stamping): both tables carry ``project_id`` and a composite key over it —
 ``project_config`` PK ``(project_id, config_key)``; ``project_config_audit`` UNIQUE
 ``(project_id, event_id)``.
+
+ADR-087 decision 8: ``ensure_config_tables`` also adds the audit columns ``operation`` and ``reason``
+with ``ALTER TABLE ... ADD COLUMN`` when missing, so a new and an existing database end with one shape.
 """
 from __future__ import annotations
 
@@ -61,9 +64,31 @@ CREATE INDEX IF NOT EXISTS idx_pca_project_key ON project_config_audit(project_i
 """
 
 
+# ADR-087 decision 8: additive only. No table rebuilt, no column changed, the ADR-007 keys untouched.
+_AUDIT_ADDED_COLUMNS = (
+    ("operation", "ALTER TABLE project_config_audit ADD COLUMN operation TEXT NOT NULL DEFAULT 'set'"),
+    ("reason", "ALTER TABLE project_config_audit ADD COLUMN reason TEXT"),
+)
+
+
+def _audit_columns(conn: sqlite3.Connection) -> set:
+    return {row[1] for row in conn.execute("PRAGMA table_info(project_config_audit)")}
+
+
 def ensure_config_tables(conn: sqlite3.Connection) -> None:
-    """Create the config-store tables if absent. Idempotent; safe to call on every open."""
+    """Create the config-store tables if absent and add the missing audit columns. Idempotent."""
     conn.executescript(_SCHEMA)
+    for column, ddl in _AUDIT_ADDED_COLUMNS:
+        if column in _audit_columns(conn):
+            continue
+        try:
+            conn.execute(ddl)
+            conn.commit()
+        except sqlite3.OperationalError as exc:
+            # A concurrent opener added it first: only that case is not an error, and only when
+            # the column is really there now.
+            if "duplicate column name" not in str(exc) or column not in _audit_columns(conn):
+                raise
 
 
 def has_config_tables(conn: sqlite3.Connection) -> bool:
@@ -98,8 +123,16 @@ def read_config(
     return row[0] if row else None
 
 
-def _coerce(type_: str, value: Any) -> str:
-    """Validate + normalise a value to its stored string form. Raises ValueError on a bad value."""
+def _coerce(type_: str, value: Any, key: str = "", allowed_values: Optional[tuple] = None) -> str:
+    """Validate + normalise a value; with ``allowed_values`` it must match one exactly (no case folding)."""
+    coerced = _coerce_type(type_, value)
+    if allowed_values is not None and coerced not in allowed_values:
+        raise ValueError(f"{key}: value {coerced!r} is not one of {list(allowed_values)}")
+    return coerced
+
+
+def _coerce_type(type_: str, value: Any) -> str:
+    """Normalise a value to its stored string form by type. Raises ValueError on a bad value."""
     if type_ == "bool":
         if isinstance(value, bool):
             return "1" if value else "0"
@@ -147,6 +180,7 @@ def _state_dir_of(conn: sqlite3.Connection) -> Path:
 def set_config(
     conn: sqlite3.Connection, project_id: str, key: str, value: Any, *,
     actor: str, approval_id: Optional[str] = None, planted_manifest: Optional[Path] = None,
+    reason: Optional[str] = None,
 ) -> dict:
     """Persist an operator config change, atomically writing the value + a mandatory audit row.
 
@@ -160,10 +194,13 @@ def set_config(
         raise ValueError(f"unknown config key: {key}")
     if not entry.writable_from_ui:
         raise PermissionError(f"{key} is not writable from the UI")
+    if entry.scope == "global":
+        raise PermissionError(
+            f"{key} is a global key: it has no project value; set it with `vnx config set --global`")
     if entry.requires_approval and not approval_id:
         raise PermissionError(f"{key} requires an approval_id")
 
-    coerced = _coerce(entry.type, value)
+    coerced = _coerce(entry.type, value, key, entry.allowed_values)
     if key == review_scope.SCOPE_KEY and coerced == review_scope.DELTA:
         from project_root import resolve_project_root
 
@@ -203,10 +240,11 @@ def set_config(
         conn.execute(
             """
             INSERT INTO project_config_audit
-                (project_id, config_key, old_value, new_value, changed_by, approval_id, event_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+                (project_id, config_key, old_value, new_value, changed_by, approval_id, event_id,
+                 operation, reason)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 'set', ?)
             """,
-            (project_id, key, old, coerced, actor, approval_id, event_id),
+            (project_id, key, old, coerced, actor, approval_id, event_id, reason),
         )
         conn.commit()  # the value + its audit row commit together, or neither does
     except BaseException:
@@ -215,6 +253,57 @@ def set_config(
 
     _emit_config_event_best_effort(conn, project_id, key, old, coerced, actor, event_id)
     return {"key": key, "old_value": old, "new_value": coerced, "event_id": event_id}
+
+
+def unset_config(
+    conn: sqlite3.Connection, project_id: str, key: str, *,
+    actor: str, approval_id: Optional[str] = None, reason: Optional[str] = None,
+) -> dict:
+    """Remove the project row for (project_id, key) plus ONE audit row (``operation='unset'``), atomically.
+
+    Refuses like set_config, except a global key: removing its stale project row is the cleanup the
+    resolver's WARNING points at. No row: nothing written, ``removed: False``."""
+    entry = config_registry.CONFIG_REGISTRY.get(key)
+    if entry is None:
+        raise ValueError(f"unknown config key: {key}")
+    if not entry.writable_from_ui:
+        raise PermissionError(f"{key} is not writable from the UI")
+    if entry.requires_approval and not approval_id:
+        raise PermissionError(f"{key} requires an approval_id")
+
+    ensure_config_tables(conn)
+    event_id = str(uuid.uuid4())
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        # Read the old value directly, not via the fail-open read_config: a read error must roll back.
+        old_row = conn.execute(
+            "SELECT config_value FROM project_config WHERE project_id = ? AND config_key = ?",
+            (project_id, key),
+        ).fetchone()
+        if old_row is None:
+            conn.rollback()  # nothing changed, so no audit row
+            return {"key": key, "old_value": None, "new_value": "", "event_id": None, "operation": "unset",
+                    "removed": False}
+        old = old_row[0]
+        conn.execute(
+            "DELETE FROM project_config WHERE project_id = ? AND config_key = ?", (project_id, key))
+        conn.execute(
+            """
+            INSERT INTO project_config_audit
+                (project_id, config_key, old_value, new_value, changed_by, approval_id, event_id,
+                 operation, reason)
+            VALUES (?, ?, ?, '', ?, ?, ?, 'unset', ?)
+            """,
+            (project_id, key, old, actor, approval_id, event_id, reason),
+        )
+        conn.commit()  # the removal + its audit row commit together, or neither does
+    except BaseException:
+        conn.rollback()
+        raise
+
+    _emit_config_event_best_effort(conn, project_id, key, old, "", actor, event_id)
+    return {"key": key, "old_value": old, "new_value": "", "event_id": event_id,
+            "operation": "unset", "removed": True}
 
 
 def make_db_resolver(
