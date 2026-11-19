@@ -171,7 +171,7 @@ def read_dream(project_id: str, *, data_root: Optional[Path] = None, now: Any = 
 
 # --- source 4: analyzer proposals --------------------------------------------------------------------------
 
-# Decision statuses the writers set (apply_suggested_edits.py:273,299,449; learning_loop.py:2236). Exact match:
+# Decision statuses the writers set (apply_suggested_edits.py cmd_accept, cmd_reject; learning_loop.py:2236). Exact match:
 # stale, superseded, "unknown" and case/whitespace variants are no decision.
 _DECISION_STATUSES = frozenset({"accepted", "rejected", "applied", "approved", "dismissed"})
 
