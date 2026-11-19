@@ -85,7 +85,7 @@ def test_each_form_parses(ref, kind):
     assert qa.parse_ref(ref)[0] == kind
 
 
-@pytest.mark.parametrize("ref", ["dlv", "oi:", "track:x", "pr:12", "free text"])
+@pytest.mark.parametrize("ref", ["dlv", "oi:", "track:x", "pr:0", "free text"])
 def test_malformed_refs_are_refused_and_the_cli_exits_2_writing_nothing(env, capsys, ref):
     with pytest.raises(qa.RefRefused, match=r"dlv:<id>.*antwoord:<hash>"):
         qa.parse_ref(ref)

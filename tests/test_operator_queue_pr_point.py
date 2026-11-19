@@ -1,0 +1,174 @@
+"""ADR-088 decision 6 (PG-3b): the inbox point ``pr:<n>``, its ceiling and reason, revisions and close rules."""
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+_ROOT = Path(__file__).resolve().parent.parent
+sys.path[:0] = [str(_ROOT / "scripts" / "lib"), str(_ROOT / "scripts")]
+
+import inbox_cli  # noqa: E402
+import operator_queue as oq  # noqa: E402
+import operator_queue_ask as qa  # noqa: E402
+
+PID = "proj"
+
+
+@pytest.fixture()
+def env(tmp_path, monkeypatch):
+    (tmp_path / "root" / "state").mkdir(parents=True)
+    gh = {"out": "OPEN\n", "rc": 0, "raise": None, "calls": []}
+
+    def fake_run(cmd, **kw):
+        gh["calls"].append(cmd)
+        if gh["raise"]:
+            raise gh["raise"]
+        return subprocess.CompletedProcess(cmd, gh["rc"], stdout=gh["out"], stderr="")
+    monkeypatch.setattr(qa, "project_checkout_path", lambda pid: tmp_path)
+    monkeypatch.setattr(qa.subprocess, "run", fake_run)
+    return {"root": tmp_path / "root", "q": tmp_path / "q", "gh": gh}
+
+
+def _ask(env, ceiling=500, reason="one_working_unit", ref="pr:12", bron="besluit"):
+    return qa.ask(PID, bron=bron, ref=ref, vraag="Allow PR 12 above 450?", sluit_bij="an answer line",
+                  opened_by="T0", state_dir=env["q"], ceiling=ceiling, reason=reason)
+
+
+def _points(env):
+    return oq.read_state(PID, state_dir=env["q"])["points"]
+
+
+def _ledger(env):
+    return path.read_text() if (path := env["q"] / oq.LEDGER_FILENAME).exists() else ""
+
+
+def _read(env):
+    return {r["bron"]: r for r in qa.read_asked(PID, data_root=env["root"], state_dir=env["q"])}[2]
+
+
+def _cli(env, *extra):
+    return inbox_cli.main(["--project-id", PID, "--state-dir", str(env["q"]), "ask", "--bron", "besluit",
+                           "--ref", "pr:12", "--vraag", "Allow PR 12?", "--sluit-bij", "an answer line", *extra])
+
+
+def test_cli_ask_pr_needs_a_ceiling_and_opens_with_both_fields(env):
+    assert _cli(env, "--reason", "generated") == 2
+    with pytest.raises(SystemExit) as exc:
+        _cli(env, "--ceiling", "lots", "--reason", "generated")
+    assert exc.value.code == 2 and _ledger(env) == ""
+    assert _cli(env, "--ceiling", "500", "--reason", "generated") == 0
+    (point,) = _points(env).values()
+    assert (point["ref"], point["revisie"], point["ceiling"], point["bron"]) == ("pr:12", 1, 500, 2)
+    assert '"reason": "generated"' in _ledger(env)
+
+
+@pytest.mark.parametrize("state", ["MERGED", "CLOSED"])
+def test_merged_or_closed_pr_lapses_never_answered(env, state):
+    pid = _ask(env)["point_id"]
+    env["gh"]["out"] = state + "\n"
+    assert pid in _read(env)["closed"]
+    point = _points(env)[pid]
+    assert point["state"] == "vervallen" and point["bewijs"] == f"gh pr view 12: state={state}"
+
+
+def test_open_pr_stays_open_and_an_answer_line_closes_as_answered_even_on_a_merged_pr(env):
+    pid = _ask(env)["point_id"]
+    res = _read(env)
+    assert pid not in res["closed"] and pid not in res["unknown"] and _points(env)[pid]["state"] == "open"
+    assert env["gh"]["calls"][0][:4] == ["gh", "pr", "view", "12"]
+    qa.answer(PID, pid, quote="yes, 500 is fine", vastgelegd_door="T0", state_dir=env["q"])
+    env["gh"]["out"] = "MERGED\n"
+    _read(env)
+    assert _points(env)[pid]["state"] == "beantwoord"
+
+
+def test_same_or_lower_ceiling_opens_nothing_a_higher_one_opens_revision_2(env):
+    first = _ask(env, ceiling=500)["point_id"]
+    before = _ledger(env)
+    for same_or_lower in (500, 400):
+        with pytest.raises(oq.QueueRefused, match="not above ceiling 500 of revision 1"):
+            _ask(env, ceiling=same_or_lower)
+    assert _ledger(env) == before
+    second = _ask(env, ceiling=600)
+    assert second["revisie"] == 2 and second["ceiling"] == 600
+    points = _points(env)
+    assert points[first]["state"] == "vervallen" and points[first]["bewijs"] == "replaced by revision 2"
+    assert points[second["point_id"]]["state"] == "open"
+    with pytest.raises(oq.QueueRefused, match="answer: the point is closed"):
+        qa.answer(PID, first, quote="yes", vastgelegd_door="T0", state_dir=env["q"])
+
+
+def test_answer_on_open_older_revision_refused_and_reader_lapses_it(env):  # its close line never landed
+    first = oq.append_line(PID, "opened", _opened(ref="pr:12", ceiling=500, reason="generated"), state_dir=env["q"])
+    oq.append_line(PID, "opened", _opened(ref="pr:12", revisie=2, ceiling=600, reason="generated"), state_dir=env["q"])
+    before = _ledger(env)
+    with pytest.raises(oq.QueueRefused, match="revision 2 of pr:12 replaces this point"):
+        qa.answer(PID, first["point_id"], quote="yes", vastgelegd_door="T0", state_dir=env["q"])
+    assert _ledger(env) == before
+    _read(env)
+    assert _points(env)[first["point_id"]]["bewijs"] == "replaced by revision 2"
+
+
+@pytest.mark.parametrize("bron,ref", [("vraag", "pr:12"), ("promote", "pr:12"), ("besluit", "dlv:d1")])
+def test_pr_with_other_bron_or_ceiling_on_other_ref_refused(env, bron, ref):
+    with pytest.raises(qa.RefRefused):
+        _ask(env, bron=bron, ref=ref)
+    assert _ledger(env) == ""
+
+
+@pytest.mark.parametrize("ceiling,reason", [(None, "generated"), (0, "generated"), (-5, "generated"), (True, "generated"),
+                                            ("500", "generated"), (500, None), (500, "other"), (500, "")])
+def test_missing_or_invalid_ceiling_or_reason_refused_writes_nothing(env, ceiling, reason):
+    with pytest.raises(oq.QueueRefused, match="needs --ceiling"):
+        _ask(env, ceiling=ceiling, reason=reason)
+    assert _ledger(env) == ""
+
+
+@pytest.mark.parametrize("ref", ["pr:0", "pr:-1", "pr:abc", "pr:", "pr:1/2", "pr:01"])
+def test_malformed_pr_ref_refused(ref):
+    with pytest.raises(qa.RefRefused):
+        qa.parse_ref(ref)
+
+
+@pytest.mark.parametrize("fault", [{"rc": 1, "out": ""}, {"out": "DRAFT\n"}, {"out": ""},
+                                   {"raise": FileNotFoundError("gh")}, {"raise": subprocess.TimeoutExpired("gh", 20)}, None])
+def test_unreadable_gh_keeps_the_point_open_as_unknown(env, monkeypatch, fault):
+    pid = _ask(env)["point_id"]
+    if fault is None:
+        monkeypatch.setattr(qa, "project_checkout_path", lambda pid: None)
+    else:
+        env["gh"].update(fault)
+    assert pid in (res := _read(env))["unknown"] and res["dekking"] == "unknown"
+    point = _points(env)[pid]
+    assert point["state"] == "open" and point["unknown_reden"].startswith("source unreadable")
+
+
+def _opened(bron=2, ref="pr:3", revisie=1, **fields):
+    return {"kind": "opened", "project_id": PID, "ts": "2026-11-19T10:00:00Z", "point_id": oq.point_id(PID, bron, ref, revisie),
+            "bron": bron, "ref": ref, "revisie": revisie, "vraag": "v", "sluit_bij": "s",
+            "asked_at": "2026-11-19T10:00:00Z", "opened_by": "T0", **fields}
+
+
+@pytest.mark.parametrize("fields,why", [({"ceiling": 500}, "needs a ceiling"), ({"reason": "generated"}, "needs a ceiling"),
+                                        ({}, "needs a ceiling"), ({"ceiling": 5, "reason": "generated", "bron": 8}, "only with bron 2"),
+                                        ({"ceiling": 5, "ref": "dlv:d1"}, "only on a pr: point")])
+def test_append_refuses_wrong_ceiling_and_reason_on_an_opened_line(env, fields, why):
+    line = _opened(fields.pop("bron", 2), fields.pop("ref", "pr:3"), **fields)
+    with pytest.raises(oq.QueueRefused, match=why):
+        oq.append_line(PID, "opened", line, state_dir=env["q"])
+    assert _ledger(env) == ""
+
+
+def test_older_pr_line_without_ceiling_stays_readable_and_a_higher_ask_replaces_it(env):  # the PG-3a shape
+    env["q"].mkdir()
+    old = _opened(ref="pr:12")
+    (env["q"] / oq.LEDGER_FILENAME).write_text(json.dumps(old) + "\n")
+    assert oq.read_state(PID, state_dir=env["q"])["points"][old["point_id"]]["ceiling"] is None  # status ok, not {}
+    grant = dict(ceiling=650, reason="generated", head_sha="a" * 40, base_ref="main", lines=600, measured_at=old["ts"])
+    oq.append_line(PID, "answer", {"point_id": old["point_id"], "citaat": "yes", "vastgelegd_door": "T0", "grant": grant},
+                   state_dir=env["q"])
+    assert oq.latest_grant(PID, 12, state_dir=env["q"])["revision"] == 1
+    second = _ask(env, ceiling=500)
+    assert second["revisie"] == 2 and _points(env)[old["point_id"]]["state"] == "vervallen"
