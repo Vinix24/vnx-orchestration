@@ -136,15 +136,72 @@ def _db(path, rows):
     conn.close()
 
 
-def test_baseline_counts_distinct_dispatches_in_window(tmp_path):
-    now = datetime(2026, 11, 19, tzinfo=timezone.utc)
+NOW = datetime(2026, 11, 19, tzinfo=timezone.utc)
+
+
+def _receipts(path, *items):
+    """items: (dispatch_id, timestamp[, project])"""
+    path.write_text("".join(json.dumps({"event_type": "task_complete", "dispatch_id": i[0], "timestamp": i[1],
+                                        "project_id": i[2] if len(i) > 2 else PID}) + "\n" for i in items))
+    return path
+
+
+def _baseline(tmp_path, rows, *receipts, ledger=True):
     db = tmp_path / "q.db"
-    _db(db, [(PID, "t", RULE, '["d1","d2","d1"]', "2026-11-10 08:00:00"),
-             (PID, "t", RULE, '["d3"]', "2026-11-18 08:00:00"),
-             (PID, "t", RULE, '["d9"]', "2026-10-01 08:00:00"),
-             ("other", "t", RULE, '["d8"]', "2026-11-10 08:00:00")])
-    out = sed.baseline_for({"content": f"- {RULE}"}, PID, db, now)
+    _db(db, rows)
+    led = _receipts(tmp_path / "l.ndjson", *receipts) if ledger else tmp_path / "missing.ndjson"
+    return sed.baseline_for({"content": f"- {RULE}"}, PID, db, NOW, led)
+
+
+def test_baseline_counts_distinct_dispatches_in_window(tmp_path):
+    out = _baseline(tmp_path, [(PID, "t", RULE, '["d1","d2","d1"]', "2026-11-10 08:00:00"),
+                               (PID, "t", RULE, '["d3"]', "2026-11-18 08:00:00"),
+                               (PID, "t", RULE, '["d9"]', "2026-10-01 08:00:00"),
+                               ("other", "t", RULE, '["d8"]', "2026-11-10 08:00:00")],
+                    ("d1", "2026-11-09T08:00:00Z"), ("d1", "2026-11-12T08:00:00Z"),
+                    ("d2", "2026-11-10T08:00:00+00:00"), ("d3", "2026-11-18T08:00:00Z"))
     assert out["status"] == "ok" and out["count"] == 3 and out["window_days"] == 14
+
+
+def test_old_dispatch_of_a_recently_seen_row_is_not_counted(tmp_path):
+    out = _baseline(tmp_path, [(PID, "t", RULE, '["old"]', "2026-11-18 08:00:00")], ("old", "2026-10-20T08:00:00Z"))
+    assert out["status"] == "ok" and out["count"] == 0
+
+
+def test_dispatch_is_dated_by_its_earliest_receipt_and_exact_project(tmp_path):
+    out = _baseline(tmp_path, [(PID, "t", RULE, '["d1","d2"]', "2026-11-18 08:00:00")],
+                    ("d1", "2026-11-17T08:00:00Z"), ("d1", "2026-10-01T08:00:00Z"),  # earliest is old
+                    ("d2", "2026-11-17T08:00:00Z", "other"), ("d2", "2026-11-16T08:00:00Z"))
+    assert out["status"] == "ok" and out["count"] == 1
+
+
+def test_id_without_any_receipt_is_unknown_naming_the_missing_count(tmp_path):
+    out = _baseline(tmp_path, [(PID, "t", RULE, '["d1","ghost","d1x"]', "2026-11-18 08:00:00")],
+                    ("d1", "2026-11-17T08:00:00Z"), ("d1x", "bad-timestamp"))
+    assert out["status"] == "unknown" and out["count"] is None and "2 of 3" in out["reason"]
+
+
+@pytest.mark.parametrize("last_seen", ["not a date", "", None])
+def test_unparsable_last_seen_is_unknown(tmp_path, last_seen):
+    out = _baseline(tmp_path, [(PID, "t", RULE, '["d1"]', last_seen)], ("d1", "2026-11-17T08:00:00Z"))
+    assert out["status"] == "unknown" and out["count"] is None and "last_seen" in out["reason"]
+
+
+def test_unreadable_or_absent_ledger_is_unknown(tmp_path):
+    rows = [(PID, "t", RULE, '["d1"]', "2026-11-18 08:00:00")]
+    out = _baseline(tmp_path, rows, ledger=False)
+    assert out["status"] == "unknown" and "ledger unreadable" in out["reason"]
+    (tmp_path / "l.ndjson").write_text("{not json\n")
+    out = sed.baseline_for({"content": f"- {RULE}"}, PID, tmp_path / "q.db", NOW, tmp_path / "l.ndjson")
+    assert out["status"] == "unknown" and "ledger unreadable" in out["reason"]
+    out = sed.baseline_for({"content": f"- {RULE}"}, PID, tmp_path / "q.db", NOW)
+    assert out["status"] == "unknown" and "no receipt ledger" in out["reason"]
+
+
+def test_two_rows_sharing_a_dispatch_count_it_once(tmp_path):
+    out = _baseline(tmp_path, [(PID, "t", RULE, '["d1"]', "2026-11-10 08:00:00"),
+                               (PID, "tt", RULE, '["d1"]', "2026-11-12 08:00:00")], ("d1", "2026-11-09T08:00:00Z"))
+    assert out["status"] == "ok" and out["count"] == 1
 
 
 @pytest.mark.parametrize("rows,reason", [

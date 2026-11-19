@@ -142,18 +142,54 @@ def edit_source_text(edit: dict) -> str:
     return re.sub(r"^\s*-\s*", "", (edit.get("content") or "").strip())
 
 
+def _parse_ts(raw: object) -> Optional[datetime]:
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    try:
+        ts = datetime.fromisoformat(raw.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return ts if ts.tzinfo else ts.replace(tzinfo=_UTC)
+
+
+def _first_receipt_times(ledger: Path, project_id: str, wanted: set) -> Dict[str, datetime]:
+    """``dispatch_id -> earliest receipt time`` for the wanted ids of this project.
+
+    Reads the ``timestamp`` field of every receipt with that exact ``dispatch_id`` and ``project_id``; a receipt
+    whose timestamp is missing or unparsable is not evidence and is skipped. Raises ``LedgerUnreadable``.
+    """
+    first: Dict[str, datetime] = {}
+    for rec in iter_ledger(ledger):
+        did = rec.get("dispatch_id")
+        if rec.get("project_id") != project_id or not isinstance(did, str) or did not in wanted:
+            continue
+        ts = _parse_ts(rec.get("timestamp"))
+        if ts is not None and (did not in first or ts < first[did]):
+            first[did] = ts
+    return first
+
+
 def count_dispatches_in_window(db_path: Path, project_id: str, source_text: str,
-                               start: datetime, end: datetime) -> dict:
+                               start: datetime, end: datetime, ledger: Optional[Path] = None) -> dict:
     """Distinct dispatches that showed the pattern in ``[start, end)``: ``{status, count, reason, source}``.
 
-    Unknown (never 0) when the db or table cannot be read, no row matches, or a row has no readable dispatch ids.
+    A dispatch of a matching row's ``source_dispatch_ids`` counts only when the receipt ledger ``ledger`` holds a
+    receipt for that exact ``dispatch_id`` and ``project_id`` whose earliest ``timestamp`` lies in the window. The
+    row's ``last_seen`` only prefilters (a row last seen before ``start`` holds no in-window occurrence); it is never
+    the evidence. Unknown (never 0) when the db or table cannot be read, no row matches, a ``last_seen`` or the ids
+    cannot be parsed, the ledger is missing or unreadable, or an id has no timestamped receipt (the reason names how
+    many).
     """
     base = {"source": source_text[:200], "window_start": start.isoformat().replace("+00:00", "Z"),
             "window_end": end.isoformat().replace("+00:00", "Z")}
+
+    def unknown(reason: str) -> dict:
+        return {**base, "status": "unknown", "count": None, "reason": reason}
+
     if not source_text:
-        return {**base, "status": "unknown", "count": None, "reason": "edit has no source text"}
+        return unknown("edit has no source text")
     if not Path(db_path).is_file():
-        return {**base, "status": "unknown", "count": None, "reason": f"{Path(db_path).name} not found"}
+        return unknown(f"{Path(db_path).name} not found")
     try:
         conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
         try:
@@ -163,26 +199,36 @@ def count_dispatches_in_window(db_path: Path, project_id: str, source_text: str,
         finally:
             conn.close()
     except sqlite3.Error as exc:
-        return {**base, "status": "unknown", "count": None, "reason": f"antipatterns unreadable: {exc}"}
-    seen: set = set()
+        return unknown(f"antipatterns unreadable: {exc}")
+    if not rows:
+        return unknown("no antipattern row matches the edit")
+    candidates: set = set()
     for raw_ids, last_seen in rows:
-        try:
-            ts = datetime.fromisoformat(str(last_seen).replace("Z", "+00:00"))
-        except ValueError:
-            continue
-        ts = ts if ts.tzinfo else ts.replace(tzinfo=_UTC)
-        if not (start <= ts < end):
+        ts = _parse_ts(str(last_seen) if last_seen is not None else None)
+        if ts is None:
+            return unknown(f"last_seen unparsable: {last_seen!r}")
+        if ts < start:
             continue
         ids = _ids(raw_ids)
         if ids is None:
-            return {**base, "status": "unknown", "count": None, "reason": "source_dispatch_ids unreadable"}
-        seen.update(ids)
-    if not rows:
-        return {**base, "status": "unknown", "count": None, "reason": "no antipattern row matches the edit"}
-    return {**base, "status": "ok", "count": len(seen), "reason": None}
+            return unknown("source_dispatch_ids unreadable")
+        candidates.update(ids)
+    if not candidates:
+        return {**base, "status": "ok", "count": 0, "reason": None}
+    if ledger is None:
+        return unknown("no receipt ledger given to date the dispatches")
+    try:
+        first = _first_receipt_times(Path(ledger), project_id, candidates)
+    except LedgerUnreadable as exc:
+        return unknown(f"receipt ledger unreadable: {exc}")
+    missing = len(candidates - set(first))
+    if missing:
+        return unknown(f"{missing} of {len(candidates)} source dispatch ids have no timestamped receipt in the ledger")
+    return {**base, "status": "ok", "count": sum(1 for t in first.values() if start <= t < end), "reason": None}
 
 
-def baseline_for(edit: dict, project_id: str, db_path: Path, applied_at: datetime) -> dict:
+def baseline_for(edit: dict, project_id: str, db_path: Path, applied_at: datetime,
+                 ledger: Optional[Path] = None) -> dict:
     start = applied_at - timedelta(days=REMEASURE_DAYS)
     return {"window_days": REMEASURE_DAYS,
-            **count_dispatches_in_window(db_path, project_id, edit_source_text(edit), start, applied_at)}
+            **count_dispatches_in_window(db_path, project_id, edit_source_text(edit), start, applied_at, ledger)}

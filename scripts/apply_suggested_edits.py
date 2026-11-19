@@ -594,7 +594,8 @@ def cmd_reconcile():
         now = datetime.now(tz=_UTC)
         edit.update(status="applied", applied_at=now.isoformat().replace("+00:00", "Z"), applied_ref=ref,
                     remeasure_at=(now + timedelta(days=sed.REMEASURE_DAYS)).isoformat().replace("+00:00", "Z"),
-                    baseline=sed.baseline_for(edit, project_id, STATE_DIR / "quality_intelligence.db", now))
+                    baseline=sed.baseline_for(edit, project_id, STATE_DIR / "quality_intelligence.db", now,
+                                                  STATE_DIR / sed.LEDGER_NAME))
         edit.pop("dispatch_state", None)
         edit.pop("dispatch_state_reason", None)
         if not any(h.get("id") == edit["id"] and h.get("dispatch_id") == edit["dispatch_id"] for h in history):
