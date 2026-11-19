@@ -1,9 +1,7 @@
-"""accept stages a dispatch with the exact diff; reconcile applies only on a pr_merged receipt (ochtendronde D3c)."""
+"""accept stages a dispatch with the exact diff; apply writes nothing (ochtendronde D3c part A)."""
 
 import json
-import sqlite3
 import sys
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -41,16 +39,6 @@ def env(tmp_path, monkeypatch):
 
 def _pending(state):
     return json.loads((state / "pending_edits.json").read_text())["edits"]
-
-
-def _ledger(state, *lines):
-    (state / "t0_receipts.ndjson").write_text("".join(
-        (l if isinstance(l, str) else json.dumps(l)) + "\n" for l in lines))
-
-
-def _merged(did, project=PID, pr=3060, sha="0123456789abcdef"):
-    return {"event_type": "pr_merged", "conclusion": "merged", "dispatch_id": did,
-            "project_id": project, "pr_number": pr, "merge_sha": sha}
 
 
 def _approve(env):
@@ -121,106 +109,26 @@ def test_accept_when_handler_changes_nothing_stays_pending(env, capsys):
     assert _pending(state)[0]["status"] == "pending"
 
 
-def test_reconcile_marks_applied_with_ref_remeasure_and_baseline(env):
+def test_accept_when_handler_raises_stays_pending(env, monkeypatch, capsys):
     root, state, store = env
-    did = _approve(env)["dispatch_id"]
-    _ledger(state, _merged("other-dispatch"), _merged(did))
-    before = datetime.now(tz=timezone.utc)
-    assert ase.cmd_reconcile() == 0
-    assert _pending(state) == []
-    (entry,) = json.loads((state / "edit_history.json").read_text())
-    assert entry["status"] == "applied" and entry["applied_ref"] == "#3060@0123456789ab"
-    applied = datetime.fromisoformat(entry["applied_at"].replace("Z", "+00:00"))
-    assert applied >= before - timedelta(seconds=1)
-    assert datetime.fromisoformat(entry["remeasure_at"].replace("Z", "+00:00")) - applied == timedelta(days=14)
-    assert entry["baseline"]["window_days"] == 14 and entry["baseline"]["status"] == "unknown"
-    assert entry["baseline"]["count"] is None and entry["baseline"]["reason"]
-    assert ase.cmd_reconcile() == 0  # idempotent
-    assert len(json.loads((state / "edit_history.json").read_text())) == 1
+
+    def boom(edit):
+        raise RuntimeError("handler broke")
+    monkeypatch.setitem(ase.APPLY_HANDLERS, "role", boom)
+    assert ase.cmd_accept("1") == 1
+    assert "handler raised RuntimeError" in capsys.readouterr().err
+    assert _pending(state)[0]["status"] == "pending"
+    assert not (store / "dispatches").exists()
 
 
-@pytest.mark.parametrize("ledger", ["none", "empty", "other_project", "other_dispatch", "not_merged", "no_sha"])
-def test_reconcile_without_evidence_changes_nothing(env, ledger):
+def test_apply_writes_nothing_and_says_where_accepted_edits_go(env, capsys):
     root, state, store = env
-    did = _approve(env)["dispatch_id"]
-    lines = {"none": [], "empty": [],
-             "other_project": [_merged(did, project="other")],
-             "other_dispatch": [_merged(did + "x"), _merged("x" + did)],
-             "not_merged": [{**_merged(did), "conclusion": "closed"}, {**_merged(did), "event_type": "x"}],
-             "no_sha": [{**_merged(did), "merge_sha": None}]}[ledger]
-    _ledger(state, *lines)
-    ase.cmd_reconcile()
-    assert _pending(state)[0]["status"] == "approved"
+    edit = _approve(env)
+    target_before = (root / TARGET).read_bytes()
+    pending_before = (state / "pending_edits.json").read_bytes()
+    assert ase.cmd_apply() == 0
+    assert "staged dispatch" in capsys.readouterr().out
+    assert (root / TARGET).read_bytes() == target_before
+    assert (state / "pending_edits.json").read_bytes() == pending_before
     assert not (state / "edit_history.json").exists()
-
-
-def test_reconcile_corrupt_or_missing_ledger_is_refused(env, capsys):
-    root, state, store = env
-    did = _approve(env)["dispatch_id"]
-    # no ledger file at all
-    assert ase.cmd_reconcile() == 1
-    _ledger(state, json.dumps(_merged(did)), "{not json")
-    assert ase.cmd_reconcile() == 1
-    assert "unreadable" in capsys.readouterr().err
-    assert _pending(state)[0]["status"] == "approved" and not (state / "edit_history.json").exists()
-
-
-def test_failed_dispatch_leaves_edit_approved_with_state(env, monkeypatch):
-    root, state, store = env
-    did = _approve(env)["dispatch_id"]
-    _ledger(state)
-    monkeypatch.setattr(ase, "_dispatch_states", lambda pid, wanted: {did: ("rejected_dispatch", "bad lane")})
-    assert ase.cmd_reconcile() == 0
-    edit = _pending(state)[0]
-    assert edit["status"] == "approved" and edit["dispatch_state"] == "rejected_dispatch"
-    assert edit["dispatch_state_reason"] == "bad lane"
-
-
-def test_unreadable_outcomes_is_visible_and_keeps_edit(env, monkeypatch, capsys):
-    root, state, store = env
-    _approve(env)
-    _ledger(state)
-
-    def boom(pid, wanted):
-        raise RuntimeError("ledger gone")
-    monkeypatch.setattr(ase, "_dispatch_states", boom)
-    assert ase.cmd_reconcile() == 1
-    assert "outcomes unreadable" in capsys.readouterr().err
-    assert _pending(state)[0]["status"] == "approved"
-
-
-def _db(path, rows):
-    conn = sqlite3.connect(path)
-    conn.execute("CREATE TABLE antipatterns (project_id TEXT, title TEXT, description TEXT, "
-                 "source_dispatch_ids TEXT, last_seen TEXT)")
-    conn.executemany("INSERT INTO antipatterns VALUES (?,?,?,?,?)", rows)
-    conn.commit()
-    conn.close()
-
-
-def test_baseline_counts_distinct_dispatches_in_window(tmp_path):
-    now = datetime(2026, 11, 19, tzinfo=timezone.utc)
-    db = tmp_path / "q.db"
-    _db(db, [(PID, "t", RULE, '["d1","d2","d1"]', "2026-11-10 08:00:00"),
-             (PID, "t", RULE, '["d3"]', "2026-11-18 08:00:00"),
-             (PID, "t", RULE, '["d9"]', "2026-10-01 08:00:00"),
-             ("other", "t", RULE, '["d8"]', "2026-11-10 08:00:00")])
-    out = sed.baseline_for({"content": f"- {RULE}"}, PID, db, now)
-    assert out["status"] == "ok" and out["count"] == 3 and out["window_days"] == 14
-
-
-@pytest.mark.parametrize("rows,reason", [
-    ([], "no antipattern row"),
-    ([(PID, "t", RULE, "not json", "2026-11-10 08:00:00")], "source_dispatch_ids unreadable"),
-])
-def test_baseline_unknown_is_never_zero(tmp_path, rows, reason):
-    db = tmp_path / "q.db"
-    _db(db, rows)
-    out = sed.baseline_for({"content": f"- {RULE}"}, PID, db, datetime(2026, 11, 19, tzinfo=timezone.utc))
-    assert out["status"] == "unknown" and out["count"] is None and reason in out["reason"]
-
-
-def test_baseline_missing_db_and_empty_source_are_unknown(tmp_path):
-    now = datetime(2026, 11, 19, tzinfo=timezone.utc)
-    assert sed.baseline_for({"content": f"- {RULE}"}, PID, tmp_path / "none.db", now)["status"] == "unknown"
-    assert sed.baseline_for({"content": ""}, PID, tmp_path / "none.db", now)["count"] is None
+    assert edit["status"] == "approved"

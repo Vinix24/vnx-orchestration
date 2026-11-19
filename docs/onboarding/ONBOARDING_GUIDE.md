@@ -142,7 +142,7 @@ main session.
 ./bin/vnx analyze-sessions
 ./bin/vnx suggest review
 ./bin/vnx suggest accept 1,3,5
-./bin/vnx suggest reconcile   # accept stages a dispatch; reconcile marks applied after the PR merges
+./bin/vnx suggest accept <ids>   # stages a dispatch with the exact diff; the T0 fires it
 ```
 
 ---

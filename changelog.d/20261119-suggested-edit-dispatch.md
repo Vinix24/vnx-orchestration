@@ -1,1 +1,1 @@
-- `vnx suggest accept` stages a dispatch with the exact diff of the edit (status `approved`, the T0 fires it) instead of marking it accepted. `vnx suggest apply` no longer writes files: `vnx suggest reconcile` marks an edit `applied` only on the `pr_merged` receipt of its dispatch, and records `remeasure_at` (14 days) and a baseline in `edit_history.json`.
+- `vnx suggest accept` stages a dispatch with the exact diff of the edit (status `approved`, the T0 fires it) instead of marking it accepted. `vnx suggest apply` no longer writes files; it points to the staged dispatch.
