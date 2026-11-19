@@ -201,11 +201,15 @@ def _refuse_test_post_without_opt_in(name: str, head_sha: str) -> None:
         return
     if os.environ.get(TEST_POST_OPT_IN_ENV) == "1":
         return
+    try:
+        slug = resolve_owner_repo(Path.cwd())
+    except Exception:  # vnx-silent-except: building a refusal message must never raise; the message falls back to a generic name
+        slug = "this repository"
     raise ForgeTestPostRefused(
         f"[TEST MODE GUARD] publish_check_run geweigerd: een POST voor check "
         f"'{name}' op sha {head_sha[:12]} zou dit vanuit een pytest-run naar de "
         f"echte GitHub API sturen — de vnx-gate App heeft checks:write op "
-        f"Vinix24/vnx-orchestration en vnx-gate/review is een VERPLICHTE check "
+        f"{slug} en vnx-gate/review is een VERPLICHTE check "
         f"op main. Dit weigert fail-closed in elke pytest-run (OI-1675). Wil je "
         f"publish_check_run() echt uitoefenen tegen een gemockte _api_request "
         f"(zoals tests/test_forge_check_run_client.py doet): zet "
