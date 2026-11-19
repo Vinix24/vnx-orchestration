@@ -37,6 +37,25 @@ from git_maintenance_guard import disable_auto_maintenance  # noqa: E402
 _LOGGER = "orphan_sweep"
 
 
+@pytest.fixture(autouse=True)
+def _lib_crash_recovery_sweep(monkeypatch):
+    """Resolve ``import crash_recovery_sweep`` to the library module, whatever ran before.
+
+    ``orphan_sweep.sweep`` imports it lazily by its bare name, and scripts/ holds a
+    CLI of the same name that imports it back: with scripts/ ahead of scripts/lib on
+    sys.path, or the CLI already in sys.modules, that import is circular. Put
+    scripts/lib first for this test and drop a cached CLI; monkeypatch restores both.
+    """
+    lib_dir = str(_SCRIPT_DIR / "lib")
+    monkeypatch.syspath_prepend(lib_dir)
+    cached = sys.modules.get("crash_recovery_sweep")
+    cached_file = getattr(cached, "__file__", None)
+    if cached is not None and (
+        cached_file is None or Path(cached_file).resolve().parent != _SCRIPT_DIR / "lib"
+    ):
+        monkeypatch.delitem(sys.modules, "crash_recovery_sweep")
+
+
 @pytest.fixture
 def env(tmp_path):
     """Pin runtime dirs to a per-test tmp tree; clear the current-dispatch fence.
