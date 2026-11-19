@@ -122,7 +122,7 @@ def _attempt_publish_check_run(*, guard_active: bool) -> List[Tuple[str, int]]:
             fcr, "_installation_token_with_freshness", return_value=("ghs_measurement", True)
         ),
         mock.patch.object(
-            fcr, "resolve_owner_repo", return_value="Vinix24/vnx-orchestration"
+            fcr, "resolve_owner_repo", return_value="example-owner/example-repo"
         ),
     ]
     if not guard_active and hasattr(fcr, "_refuse_test_post_without_opt_in"):
