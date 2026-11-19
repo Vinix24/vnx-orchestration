@@ -166,6 +166,8 @@ _ROW_ORDER: List[str] = [
     "evidence-bound-gate",
     # ochtendronde D1a: pure core built, nothing reads it until D1b
     "morning-pause",
+    # blast-radius B3: pure core built, nothing reads it until B4b
+    "blast-radius",
     # ACTIVATE-and-measure
     "intelligence-self-learning-loop",
     "dream-consolidation",
