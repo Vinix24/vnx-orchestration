@@ -26,7 +26,7 @@ FIELDS = "schema ts invocation_id project_id vorm actor_class exit_code duration
 #: bin/vnx main() case labels + vnx_cli/main.py subparsers (pinned by tests); any other word is a placeholder.
 KNOWN_SUBCOMMANDS = tuple("""
 activate add analyze-sessions approve attest backfill backfill-reason batch bootstrap-hooks bootstrap-skills
-bootstrap-terminals check cleanup close context-manifest cost-report costs daily-metrics decide-rule decide-steering
+bootstrap-terminals check cleanup close config context-manifest cost-report costs daily-metrics decide-rule decide-steering
 deliverable dismiss dispatch dispatch-agent dispatch-cleanup doctor done dream drift fabric-audit finish-worktree gate
 gate-check gate-profile gate-reanchor grounding-shadow guard handoff help history horizon impact inbox init init-db
 insights install install-check install-git-hooks install-scheduler install-shell-helper install-validate

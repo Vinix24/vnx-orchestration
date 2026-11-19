@@ -68,6 +68,8 @@ TIER_STARTER_OPERATOR: FrozenSet[str] = frozenset({
     # `vnx impact` (ADR-074 besluit 8): collect keeps the CI shadow artifacts in a local ledger,
     # report only reads it. In no tier the mode gate refuses it as an unknown name (OI-2456).
     "impact",
+    # `vnx config` (PR-10a): list/get/explain/get --raw only read, so safe in both modes.
+    "config",
 })
 
 TIER_OPERATOR_ONLY: FrozenSet[str] = frozenset({
