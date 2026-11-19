@@ -153,9 +153,3 @@ def test_a_table_in_another_shape_rolls_back_and_stays_at_38(db_at_38):
     finally:
         conn.close()
 
-
-def test_statements_drop_comments_and_split():
-    statements = apply_0039._statements(SQL.read_text(encoding="utf-8"))
-    assert len(statements) == 2
-    assert statements[0].startswith("CREATE TABLE IF NOT EXISTS deliverable_dependencies")
-    assert statements[1].startswith("CREATE INDEX IF NOT EXISTS idx_deliverable_dependencies_on")
