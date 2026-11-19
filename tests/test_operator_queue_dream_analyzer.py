@@ -252,3 +252,23 @@ def test_reminder_rounds_never_return_a_closed_point(tmp_path):
             assert out["opened"] == out["closed"] == out["unknown"] == []
         assert [p for p in s.points() if p["state"] == "open"] == []
     assert s.ledger() == before
+
+
+def test_approved_edit_closes_the_point_as_a_decision(tmp_path):
+    s = Store(tmp_path)
+    s.edits({"id": 6, "status": "pending", "category": "role"})
+    assert len(qa.read_analyzer(P, **s.kw())["opened"]) == 1
+    s.edits({"id": 6, "status": "approved", "approved_at": "2026-11-19T09:00:00Z", "dispatch_id": "edit-6-abcd1234"})
+    out = qa.read_analyzer(P, **s.kw())
+    assert len(out["closed"]) == 1 and "status=approved" in s.points()[0]["bewijs"]
+
+
+def test_applied_history_entry_with_applied_ref_closes_the_point(tmp_path):
+    s = Store(tmp_path)
+    s.edits({"id": 7, "status": "pending", "category": "role"})
+    assert len(qa.read_analyzer(P, **s.kw())["opened"]) == 1
+    s.edits()
+    s.put("edit_history.json", [{"id": 7, "status": "applied", "applied_at": "2026-11-19T10:00:00Z",
+                                 "applied_ref": "#3060@0123456789ab"}])
+    out = qa.read_analyzer(P, **s.kw())
+    assert len(out["closed"]) == 1 and "edit_history.json: id=7 status=applied" in s.points()[0]["bewijs"]

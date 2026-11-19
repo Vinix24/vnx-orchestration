@@ -158,7 +158,7 @@ def _format_pending_edits(edits_data: dict) -> str:
         "\nReview: vnx suggest review\n"
         "Accept: vnx suggest accept <ids>\n"
         "Reject: vnx suggest reject <ids>\n"
-        "Apply:  vnx suggest apply"
+        "Reconcile: vnx suggest reconcile (accept stages a dispatch)"
     )
 
     return "\n".join(lines) + "\n"
