@@ -20,6 +20,6 @@
   ["scripts/lib/providers/wave7_models.yaml", "kimi-k3", "7470363e627535f2", 1], ["scripts/lib/providers/wave7_models.yaml", "kimi-k3", "786b4a3b8cdadd36", 1], ["scripts/lib/providers/wave7_models.yaml", "kimi-k3", "869b0ba6d9fffd5b", 1],
   ["scripts/lib/providers/wave7_models.yaml", "kimi-k3", "ba5a05809e842665", 1], ["scripts/lib/providers/wave7_models.yaml", "kimi-k3", "be0727339c98edbd", 1], ["scripts/lib/providers/wave7_models.yaml", "kimi-k3", "eeedf5a50fd42ef2", 1],
   ["scripts/lib/report_to_receipt_converter.py", "kimi-k3", "344f895c361a8779", 1], ["scripts/lib/subprocess_dispatch.py", "kimi-k3", "745ecd51eda5700c", 1], ["scripts/lib/vnx_paths.py", "Vinix24", "6ac4ff1b2a2f1376", 1],
-  ["scripts/lib/vnx_resolve_root.sh", "Vinix24", "05835688f33a20f8", 1], ["scripts/lib/vnx_start_runtime.py", "kimi-k3", "f231162d721e9682", 1], ["scripts/lib/vnx_start_runtime.py", "kimi-k3", "f260c8d082ec2405", 1],
+  ["scripts/lib/vnx_resolve_root.sh", "Vinix24", "05835688f33a20f8", 1], ["scripts/lib/vnx_start_runtime.py", "kimi-k3", "a4a9d03cf2530126", 1], ["scripts/lib/vnx_start_runtime.py", "kimi-k3", "d1a96d68f101b552", 1],
   ["scripts/report_parser.py", "kimi-k3", "4ac9d261116567af", 1], ["scripts/report_parser.py", "kimi-k3", "697d82f91fbb570d", 1], ["vnx_cli/commands/update.py", "Vinix24", "0c84f49590acbeb9", 1]
 ]}
