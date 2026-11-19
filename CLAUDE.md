@@ -24,6 +24,7 @@ Everything above this block describes *this project*. Everything the fabric does
 - No mock objects, placeholder data or stub implementations in shipped code. Tests patch external processes and services as the test rules require; that stays allowed and stays inside `tests/`.
 - Tests go in `tests/`, never next to the source. Scripts go in `scripts/`.
 - Never create `_v2`, `_fixed` or `_new` duplicate files: edit the original.
+- Everything a user or another agent reads or types in this repo is English: code identifiers, file and directory names, ledger and schema fields, reason codes, CLI commands, flags and output, headings written into agent files, docs and new ADRs. Existing ADRs stay as they are (ADR-079 § 83). The Dutch fields of the inbox ledger (ADR-076) move to English in their own migration track. Operator decision 2026-11-19.
 
 ## Mandatory Report Contract
 
