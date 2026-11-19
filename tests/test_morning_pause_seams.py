@@ -196,3 +196,38 @@ def test_main_lands_the_refusal_in_the_preflight_ledger(merge_door, merge_seams)
     assert _run() == pr_merge.EXIT_ERROR
     gates = {g["gate"]: g for g in _refusal(merge_door)["preflight_gates"]}
     assert gates["morning_pause"]["verdict"] == "NO-GO" and gates["door"]["verdict"] == "not_evaluated"
+
+
+BEFORE = datetime(2026, 11, 19, 5, 59, tzinfo=timezone.utc)  # 06:59 Europe/Amsterdam
+
+
+@pytest.mark.parametrize("override", [None, "operator says go"])
+def test_pause_is_rechecked_after_the_main_lock(merge_door, merge_seams, monkeypatch, override):
+    """Approved at 06:59, the lock wait carries the merge to 07:30: the recheck refuses before the permit."""
+    import contextlib
+    from test_pr_merge_door_permit import _refusal, _run
+    snapshot(merge_seams["sd"])
+    merge_seams["now"] = BEFORE
+
+    @contextlib.contextmanager
+    def slow_lock(args, enabled):
+        merge_seams["now"] = IN_WINDOW
+        yield 600.0
+    monkeypatch.setattr(pr_merge, "_main_admission_lock", slow_lock)
+    extra = ("--override-morning-pause", override) if override else ()
+    if override:  # an override first recorded at the recheck is one line, and a GO
+        assert _run(*extra) == pr_merge.EXIT_OK
+        assert [e["kind"] for e in events(merge_seams["sd"])] == ["override"]
+        return
+    assert _run() == pr_merge.EXIT_ERROR
+    assert not merge_door.receipts("pr_merged") and not merge_door.of("POST")
+    gates = {g["gate"]: g for g in _refusal(merge_door)["preflight_gates"]}
+    assert gates["morning_pause"]["verdict"] == "NO-GO" and gates["door"]["verdict"] == "not_evaluated"
+    assert [e["kind"] for e in events(merge_seams["sd"])] == ["refused"]
+
+
+def test_an_override_recorded_at_the_first_check_is_not_recorded_again(merge_door, merge_seams):
+    from test_pr_merge_door_permit import _run
+    snapshot(merge_seams["sd"])
+    assert _run("--override-morning-pause", "operator says go") == pr_merge.EXIT_OK
+    assert [e["kind"] for e in events(merge_seams["sd"])] == ["override"]

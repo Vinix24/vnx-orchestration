@@ -3200,10 +3200,12 @@ def _run_main_gate(args: argparse.Namespace, head_sha: str) -> Dict[str, Any]:
     return gate
 
 
-def _run_pause_gate(args: argparse.Namespace) -> Dict[str, Any]:
+def _run_pause_gate(args: argparse.Namespace, override_recorded: bool = False) -> Dict[str, Any]:
     """The ``morning_pause`` preflight (ADR-095): NO-GO while paused, GO with ``--override-morning-pause`` and a reason.
 
     Every refusal and override is a line in ``ochtendronde.ndjson``; a failing append is printed, never a pass.
+    ``override_recorded`` (the recheck under the lock) means this merge's override line is already
+    written: a paused verdict with the reason is then a GO without a second line.
     """
     import morning_pause_gate as pause
 
@@ -3222,6 +3224,9 @@ def _run_pause_gate(args: argparse.Namespace) -> Dict[str, Any]:
         return gate
     if override is not None and not reason:
         gate["message"] += "; override refused: --override-morning-pause needs a non-empty reason"
+    if reason and override_recorded:
+        gate.update(verdict="GO", overridden=True, override_reason=reason, message=f"{gate['message']}; overridden: {reason}")
+        return gate
     kind = "override" if reason else "refused"
     ref = f"PR #{args.pr}" + (f" {args.dispatch_id}" if args.dispatch_id else "")
     event_error = pause.record_event(
@@ -3320,6 +3325,23 @@ def _reread_main_gate(
     return None
 
 
+def _reread_pause_gate(
+    args: argparse.Namespace, evaluated: list[Dict[str, Any]], head_sha: str, refuse: Callable[..., int],
+) -> Optional[int]:
+    """The ``morning_pause`` gate again after the lock wait, before the permit: the clock may have entered the pause.
+
+    Its record replaces the first one, like the ``main`` recheck; an override the first check
+    already wrote to the ledger is not written again. A NO-GO is a refusal.
+    """
+    first = next((r for r in evaluated if r.get("gate") == PAUSE_GATE), {})
+    gate = _run_pause_gate(args, override_recorded=first.get("overridden") is True)
+    evaluated[:] = [r for r in evaluated if r.get("gate") != PAUSE_GATE]
+    evaluated.append(_preflight_record(PAUSE_GATE, gate, head_sha))
+    if gate["verdict"] != "GO":
+        return refuse(PAUSE_GATE, gate, "morning_pause_gate")
+    return None
+
+
 def _locked_door_merge(
     args: argparse.Namespace, evaluated: list[Dict[str, Any]], head_sha: str,
     refuse: Callable[..., int], main_admission: Dict[str, Any], finish: Callable[[], int],
@@ -3328,7 +3350,8 @@ def _locked_door_merge(
 
     Mode off (``main_admission['mode'] == 'off'``) takes no lock and reads nothing again. Any
     other mode, an unknown one included, locks: the window is re-read under the lock and a
-    NO-GO there refuses before the permit is published.
+    NO-GO there refuses before the permit is published. The morning pause is rechecked in
+    every mode, right before the permit.
     """
     locked = main_admission.get("mode") != MAIN_ADMISSION_OFF["mode"]
     main_admission["lock_wait_s"] = 0
@@ -3339,6 +3362,9 @@ def _locked_door_merge(
                 refused = _reread_main_gate(args, evaluated, head_sha, refuse, main_admission)
                 if refused is not None:
                     return refused
+            refused = _reread_pause_gate(args, evaluated, head_sha, refuse)
+            if refused is not None:
+                return refused
             return finish()
     except MainLockTimeout as exc:
         main_admission.update(mode="on", verdict="NO-GO", reason=str(exc), overridden=False, override_reason=None)
