@@ -1,0 +1,1 @@
+- 18 registry keys (analyzer and Ollama, digest email, the opt-in gates, the per-terminal providers, `VNX_ENFORCEMENT_PROFILE`, `VNX_ACCOUNT_DIRS`) with scope and allowed values; nothing reads them through the registry yet.
