@@ -127,7 +127,8 @@ def test_apply_writes_nothing_and_says_where_accepted_edits_go(env, capsys):
     target_before = (root / TARGET).read_bytes()
     pending_before = (state / "pending_edits.json").read_bytes()
     assert ase.cmd_apply() == 0
-    assert "staged dispatch" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "staged dispatch" in out and "reconcile" in out
     assert (root / TARGET).read_bytes() == target_before
     assert (state / "pending_edits.json").read_bytes() == pending_before
     assert not (state / "edit_history.json").exists()
