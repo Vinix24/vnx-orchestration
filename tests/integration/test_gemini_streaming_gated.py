@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Integration test: GeminiAdapter streaming gated by VNX_GEMINI_STREAM=1.
+"""Integration test: GeminiAdapter streaming gated by gemini_stream_enabled().
 
 Verifies:
-- VNX_GEMINI_STREAM=0 (default): behavior identical to pre-migration (single Tier-3 event).
-- VNX_GEMINI_STREAM=1: live events accumulate in EventStore during execution; Tier-1 on all events.
+- streaming off (default): behavior identical to pre-migration (single Tier-3 event).
+- streaming on (seam patched): live events accumulate in EventStore during execution; Tier-1 on all events.
 - Real gemini subprocess integration requires `gemini` on PATH (skipped otherwise).
 - Fake subprocess path covers gated drain logic without needing real gemini binary.
 
@@ -88,11 +88,10 @@ def event_store(tmp_path: Path) -> EventStore:
 # ---------------------------------------------------------------------------
 
 class TestDefaultOffBehavior:
-    """Verify VNX_GEMINI_STREAM=0 preserves legacy single-event Tier-3 path."""
+    """Verify the default preserves legacy single-event Tier-3 path."""
 
     def test_stream_events_yields_single_tier3_result(self, monkeypatch):
         """stream_events() without stream flag yields one Tier-3 result event."""
-        monkeypatch.delenv("VNX_GEMINI_STREAM", raising=False)
 
         adapter = GeminiAdapter("T3")
 
@@ -117,7 +116,6 @@ class TestDefaultOffBehavior:
 
     def test_execute_returns_done_on_legacy(self, monkeypatch):
         """execute() without stream flag routes to legacy path and returns AdapterResult."""
-        monkeypatch.delenv("VNX_GEMINI_STREAM", raising=False)
 
         adapter = GeminiAdapter("T3")
         seen = {}
@@ -166,8 +164,8 @@ class TestStreamingWithFakeSubprocess:
         monkeypatch.setattr(ga_mod.subprocess, "Popen", fake_popen)
 
     def test_streaming_emits_multiple_events(self, monkeypatch, event_store: EventStore):
-        """VNX_GEMINI_STREAM=1 + fake subprocess emits multiple CanonicalEvents."""
-        monkeypatch.setenv("VNX_GEMINI_STREAM", "1")
+        """streaming on + fake subprocess emits multiple CanonicalEvents."""
+        monkeypatch.setattr("provider_spawns.gemini_spawn.gemini_stream_enabled", lambda: True)
         adapter = GeminiAdapter("T3")
         adapter._current_terminal_id = "T3"
         adapter._current_dispatch_id = "stream-test-001"
@@ -185,7 +183,7 @@ class TestStreamingWithFakeSubprocess:
 
     def test_all_streaming_events_have_tier_1(self, monkeypatch, event_store: EventStore):
         """All streamed events must carry observability_tier=1."""
-        monkeypatch.setenv("VNX_GEMINI_STREAM", "1")
+        monkeypatch.setattr("provider_spawns.gemini_spawn.gemini_stream_enabled", lambda: True)
         adapter = GeminiAdapter("T3")
         adapter._current_terminal_id = "T3"
         adapter._current_dispatch_id = "tier-test-001"
@@ -209,7 +207,7 @@ class TestStreamingWithFakeSubprocess:
         self, monkeypatch, event_store: EventStore
     ):
         """Streaming events must include init, text, and complete types."""
-        monkeypatch.setenv("VNX_GEMINI_STREAM", "1")
+        monkeypatch.setattr("provider_spawns.gemini_spawn.gemini_stream_enabled", lambda: True)
         adapter = GeminiAdapter("T3")
         adapter._current_terminal_id = "T3"
         adapter._current_dispatch_id = "types-test-001"
@@ -229,8 +227,8 @@ class TestStreamingWithFakeSubprocess:
         assert "complete" in types_seen, f"Expected 'complete' in {types_seen}"
 
     def test_execute_streaming_returns_done(self, monkeypatch, event_store: EventStore):
-        """execute() with VNX_GEMINI_STREAM=1 returns status='done' for rc=0."""
-        monkeypatch.setenv("VNX_GEMINI_STREAM", "1")
+        """execute() with streaming on returns status='done' for rc=0."""
+        monkeypatch.setattr("provider_spawns.gemini_spawn.gemini_stream_enabled", lambda: True)
         adapter = GeminiAdapter("T3")
         adapter._current_terminal_id = "T3"
         adapter._current_dispatch_id = "execute-stream-001"
@@ -250,7 +248,7 @@ class TestStreamingWithFakeSubprocess:
 
     def test_event_store_accumulates_during_stream(self, monkeypatch, event_store: EventStore):
         """EventStore must contain events after a streaming run."""
-        monkeypatch.setenv("VNX_GEMINI_STREAM", "1")
+        monkeypatch.setattr("provider_spawns.gemini_spawn.gemini_stream_enabled", lambda: True)
         adapter = GeminiAdapter("T3")
         adapter._current_terminal_id = "T3"
         adapter._current_dispatch_id = "store-test-001"
@@ -278,7 +276,7 @@ class TestStreamingWithFakeSubprocess:
 
 @pytest.mark.skipif(shutil.which("gemini") is None, reason="gemini binary not installed")
 class TestGeminiLiveStreaming:
-    """Boot real gemini subprocess with VNX_GEMINI_STREAM=1."""
+    """Boot real gemini subprocess with streaming on."""
 
     FIXTURE_PROMPT = (
         "In exactly one sentence, state what color the sky is on a clear day."
@@ -286,7 +284,7 @@ class TestGeminiLiveStreaming:
 
     def test_stream_events_yields_events(self, monkeypatch, event_store: EventStore):
         """Real gemini subprocess emits at least one event when streaming."""
-        monkeypatch.setenv("VNX_GEMINI_STREAM", "1")
+        monkeypatch.setattr("provider_spawns.gemini_spawn.gemini_stream_enabled", lambda: True)
         adapter = GeminiAdapter("T-real")
         ctx = {
             "terminal_id": "T-real",
@@ -300,7 +298,7 @@ class TestGeminiLiveStreaming:
 
     def test_all_real_events_have_tier_1(self, monkeypatch, event_store: EventStore):
         """All real gemini events must have observability_tier=1."""
-        monkeypatch.setenv("VNX_GEMINI_STREAM", "1")
+        monkeypatch.setattr("provider_spawns.gemini_spawn.gemini_stream_enabled", lambda: True)
         adapter = GeminiAdapter("T-real")
         ctx = {
             "terminal_id": "T-real",

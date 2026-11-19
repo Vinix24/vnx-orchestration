@@ -14,7 +14,6 @@ BILLING SAFETY: No Anthropic SDK. No network calls.
 """
 from __future__ import annotations
 
-import os
 import sys
 from pathlib import Path
 
@@ -52,8 +51,7 @@ def cmd_tiers(argv: list[str]) -> int:
         # Annotate environment-dependent adapters
         note = ""
         if provider == "gemini":
-            stream = os.environ.get("VNX_GEMINI_STREAM", "0").strip()
-            note = f"  [VNX_GEMINI_STREAM={stream}]"
+            note = "  [streaming off]"
         elif provider == "litellm":
             note = "  [streaming SSE]"
         elif provider == "ollama":

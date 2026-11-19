@@ -60,10 +60,10 @@ class TestDispatchGeminiArgsModel(unittest.TestCase):
         model = _dispatch_with_env(_args(model="gemini-2.5-flash"), _env_without_gemini())
         self.assertEqual(model, "gemini-2.5-flash")
 
-    def test_dispatch_gemini_falls_back_to_env_when_args_sonnet(self):
+    def test_dispatch_gemini_ignores_the_deleted_model_variable_when_args_sonnet(self):
         env = {**_env_without_gemini(), "VNX_GEMINI_MODEL": "gemini-2.5-flash"}
         model = _dispatch_with_env(_args(model="sonnet"), env)
-        self.assertEqual(model, "gemini-2.5-flash")
+        self.assertEqual(model, "gemini-2.5-pro")
 
     def test_dispatch_gemini_falls_back_to_default_when_neither(self):
         model = _dispatch_with_env(_args(model="sonnet"), _env_without_gemini())

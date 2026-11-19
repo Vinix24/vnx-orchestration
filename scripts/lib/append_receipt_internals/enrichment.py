@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 import sys
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -249,7 +248,7 @@ def _enrich_cqs(enriched: Dict[str, Any], state_dir: Path) -> None:
         _emit("WARN", "cqs_calculation_failed", error=str(exc))
 
 
-def _enrich_toolcall_signals(enriched: Dict[str, Any]) -> None:
+def _enrich_toolcall_signals(enriched: Dict[str, Any], signal_dir: Optional[str] = None) -> None:
     """receipt-quality PR-B2 fix-forward (Finding C): aggregate PreToolUse-hook
     tool-call signals (scripts/lib/toolcall_signals.py) onto the tmux-interactive
     lane's worker-authored completion receipt.
@@ -258,9 +257,8 @@ def _enrich_toolcall_signals(enriched: Dict[str, Any]) -> None:
     lane's own ``append_receipt.py`` completion call) — a distinct code path
     from ``governance_emit.emit_dispatch_receipt`` (Path 1, ReceiptV2), which
     already aggregates signals for the provider/subprocess lanes. Reads the
-    same ``VNX_TMUX_SIGNAL_DIR`` the PreToolUse hooks wrote to, inherited from
-    this worker's own process environment (the tmux lane exports it into the
-    pane's shell before the worker session starts).
+    ``signal_dir`` the PreToolUse hooks wrote to. None (the default; nothing
+    exports a signal dir any more) leaves the receipt untouched.
 
     FAIL-OPEN: an aggregation error or absent signal log must never break
     receipt enrichment. Uses ``setdefault`` so a caller-supplied value (e.g. a
@@ -270,7 +268,6 @@ def _enrich_toolcall_signals(enriched: Dict[str, Any]) -> None:
     ReceiptV2's None-omission contract for the same fields on the other paths.
     """
     try:
-        signal_dir = os.environ.get("VNX_TMUX_SIGNAL_DIR")
         if not signal_dir:
             return
         from toolcall_signals import aggregate_toolcall_signals  # noqa: PLC0415

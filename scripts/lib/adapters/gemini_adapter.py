@@ -4,9 +4,8 @@
 Executes code review via the `gemini` CLI (not the Vertex AI REST path).
 Review-only: no CODE capability, no file writes, no git commits.
 
-Streaming mode: set VNX_GEMINI_STREAM=1 to switch to --output-format stream-json
-and drain events via StreamingDrainerMixin (Tier-1). Default (unset/0) keeps the
-legacy --output-format json path (Tier-3, single synthetic result event).
+Streaming mode (--output-format stream-json drained via StreamingDrainerMixin, Tier-1) is
+off; the --output-format json path (Tier-3, single synthetic result event) is the default.
 
 BILLING SAFETY: No Anthropic SDK. CLI-only subprocess calls.
 """
@@ -45,17 +44,19 @@ _DEFAULT_TIMEOUT = 300
 _DEFAULT_STALL_THRESHOLD = 60
 
 # Observability tiers
-_TIER_STREAMING = 1   # VNX_GEMINI_STREAM=1: live per-event
-_TIER_LEGACY = 3      # VNX_GEMINI_STREAM=0: final-only synthetic result
+_TIER_STREAMING = 1   # streaming drainer: live per-event
+_TIER_LEGACY = 3      # default: final-only synthetic result
 
 # Public adapter-level tier constant: effective tier under streaming config.
-# When VNX_GEMINI_STREAM=0 (legacy), effective tier is _TIER_LEGACY (3).
+# With streaming off (the default), effective tier is _TIER_LEGACY (3).
 OBSERVABILITY_TIER = _TIER_STREAMING
 
 
 def _gemini_stream_enabled() -> bool:
-    """Return True when VNX_GEMINI_STREAM=1 is set in the environment."""
-    return os.environ.get("VNX_GEMINI_STREAM", "0").strip() == "1"
+    """Whether the streaming drainer runs: the one seam is ``gemini_spawn.gemini_stream_enabled``
+    (off today), read at call time so a test that patches it steers both the adapter and the spawn."""
+    import provider_spawns.gemini_spawn as _spawn  # noqa: PLC0415
+    return _spawn.gemini_stream_enabled()
 
 
 def _legacy_failure(status: str, output: str, model: str, duration: float) -> AdapterResult:
@@ -77,10 +78,10 @@ def _legacy_failure(status: str, output: str, model: str, duration: float) -> Ad
 class GeminiAdapter(StreamingDrainerMixin, ProviderAdapter):
     """Provider adapter for the Gemini CLI (review and digest only).
 
-    When VNX_GEMINI_STREAM=1: spawns `gemini --output-format stream-json`,
+    When streaming is on: spawns `gemini --output-format stream-json`,
     drains NDJSON events live via StreamingDrainerMixin (Tier-1 observability).
 
-    When VNX_GEMINI_STREAM=0 (default): spawns `gemini --output-format json`,
+    When streaming is off (default): spawns `gemini --output-format json`,
     collects buffered response as a single synthetic result event (Tier-3).
     """
 
@@ -116,7 +117,7 @@ class GeminiAdapter(StreamingDrainerMixin, ProviderAdapter):
 
         Behavior is byte-identical to the pre-refactor inline path.
         """
-        model = os.environ.get("VNX_GEMINI_MODEL", _DEFAULT_MODEL)
+        model = _DEFAULT_MODEL
         terminal_id = context.get("terminal_id", self._terminal_id)
         dispatch_id = context.get("dispatch_id", "unknown")
         changed_files = context.get("changed_files", [])
@@ -127,12 +128,8 @@ class GeminiAdapter(StreamingDrainerMixin, ProviderAdapter):
         dispatch_meta = context.get("dispatch_metadata", {})
         prompt = self._build_prompt(instruction, changed_files, role=role, dispatch_metadata=dispatch_meta)
 
-        chunk_timeout = float(os.environ.get(
-            "VNX_GEMINI_STALL_THRESHOLD", context.get("chunk_timeout", _DEFAULT_STALL_THRESHOLD)
-        ))
-        total_deadline = float(os.environ.get(
-            "VNX_GEMINI_TIMEOUT", context.get("total_deadline", _DEFAULT_TIMEOUT)
-        ))
+        chunk_timeout = float(context.get("chunk_timeout", _DEFAULT_STALL_THRESHOLD))
+        total_deadline = float(context.get("total_deadline", _DEFAULT_TIMEOUT))
         event_store = context.get("event_store")
 
         collected_events: list[dict] = []
@@ -179,25 +176,19 @@ class GeminiAdapter(StreamingDrainerMixin, ProviderAdapter):
         )
 
     def stream_events(self, instruction: str, context: dict) -> Iterator[dict]:
-        """Stream Gemini events live (VNX_GEMINI_STREAM=1) or yield a single
-        result event (legacy, VNX_GEMINI_STREAM=0).
+        """Stream Gemini events live (streaming on) or yield a single
+        result event (legacy, the default).
 
         Raises ``provider_switch.ProviderDisabledError`` on the first ``next()``, before
         any launch, when the operator switched gemini off."""
         provider_switch.require("gemini", consumer="gemini_adapter.stream_events")
-        model = os.environ.get("VNX_GEMINI_MODEL", _DEFAULT_MODEL)
+        model = _DEFAULT_MODEL
         terminal_id = context.get("terminal_id", self._terminal_id)
         dispatch_id = context.get("dispatch_id", "unknown")
         changed_files = context.get("changed_files", [])
         event_store = context.get("event_store")
-        chunk_timeout = float(
-            os.environ.get("VNX_GEMINI_STALL_THRESHOLD",
-                           context.get("chunk_timeout", _DEFAULT_STALL_THRESHOLD))
-        )
-        total_deadline = float(
-            os.environ.get("VNX_GEMINI_TIMEOUT",
-                           context.get("total_deadline", _DEFAULT_TIMEOUT))
-        )
+        chunk_timeout = float(context.get("chunk_timeout", _DEFAULT_STALL_THRESHOLD))
+        total_deadline = float(context.get("total_deadline", _DEFAULT_TIMEOUT))
         role = context.get("role")
         dispatch_meta = context.get("dispatch_metadata", {})
 
@@ -277,7 +268,7 @@ class GeminiAdapter(StreamingDrainerMixin, ProviderAdapter):
         Raises ``provider_switch.ProviderDisabledError`` before the launch when the operator
         switched gemini off."""
         provider_switch.require("gemini", consumer="gemini_adapter.execute_legacy")
-        timeout = int(os.environ.get("VNX_GEMINI_TIMEOUT", str(_DEFAULT_TIMEOUT)))
+        timeout = _DEFAULT_TIMEOUT
         cmd = ["gemini", "--model", model, "--output-format", "json"]
         t0 = time.monotonic()
         try:

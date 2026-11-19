@@ -164,30 +164,32 @@ class TestStepBToolcallSignals:
         for field in ("tool_call_count", "tool_call_failures", "tool_call_retries"):
             assert field not in receipt, f"{field} must stay omitted, never a fabricated zero"
 
-    def test_real_signal_log_lands_its_counts_on_the_receipt(self, monkeypatch, tmp_path):
+    def test_deleted_signal_dir_variable_no_longer_feeds_the_receipt(self, monkeypatch, tmp_path):
+        signal_dir = tmp_path / "tmux-signal"
+        record_toolcall_event(signal_dir, {"tool_name": "Bash", "tool_input": {"command": "ls"}}, blocked=False)
+        monkeypatch.setenv("VNX_TMUX_SIGNAL_DIR", str(signal_dir))
+        args = _make_args(dispatch_id="steps-b-env-ignored")
+        receipt = _receipt(_run_emit(monkeypatch, tmp_path, args=args), "steps-b-env-ignored")
+        assert "tool_call_count" not in receipt
+
+    def test_explicit_signal_dir_lands_its_counts(self, tmp_path):
         signal_dir = tmp_path / "tmux-signal"
         record_toolcall_event(signal_dir, {"tool_name": "Bash", "tool_input": {"command": "ls"}}, blocked=False)
         record_toolcall_event(signal_dir, {"tool_name": "Bash", "tool_input": {"command": "claude -p x"}}, blocked=True)
         record_toolcall_event(signal_dir, {"tool_name": "Bash", "tool_input": {"command": "pytest"}}, blocked=False)
         record_toolcall_event(signal_dir, {"tool_name": "Bash", "tool_input": {"command": "pytest"}}, blocked=False)
-        monkeypatch.setenv("VNX_TMUX_SIGNAL_DIR", str(signal_dir))
+        signals = pd._resolve_toolcall_signals(_make_args(dispatch_id="steps-b-present"), str(signal_dir))
+        assert signals["tool_call_count"] == 4
+        assert signals["tool_call_failures"] == 1
+        assert signals["tool_call_retries"] == 1
 
-        args = _make_args(dispatch_id="steps-b-present")
-        receipt = _receipt(_run_emit(monkeypatch, tmp_path, args=args), "steps-b-present")
-
-        assert receipt["tool_call_count"] == 4
-        assert receipt["tool_call_failures"] == 1
-        assert receipt["tool_call_retries"] == 1
-
-    def test_aggregation_error_falls_open_to_empty_and_logs(self, monkeypatch, tmp_path, caplog):
-        monkeypatch.setenv("VNX_TMUX_SIGNAL_DIR", str(tmp_path / "tmux-signal-broken"))
+    def test_aggregation_error_falls_open_to_empty_and_logs(self, tmp_path, caplog):
         args = _make_args(dispatch_id="steps-b-failopen")
         with caplog.at_level(logging.DEBUG, logger="provider_dispatch"):
             with patch("toolcall_signals.aggregate_toolcall_signals",
                        side_effect=RuntimeError("signal log unreadable")):
-                receipt = _receipt(_run_emit(monkeypatch, tmp_path, args=args), "steps-b-failopen")
-        for field in ("tool_call_count", "tool_call_failures", "tool_call_retries"):
-            assert field not in receipt
+                signals = pd._resolve_toolcall_signals(args, str(tmp_path / "tmux-signal-broken"))
+        assert signals == {}
         records = _debug_records(caplog, "toolcall signal aggregation failed")
         assert records, "the fail-open path must leave its debug line"
         assert records[0].exc_info is not None

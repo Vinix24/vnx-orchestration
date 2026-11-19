@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import shutil
 import subprocess
 import time
@@ -29,17 +28,13 @@ class GeminiProvider(ClassifierProvider):
         timeout_seconds: Optional[int] = None,
         flat_cost_usd: Optional[float] = None,
     ) -> None:
-        self.model = model or os.environ.get("VNX_GEMINI_MODEL", _DEFAULT_MODEL)
+        self.model = model or _DEFAULT_MODEL
         self.timeout_seconds = int(
-            timeout_seconds
-            if timeout_seconds is not None
-            else os.environ.get("VNX_GEMINI_TIMEOUT", _DEFAULT_TIMEOUT)
+            timeout_seconds if timeout_seconds is not None else _DEFAULT_TIMEOUT
         )
         try:
             self.flat_cost_usd = float(
-                flat_cost_usd
-                if flat_cost_usd is not None
-                else os.environ.get("VNX_GEMINI_FLAT_COST_USD", _DEFAULT_FLAT_COST_USD)
+                flat_cost_usd if flat_cost_usd is not None else _DEFAULT_FLAT_COST_USD
             )
         except (TypeError, ValueError):
             self.flat_cost_usd = _DEFAULT_FLAT_COST_USD

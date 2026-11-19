@@ -248,6 +248,14 @@ class GeminiSpawnResult:
 # Main spawn function
 # ---------------------------------------------------------------------------
 
+def gemini_stream_enabled() -> bool:
+    """Streaming is off: the buffered Tier-3 path is the only configuration.
+
+    The seam for the streaming drainer; tests that exercise it patch this function.
+    """
+    return False
+
+
 def spawn_gemini(
     prompt: str,
     model: str,
@@ -266,7 +274,7 @@ def spawn_gemini(
 ) -> GeminiSpawnResult:
     """Spawn ``gemini`` and consume the event stream.
 
-    Routes through streaming drainer (NDJSON, Tier-1) when VNX_GEMINI_STREAM=1;
+    Routes through streaming drainer (NDJSON, Tier-1) when gemini_stream_enabled();
     otherwise uses the legacy buffered-JSON path (Tier-3, single result event).
     Returns GeminiSpawnResult on completion. Caller manages lease/manifest/receipt.
 
@@ -302,19 +310,9 @@ def spawn_gemini(
     A missing gemini binary returns returncode=127 with result.error set;
     it does NOT raise FileNotFoundError. Check result.error to detect spawn failures.
     """
-    try:
-        chunk_timeout = float(os.environ.get("VNX_GEMINI_STALL_THRESHOLD", chunk_timeout))
-    except (TypeError, ValueError):
-        pass
-    try:
-        total_deadline = float(os.environ.get("VNX_GEMINI_TIMEOUT", total_deadline))
-    except (TypeError, ValueError):
-        pass
     # OI-903: scale the stall timeout with the total deadline so a long deadline
-    # stays the binding constraint. Skipped when VNX_GEMINI_STALL_THRESHOLD is set
-    # explicitly — env overrides retain precedence.
-    if "VNX_GEMINI_STALL_THRESHOLD" not in os.environ:
-        chunk_timeout = coerce_chunk_stall(chunk_timeout, total_deadline)
+    # stays the binding constraint.
+    chunk_timeout = coerce_chunk_stall(chunk_timeout, total_deadline)
 
     # OI-1619: gemini is a real worker subprocess (untrusted-model-driven) — the
     # parent env must be scrubbed of secrets before it crosses into it. This lane
@@ -323,7 +321,7 @@ def spawn_gemini(
     env = scrub_env({**os.environ, **(extra_env or {})}, DEFAULT_SCRUB_KEY_PATTERNS)
     cwd_str = str(cwd) if cwd is not None else None
 
-    if os.environ.get("VNX_GEMINI_STREAM", "0").strip() == "1":
+    if gemini_stream_enabled():
         return _spawn_streaming(
             prompt=prompt, model=model,
             dispatch_id=dispatch_id, terminal_id=terminal_id,
