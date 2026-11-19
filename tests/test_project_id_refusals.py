@@ -89,6 +89,45 @@ def test_record_never_raises_on_missing_dir_and_full_disk(tmp_path, monkeypatch,
     assert any("No space" in r.message for r in caplog.records)
 
 
+def test_logging_failure_still_appends_and_names_it_on_stderr(tmp_path, monkeypatch, capsys):
+    def boom(*a, **k):
+        raise RuntimeError("log handler broke")
+
+    monkeypatch.setattr(pir.logger, "error", boom)
+    pir.record_project_id_refusal("hook", tmp_path, "why")
+    rec = json.loads((tmp_path / "skip_metrics.ndjson").read_text())
+    assert rec["context"] == "hook" and rec["event_type"] == "project_id_unresolved"
+    err = capsys.readouterr().err
+    assert "context=hook" in err and "log handler broke" in err
+
+
+def test_append_failure_still_logs_and_does_not_raise(tmp_path, monkeypatch, caplog):
+    import state_writer
+
+    def boom(*a, **k):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(state_writer, "append_locked", boom)
+    with caplog.at_level(logging.ERROR):
+        pir.record_project_id_refusal("hook", tmp_path, "why")
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("project_id_unresolved: context=hook" in m for m in messages)
+    assert any("append failed" in m and "skip_metrics.ndjson" in m for m in messages)
+
+
+def test_both_log_and_append_failing_never_raises_and_reaches_stderr(tmp_path, monkeypatch, capsys):
+    import state_writer
+
+    def boom(*a, **k):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(pir.logger, "error", boom)
+    monkeypatch.setattr(state_writer, "append_locked", boom)
+    pir.record_project_id_refusal("hook", tmp_path, "why")
+    err = capsys.readouterr().err
+    assert "logging failed" in err and "append failed" in err and "No space" in err
+
+
 def test_section_counts_per_context_window_and_sources(env):
     store, home = env
     _write(store / "state" / "skip_metrics.ndjson",

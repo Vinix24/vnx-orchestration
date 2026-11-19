@@ -21,6 +21,7 @@ import json
 import logging
 import math
 import os
+import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
@@ -49,17 +50,22 @@ def record_project_id_refusal(
     **fields: Any,
 ) -> None:
     """Log ERROR and count one refusal for ``context``. Never raises."""
+    # The log and the append are independent: a failure in one never skips the other.
     try:
         logger.error(
             "project_id_unresolved: context=%s reason=%s fields=%s",
             context, reason, fields,
         )
-    except Exception:  # vnx-silent-except: a recorder must never raise
-        return
+    except Exception as exc:  # vnx-silent-except: a recorder must never raise; stderr is the fallback diagnostic
+        _stderr_diagnostic(
+            f"project_id_unresolved: logging failed for context={context}: {exc!r}"
+        )
+    target: Optional[Path] = None
     try:
         from state_writer import append_locked
 
         anchor = Path(anchor_dir) if anchor_dir else data_home()
+        target = anchor / SKIP_METRICS_NAME
         record = dict(fields)
         record.update({
             "event_type": EVENT_UNRESOLVED,
@@ -67,12 +73,24 @@ def record_project_id_refusal(
             "reason": reason,
             "ts": datetime.now(timezone.utc).isoformat(),
         })
-        append_locked(anchor / SKIP_METRICS_NAME, record)
-    except Exception as exc:  # vnx-silent-except: a recorder must never raise; the ERROR log above is the contract
+        append_locked(target, record)
+    except Exception as exc:  # vnx-silent-except: a recorder must never raise; ERROR log or stderr names the failure
+        message = (
+            f"project_id_unresolved counter append failed: context={context} "
+            f"path={target} error={exc!r}"
+        )
         try:
-            logger.error("project_id_unresolved counter append failed: %s", exc)
-        except Exception:  # vnx-silent-except: a recorder must never raise
-            return
+            logger.error("%s", message)
+        except Exception:  # vnx-silent-except: a recorder must never raise; stderr fallback
+            _stderr_diagnostic(message)
+
+
+def _stderr_diagnostic(message: str) -> None:
+    """One line to stderr; never raises."""
+    try:
+        sys.stderr.write(message + "\n")
+    except Exception:  # vnx-silent-except: a recorder must never raise
+        return
 
 
 def _parse_ts(value: Any) -> Optional[datetime]:
