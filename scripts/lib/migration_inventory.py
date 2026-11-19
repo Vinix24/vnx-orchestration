@@ -45,7 +45,7 @@ CENTRAL_DB_TABLES: Dict[str, bool] = {
     for name in (
         "antipatterns", "central_install_events", "central_install_pins",
         "code_snippets", "confidence_events", "coordination_events",
-        "cross_project_recommendations", "dispatch_attempts", "dispatch_metadata",
+        "cross_project_recommendations", "deliverable_dependencies", "dispatch_attempts", "dispatch_metadata",
         "dispatch_pattern_offered", "dispatch_quality_context", "dispatches",
         "dream_cycles", "dream_pattern_archives", "escalation_log",
         "execution_targets", "global_patterns", "governance_metrics",

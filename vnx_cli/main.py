@@ -1048,6 +1048,8 @@ def _register_deliverable_verbs(subs: argparse.Action) -> None:
         help="optional comma-separated repo paths this deliverable will touch; a "
              "plan-gate run without --dispatch-paths reads them",
     )
+    p_dadd.add_argument("--depends-on", dest="depends_on", default=None, metavar="DLV1,DLV2",
+                        help="comma-separated deliverables this one depends on (hard)")
 
     _register_deliverable_list_verb(subs)
 
@@ -1118,6 +1120,24 @@ def _register_deliverable_retarget_verb(subs: argparse.Action) -> None:
     _common_horizon_args(p)
     p.add_argument("dispatch_id")
     p.add_argument("--reason", required=True, help="why it is not built (REQUIRED, in the audit event)")
+    _register_deliverable_dependency_verbs(subs)
+
+
+def _register_deliverable_dependency_verbs(subs: argparse.Action) -> None:
+    """`deliverable depend`, `undepend` and `deps`: order between deliverables (ADR-096)."""
+    p = subs.add_parser("depend", help="record that a deliverable depends on another (a cycle is refused)")
+    _common_horizon_args(p)
+    p.add_argument("dispatch_id")
+    p.add_argument("--on", required=True, metavar="DLV", help="the deliverable it depends on")
+    p.add_argument("--kind", choices=("hard", "soft"), default="hard", help="hard (default) or soft")
+    p = subs.add_parser("undepend", help="remove a dependency; the row stays with the reason")
+    _common_horizon_args(p)
+    p.add_argument("dispatch_id")
+    p.add_argument("--on", required=True, metavar="DLV", help="the deliverable it no longer depends on")
+    p.add_argument("--reason", required=True, help="why it is removed (REQUIRED, may not be empty)")
+    p = subs.add_parser("deps", help="dependencies of a deliverable, both directions, active and removed")
+    _common_horizon_args(p)
+    p.add_argument("dispatch_id")
 
 
 def _register_plan_gate_sign_verb(subs: argparse.Action) -> None:
