@@ -108,6 +108,7 @@ def target(tmp_path):
     tgt = tmp_path / "toolkit"
     tgt.mkdir()
     git(tgt, "init", "-q", "-b", "main")
+    git(tgt, "remote", "add", "origin", "https://github.com/toolkit-owner/claude-code-toolkit.git")
     write(tgt, "README.md", TOOLKIT_README)
     write(tgt, "timekeeper/tk.txt", "tk\n")
     write(tgt, "docs/keep.md", "keep\n")
@@ -1073,7 +1074,7 @@ def test_leak_on_an_existing_export_branch_leaves_its_tip(source, target):
 def test_script_never_pushes_or_tags(source, target):
     assert export(source, target).returncode == 0
     assert git(target, "tag") == ""
-    assert git(target, "remote") == ""
+    assert git(target, "remote") == "origin"  # the fixture's own remote; the script adds none
 
 
 def test_script_lives_outside_the_wheel():
