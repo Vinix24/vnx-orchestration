@@ -121,6 +121,7 @@ def test_registry_keys_have_the_defaults_and_project_scope():
     for key, (type_, default) in expected.items():
         e = cr.CONFIG_REGISTRY[key]
         assert (e.type, e.default, e.scope) == (type_, default, "project")
+        # ENABLED stays wired so canonical_flags() has a candidate for the new subsystem
         assert e.read_site_wired is True
     assert {cr.CONFIG_REGISTRY[k].subsystem for k in expected} == {"morning-pause"}
 
@@ -141,7 +142,8 @@ def test_canonical_flags_unchanged_for_every_main_subsystem():
         del sys.modules[spec.name]
     old = {e.subsystem: k for k, e in snap.CONFIG_REGISTRY.items() if e.subsystem}
     now = _canonical_flags(cr)
-    assert now == old
+    # every subsystem origin/main knows keeps its flag; a missing one shows as None
+    assert {k: now.get(k) for k in old} == old
     assert now["morning-pause"] == "VNX_MORNING_PAUSE_ENABLED"
-    assert cr.canonical_flags() == snap.canonical_flags()
+    assert {k: v for k, v in cr.canonical_flags().items() if k in old} == snap.canonical_flags()
     assert cr.canonical_flags()["morning-pause"] == "VNX_MORNING_PAUSE_ENABLED"
