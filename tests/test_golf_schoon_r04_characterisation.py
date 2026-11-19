@@ -98,7 +98,8 @@ def test_completed_cycle_result_review_events_row_and_stdout(world, capsys):
     assert out.startswith(f"dream run: cycle={result['cycle_id']} project={PROJECT}")
     assert set(result) == {
         "cycle_id", "probe_health", "input_count", "restricted_rows_dropped", "merged_count",
-        "dropped_count", "archived_count", "flagged_count", "review_path"}
+        "dropped_count", "archived_count", "flagged_count", "review_path",
+        "input_hash", "tables_without_valid_until"}  # D3a: additive fields
     assert result["probe_health"] == "ok" and result["input_count"] == 1
     zero = {"antipatterns": 0, "intelligence_injections": 0, "success_patterns": 0}
     assert result["restricted_rows_dropped"] == zero
