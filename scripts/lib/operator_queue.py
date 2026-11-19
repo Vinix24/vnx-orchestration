@@ -43,6 +43,10 @@ OUTCOMES, CHANNELS = ("beantwoord", "vervallen"), ("kickoff", "rotatie", "status
 REFUSED_PATTERNS = frozenset({"sk_key", "github_token", "aws_key_id", "slack_token", "bearer",
                               "secret_assignment", "authorization_header", "pem_block", "jwt"})
 _LIMITS = {"vraag": 200, "kopieerblok": 10**6, "citaat": 300}  # the free-text fields and their length limit; all three are scanned for secrets
+# ADR-088 decision 5: the PR-size exception is a ``grant`` on an ``answer`` line; no other field and no other reason.
+GRANT_FIELDS = frozenset({"ceiling", "reason", "head_sha", "base_ref", "lines", "measured_at"})
+GRANT_REASONS = frozenset({"splitting_removes_tests", "one_working_unit", "generated", "mechanical_rename"})
+_HEX40 = frozenset("0123456789abcdef")
 
 
 class QueueRefused(ValueError):
@@ -98,7 +102,38 @@ def check_line(project_id: str, line: Any) -> Dict[str, Any]:
         if name not in line:
             raise ValueError(f"{kind} misses {name}")
     _check_values(project_id, kind, line)
+    if "grant" in line:
+        if kind != "answer":
+            raise ValueError(f"{kind}: grant is only on an answer line")
+        _check_grant(line["grant"])
     return line
+
+
+def _utc_ok(value: Any) -> bool:
+    if not _ts_ok(value):
+        return False
+    return datetime.fromisoformat(value.strip().replace("Z", "+00:00")).utcoffset() == timedelta(0)
+
+
+def _check_grant(grant: Any) -> None:
+    """ADR-088 decision 5: every field present and valid, or the whole line is invalid (raises ValueError)."""
+    if not isinstance(grant, dict):
+        raise ValueError("grant: not an object")
+    if set(grant) != GRANT_FIELDS:
+        raise ValueError("grant: fields are exactly " + ", ".join(sorted(GRANT_FIELDS)))
+    if grant["reason"] not in GRANT_REASONS:
+        raise ValueError("grant: reason is not in the closed set")
+    if not _int(grant["lines"], 0):
+        raise ValueError("grant: lines is not a non-negative integer")
+    if not _int(grant["ceiling"], max(1, grant["lines"])):
+        raise ValueError("grant: ceiling is not a positive integer of at least lines")
+    sha = grant["head_sha"]
+    if not (isinstance(sha, str) and len(sha) == 40 and set(sha) <= _HEX40):
+        raise ValueError("grant: head_sha is not a 40-hex sha")
+    if not _text(grant["base_ref"]) or len(grant["base_ref"]) > 255:
+        raise ValueError("grant: base_ref is empty, not text or too long")
+    if not _utc_ok(grant["measured_at"]):
+        raise ValueError("grant: measured_at is not an ISO UTC timestamp")
 
 
 def _check_values(project_id: str, kind: str, line: Mapping[str, Any]) -> None:
@@ -238,6 +273,27 @@ def answers(project_id: str, *, state_dir: Optional[Path] = None) -> List[Dict[s
     """The ``answer`` lines of the ledger in file order. Raises QueueUnreadable on a bad ledger line."""
     sdir = Path(state_dir) if state_dir is not None else state_dir_for(project_id)
     return [line for line in _ledger_lines(sdir, project_id) if line["kind"] == "answer"]
+
+
+def latest_grant(project_id: str, pr: int, *, state_dir: Optional[Path] = None) -> Optional[Dict[str, Any]]:
+    """ADR-088 decision 5: the grant of the ``pr:<pr>`` point with the highest revision that carries one, as
+    ``{grant, point_id, revision}``; None when no answer of such a point carries a grant (no ledger is no grant).
+    A bad ledger line raises QueueUnreadable, never None: "cannot read" is not "no grant" (the door refuses on it).
+    Only an answer line with a citation counts; a ``check_line`` without one already makes the ledger unreadable."""
+    if not _int(pr, 1):
+        raise ValueError("pr is not a positive integer")
+    sdir = Path(state_dir) if state_dir is not None else state_dir_for(project_id)
+    lines = _ledger_lines(sdir, project_id)
+    ref = f"pr:{pr}"
+    revisions = {ln["point_id"]: ln["revisie"] for ln in lines if ln["kind"] == "opened" and ln["ref"] == ref}
+    best: Optional[Dict[str, Any]] = None
+    for line in lines:
+        pid = line.get("point_id")
+        if line["kind"] != "answer" or "grant" not in line or pid not in revisions or not _text(line["citaat"]):
+            continue
+        if best is None or revisions[pid] > best["revision"]:  # same revision: the first answer stands
+            best = {"grant": dict(line["grant"]), "point_id": pid, "revision": revisions[pid]}
+    return best
 
 
 def append_line(project_id: str, kind: str, fields: Mapping[str, Any], *, now: Optional[str] = None,
