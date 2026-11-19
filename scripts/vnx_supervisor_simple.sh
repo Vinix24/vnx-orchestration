@@ -57,8 +57,25 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m'
 
+SUPERVISOR_QUEUE_POPUP=""
+
 log() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$SUPERVISOR_LOG" >&2
+}
+
+# VNX_QUEUE_POPUP_ENABLED through the one config surface (stored value > env > registry default),
+# by this fabric's own binary and never PATH; one process for the whole script. A failed read
+# stops the supervisor naming the key.
+load_queue_popup_enabled() {
+    [ -n "$SUPERVISOR_QUEUE_POPUP" ] && return 0
+    SUPERVISOR_QUEUE_POPUP="$("$VNX_HOME/bin/vnx" config get --raw VNX_QUEUE_POPUP_ENABLED)" || {
+        log "ERROR: vnx config get --raw VNX_QUEUE_POPUP_ENABLED failed; supervisor stopped"
+        exit 1
+    }
+    if [ -z "$SUPERVISOR_QUEUE_POPUP" ]; then
+        log "ERROR: VNX_QUEUE_POPUP_ENABLED has no value; supervisor stopped"
+        exit 1
+    fi
 }
 
 is_process_running() {
@@ -194,6 +211,7 @@ stop_process() {
 
 start_all() {
     log "Starting all VNX processes..."
+    load_queue_popup_enabled
 
     start_process "dispatcher" "dispatcher_minimal.sh"
     # Note: Deprecated scripts moved to archive/legacy_scripts_2026-02-11/scripts/archived_phase1b/
@@ -208,7 +226,7 @@ start_all() {
     # dispatch_ack_watcher is also deprecated - heartbeat_ack_monitor socket path is canonical ACK flow
     # start_process "ack_dispatcher" "ack_dispatcher_v2.sh"
     start_process "heartbeat_ack_monitor" "heartbeat_ack_monitor.py"
-    if [ "${VNX_QUEUE_POPUP_ENABLED:-1}" != "0" ]; then
+    if [ "$SUPERVISOR_QUEUE_POPUP" != "0" ]; then
       start_process "queue_watcher" "queue_popup_watcher.sh"
     else
       log "Queue popup disabled — starting auto-accept watcher instead"
@@ -286,6 +304,7 @@ status() {
 }
 
 monitor() {
+    load_queue_popup_enabled
     # Ensure singleton using mkdir (atomic on all UNIX systems, works on macOS)
     LOCK_DIR="$STATE_DIR/supervisor.lock"
 
@@ -342,7 +361,7 @@ monitor() {
         receipt_item="${RECEIPT_SERVICE_NAME}:${RECEIPT_SCRIPT}"
         # Build process list (conditionally include queue_watcher)
         local _monitor_items="dispatcher:dispatcher_minimal.sh smart_tap:smart_tap_json_translator.sh $receipt_item heartbeat_ack_monitor:heartbeat_ack_monitor.py"
-        if [ "${VNX_QUEUE_POPUP_ENABLED:-1}" != "0" ]; then
+        if [ "$SUPERVISOR_QUEUE_POPUP" != "0" ]; then
             _monitor_items="$_monitor_items queue_watcher:queue_popup_watcher.sh"
         fi
         _monitor_items="$_monitor_items dashboard:generate_valid_dashboard.sh state_manager:unified_state_manager.py intelligence_daemon:intelligence_daemon.py recommendations_engine:recommendations_engine_daemon.sh"

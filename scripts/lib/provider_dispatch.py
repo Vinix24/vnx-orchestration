@@ -27,6 +27,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+_GEMINI_DEFAULT_MODEL = "gemini-2.5-pro"
+
 sys.path.insert(0, str(Path(__file__).parent))
 
 logger = logging.getLogger(__name__)
@@ -902,7 +904,7 @@ def _build_frontmatter(
         "sub_provider": spawn_fm.get("sub_provider", "none"),
         "model": model_used,
         "terminal_id": args.terminal_id,
-        "pool_id": os.environ.get("VNX_POOL_ID", "headless"),
+        "pool_id": "headless",
         "role": getattr(args, "role", None) or "backend-developer",
         "task_class": task_class,
         "pr_id": getattr(args, "pr_id", None) or "none",
@@ -1619,20 +1621,19 @@ def _resolve_receipt_role(args: argparse.Namespace, state_dir: Path) -> str:
         return _IDENTITY_UNRESOLVED
 
 
-def _resolve_toolcall_signals(args: argparse.Namespace) -> Dict[str, int]:
+def _resolve_toolcall_signals(args: argparse.Namespace, signal_dir: Optional[str] = None) -> Dict[str, int]:
     """Aggregate this dispatch's PreToolUse-hook tool-call signals (step B).
 
-    ``VNX_TMUX_SIGNAL_DIR``'s ``toolcalls.ndjson`` is folded by
+    The ``toolcalls.ndjson`` under ``signal_dir`` (None: no signal dir, nothing to fold) is folded by
     ``toolcall_signals.aggregate_toolcall_signals`` into the three additive
     receipt fields. FAIL-OPEN — an aggregation error or absent signal log must
     never break receipt emission; the dict stays empty and ReceiptV2 omits the
     fields. The import stays lazy: only signal-carrying lanes pay for it.
     """
     try:
-        _signal_dir = os.environ.get("VNX_TMUX_SIGNAL_DIR")
-        if _signal_dir:
+        if signal_dir:
             from toolcall_signals import aggregate_toolcall_signals  # noqa: PLC0415
-            return aggregate_toolcall_signals(_signal_dir) or {}
+            return aggregate_toolcall_signals(signal_dir) or {}
     except Exception:  # noqa: BLE001 — observability signal must never break receipt emission
         logger.debug(
             "_emit_governance: toolcall signal aggregation failed dispatch=%s (non-fatal)",
@@ -1887,7 +1888,6 @@ def _emit_receipt_with_retry(
                 session_id=(
                     getattr(result, "session_id", None)
                     or getattr(args, "session_id", None)
-                    or os.environ.get("VNX_SESSION_ID")
                 ),
                 tool_call_count=_toolcall_signals.get("tool_call_count"),
                 tool_call_failures=_toolcall_signals.get("tool_call_failures"),
@@ -2135,7 +2135,7 @@ def _constraint_model_for_provider(args: argparse.Namespace, provider: str) -> s
         except _reg.CodexModelResolutionError:
             return ""
     if provider == "gemini":
-        return args.model if (args.model and args.model != "sonnet") else os.environ.get("VNX_GEMINI_MODEL", "gemini-2.5-pro")
+        return args.model if (args.model and args.model != "sonnet") else _GEMINI_DEFAULT_MODEL
     if provider == "kimi":
         return _kimi_resolve_requested_key(getattr(args, "model", None))
     if provider == "deepseek-harness":
@@ -4013,7 +4013,7 @@ def _dispatch_gemini(args: argparse.Namespace) -> int:
         )
         return 1
 
-    model = args.model if (args.model and args.model != "sonnet") else os.environ.get("VNX_GEMINI_MODEL", "gemini-2.5-pro")
+    model = args.model if (args.model and args.model != "sonnet") else _GEMINI_DEFAULT_MODEL
     enriched_instruction = _enrich_instruction(args)
     # Isolation + (bench) seed materialization. Fail-loud by design, never a
     # silent shared-checkout fallback. VNX_BENCH_REQUIRE_ISOLATION=1 (benchmark):
@@ -4274,7 +4274,7 @@ def _gate_delegation_then_dispatch(args: argparse.Namespace, provider: str, pars
             return 1
         _ctx = _dm.DispatchContext(
             project_id=_resolve_data_dir().name,
-            session_id=getattr(args, "session_id", None) or os.environ.get("VNX_SESSION_ID"),
+            session_id=getattr(args, "session_id", None),
             task_class=getattr(args, "task_class", None) or None,
             dispatch_id=args.dispatch_id,
         )
