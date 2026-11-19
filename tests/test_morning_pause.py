@@ -121,8 +121,7 @@ def test_registry_keys_have_the_defaults_and_project_scope():
     for key, (type_, default) in expected.items():
         e = cr.CONFIG_REGISTRY[key]
         assert (e.type, e.default, e.scope) == (type_, default, "project")
-        # ENABLED stays wired so canonical_flags() has a candidate for the new subsystem
-        assert e.read_site_wired is (key == "VNX_MORNING_PAUSE_ENABLED")
+        assert e.read_site_wired is True
     assert {cr.CONFIG_REGISTRY[k].subsystem for k in expected} == {"morning-pause"}
 
 

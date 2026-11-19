@@ -25,7 +25,7 @@ import pr_merge  # noqa: E402
 
 SHA = "a" * 40
 APP_ID = 4869217
-GATES = ["ci", "review", "adr", "contract_invalid", "branch_protection", "main"]
+GATES = ["ci", "review", "adr", "contract_invalid", "branch_protection", "main", "morning_pause"]
 
 
 class FakeGitHub:

@@ -78,7 +78,7 @@ def test_mode_off_is_go_and_reads_no_window(door: FakeGitHub, monkeypatch: pytes
     }
     record = _main_record(receipt)
     assert (record["verdict"], record["mode"], record["overridden"]) == ("GO", "off", False)
-    assert [g["gate"] for g in receipt["preflight_gates"]][-2:] == ["main", "door"]
+    assert [g["gate"] for g in receipt["preflight_gates"]][-2:] == ["morning_pause", "door"]
     assert len(door.of("POST")) == 1, "the merge itself is the same as before: one permit, one merge"
 
 
@@ -222,8 +222,8 @@ def test_the_door_evidence_carries_a_main_record(door: FakeGitHub, monkeypatch: 
     monkeypatch.setattr(pr_merge.forge_gate_publisher, "publish_door_permit", lambda ev, **kw: seen.append(ev) or real(ev, **kw))
     assert _run() == pr_merge.EXIT_OK
     (evidence,) = seen
-    assert [g["gate"] for g in evidence["preflight_gates"]][-1] == "main"
-    assert pr_merge.PREFLIGHT_ORDER == ("ci", "review", "adr", "contract_invalid", "branch_protection", "main", "door")
+    assert [g["gate"] for g in evidence["preflight_gates"]][-1] == "morning_pause"
+    assert pr_merge.PREFLIGHT_ORDER == ("ci", "review", "adr", "contract_invalid", "branch_protection", "main", "morning_pause", "door")
 
 
 def test_a_direct_merge_pr_records_main_admission_not_evaluated(door: FakeGitHub) -> None:
