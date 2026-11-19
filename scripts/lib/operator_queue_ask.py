@@ -10,6 +10,7 @@ import io
 import json
 import re
 import sqlite3
+import subprocess
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -18,21 +19,25 @@ try:
     import operator_queue as oq
     import operator_queue_steering_verdict as steering
     import tracks as tracks_lib
+    from forge_project_target import project_checkout_path
     from project_root import resolve_central_data_dir
 except ImportError:  # vnx-silent-except: imported as scripts.lib.operator_queue_ask
     from scripts.lib import operator_queue as oq
     from scripts.lib import operator_queue_steering_verdict as steering
     from scripts.lib import tracks as tracks_lib
+    from scripts.lib.forge_project_target import project_checkout_path
     from scripts.lib.project_root import resolve_central_data_dir
 
 BRON = {"promote": 1, "besluit": 2, "vraag": 8}
-FORMS = ("dlv:<id>", "oi:<id>", "track:<id>:<fase>", "config:<sleutel>", "verdict:<id>", "antwoord:<hash>")
+FORMS = ("dlv:<id>", "oi:<id>", "track:<id>:<fase>", "config:<sleutel>", "verdict:<id>", "antwoord:<hash>", "pr:<n>")
 _ID = r"[A-Za-z0-9][A-Za-z0-9._-]*"
 _REF = {
     "dlv": re.compile(rf"^dlv:({_ID})$"), "oi": re.compile(rf"^oi:({_ID})$"),
     "track": re.compile(rf"^track:({_ID}):([a-z]+)$"), "config": re.compile(r"^config:([A-Za-z0-9_.-]+)$"),
     "verdict": re.compile(rf"^verdict:({_ID})$"), "antwoord": re.compile(r"^antwoord:([0-9a-f]{12})$"),
+    "pr": re.compile(r"^pr:([1-9][0-9]{0,8})$"),
 }
+_GH_TIMEOUT = 20
 OI_ANSWERED = frozenset({"closed", "done", "deferred", "wontfix"})
 MAX_QUOTE = 300
 
@@ -58,8 +63,10 @@ def question_ref(vraag: str) -> str:
     return "antwoord:" + hashlib.sha256(normalise_question(vraag).encode("utf-8")).hexdigest()[:12]
 
 def ask(project_id: str, *, bron: str, ref: str, vraag: str, sluit_bij: str, kopieerblok: str = "",
-        opened_by: str, now: Optional[str] = None, state_dir: Optional[Path] = None) -> Optional[Dict[str, Any]]:
+        opened_by: str, now: Optional[str] = None, state_dir: Optional[Path] = None,
+        ceiling: Optional[int] = None, reason: Optional[str] = None) -> Optional[Dict[str, Any]]:
     """Open a point of source promote (1), besluit (2) or vraag (8); None when it already exists.
+    A ``pr:<n>`` point needs ``ceiling`` and ``reason`` (ADR-088 decision 6, see ``_ask_pr``).
     Raises RefRefused (bad ref or bron/ref mismatch) or operator_queue.QueueRefused (secret, bad field)."""
     if bron not in BRON:
         raise RefRefused("bron is one of: " + ", ".join(BRON))
@@ -68,18 +75,55 @@ def ask(project_id: str, *, bron: str, ref: str, vraag: str, sluit_bij: str, kop
     kind, _ = parse_ref(ref)
     if bron == "promote" and kind != "dlv":
         raise RefRefused("bron promote takes only a dlv:<id> ref")
+    if kind == "pr":
+        if bron != "besluit":
+            raise RefRefused("a pr:<n> ref opens only with bron besluit")
+        return _ask_pr(project_id, ref=ref, vraag=vraag, sluit_bij=sluit_bij, kopieerblok=kopieerblok,
+                       opened_by=opened_by, now=now, state_dir=state_dir, ceiling=ceiling, reason=reason)
+    if ceiling is not None or reason is not None:
+        raise RefRefused("--ceiling and --reason are only for a pr:<n> ref")
     return oq.open_point(project_id, bron=BRON[bron], ref=ref, vraag=vraag, sluit_bij=sluit_bij,
                          kopieerblok=kopieerblok, opened_by=opened_by, now=now, state_dir=state_dir)
 
+def _pr_points(state: Dict[str, Any], ref: str) -> List[Dict[str, Any]]:
+    return sorted((p for p in state["points"].values() if p["bron"] == BRON["besluit"] and p["ref"] == ref),
+                  key=lambda p: p["revisie"])
+
+def _ask_pr(project_id: str, *, ref: str, ceiling: Any, reason: Any, now: Optional[str],
+            state_dir: Optional[Path], **fields: Any) -> Optional[Dict[str, Any]]:
+    """Revision 1, or revision +1 for a ceiling above the latest point's, which then closes the earlier open ones as
+    ``vervallen``. The same or a lower ceiling writes nothing and is refused with the ceiling that stands."""
+    if not oq._int(ceiling, 1) or reason not in oq.GRANT_REASONS:
+        raise oq.QueueRefused("ask: a pr:<n> ref needs --ceiling (an integer above 0) and --reason, one of: "
+                              + ", ".join(sorted(oq.GRANT_REASONS)))
+    state = oq.read_state(project_id, state_dir=state_dir)
+    if state["status"] != "ok":
+        raise oq.QueueUnreadable(state["reason"], state["line"])
+    mine = _pr_points(state, ref)
+    if mine and ceiling <= mine[-1]["ceiling"]:
+        raise oq.QueueRefused(f"ask: ceiling {ceiling} is not above ceiling {mine[-1]['ceiling']} of revision "
+                              f"{mine[-1]['revisie']} for {ref}; no new point")
+    revision = mine[-1]["revisie"] + 1 if mine else 1
+    line = oq.open_point(project_id, bron=BRON["besluit"], ref=ref, revisie=revision, now=now, state_dir=state_dir,
+                         extra={"ceiling": ceiling, "reason": reason}, **fields)
+    for older in (p for p in mine if p["state"] == "open"):
+        oq.close_point(project_id, older["point_id"], uitkomst="vervallen", bewijs=f"replaced by revision {revision}",
+                       now=now, state_dir=state_dir)
+    return line
+
 def answer(project_id: str, point_id: str, *, quote: str, vastgelegd_door: str, now: Optional[str] = None,
            state_dir: Optional[Path] = None) -> Dict[str, Any]:
-    """Record Vincent's own words for a chat question: one ``answer`` line, nothing else (decision 6)."""
+    """Record Vincent's own words for a chat question or a ``pr:`` point: one ``answer`` line, nothing else
+    (decision 6, ADR-088 decision 6). A ``pr:`` point is refused once a higher revision of it exists."""
     state = oq.read_state(project_id, state_dir=state_dir)
     if state["status"] != "ok":
         raise oq.QueueUnreadable(state["reason"], state["line"])
     point = state["points"].get(point_id) or {}
+    ref = str(point.get("ref"))
+    newer = [p["revisie"] for p in _pr_points(state, ref) if p["revisie"] > point["revisie"]] if ref.startswith("pr:") else []
     for failed, why in ((not point, "the point does not exist"), (point.get("state") != "open", "the point is closed"),
-                        (not str(point.get("ref")).startswith("antwoord:"), "only an antwoord: point is answered here; the source decides the others"),
+                        (not ref.startswith(("antwoord:", "pr:")), "only an antwoord: or pr: point is answered here; the source decides the others"),
+                        (bool(newer), f"revision {max(newer or [0])} of {ref} replaces this point"),
                         (not isinstance(quote, str) or not quote.strip() or len(quote) > MAX_QUOTE, f"the quote is empty or over {MAX_QUOTE} characters")):
         if failed:
             raise oq.QueueRefused("answer: " + why)
@@ -206,6 +250,37 @@ def _eval_verdict(src: _Source, verdict_id: str, point: Dict[str, Any]) -> tuple
         return _OPEN
     return ("closed", state, f"bron 7: {mine[-1]['bewijs']}", "onbekend")
 
+def gh_pr_state(project_id: str, pr: int) -> str:
+    """``OPEN``, ``MERGED`` or ``CLOSED`` from ``gh pr view`` in the project's checkout; raises OSError naming why
+    for anything else (no checkout, gh fails or times out, an unknown state): unreadable is never a state."""
+    repo = project_checkout_path(project_id)
+    if repo is None:
+        raise OSError(f"no checkout registered for {project_id}")
+    try:
+        done = subprocess.run(["gh", "pr", "view", str(pr), "--json", "state", "--jq", ".state"], cwd=str(repo),
+                              capture_output=True, text=True, timeout=_GH_TIMEOUT)
+    except subprocess.SubprocessError as exc:
+        raise OSError(f"gh pr view {pr}: {type(exc).__name__}") from exc
+    state = done.stdout.strip()
+    if done.returncode != 0 or state not in ("OPEN", "MERGED", "CLOSED"):
+        raise OSError(f"gh pr view {pr}: exit {done.returncode}, state {state[:40]!r}")
+    return state
+
+def _eval_pr(src: _Source, number: str, point: Dict[str, Any]) -> tuple:
+    """ADR-088 decision 6: only an answer line closes as ``beantwoord``; a higher revision or a merged or closed PR
+    closes as ``vervallen``; an open PR keeps the point open. Unreadable raises, which ``_evaluate`` makes ``unknown``."""
+    ts = _answer_ts(src.project_id, point["point_id"], src.state_dir)
+    if ts is not None:
+        return ("closed", "beantwoord", ts, "t0_namens_operator")
+    ledger = oq.read_state(src.project_id, state_dir=src.state_dir)
+    if ledger["status"] != "ok":
+        return ("unknown", ledger["reason"])
+    newer = [p["revisie"] for p in _pr_points(ledger, point["ref"]) if p["revisie"] > point["revisie"]]
+    if newer:
+        return ("closed", "vervallen", f"replaced by revision {max(newer)}", "onbekend")
+    state = gh_pr_state(src.project_id, int(number))
+    return _OPEN if state == "OPEN" else ("closed", "vervallen", f"gh pr view {number}: state={state}", "onbekend")
+
 def _evaluate(src: _Source, project_id: str, point: Dict[str, Any], state_dir: Optional[Path]) -> tuple:
     try:
         kind, parts = parse_ref(point["ref"])
@@ -216,8 +291,8 @@ def _evaluate(src: _Source, project_id: str, point: Dict[str, Any], state_dir: O
             ts = _answer_ts(project_id, point["point_id"], state_dir)
             return _OPEN if ts is None else ("closed", "beantwoord", ts, "t0_namens_operator")
         evaluator = {"dlv": _eval_dlv, "oi": _eval_oi, "track": _eval_track, "config": _eval_config,
-                     "verdict": _eval_verdict}.get(kind)
-        if evaluator in (_eval_track, _eval_config, _eval_verdict):
+                     "verdict": _eval_verdict, "pr": _eval_pr}.get(kind)
+        if evaluator in (_eval_track, _eval_config, _eval_verdict, _eval_pr):
             return evaluator(src, *parts, point)
         if evaluator:
             return evaluator(src, *parts)
