@@ -2765,6 +2765,9 @@ main() {
     config)
       PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" exec "$VNX_PYTHON" "$VNX_HOME/scripts/config_cli.py" "$@"
       ;;
+    morning-round)
+      PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" exec "$VNX_PYTHON" "$VNX_HOME/scripts/morning_round_cli.py" "$@"
+      ;;
     main-window)
       PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" exec "$VNX_PYTHON" "$VNX_HOME/scripts/main_window_cli.py" "$@"
       ;;
