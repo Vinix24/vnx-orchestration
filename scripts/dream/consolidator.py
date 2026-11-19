@@ -197,7 +197,7 @@ def _emit_dream_event(event: dict[str, Any], data_root: Path) -> None:
     with event_path.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(event) + "\n")
 
-# The column that says a row changed, per table; part of the input hash next to the sort column.
+# Per table the column that says a row changed; part of the input hash.
 _TABLE_UPDATED_COL: dict[str, str] = {
     "success_patterns": "last_used", "antipatterns": "last_seen", "intelligence_injections": "injected_at"}
 _REASON_UNCHANGED_INPUT: str = "unchanged_input"
@@ -267,9 +267,7 @@ def _matching_cycle(
             return str(review.get("cycle_id") or path.name)
     last = conn.execute(
         "SELECT cycle_id FROM dream_cycles WHERE project_id = ? AND status = 'reviewed'"
-        " ORDER BY completed_at DESC LIMIT 1",
-        (project_id,),
-    ).fetchone()
+        " ORDER BY completed_at DESC LIMIT 1", (project_id,)).fetchone()
     if last is not None and _review_with_hash(
             state_dir / f"{last[0]}-pending-review.json", project_id, digest):
         return str(last[0])
@@ -280,14 +278,12 @@ def _unchanged_input_skip(
     conn: sqlite3.Connection, patterns: dict[str, list[dict]], cycle_id: str, project_id: str,
     data_root: Path,
 ) -> "dict[str, Any] | None":
-    """A skipped result when a waiting or the last reviewed cycle read the same input, else None."""
+    """Skipped result when a waiting or the last reviewed cycle read the same input, else None."""
     digest = _input_hash(patterns)
     match = _matching_cycle(conn, project_id, data_root, digest)
-    if match is None:
-        return None
-    return _skip_cycle(cycle_id, project_id, data_root, _REASON_UNCHANGED_INPUT,
-                       f"input_hash {digest[:12]} equals cycle {match}",
-                       matching_cycle_id=match, input_hash=digest)
+    return None if match is None else _skip_cycle(
+        cycle_id, project_id, data_root, _REASON_UNCHANGED_INPUT,
+        f"input_hash {digest[:12]} equals cycle {match}", matching_cycle_id=match, input_hash=digest)
 
 
 def _filter_restricted_rows(
