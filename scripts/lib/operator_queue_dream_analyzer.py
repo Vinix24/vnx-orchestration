@@ -272,10 +272,10 @@ def _route_new(run: _Run, fleet: _Run, routing: Any, ref: str, verdict: _Verdict
     extra["classification"][ref] = cls.kind
     if cls.kind == rt.UNKNOWN:
         extra["unclassified"].append({"ref": ref, "reden": cls.reason})
-    elif cls.kind == rt.PROJECT or pid == rt.FLEET_PROJECT:
+    elif cls.kind == rt.PROJECT:
         run.apply(ref, verdict)
-    elif cls.owner == pid:
-        fleet.apply(rt.routed_ref(pid, ref), _fleet_verdict(pid, verdict))
+    elif cls.owner == pid:  # the elected owner opens it; the fleet project's own ledger keeps the plain ref
+        (run.apply(ref, verdict) if pid == rt.FLEET_PROJECT else fleet.apply(rt.routed_ref(pid, ref), _fleet_verdict(pid, verdict)))
     else:
         extra["routed_elsewhere"].append({"ref": ref, "owner": cls.owner})
 
