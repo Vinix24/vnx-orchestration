@@ -164,6 +164,8 @@ _ROW_ORDER: List[str] = [
     "receipt-hash-chain",
     "signed-attestation",
     "evidence-bound-gate",
+    # ochtendronde D1a: pure core built, nothing reads it until D1b
+    "morning-pause",
     # ACTIVATE-and-measure
     "intelligence-self-learning-loop",
     "dream-consolidation",
