@@ -840,23 +840,22 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         ".vnx-agent-skills/) or on (the skills at the provider's native, discovered destination, "
         "set per project by the operator). An unknown value reads as off.",
         subsystem="agent-layout", status="SCOPE"),
-    # ochtendronde D1a (ADR-095): the pure core scripts/lib/morning_pause.py reads these through a
-    # getter. No production reader exists until D1b, so the three tuning keys are
-    # read_site_wired=False. VNX_MORNING_PAUSE_ENABLED is the exception and the subsystem's
-    # canonical flag: canonical_flags() raises for a subsystem whose keys are all unwired, which
-    # would break the dashboard. It is inserted last so the CLI's last-inserted rule agrees.
+    # ochtendronde (ADR-095): morning_pause.py reads these through a getter; since D1b the door
+    # (stop_conditions.check_morning_pause) and pr_merge read them (morning_pause_gate.py), so all
+    # four are wired. VNX_MORNING_PAUSE_ENABLED is the subsystem's canonical flag, inserted last
+    # so the CLI's last-inserted rule agrees.
     "VNX_MORNING_PAUSE_START": _e(
         "VNX_MORNING_PAUSE_START", "string", "07:00", "dispatch",
         "Morning pause start, HH:MM in VNX_MORNING_PAUSE_TZ.",
-        subsystem="morning-pause", status="PARK", read_site_wired=False),
+        subsystem="morning-pause", status="PARK"),
     "VNX_MORNING_PAUSE_DEADLINE": _e(
         "VNX_MORNING_PAUSE_DEADLINE", "string", "09:00", "dispatch",
         "Morning pause deadline, HH:MM in VNX_MORNING_PAUSE_TZ; after it the pause never holds.",
-        subsystem="morning-pause", status="PARK", read_site_wired=False),
+        subsystem="morning-pause", status="PARK"),
     "VNX_MORNING_PAUSE_TZ": _e(
         "VNX_MORNING_PAUSE_TZ", "string", "Europe/Amsterdam", "dispatch",
         "IANA timezone of the morning pause window.",
-        subsystem="morning-pause", status="PARK", read_site_wired=False),
+        subsystem="morning-pause", status="PARK"),
     "VNX_MORNING_PAUSE_ENABLED": _e(
         "VNX_MORNING_PAUSE_ENABLED", "bool", "false", "dispatch",
         "Morning pause (ADR-095): firing and merging stop from the start time until the morning "
