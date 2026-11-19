@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import operator_queue as oq
+from operator_queue_ask import ANSWERABLE_REF_PREFIXES
 from ochtendronde_agenda import _load_snapshot, _snapshot_path, decision_status
 
 SCHEMA = "morning_agenda/1"
@@ -29,8 +30,8 @@ class AgendaUnreadable(ValueError):
 
 def decide_command(source: str, point_id: str, ref: str) -> Optional[str]:
     """The command that carries out the decision, as the source dictates; None where the source has no command."""
-    if source in ("decision", "question"):
-        return f'vnx inbox answer {point_id} --quote "..."'
+    if source in ("decision", "question"):  # `inbox answer` refuses every other ref: the source decides those
+        return f'vnx inbox answer {point_id} --quote "..."' if ref.startswith(ANSWERABLE_REF_PREFIXES) else None
     bare = ref.split(":", 1)[-1]  # the snapshot ref is "<form>:<id>" (dlv:<id>, edit:<n>, dream:<id>); the CLIs take the id
     if source == "promote":
         return f"vnx deliverable promote {bare}"
@@ -64,12 +65,15 @@ def build_agenda(project_id: str, day: str, *, state_dir: Path, now: datetime) -
         decided = status.points.get(pid)
         if decided not in STATUSES:
             raise AgendaUnreadable(f"point {pid} has status {decided!r} in the inbox ledger of {project_id}")
+        ledger_point = state.get(pid)
+        if ledger_point is None:
+            raise AgendaUnreadable(f"point {pid} is missing from the inbox ledger of {project_id} on the second read")
         source = SOURCES.get(item.get("bron"), "unknown")
         points.append({
             "point_id": pid, "project_id": project_id, "source": source, "ref": item.get("ref"),
             "question": item.get("vraag"), "advice": item.get("advies") or None,
             "classification": item.get("klasse") or None,
-            "age_seconds": _age(state[pid].get("asked_at"), now), "status": decided,
+            "age_seconds": _age(ledger_point.get("asked_at"), now), "status": decided,
             "decide_command": decide_command(source, pid, str(item.get("ref"))),
         })
     return {"schema": SCHEMA, "project_id": project_id, "day": day, "snapshot_written_at": written,

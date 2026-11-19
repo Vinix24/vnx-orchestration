@@ -115,7 +115,7 @@ def test_decide_command_by_source():
 
 
 @pytest.mark.parametrize("source,ref", [("promote", "dlv:abc"), ("analyzer", "edit:1"), ("dream", "dream:c1"),
-                                         ("decision", "oi:7"), ("question", "antwoord:0123456789ab")])
+                                         ("decision", "pr:3073"), ("question", "antwoord:0123456789ab")])
 def test_every_decide_command_parses_in_the_real_cli(source, ref, monkeypatch):
     cmd = ma.decide_command(source, "p1", ref)
     assert cmd, source
@@ -161,3 +161,38 @@ def test_every_decide_command_parses_in_the_real_cli(source, ref, monkeypatch):
         with pytest.raises(KeyboardInterrupt):
             ase.main()
         assert (captured["ns"].command, captured["ns"].ids) == ("accept", "1")
+
+
+def test_decide_command_is_printed_only_for_a_ref_the_inbox_answers(tmp_path):
+    import operator_queue_ask as oqa
+    sd = tmp_path / "state"
+    refs = {"antwoord:0123456789ab": (8, None), "pr:3073": (2, {"ceiling": 5, "reason": "one_working_unit"}), "oi:7": (2, None),
+            "track:t1": (2, None), "config:k": (2, None), "verdict:v1": (2, None)}
+    seen = {}
+    for ref, (bron, extra) in refs.items():
+        assert oq.open_point(P, bron=bron, ref=ref, vraag="q", sluit_bij="x", opened_by="t", state_dir=sd, extra=extra)
+        seen[ref] = oq.point_id(P, bron, ref, 1)
+    for ref, pid in seen.items():
+        source = "question" if ref.startswith("antwoord:") else "decision"
+        cmd = ma.decide_command(source, pid, ref)
+        if ref.startswith(("antwoord:", "pr:")):
+            assert cmd == f'vnx inbox answer {pid} --quote "..."', ref
+            assert oqa.answer(P, pid, quote="yes", vastgelegd_door="t", state_dir=sd), ref
+        else:
+            assert cmd is None, ref
+            with pytest.raises(oq.QueueRefused, match="the source decides"):
+                oqa.answer(P, pid, quote="yes", vastgelegd_door="t", state_dir=sd)
+
+
+def test_point_missing_on_the_second_read_is_agenda_unreadable(env, monkeypatch):
+    sd, _, pids = env
+    real = oq.read_state
+
+    def second_read_drops_a_point(project_id, **kw):
+        state = real(project_id, **kw)
+        state["points"] = {k: v for k, v in state["points"].items() if k != pids["proj"]}
+        return state
+
+    monkeypatch.setattr(ma.oq, "read_state", second_read_drops_a_point)
+    with pytest.raises(ma.AgendaUnreadable, match=pids["proj"]):
+        ma.build_agenda(P, DAY, state_dir=sd, now=NOW)

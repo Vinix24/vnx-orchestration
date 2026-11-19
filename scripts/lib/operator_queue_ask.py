@@ -39,6 +39,7 @@ _REF = {
 }
 OI_ANSWERED = frozenset({"closed", "done", "deferred", "wontfix"})
 MAX_QUOTE = 300
+ANSWERABLE_REF_PREFIXES = ("antwoord:", "pr:")  # the only refs `answer` records; the source decides the others
 
 class RefRefused(ValueError):
     """The ref is not one of the six forms of ADR-076 decision 4."""
@@ -120,7 +121,7 @@ def answer(project_id: str, point_id: str, *, quote: str, vastgelegd_door: str, 
     ref = str(point.get("ref"))
     newer = [p["revisie"] for p in _pr_points(state, ref) if p["revisie"] > point["revisie"]] if ref.startswith("pr:") else []
     for failed, why in ((not point, "the point does not exist"), (point.get("state") != "open", "the point is closed"),
-                        (not ref.startswith(("antwoord:", "pr:")), "only an antwoord: or pr: point is answered here; the source decides the others"),
+                        (not ref.startswith(ANSWERABLE_REF_PREFIXES), "only an antwoord: or pr: point is answered here; the source decides the others"),
                         (bool(newer), f"revision {max(newer or [0])} of {ref} replaces this point"),
                         (not isinstance(quote, str) or not quote.strip() or len(quote) > MAX_QUOTE, f"the quote is empty or over {MAX_QUOTE} characters")):
         if failed:
