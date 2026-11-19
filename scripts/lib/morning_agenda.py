@@ -12,7 +12,6 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import operator_queue as oq
-from operator_queue_ask import ANSWERABLE_REF_PREFIXES
 from ochtendronde_agenda import _load_snapshot, _snapshot_path, decision_status
 
 SCHEMA = "morning_agenda/1"
@@ -22,6 +21,8 @@ POINT_KEYS = ("point_id", "project_id", "source", "ref", "question", "advice", "
 SOURCES = {1: "promote", 2: "decision", 3: "dream", 4: "analyzer", 5: "steering", 6: "permission",
            7: "cap_verdict", 8: "question"}
 STATUSES = ("open", "decided")
+# Mirrors the ref rule of operator_queue_ask.answer; tests/test_morning_round_cli.py runs answer() for every ref form to pin it.
+ANSWERABLE_REF_PREFIXES = ("antwoord:", "pr:")
 
 
 class AgendaUnreadable(ValueError):
