@@ -150,8 +150,13 @@ def _run_cli(*args: str, stdin_text: str | None = None) -> subprocess.CompletedP
     )
 
 
+# Composed at run time: a contiguous literal here would be a test naming the path,
+# which makes it heavy on the real checkout (the OI-3035 rule).
+_UNNAMED = "docs/" + "cli-probe-"
+
+
 def test_cli_prints_profile_from_stdin():
-    result = _run_cli(stdin_text="docs/a.md\ndocs/b.md\n")
+    result = _run_cli(stdin_text=f"{_UNNAMED}a.md\n{_UNNAMED}b.md\n")
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == LIGHT
 
@@ -164,7 +169,7 @@ def test_cli_prints_heavy_from_positional_args():
 
 def test_cli_paths_file_interface(tmp_path: Path):
     paths_file = tmp_path / "changed.txt"
-    paths_file.write_text("README.md\nclaudedocs/x.md\n", encoding="utf-8")
+    paths_file.write_text(f"{_UNNAMED}c.md\nclaudedocs/" + "cli-probe.md\n", encoding="utf-8")
     result = _run_cli("--paths-file", str(paths_file))
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == LIGHT
@@ -174,3 +179,69 @@ def test_cli_empty_stdin_is_heavy():
     result = _run_cli(stdin_text="")
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == HEAVY
+
+
+# ---------------------------------------------------------------------------
+# A light path that a test names is heavy (OI-3035)
+# ---------------------------------------------------------------------------
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _layout(tmp_path: Path, test_text: str) -> Path:
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_reader.py").write_text(test_text, encoding="utf-8")
+    return tmp_path
+
+
+def _classify(root: Path, paths: list[str]) -> str:
+    return classifier.classify_paths(paths, classifier.scan_test_read_paths(root, paths))
+
+
+def test_claude_md_only_diff_is_heavy_on_this_checkout():
+    paths = ["CLAUDE.md"]
+    assert classifier.classify_paths(paths) == LIGHT  # the old call shape: the OI-3035 bug
+    assert _classify(REPO_ROOT, paths) == HEAVY
+
+
+def test_root_md_that_no_test_names_stays_light(tmp_path: Path):
+    root = _layout(tmp_path, "def test_x():\n    assert open('CLAUDE.md')\n")
+    assert _classify(root, ["NOTES.md"]) == LIGHT
+    assert _classify(root, ["CLAUDE.md"]) == HEAVY
+
+
+def test_docs_file_a_test_names_is_heavy_and_others_stay_light(tmp_path: Path):
+    root = _layout(tmp_path, "P = 'docs/core/READ_BY_TEST.md'\n")
+    assert _classify(root, ["docs/core/READ_BY_TEST.md"]) == HEAVY
+    assert _classify(root, ["docs/core/UNREAD.md"]) == LIGHT
+    assert _classify(root, ["docs/core/UNREAD.md", "docs/core/READ_BY_TEST.md"]) == HEAVY
+
+
+def test_nested_test_file_counts(tmp_path: Path):
+    root = _layout(tmp_path, "")
+    (root / "tests" / "sub").mkdir()
+    (root / "tests" / "sub" / "helper.py").write_text("'docs/x.md'", encoding="utf-8")
+    assert _classify(root, ["docs/x.md"]) == HEAVY
+
+
+def test_scan_missing_tests_dir_raises(tmp_path: Path):
+    with pytest.raises(OSError):
+        classifier.scan_test_read_paths(tmp_path, ["docs/a.md"])
+
+
+def test_scan_unreadable_test_file_raises(tmp_path: Path):
+    root = _layout(tmp_path, "")
+    (root / "tests" / "test_bad.py").write_bytes(b"\xff\xfe\x00bad")
+    with pytest.raises(UnicodeDecodeError):
+        classifier.scan_test_read_paths(root, ["docs/a.md"])
+
+
+def test_main_prints_heavy_when_the_scan_raises(monkeypatch, capsys):
+    def boom(root, paths):
+        raise OSError("tests unreadable")
+
+    monkeypatch.setattr(classifier, "scan_test_read_paths", boom)
+    assert classifier.main(["docs/a.md"]) == 0
+    captured = capsys.readouterr()
+    assert captured.out.strip() == HEAVY
+    assert "tests unreadable" in captured.err
