@@ -1,5 +1,4 @@
-"""ochtendronde D1b: the morning pause at the door (stop condition) and in the pr_merge preflight."""
-import argparse
+"""ochtendronde D1b part A: the morning pause at the door (stop condition)."""
 import json
 import sys
 from datetime import datetime, timezone
@@ -15,7 +14,6 @@ import dispatch_cli
 import morning_pause_gate as gate
 import ochtendronde_agenda as ag
 import operator_queue as oq
-import pr_merge
 import stop_conditions as sc
 
 P, DAY = "proj-a", "2026-11-19"
@@ -39,21 +37,15 @@ def events(sd):
 
 @pytest.fixture
 def seams(tmp_path, monkeypatch):
-    """Injected getter and clock for the door check and the merge gate; never the live registry."""
+    """Injected getter and clock for the door check; never the live registry."""
     state = {"cfg": dict(CONFIG), "now": IN_WINDOW, "sd": tmp_path}
     monkeypatch.setattr(gate, "registry_getter", lambda pid, sd: state["cfg"].__getitem__)
-    monkeypatch.setattr(pr_merge, "active_store", lambda: (state["sd"], P))
     monkeypatch.setattr("vnx_paths.project_id_from_state_dir", lambda sd: P)
-    monkeypatch.setattr(pr_merge, "datetime", type("D", (), {"now": staticmethod(lambda tz=None: state["now"])}))
     return state
 
 
 def door(seams):
     return sc.check_morning_pause(seams["sd"], now=seams["now"], get=seams["cfg"].__getitem__)
-
-
-def merge(override=None):
-    return pr_merge._run_pause_gate(argparse.Namespace(pr=7, dispatch_id="dlv-x", override_morning_pause=override))
 
 
 def test_off_reads_nothing_else(tmp_path):
@@ -66,21 +58,20 @@ def test_off_reads_nothing_else(tmp_path):
     assert sc.check_morning_pause(sd, now=IN_WINDOW, get=only_enabled).status == sc.CheckStatus.CLEAR
 
 
-def test_open_point_triggers_door_and_refuses_merge_one_line_each(seams):
+def test_open_point_triggers_door_and_books_one_refused_line(seams):
     snapshot(seams["sd"])
     res = door(seams)
     assert res.status == sc.CheckStatus.TRIGGERED and res.evidence["reason"] == "open_points"
-    assert merge()["verdict"] == "NO-GO"
     dispatch_cli._book_morning_pause([res], state_dir=seams["sd"], dispatch_id="dlv-x", override_reason="")
     assert [(e["kind"], e["surface"], e["ref"]) for e in events(seams["sd"])] == [
-        ("refused", "merge", "PR #7 dlv-x"), ("refused", "door", "dlv-x")]
+        ("refused", "door", "dlv-x")]
 
 
 @pytest.mark.parametrize("decide,now", [(True, IN_WINDOW), (False, AFTER)])
 def test_all_decided_and_after_deadline_are_clear(seams, decide, now):
     snapshot(seams["sd"], decide=decide)
     seams["now"] = now
-    assert door(seams).status == sc.CheckStatus.CLEAR and merge()["verdict"] == "GO"
+    assert door(seams).status == sc.CheckStatus.CLEAR
 
 
 @pytest.mark.parametrize("key,bad,reason", [
@@ -93,7 +84,6 @@ def test_no_snapshot_or_bad_config_is_paused(seams, key, bad, reason):
         seams["cfg"][key] = bad
     res = door(seams)
     assert res.status == sc.CheckStatus.TRIGGERED and res.evidence["reason"].startswith(reason)
-    assert merge()["verdict"] == "NO-GO"
 
 
 def test_unreadable_registry_is_paused(seams):
@@ -101,22 +91,6 @@ def test_unreadable_registry_is_paused(seams):
         raise ValueError(f"{key}: config unreadable")
     v = gate.morning_pause_verdict(P, IN_WINDOW, state_dir=seams["sd"], get=unreadable)
     assert v.paused and v.reason.startswith("morning_pause_config_invalid")
-
-
-@pytest.mark.parametrize("reason", ["revert_or_fix_forward", "operator says go"])
-def test_merge_override_passes_with_one_override_line(seams, reason):
-    snapshot(seams["sd"])
-    g = merge(reason)
-    assert g["verdict"] == "GO" and g["overridden"] and g["override_reason"] == reason
-    (line,) = events(seams["sd"])
-    assert (line["kind"], line["surface"], line["reason"]) == ("override", "merge", reason)
-
-
-@pytest.mark.parametrize("empty", ["", "   "])
-def test_merge_empty_override_is_refused(seams, empty):
-    snapshot(seams["sd"])
-    assert merge(empty)["verdict"] == "NO-GO"
-    assert [e["kind"] for e in events(seams["sd"])] == ["refused"]
 
 
 def test_door_blocks_then_override_passes_and_books_lines(seams, monkeypatch):
@@ -136,6 +110,8 @@ def test_door_blocks_then_override_passes_and_books_lines(seams, monkeypatch):
 def test_failing_append_keeps_the_refusal_and_shows_the_error(seams, monkeypatch, capsys):
     snapshot(seams["sd"])
     monkeypatch.setattr(gate, "append_event", lambda *a, **k: (_ for _ in ()).throw(OSError("disk full")))
-    assert merge()["verdict"] == "NO-GO" and "OSError: disk full" in capsys.readouterr().err
+    res = door(seams)
+    dispatch_cli._book_morning_pause([res], state_dir=seams["sd"], dispatch_id="dlv-x", override_reason="")
+    assert res.status == sc.CheckStatus.TRIGGERED and "OSError: disk full" in capsys.readouterr().err
     v = gate.MorningPauseVerdict(True, "x", DAY)
     assert gate.record_event("refused", v, project_id=None, state_dir=seams["sd"], surface="door", ref="r", reason="x")

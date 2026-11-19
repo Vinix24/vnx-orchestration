@@ -2725,12 +2725,15 @@ def _persist_halt_file(
         )
 
 
-def _book_morning_pause(blocking_triggered: list, *, state_dir: Path, dispatch_id: str, override_reason: str) -> None:
-    """One ``refused``/``override`` ledger line when morning_pause is blocking; a failing append is printed only."""
+def _book_morning_pause(
+    blocking_triggered: list, *, state_dir: Path, dispatch_id: str, override_reason: str, dry_run: bool = False,
+) -> None:
+    """One ``refused``/``override`` ledger line when morning_pause is blocking on a real fire (never a dry run);
+    a failing append is printed only."""
     import morning_pause_gate as gate  # noqa: PLC0415
 
     pause = next((r for r in blocking_triggered if r.check_id == "morning_pause"), None)
-    if pause is None:
+    if pause is None or dry_run:
         return
     ev = pause.evidence or {}
     verdict = gate.MorningPauseVerdict(True, str(ev.get("reason") or ""), str(ev.get("day") or ""))
@@ -2841,11 +2844,9 @@ def _check_stop_conditions_verdict(
 
     if not dry_run:
         _persist_halt_file(state_dir, results, scoped_out, relevant_spec_providers, relevant_gates)
-
     summary = "; ".join(f"{r.check_id}: {r.message}" for r in blocking_triggered)
     reason = (override_reason or "").strip()
-    if not dry_run:
-        _book_morning_pause(blocking_triggered, state_dir=state_dir, dispatch_id=dispatch_id, override_reason=reason)
+    _book_morning_pause(blocking_triggered, state_dir=state_dir, dispatch_id=dispatch_id, override_reason=reason, dry_run=dry_run)
     if reason:
         logger.warning(
             "[dispatch_cli] AUDIT stop-conditions-override-applied triggered=%s reason=%s",
