@@ -572,8 +572,11 @@ def test_t21_path1_and_path2_concurrent_writes_never_fork(tmp_path, monkeypatch)
 
 
 # ADR-083: read_ledger_tail, the bounded tail reading (receipt-hashketen-aan H3)
-def test_tail_window_is_the_closer_window():
-    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+def test_tail_window_is_the_closer_window(monkeypatch):
+    # monkeypatch restores sys.path at teardown: a bare sys.path.insert left
+    # scripts/ ahead of scripts/lib for every later test in the process, and
+    # the CLI scripts/crash_recovery_sweep.py then shadowed the library module.
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parent.parent / "scripts"))
     from append_receipt_internals.idempotency import _TORN_TAIL_WINDOW
     assert nhc.TAIL_WINDOW == _TORN_TAIL_WINDOW
 
