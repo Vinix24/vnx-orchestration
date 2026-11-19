@@ -1,0 +1,1 @@
+- `vnx suggest accept` stages a dispatch with the exact diff of the edit (status `approved`, the T0 fires it) instead of marking it accepted. `vnx suggest apply` no longer writes files; it points to the staged dispatch.
