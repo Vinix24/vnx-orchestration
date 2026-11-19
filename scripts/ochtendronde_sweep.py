@@ -1,19 +1,11 @@
 #!/usr/bin/env python3
 """Ochtendronde sweep: the nightly learning loop and the dream cycle for every registered project.
 
-Reads the project register (``~/.vnx/projects.json``) and, per project, runs the learning-loop
-nightly phase and the dream cycle against that project's central store (ADR-026). The project id
-comes from the register entry and is passed explicitly: the learning phase runs in a child process
-whose environment is rebuilt for that project, the dream cycle takes ``project_id``, ``db_path``
-and ``data_root`` as arguments. Nothing reads the project from the environment of the sweep.
-
-Signals, one source each: learning writes ``learning_loop_nightly_beacon.json`` in the project's
-state dir (the child writes it; the sweep writes the same shape for a project it could not run),
-dream writes its ``dream_cycle_*`` events under ``<store>/events/dream`` (what
-``dream_liveness`` reads). The sweep never writes a second record of either.
-
-A project that fails, or cannot be read, never stops the sweep and is never left out: it is listed
-in the summary and the exit code is 1. An empty or unreadable register exits 2 and writes nothing.
+Per registered project (``~/.vnx/projects.json``): the learning-loop nightly phase in a child with
+that project's rebuilt environment, and the dream cycle with explicit arguments (ADR-026 store).
+Signals: the learning beacon in the state dir (the sweep writes the same shape for a project it
+could not run) and the ``dream_cycle_*`` events. A failing project never stops the sweep: it is
+listed and the exit code is 1. An empty or unreadable register exits 2 and writes nothing.
 """
 from __future__ import annotations
 
@@ -39,6 +31,7 @@ from project_root import resolve_central_data_dir
 STATUS_SKIPPED = "skipped"
 LEARNING_OK = frozenset({"ok", "dormant", "degraded", "refused"})
 LEARNING_TIMEOUT_SECONDS = 1800
+STDERR_TAIL_CHARS = 300
 DB_NAME = "quality_intelligence.db"
 _PROJECT_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 # Everything the child resolves its project and paths from; rebuilt per project.
@@ -84,14 +77,23 @@ def project_env(base: Dict[str, str], project_id: str, store: Path) -> Dict[str,
     return env
 
 
-def run_learning_child(project_id: str, entry: Dict[str, Any], store: Path) -> None:
-    """The learning-loop nightly phase of one project, in a child with that project's environment."""
+def run_learning_child(project_id: str, entry: Dict[str, Any], store: Path) -> Dict[str, Any]:
+    """The learning-loop nightly phase of one project in a child; returns exit code and stderr tail."""
     env = project_env(dict(os.environ), project_id, store)
     raw = entry.get("path")
     cwd = Path(raw) if isinstance(raw, str) and Path(raw).is_dir() else store
-    subprocess.run([sys.executable, str(SCRIPT_DIR / "learning_loop_nightly.py")], env=env,
-                   cwd=str(cwd), timeout=LEARNING_TIMEOUT_SECONDS, capture_output=True,
-                   text=True, check=False)
+    proc = subprocess.run([sys.executable, str(SCRIPT_DIR / "learning_loop_nightly.py")], env=env,
+                          cwd=str(cwd), timeout=LEARNING_TIMEOUT_SECONDS, capture_output=True,
+                          text=True, check=False)
+    return {"returncode": proc.returncode, "stderr_tail": (proc.stderr or "")[-STDERR_TAIL_CHARS:]}
+
+
+def _child_exit_failure(ran: Any) -> Optional[str]:
+    """A reason unless the child exited 0 (None: an injected runner that reports no exit)."""
+    if ran is None or (isinstance(ran, dict) and ran.get("returncode") == 0):
+        return None
+    info = ran if isinstance(ran, dict) else {}
+    return f"learning_child_exit_code={info.get('returncode')}: {info.get('stderr_tail') or ''}".strip()
 
 
 def run_dream_in_process(project_id: str, db_path: Path, store: Path) -> Dict[str, Any]:
@@ -156,8 +158,10 @@ def _sweep_one(project_id: str, entry: Dict[str, Any], store: Path,
         return res
     started = utc_now_iso()
     try:
-        learning_runner(project_id, entry, store)
-        res.learning = _check_learning_beacon(state_dir, project_id, started)
+        ran = learning_runner(project_id, entry, store)
+        exit_failure = _child_exit_failure(ran)
+        res.learning = (_outcome(STATUS_FAILED, exit_failure) if exit_failure
+                        else _check_learning_beacon(state_dir, project_id, started))
     except Exception as exc:  # one project must not stop the sweep; the beacon records why
         reason = f"learning_{type(exc).__name__}: {exc}"
         res.learning = _outcome(STATUS_FAILED, reason)
@@ -167,7 +171,9 @@ def _sweep_one(project_id: str, entry: Dict[str, Any], store: Path,
     except Exception as exc:  # the dream events stay the one dream signal: record the failure there
         reason = f"dream_{type(exc).__name__}: {exc}"
         res.dream = _outcome(STATUS_FAILED, reason)
-        _emit_dream_failure(project_id, store, reason)
+        event_error = _emit_dream_failure(project_id, store, reason)
+        if event_error:
+            res.dream = _outcome(STATUS_FAILED, f"{reason}; dream_event_error: {event_error}")
     return res
 
 
@@ -180,13 +186,15 @@ def _write_beacon_safely(res: ProjectResult, state_dir: Path, project_id: str,
         res.learning = _outcome(STATUS_FAILED, f"{reason}; beacon_unwritable: {exc}")
 
 
-def _emit_dream_failure(project_id: str, store: Path, reason: str) -> None:
+def _emit_dream_failure(project_id: str, store: Path, reason: str) -> Optional[str]:
+    """None when the dream_cycle_failed event was written, else the persistence error."""
     try:
         from dream.consolidator import _emit_dream_event
         _emit_dream_event({"event_type": "dream_cycle_failed", "cycle_id": None,
                            "project_id": project_id, "provider": None, "error": reason[:500]}, store)
-    except Exception:  # vnx-silent-except: the summary and exit code already carry the failure
-        return
+        return None
+    except Exception as exc:  # the caller adds the persistence failure to the project result
+        return f"{type(exc).__name__}: {exc}"
 
 
 def sweep(registry_path: Path, *, store_resolver: Callable[[str], Path] = resolve_central_data_dir,
