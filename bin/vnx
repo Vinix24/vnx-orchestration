@@ -443,6 +443,7 @@ Process commands (visibility and control):
   slot doctor        Check the host capacity slot store (exit 0 valid, 78 invalid store, policy or state)
   inbox [--json] [--present]  Operator queue: open points to answer; also ask, answer, push-due
                      (exit 0 done, 2 refused, 78 ledger unreadable)
+  morning-round [--json]  Morning agenda: open decisions and proposals to discuss (read-only)
 
 Dispatch commands (one-liner delivery):
   dispatch <file.md>              Auto-detect terminal and deliver dispatch
