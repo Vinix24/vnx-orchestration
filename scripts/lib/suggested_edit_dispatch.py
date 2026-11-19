@@ -153,11 +153,7 @@ def _parse_ts(raw: object) -> Optional[datetime]:
 
 
 def _first_receipt_times(ledger: Path, project_id: str, wanted: set) -> Dict[str, datetime]:
-    """``dispatch_id -> earliest receipt time`` for the wanted ids of this project.
-
-    Reads the ``timestamp`` field of every receipt with that exact ``dispatch_id`` and ``project_id``; a receipt
-    whose timestamp is missing or unparsable is not evidence and is skipped. Raises ``LedgerUnreadable``.
-    """
+    """``dispatch_id -> earliest receipt time`` (exact dispatch and project); an unparsable timestamp is skipped."""
     first: Dict[str, datetime] = {}
     for rec in iter_ledger(ledger):
         did = rec.get("dispatch_id")
@@ -173,12 +169,9 @@ def count_dispatches_in_window(db_path: Path, project_id: str, source_text: str,
                                start: datetime, end: datetime, ledger: Optional[Path] = None) -> dict:
     """Distinct dispatches that showed the pattern in ``[start, end)``: ``{status, count, reason, source}``.
 
-    A dispatch of a matching row's ``source_dispatch_ids`` counts only when the receipt ledger ``ledger`` holds a
-    receipt for that exact ``dispatch_id`` and ``project_id`` whose earliest ``timestamp`` lies in the window. The
-    row's ``last_seen`` only prefilters (a row last seen before ``start`` holds no in-window occurrence); it is never
-    the evidence. Unknown (never 0) when the db or table cannot be read, no row matches, a ``last_seen`` or the ids
-    cannot be parsed, the ledger is missing or unreadable, or an id has no timestamped receipt (the reason names how
-    many).
+    A source dispatch id counts only when the ledger holds a receipt for that exact dispatch and project whose
+    earliest ``timestamp`` is in the window; ``last_seen`` only prefilters. Unknown (never 0) when anything needed
+    is missing or unparsable, or an id has no timestamped receipt (the reason names how many).
     """
     base = {"source": source_text[:200], "window_start": start.isoformat().replace("+00:00", "Z"),
             "window_end": end.isoformat().replace("+00:00", "Z")}
