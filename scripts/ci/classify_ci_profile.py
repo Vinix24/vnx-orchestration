@@ -19,6 +19,14 @@ Light-profile allowlist (the complete set of things that may be light):
   ``changelog_fragments.is_fragment_path`` defines it, and
   ``changelog.d/README.md`` — any other path under ``changelog.d/`` is heavy
 
+A light-allowlist path that a test names is heavy (OI-3035): a file under
+``tests/`` that contains the repo-relative path as a literal, or, for a root
+file, its bare name, reads that file, so changing it can turn a test red
+(``CLAUDE.md`` and ``tests/test_project_claude_md_build_rules.py``).  The set of
+such paths is computed once from the checkout by ``scan_test_read_paths`` (one
+pass over the ``tests/**/*.py`` text, no test module imported) and passed to
+``classify_paths``.  A scan that fails gives heavy.
+
 Everything else is heavy.  ``skills/**`` is deliberately heavy: a skill's
 markdown drives agent behaviour, so a skill change is a code change for CI
 purposes.  ``.github/**`` (including this workflow's own YAML) is heavy.
@@ -111,20 +119,38 @@ def is_docs_only_path(path: str) -> bool:
     return is_fragment_path(path) or path == README_PATH
 
 
-def classify_paths(paths) -> str:
+def scan_test_read_paths(root: str | Path, paths) -> frozenset[str]:
+    """Return the subset of *paths* that a file under ``<root>/tests`` names.
+
+    "Names" is a plain substring match on the text of every ``tests/**/*.py``:
+    the repo-relative path, or for a root file (no ``/``) its bare name.  One
+    pass over the test text, nothing is imported.  Raises ``OSError`` or
+    ``UnicodeDecodeError`` when the tests cannot be read, and ``OSError`` when
+    ``<root>/tests`` is not a directory: the caller must treat that as heavy.
+    """
+    tests_root = Path(root) / TESTS_DIR
+    if not tests_root.is_dir():
+        raise NotADirectoryError(f"{str(tests_root)!r} is not a directory, so no test can be scanned")
+    corpus = "\n".join(f.read_text(encoding="utf-8") for f in sorted(tests_root.rglob("*.py")))
+    return frozenset(p for p in paths if p.strip() and p in corpus)
+
+
+def classify_paths(paths, test_read_paths=frozenset()) -> str:
     """Return ``PROFILE_LIGHT`` or ``PROFILE_HEAVY`` for *paths*.
 
     *paths* is any iterable of raw path strings (typically from
     ``git diff --name-only``).  Whitespace-only entries are treated as blank
     lines and dropped; a path with leading/trailing whitespace is kept and
     rejected by the whitespace guard.  The result is ``light`` only when every
-    non-blank path matches the docs-only allowlist; anything else is ``heavy``.
+    non-blank path matches the docs-only allowlist and none of them is in
+    *test_read_paths* (the paths a test names, from ``scan_test_read_paths``);
+    anything else is ``heavy``.
     """
     meaningful = [p for p in paths if p.strip() != ""]
     if not meaningful:
         return PROFILE_HEAVY
     for path in meaningful:
-        if not is_docs_only_path(path):
+        if not is_docs_only_path(path) or path in test_read_paths:
             return PROFILE_HEAVY
     return PROFILE_LIGHT
 
@@ -298,7 +324,15 @@ def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     if "--tests-only" in args:
         return _run_tests_only(args)
-    print(classify_paths(_read_paths(args)))
+    paths = _read_paths(args)
+    try:
+        test_read = scan_test_read_paths(REPO_ROOT, paths)
+    except (OSError, UnicodeDecodeError) as exc:
+        # Fail closed: tests that cannot be scanned cannot clear a path as unread.
+        print(f"classify_ci_profile: test scan failed, heavy: {exc}", file=sys.stderr)
+        print(PROFILE_HEAVY)
+        return 0
+    print(classify_paths(paths, test_read))
     return 0
 
 

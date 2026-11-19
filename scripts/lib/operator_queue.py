@@ -136,6 +136,19 @@ def _check_grant(grant: Any) -> None:
         raise ValueError("grant: measured_at is not an ISO UTC timestamp")
 
 
+def _check_pr_opened(line: Mapping[str, Any]) -> None:
+    """ADR-088 decision 6, on write only (an older ``pr:`` line without them replays with ceiling None): a ``pr:``
+    point opens with bron 2, a ceiling above 0 and a reason from the closed set; no other point carries either."""
+    if not str(line["ref"]).startswith("pr:"):
+        if "ceiling" in line or "reason" in line:
+            raise ValueError("opened: ceiling and reason are only on a pr: point")
+        return
+    if line["bron"] != 2:
+        raise ValueError("opened: a pr: point opens only with bron 2 (besluit)")
+    if not _int(line.get("ceiling"), 1) or line.get("reason") not in GRANT_REASONS:
+        raise ValueError("opened: a pr: point needs a ceiling above 0 and a reason from the closed set")
+
+
 def _check_values(project_id: str, kind: str, line: Mapping[str, Any]) -> None:
     texts = [n for n in KINDS[kind] if n not in ("bron", "revisie", "point_ids", "asked_at")]  # kopieerblok may be empty
     if kind == "opened":
@@ -196,7 +209,8 @@ def _fold(lines: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
             points.setdefault(line["point_id"], {
                 "point_id": line["point_id"], "state": "open", "bron": line["bron"], "ref": line["ref"],
                 "revisie": line["revisie"], "vraag": line["vraag"], "sluit_bij": line["sluit_bij"],
-                "asked_at": line["asked_at"], "presented": None, "bewijs": None, "unknown_reden": None})
+                "asked_at": line["asked_at"], "presented": None, "bewijs": None, "unknown_reden": None,
+                "ceiling": line.get("ceiling") if _int(line.get("ceiling"), 1) else None})
             continue
         point = points.get(line.get("point_id"))  # push_reserved has no point_id: None
         if point is None:
@@ -303,6 +317,8 @@ def append_line(project_id: str, kind: str, fields: Mapping[str, Any], *, now: O
     line = {**fields, "kind": kind, "project_id": project_id, "ts": now or _now()}
     try:
         check_line(project_id, line)
+        if kind == "opened":
+            _check_pr_opened(line)
     except ValueError as exc:
         raise QueueRefused(str(exc)) from exc
     hits = _secret_names(line)
@@ -326,13 +342,14 @@ def append_line(project_id: str, kind: str, fields: Mapping[str, Any], *, now: O
 
 def open_point(project_id: str, *, bron: int, ref: str, revisie: int = 1, vraag: str, sluit_bij: str,
                opened_by: str, kopieerblok: str = "", asked_at: Optional[str] = None, now: Optional[str] = None,
-               state_dir: Optional[Path] = None) -> Optional[Dict[str, Any]]:
-    """Open a point; ``ref`` is taken as given. None when it exists. Other kinds: ``append_line``."""
+               state_dir: Optional[Path] = None, extra: Optional[Mapping[str, Any]] = None) -> Optional[Dict[str, Any]]:
+    """Open a point; ``ref`` is taken as given. None when it exists. ``extra`` adds fields ``check_line`` validates
+    (``ceiling`` and ``reason`` of a ``pr:`` point). Other kinds: ``append_line``."""
     stamp = now or _now()
     return append_line(project_id, "opened", {
-        "point_id": point_id(project_id, bron, ref, revisie), "bron": bron, "ref": ref, "revisie": revisie,
-        "vraag": vraag, "sluit_bij": sluit_bij, "kopieerblok": kopieerblok, "asked_at": asked_at or stamp,
-        "opened_by": opened_by}, now=stamp, state_dir=state_dir)
+        **(extra or {}), "point_id": point_id(project_id, bron, ref, revisie), "bron": bron, "ref": ref,
+        "revisie": revisie, "vraag": vraag, "sluit_bij": sluit_bij, "kopieerblok": kopieerblok,
+        "asked_at": asked_at or stamp, "opened_by": opened_by}, now=stamp, state_dir=state_dir)
 
 
 def close_point(project_id: str, pid: str, *, uitkomst: str, bewijs: str, beantwoord_door: str = "onbekend",

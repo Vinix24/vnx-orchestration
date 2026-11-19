@@ -154,3 +154,48 @@ def test_a_security_path_switches_the_limit_to_300_and_a_project_prefix_adds():
     assert (v.outcome, v.limit_kind) == ("WARN", "security")
     v = _v(450, paths[:1])
     assert (v.outcome, v.limit, v.limit_kind, v.source) == ("GO", 450, "hold", "default")
+
+
+def test_350_lines_in_the_inbox_cli_under_refuse_is_no_go_at_the_security_limit():
+    v = _v(350, ("scripts/inbox_cli.py",), _REFUSE)
+    assert (v.outcome, v.reason, v.limit, v.limit_kind) == ("NO-GO", "pr_size_above_limit", 300, "security")
+    assert v.security_paths_hit == ("scripts/inbox_cli.py",)
+
+
+_RULE_1 = ("scripts/hooks/pre_commit.sh", ".claude/hooks/x.py", "scripts/lib/permission_gate.py",
+           "scripts/lib/sandbox_run.py", "scripts/lib/auth_check.py", "scripts/lib/secret_store.py",
+           "scripts/lib/token_cache.py", "scripts/lib/credential_vault.py", "scripts/lib/provider_spawns/kimi.py",
+           ".claude/settings.json", ".github/workflows/ci.yml")
+
+
+@pytest.mark.parametrize("path", _RULE_1 + tuple(m.rstrip("/") + "/x" if m.endswith("/") else m + ".py"
+                                                 for m in psp.GOVERNANCE_PATH_MARKERS + psp.PR_SIZE_SECURITY_EXTRA))
+def test_every_prefix_of_rules_1_to_3_gives_the_security_limit(path):
+    v = _v(10, (path,))
+    assert (v.limit_kind, v.limit, v.security_paths_hit) == ("security", 300, (path,))
+
+
+@pytest.mark.parametrize("path", ("scripts/lib/plain_module.py", "docs/scripts/pr_merge.py.md",
+                                  "docs/schemas/x.md", "tests/scripts/inbox_cli.py"))
+def test_a_plain_path_or_a_security_name_below_another_root_gives_hold(path):
+    v = _v(10, (path,))
+    assert (v.limit_kind, v.limit, v.security_paths_hit) == ("hold", 450, ())
+
+
+def test_a_name_that_extends_a_prefix_matches_it():
+    assert _v(10, ("scripts/lib/operator_queue_x.py",)).limit_kind == "security"
+    assert _v(10, ("scripts/lib/attestation_ledger.py",)).limit_kind == "security"
+
+
+@pytest.mark.parametrize("value", ("", "docs/", " , ", "scripts/lib/plain_"))
+def test_the_project_key_only_adds_and_never_removes_rules_1_to_3(value):
+    rows = _rows(VNX_SECURITY_PATHS=value) if value else None
+    for path in ("scripts/pr_merge.py", "schemas/x.sql", "scripts/dispatcher.sh", "scripts/hooks/x.sh"):
+        assert _v(10, (path,), rows).limit_kind == "security"
+    added = _v(10, ("scripts/lib/plain_module.py",), rows).limit_kind
+    assert added == ("security" if value == "scripts/lib/plain_" else "hold")
+
+
+def test_security_paths_hit_keeps_the_first_three_in_measurement_order():
+    paths = ("docs/a.md", "schemas/a.sql", "scripts/inbox_cli.py", "scripts/hooks/h.sh", "scripts/pr_merge.py")
+    assert _v(10, paths).security_paths_hit == paths[1:4]

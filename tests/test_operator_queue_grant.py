@@ -23,7 +23,8 @@ def _grant(**kw):
 
 def _open(d, pr=12, revisie=1, project=P):
     oq.open_point(project, bron=2, ref=f"pr:{pr}", revisie=revisie, vraag=f"Exception PR {pr}?",
-                  sluit_bij="answer", opened_by="T0", state_dir=d)
+                  sluit_bij="answer", opened_by="T0", state_dir=d,
+                  extra={"ceiling": 650, "reason": "one_working_unit"})
     return oq.point_id(project, 2, f"pr:{pr}", revisie)
 
 

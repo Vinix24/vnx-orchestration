@@ -8,6 +8,7 @@ from typing import Optional, Tuple
 
 import config_registry
 import review_risk_class
+import smart_router
 from auto_merge_policy import GOVERNANCE_PATH_MARKERS
 
 KEYS = ("VNX_PR_SIZE_ENFORCE", "VNX_PR_SIZE_HOLD", "VNX_PR_SIZE_HOLD_SECURITY", "VNX_SECURITY_PATHS")
@@ -16,6 +17,13 @@ _LIMITS = KEYS[1:3]
 FLOOR_LAYERS = ("project_config", "global_config", "default")
 _MODES = ("off", "warn", "refuse")  # loosest first: a higher index is stricter
 _HEAD_RE = re.compile(r"[0-9a-f]{7,64}")
+# The fixed set of this track (ADR-088 decision 8, rule 3), each entry matched as a path prefix.
+PR_SIZE_SECURITY_EXTRA = (
+    "scripts/pr_merge.py", "scripts/lib/pr_size_policy.py", "scripts/inbox_cli.py", "scripts/lib/operator_queue",
+    "scripts/lib/actor_class.py", "scripts/lib/config_registry.py", "scripts/lib/config_store_db.py",
+    "scripts/lib/config_global.py", "scripts/lib/attest", "scripts/lib/delegation_mandate.py",
+    "scripts/lib/worker_permissions.py", "schemas/",
+)
 Measurement = namedtuple("Measurement", "lines paths base_ref merge_base")  # lines: added plus deleted
 
 
@@ -117,7 +125,12 @@ def read_policy(project_id=None, resolver=None):
     return {"mode": eff_mode, "mode_source": eff[KEYS[0]][1], "errors": errors,
             "hold": (_limit(eff[KEYS[1]][0]), eff[KEYS[1]][1]),
             "security": (_limit(eff[KEYS[2]][0]), eff[KEYS[2]][1]),
-            "security_prefixes": tuple(GOVERNANCE_PATH_MARKERS) + extra}, None
+            "security_prefixes": tuple(GOVERNANCE_PATH_MARKERS) + PR_SIZE_SECURITY_EXTRA + extra}, None
+
+
+def is_security_path(path: str, prefixes) -> bool:
+    """Rule 1 (``smart_router.security_path_kind``) or a prefix of rules 2 to 4; assembled when read, never copied."""
+    return bool(smart_router.security_path_kind(path)) or path.startswith(tuple(prefixes))
 
 
 def verdict(pr, head_sha: str, base_branch, cwd: Path, *, project_id=None, resolver=None,
@@ -134,7 +147,7 @@ def verdict(pr, head_sha: str, base_branch, cwd: Path, *, project_id=None, resol
         m = measurer(pr, head_sha, base_branch, cwd)
     except PrSizeUnmeasured as exc:
         return Verdict(on_fail, "pr_size_unmeasured", mode=mode, errors=errors, detail=str(exc))
-    hits = tuple(p for p in m.paths if p.startswith(policy["security_prefixes"]))
+    hits = tuple(p for p in m.paths if is_security_path(p, policy["security_prefixes"]))
     limit, source = policy["security"] if hits else policy["hold"]
     fields = dict(lines=m.lines, limit=limit, limit_kind="security" if hits else "hold",
                   security_paths_hit=hits[:3], mode=mode, source=source, errors=errors)

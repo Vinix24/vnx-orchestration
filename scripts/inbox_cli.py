@@ -40,7 +40,9 @@ def _parser() -> argparse.ArgumentParser:
         ask.add_argument(name, required=True)
     ask.add_argument("--kopieerblok", default="")
     ask.add_argument("--opened-by", default="T0")
-    ans = sub.add_parser("answer", help="record the operator's own words for an antwoord: point")
+    ask.add_argument("--ceiling", type=int, default=None, help="pr:<n> only: the line ceiling asked for (above 0)")
+    ask.add_argument("--reason", default=None, help="pr:<n> only: " + ", ".join(sorted(oq.GRANT_REASONS)))
+    ans = sub.add_parser("answer", help="record the operator's own words for an antwoord: or pr: point")
     ans.add_argument("point_id")
     ans.add_argument("--quote", required=True)
     ans.add_argument("--by", default="T0")
@@ -175,7 +177,8 @@ def main(argv: list) -> int:
     try:
         if args.cmd == "ask":
             line = qa.ask(project_id, bron=args.bron, ref=args.ref, vraag=args.vraag, sluit_bij=args.sluit_bij,
-                          kopieerblok=args.kopieerblok, opened_by=args.opened_by, state_dir=sdir)
+                          kopieerblok=args.kopieerblok, opened_by=args.opened_by, state_dir=sdir,
+                          ceiling=args.ceiling, reason=args.reason)
             print(f"point {line['point_id']} opened" if line else "point already open: nothing written")
         elif args.cmd == "answer":
             line = qa.answer(project_id, args.point_id, quote=args.quote, vastgelegd_door=args.by, state_dir=sdir)
