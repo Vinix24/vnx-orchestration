@@ -792,47 +792,69 @@ def _git_capture(args: List[str], cwd: str) -> str:
     return result.stdout.strip()
 
 
-def _capture_branch_heads(cwd: str) -> str:
-    """Return a stable, comparable snapshot of local branch heads, excluding ``dispatch/*``.
+def _capture_branch_heads(cwd: str, names: List[str]) -> str:
+    """Return a stable ``"<name> <sha>"`` snapshot of exactly the local branches in *names*.
 
-    ``dispatch/<id>`` is not evidence of a touched main checkout: the fabric
-    mints one for every dispatch, and ``refs/heads`` is shared across every
-    worktree of a repo — so it moves for reasons that have nothing to do
-    with THIS checkout being touched. Two sources of that churn are normal
-    even on a clean harness-lane run:
-
-      1. The gate's own dispatch: ``_prepare_provider_workdir`` ->
-         ``create_dispatch_worktree`` runs ``git worktree add <path> -b
-         dispatch/<safe_id>`` for the provider's isolated worktree, and that
-         branch is left behind after teardown (measured: dozens of stale
-         ``dispatch/glm-gate-pr...`` branches accumulate over time).
-      2. Any OTHER dispatch running concurrently in a sibling worktree of
-         the same repo mints its own ``dispatch/<id>`` at the same time.
-
-    Filtering those out by name is deliberately narrow — it is not "ignore
-    all branch churn", it is "ignore the one prefix the fabric itself owns
-    and creates as a side effect of dispatching, per worktree". Every OTHER
-    branch appearing, disappearing, or being reset to a different commit is
-    still exactly what this vangnet exists to catch (PR #1950's stray
-    ``pr1950``, still reproduced in
-    ``TestAgentTouchingMainCheckoutIsCaught``). Compared by name AND sha via
-    ``git for-each-ref``, not by name alone, so a branch reset to a
-    different commit under an unchanged name is still caught too.
+    OI-2711 / OI-2756: this used to list every local branch except
+    ``dispatch/*``. ``refs/heads`` is shared by every worktree of the repo, so
+    a parallel builder creating ``hold/<id>-r2-r2`` (OI-2711, #2625) or
+    another chain resetting ``work`` to ``origin/main`` (OI-2756, #2709) booked
+    the seat ``harness_lane_touched_main_checkout`` although nothing touched
+    the orchestrator's own checkout. The net now reads only the branches that
+    say something about THIS checkout and THIS review: the branch HEAD points
+    to in the main checkout and the gated PR's head branch (see
+    ``_capture_main_checkout_state``). Compared by name AND sha, so a branch
+    reset under an unchanged name is still caught; a listed branch that does
+    not exist locally is written as ``<name> <absent>``, so its creation or
+    deletion is a change too.
     """
+    wanted = sorted({name for name in names if name})
+    if not wanted:
+        return ""
     raw = _git_capture(
-        ["for-each-ref", "--format=%(refname:short) %(objectname)", "refs/heads"], cwd,
+        ["for-each-ref", "--format=%(refname:short) %(objectname)",
+         *[f"refs/heads/{name}" for name in wanted]],
+        cwd,
     )
     if raw.startswith("<git "):
         return raw
-    lines = [
-        line for line in raw.splitlines()
-        if line.strip() and not line.split(" ", 1)[0].startswith("dispatch/")
-    ]
-    return "\n".join(sorted(lines))
+    found = {}
+    for line in raw.splitlines():
+        name, _, sha = line.strip().partition(" ")
+        if name in wanted:
+            found[name] = sha
+    return "\n".join(f"{name} {found.get(name, '<absent>')}" for name in wanted)
 
 
-def _capture_main_checkout_state(project_root: Optional[Path]) -> Dict[str, str]:
-    """Snapshot the orchestrator's OWN checkout: HEAD ref/sha, branch heads, working-tree status.
+def _branches_at_pr_head(cwd: str, pr_head_sha: str) -> str:
+    """Names of local branches outside ``dispatch/`` whose tip is the gated PR's head commit.
+
+    PR #1950 rule (T0 decision on dlv-stoel2-vangnet-alleen-hoofdcheckout, rule 1):
+    the incident was PR content fetched into the main checkout as a local
+    branch. A checkout of it moves ``head``; this field also catches the
+    shape without a checkout (``git fetch origin <pr branch>`` + ``git branch
+    pr1950 FETCH_HEAD``). ``dispatch/*`` is excluded because the gate's own
+    provider worktree is ``dispatch/<id>`` created from ``origin/<pr branch>``,
+    so it carries the PR head by design. The builders of OI-2711/OI-2756
+    branch from ``origin/main`` or their own commits, never the PR head.
+    """
+    if not pr_head_sha or pr_head_sha.startswith("<git "):
+        return pr_head_sha
+    raw = _git_capture(
+        ["for-each-ref", "--format=%(refname:short)", "--points-at", pr_head_sha, "refs/heads"], cwd,
+    )
+    if raw.startswith("<git "):
+        return raw
+    return "\n".join(sorted(
+        line.strip() for line in raw.splitlines()
+        if line.strip() and not line.strip().startswith("dispatch/")
+    ))
+
+
+def _capture_main_checkout_state(
+    project_root: Optional[Path], branch: str = "", pr_head_sha: Optional[str] = None,
+) -> Dict[str, str]:
+    """Snapshot the orchestrator's OWN checkout: HEAD, the branches tied to it and the review, status.
 
     OI-1887 vangnet: the harness-lane isolation this file builds (PR-branch
     worktree via ``--base-ref``, an explicit "stay in your worktree" line in
@@ -843,19 +865,35 @@ def _capture_main_checkout_state(project_root: Optional[Path]) -> Dict[str, str]
     (see ``_main_checkout_state_diff``), it catches a touched main checkout
     even when the model ignored every instruction meant to prevent it.
 
-    HEAD is the symbolic ref (branch name) when on a branch, falling back to
-    the raw sha in detached HEAD — either way, a value that changes the
-    instant something runs `git checkout`/`git switch` in this checkout.
-    Branch heads exclude ``dispatch/*`` — see ``_capture_branch_heads``.
+    Fields (OI-2711, OI-2756: HEAD, status and the gated PR branch, not
+    every local branch):
+
+    * ``head``: the symbolic ref when on a branch, the raw sha in detached
+      HEAD — it changes the instant something runs `git checkout`/`git
+      switch` in this checkout.
+    * ``status``: ``git status --porcelain`` of this checkout.
+    * ``branches``: name and sha of HEAD's branch and of *branch*, the gated
+      PR's head branch (``_capture_branch_heads``). Branch churn elsewhere in
+      the shared ``refs/heads`` no longer books the seat.
+    * ``branches_at_pr_head``: local branches outside ``dispatch/`` at the PR
+      head commit (``_branches_at_pr_head``). *pr_head_sha* is resolved from
+      ``origin/<branch>`` when not given; the caller passes the before
+      snapshot's ``pr_head_sha`` to the after capture, so a push to the PR
+      during the seat does not move the reference point.
     """
     cwd = str(project_root) if project_root else "."
     head = _git_capture(["symbolic-ref", "-q", "HEAD"], cwd)
+    head_branch = head[len("refs/heads/"):] if head.startswith("refs/heads/") else ""
     if head.startswith("<git "):
         head = _git_capture(["rev-parse", "HEAD"], cwd)
+    if branch and pr_head_sha is None:
+        pr_head_sha = _git_capture(["rev-parse", "--verify", "-q", f"origin/{branch}^{{commit}}"], cwd)
     return {
         "head": head,
-        "branches": _capture_branch_heads(cwd),
+        "branches": _capture_branch_heads(cwd, [head_branch, branch]),
         "status": _git_capture(["status", "--porcelain"], cwd),
+        "branches_at_pr_head": _branches_at_pr_head(cwd, pr_head_sha or "") if branch else "",
+        "pr_head_sha": pr_head_sha or "",
     }
 
 
@@ -872,7 +910,7 @@ def _main_checkout_state_diff(
     """
     diffs = [
         f"{key}: {before.get(key)!r} -> {after.get(key)!r}"
-        for key in ("head", "branches", "status")
+        for key in ("head", "branches", "status", "branches_at_pr_head")
         if before.get(key) != after.get(key)
     ]
     return "; ".join(diffs) if diffs else None
@@ -1499,7 +1537,7 @@ class GateRunner:
         model = os.environ.get(model_env, default_model) if model_env else default_model
         request_payload.update(dispatch_id=dispatch_id, provider=provider, model=model)
 
-        main_checkout_before = _capture_main_checkout_state(self._project_root)
+        main_checkout_before = _capture_main_checkout_state(self._project_root, branch)
 
         _start = time.monotonic()
         dispatch_exc: Optional[Exception] = None
@@ -1525,7 +1563,10 @@ class GateRunner:
         # branch below (a raised exception included) rather than wrapping
         # each one's own write after the fact.
         main_checkout_drift = _main_checkout_state_diff(
-            main_checkout_before, _capture_main_checkout_state(self._project_root),
+            main_checkout_before,
+            _capture_main_checkout_state(
+                self._project_root, branch, pr_head_sha=main_checkout_before.get("pr_head_sha"),
+            ),
         )
         if main_checkout_drift:
             log.error(
