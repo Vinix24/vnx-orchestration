@@ -44,7 +44,7 @@ REFUSED_PATTERNS = frozenset({"sk_key", "github_token", "aws_key_id", "slack_tok
                               "secret_assignment", "authorization_header", "pem_block", "jwt"})
 _LIMITS = {"vraag": 200, "kopieerblok": 10**6, "citaat": 300}  # the free-text fields and their length limit; all three are scanned for secrets
 # ADR-088 decision 5: the PR-size exception is a ``grant`` on an ``answer`` line; no other field and no other reason.
-GRANT_FIELDS = frozenset({"plafond", "reden", "head_sha", "base_ref", "regels", "gemeten_op"})
+GRANT_FIELDS = frozenset({"ceiling", "reason", "head_sha", "base_ref", "lines", "measured_at"})
 GRANT_REASONS = frozenset({"splitting_removes_tests", "one_working_unit", "generated", "mechanical_rename"})
 _HEX40 = frozenset("0123456789abcdef")
 
@@ -121,19 +121,19 @@ def _check_grant(grant: Any) -> None:
         raise ValueError("grant: not an object")
     if set(grant) != GRANT_FIELDS:
         raise ValueError("grant: fields are exactly " + ", ".join(sorted(GRANT_FIELDS)))
-    if grant["reden"] not in GRANT_REASONS:
-        raise ValueError("grant: reden is not in the closed set")
-    if not _int(grant["regels"], 0):
-        raise ValueError("grant: regels is not a non-negative integer")
-    if not _int(grant["plafond"], max(1, grant["regels"])):
-        raise ValueError("grant: plafond is not a positive integer of at least regels")
+    if grant["reason"] not in GRANT_REASONS:
+        raise ValueError("grant: reason is not in the closed set")
+    if not _int(grant["lines"], 0):
+        raise ValueError("grant: lines is not a non-negative integer")
+    if not _int(grant["ceiling"], max(1, grant["lines"])):
+        raise ValueError("grant: ceiling is not a positive integer of at least lines")
     sha = grant["head_sha"]
     if not (isinstance(sha, str) and len(sha) == 40 and set(sha) <= _HEX40):
         raise ValueError("grant: head_sha is not a 40-hex sha")
     if not _text(grant["base_ref"]) or len(grant["base_ref"]) > 255:
         raise ValueError("grant: base_ref is empty, not text or too long")
-    if not _utc_ok(grant["gemeten_op"]):
-        raise ValueError("grant: gemeten_op is not an ISO UTC timestamp")
+    if not _utc_ok(grant["measured_at"]):
+        raise ValueError("grant: measured_at is not an ISO UTC timestamp")
 
 
 def _check_values(project_id: str, kind: str, line: Mapping[str, Any]) -> None:
@@ -277,7 +277,7 @@ def answers(project_id: str, *, state_dir: Optional[Path] = None) -> List[Dict[s
 
 def latest_grant(project_id: str, pr: int, *, state_dir: Optional[Path] = None) -> Optional[Dict[str, Any]]:
     """ADR-088 decision 5: the grant of the ``pr:<pr>`` point with the highest revision that carries one, as
-    ``{grant, point_id, revisie}``; None when no answer of such a point carries a grant (no ledger is no grant).
+    ``{grant, point_id, revision}``; None when no answer of such a point carries a grant (no ledger is no grant).
     A bad ledger line raises QueueUnreadable, never None: "cannot read" is not "no grant" (the door refuses on it).
     Only an answer line with a citation counts; a ``check_line`` without one already makes the ledger unreadable."""
     if not _int(pr, 1):
@@ -291,8 +291,8 @@ def latest_grant(project_id: str, pr: int, *, state_dir: Optional[Path] = None) 
         pid = line.get("point_id")
         if line["kind"] != "answer" or "grant" not in line or pid not in revisions or not _text(line["citaat"]):
             continue
-        if best is None or revisions[pid] > best["revisie"]:  # same revision: the first answer stands
-            best = {"grant": dict(line["grant"]), "point_id": pid, "revisie": revisions[pid]}
+        if best is None or revisions[pid] > best["revision"]:  # same revision: the first answer stands
+            best = {"grant": dict(line["grant"]), "point_id": pid, "revision": revisions[pid]}
     return best
 
 
