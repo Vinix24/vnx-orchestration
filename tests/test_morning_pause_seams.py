@@ -1,4 +1,5 @@
-"""ochtendronde D1b part A: the morning pause at the door (stop condition)."""
+"""ochtendronde D1b: the morning pause at the door (stop condition, part A) and in pr_merge (part B)."""
+import argparse
 import json
 import sys
 from datetime import datetime, timezone
@@ -14,7 +15,9 @@ import dispatch_cli
 import morning_pause_gate as gate
 import ochtendronde_agenda as ag
 import operator_queue as oq
+import pr_merge
 import stop_conditions as sc
+from test_pr_merge_door_permit import door as merge_door  # fixture
 
 P, DAY = "proj-a", "2026-11-19"
 IN_WINDOW = datetime(2026, 11, 19, 6, 30, tzinfo=timezone.utc)  # 07:30 Europe/Amsterdam
@@ -115,3 +118,116 @@ def test_failing_append_keeps_the_refusal_and_shows_the_error(seams, monkeypatch
     assert res.status == sc.CheckStatus.TRIGGERED and "OSError: disk full" in capsys.readouterr().err
     v = gate.MorningPauseVerdict(True, "x", DAY)
     assert gate.record_event("refused", v, project_id=None, state_dir=seams["sd"], surface="door", ref="r", reason="x")
+
+
+# --- part B: the pr_merge preflight ---------------------------------------------------------
+
+
+@pytest.fixture
+def merge_seams(seams, monkeypatch):
+    monkeypatch.setattr(pr_merge, "active_store", lambda: (seams["sd"], P))
+    monkeypatch.setattr(pr_merge, "datetime", type("D", (), {"now": staticmethod(lambda tz=None: seams["now"])}))
+    return seams
+
+
+def merge(override=None):
+    return pr_merge._run_pause_gate(argparse.Namespace(pr=7, dispatch_id="dlv-x", override_morning_pause=override))
+
+
+def test_merge_is_refused_in_the_window_with_one_refused_line(merge_seams):
+    snapshot(merge_seams["sd"])
+    assert merge()["verdict"] == "NO-GO"
+    (line,) = events(merge_seams["sd"])
+    assert (line["kind"], line["surface"], line["ref"]) == ("refused", "merge", "PR #7 dlv-x")
+
+
+@pytest.mark.parametrize("decide,now", [(True, IN_WINDOW), (False, AFTER)])
+def test_merge_is_go_when_decided_or_after_the_deadline(merge_seams, decide, now):
+    snapshot(merge_seams["sd"], decide=decide)
+    merge_seams["now"] = now
+    assert merge()["verdict"] == "GO" and events(merge_seams["sd"]) == []
+
+
+@pytest.mark.parametrize("reason", ["revert_or_fix_forward", "operator says go"])
+def test_merge_override_with_a_reason_is_go_with_one_override_line(merge_seams, reason):
+    snapshot(merge_seams["sd"])
+    g = merge(reason)
+    assert g["verdict"] == "GO" and g["overridden"] and g["override_reason"] == reason
+    (line,) = events(merge_seams["sd"])
+    assert (line["kind"], line["surface"], line["reason"]) == ("override", "merge", reason)
+
+
+@pytest.mark.parametrize("empty", ["", "   "])
+def test_merge_empty_override_is_refused_in_english(merge_seams, empty):
+    snapshot(merge_seams["sd"])
+    g = merge(empty)
+    assert g["verdict"] == "NO-GO" and not g["overridden"]
+    assert "override refused: --override-morning-pause needs a non-empty reason" in g["message"]
+    assert [e["kind"] for e in events(merge_seams["sd"])] == ["refused"]
+
+
+def test_a_raising_gate_is_a_no_go_naming_the_type(merge_seams, monkeypatch):
+    def boom(*a, **k):
+        raise RuntimeError("store gone")
+    monkeypatch.setattr(gate, "morning_pause_verdict", boom)
+    g = merge()
+    assert g["verdict"] == "NO-GO" and "morning_pause_unreadable: RuntimeError" in g["message"]
+
+
+def test_a_failing_append_keeps_the_refusal_and_shows_the_error(merge_seams, monkeypatch, capsys):
+    snapshot(merge_seams["sd"])
+    monkeypatch.setattr(gate, "append_event", lambda *a, **k: (_ for _ in ()).throw(OSError("disk full")))
+    assert merge()["verdict"] == "NO-GO" and "OSError: disk full" in capsys.readouterr().err
+
+
+def test_an_override_whose_line_cannot_be_written_is_a_no_go_naming_the_type(merge_seams, monkeypatch, capsys):
+    snapshot(merge_seams["sd"])
+    monkeypatch.setattr(gate, "append_event", lambda *a, **k: (_ for _ in ()).throw(OSError("disk full")))
+    g = merge("operator says go")
+    assert g["verdict"] == "NO-GO" and not g["overridden"] and g["override_reason"] is None
+    assert "morning_pause_override_unrecorded: OSError" in g["message"]
+    assert "OSError: disk full" in capsys.readouterr().err
+    assert events(merge_seams["sd"]) == []
+
+
+def test_main_lands_the_refusal_in_the_preflight_ledger(merge_door, merge_seams):
+    from test_pr_merge_door_permit import _refusal, _run
+    snapshot(merge_seams["sd"])
+    assert _run() == pr_merge.EXIT_ERROR
+    gates = {g["gate"]: g for g in _refusal(merge_door)["preflight_gates"]}
+    assert gates["morning_pause"]["verdict"] == "NO-GO" and gates["door"]["verdict"] == "not_evaluated"
+
+
+BEFORE = datetime(2026, 11, 19, 5, 59, tzinfo=timezone.utc)  # 06:59 Europe/Amsterdam
+
+
+@pytest.mark.parametrize("override", [None, "operator says go"])
+def test_pause_is_rechecked_after_the_main_lock(merge_door, merge_seams, monkeypatch, override):
+    """Approved at 06:59, the lock wait carries the merge to 07:30: the recheck refuses before the permit."""
+    import contextlib
+    from test_pr_merge_door_permit import _refusal, _run
+    snapshot(merge_seams["sd"])
+    merge_seams["now"] = BEFORE
+
+    @contextlib.contextmanager
+    def slow_lock(args, enabled):
+        merge_seams["now"] = IN_WINDOW
+        yield 600.0
+    monkeypatch.setattr(pr_merge, "_main_admission_lock", slow_lock)
+    extra = ("--override-morning-pause", override) if override else ()
+    if override:  # an override first recorded at the recheck is one line, and a GO
+        assert _run(*extra) == pr_merge.EXIT_OK
+        assert [e["kind"] for e in events(merge_seams["sd"])] == ["override"]
+        return
+    assert _run() == pr_merge.EXIT_ERROR
+    assert not merge_door.receipts("pr_merged") and not merge_door.of("POST")
+    gates = {g["gate"]: g for g in _refusal(merge_door)["preflight_gates"]}
+    assert gates["morning_pause"]["verdict"] == "NO-GO" and gates["door"]["verdict"] == "not_evaluated"
+    assert [e["kind"] for e in events(merge_seams["sd"])] == ["refused"]
+
+
+def test_an_override_recorded_at_the_first_check_is_not_recorded_again(merge_door, merge_seams):
+    from test_pr_merge_door_permit import _run
+    snapshot(merge_seams["sd"])
+    assert _run("--override-morning-pause", "operator says go") == pr_merge.EXIT_OK
+    assert [e["kind"] for e in events(merge_seams["sd"])] == ["override"]

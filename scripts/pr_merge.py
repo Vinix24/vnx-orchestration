@@ -249,6 +249,7 @@ import re
 import subprocess
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib.parse import quote
@@ -334,10 +335,12 @@ PREFLIGHT_ORDER: tuple[str, ...] = (
     "contract_invalid",
     "branch_protection",
     "main",
+    "morning_pause",
     "door",
 )
 DOOR_GATE = "door"
 MAIN_GATE = "main"
+PAUSE_GATE = "morning_pause"
 
 #: ``main_admission`` on both receipts (ADR-073): what the ``main`` preflight read, or that it never ran.
 MAIN_ADMISSION_NOT_EVALUATED: Dict[str, Any] = {"verdict": "not_evaluated"}
@@ -2722,6 +2725,12 @@ def main(argv: Optional[list[str]] = None) -> int:
              "Covers ONLY that preflight; --override-reason does not.",
     )
     parser.add_argument(
+        "--override-morning-pause", default=None,
+        help="Escape hatch (ADR-095): merge past the morning pause, with the reason "
+             "revert_or_fix_forward or another non-empty operator reason (empty is refused). "
+             "Covers ONLY that preflight; every override is a line in ochtendronde.ndjson.",
+    )
+    parser.add_argument(
         "--allow-weaken", default=None,
         help="Escape hatch (golf B, B1): accept a PR that weakens the project's "
              "branch_protection.yaml relative to main (a lowered check, or a lowered "
@@ -3191,6 +3200,47 @@ def _run_main_gate(args: argparse.Namespace, head_sha: str) -> Dict[str, Any]:
     return gate
 
 
+def _run_pause_gate(args: argparse.Namespace, override_recorded: bool = False) -> Dict[str, Any]:
+    """The ``morning_pause`` preflight (ADR-095): NO-GO while paused, GO with ``--override-morning-pause`` and a reason.
+
+    Every refusal and override is a line in ``ochtendronde.ndjson``; a failing append is printed, never a pass.
+    ``override_recorded`` (the recheck under the lock) means this merge's override line is already
+    written: a paused verdict with the reason is then a GO without a second line.
+    """
+    import morning_pause_gate as pause
+
+    state_dir, project_id = active_store()
+    try:
+        verdict = pause.morning_pause_verdict(project_id, datetime.now(timezone.utc), state_dir=state_dir)
+    except Exception as exc:  # vnx-silent-except: a failure to read the pause is a NO-GO that names the type
+        verdict = pause.MorningPauseVerdict(True, f"morning_pause_unreadable: {type(exc).__name__}")
+    override = getattr(args, "override_morning_pause", None)
+    reason = (override or "").strip()
+    gate: Dict[str, Any] = {
+        "verdict": "NO-GO" if verdict.paused else "GO", "message": f"morning_pause: {verdict.reason}",
+        "overridden": False, "override_reason": None, "override_unnecessary": override is not None and not verdict.paused,
+    }
+    if not verdict.paused:
+        return gate
+    if override is not None and not reason:
+        gate["message"] += "; override refused: --override-morning-pause needs a non-empty reason"
+    if reason and override_recorded:
+        gate.update(verdict="GO", overridden=True, override_reason=reason, message=f"{gate['message']}; overridden: {reason}")
+        return gate
+    kind = "override" if reason else "refused"
+    ref = f"PR #{args.pr}" + (f" {args.dispatch_id}" if args.dispatch_id else "")
+    event_error = pause.record_event(
+        kind, verdict, project_id=project_id, state_dir=state_dir, surface="merge", ref=ref, reason=reason or verdict.reason)
+    pause.report_event_error(event_error)
+    if reason and event_error:
+        # An override is only valid with its audit line: the type is the text before the first colon, or the whole text.
+        error_type = event_error.split(":", 1)[0]
+        gate["message"] += f"; morning_pause_override_unrecorded: {error_type}"
+    elif reason:
+        gate.update(verdict="GO", overridden=True, override_reason=reason, message=f"{gate['message']}; overridden: {reason}")
+    return gate
+
+
 def _run_main_preflight(
     args: argparse.Namespace, evaluated: list[Dict[str, Any]], head_sha: str,
     refuse: Callable[..., int], main_admission: Dict[str, Any],
@@ -3275,6 +3325,23 @@ def _reread_main_gate(
     return None
 
 
+def _reread_pause_gate(
+    args: argparse.Namespace, evaluated: list[Dict[str, Any]], head_sha: str, refuse: Callable[..., int],
+) -> Optional[int]:
+    """The ``morning_pause`` gate again after the lock wait, before the permit: the clock may have entered the pause.
+
+    Its record replaces the first one, like the ``main`` recheck; an override the first check
+    already wrote to the ledger is not written again. A NO-GO is a refusal.
+    """
+    first = next((r for r in evaluated if r.get("gate") == PAUSE_GATE), {})
+    gate = _run_pause_gate(args, override_recorded=first.get("overridden") is True)
+    evaluated[:] = [r for r in evaluated if r.get("gate") != PAUSE_GATE]
+    evaluated.append(_preflight_record(PAUSE_GATE, gate, head_sha))
+    if gate["verdict"] != "GO":
+        return refuse(PAUSE_GATE, gate, "morning_pause_gate")
+    return None
+
+
 def _locked_door_merge(
     args: argparse.Namespace, evaluated: list[Dict[str, Any]], head_sha: str,
     refuse: Callable[..., int], main_admission: Dict[str, Any], finish: Callable[[], int],
@@ -3283,7 +3350,8 @@ def _locked_door_merge(
 
     Mode off (``main_admission['mode'] == 'off'``) takes no lock and reads nothing again. Any
     other mode, an unknown one included, locks: the window is re-read under the lock and a
-    NO-GO there refuses before the permit is published.
+    NO-GO there refuses before the permit is published. The morning pause is rechecked in
+    every mode, right before the permit.
     """
     locked = main_admission.get("mode") != MAIN_ADMISSION_OFF["mode"]
     main_admission["lock_wait_s"] = 0
@@ -3294,6 +3362,9 @@ def _locked_door_merge(
                 refused = _reread_main_gate(args, evaluated, head_sha, refuse, main_admission)
                 if refused is not None:
                     return refused
+            refused = _reread_pause_gate(args, evaluated, head_sha, refuse)
+            if refused is not None:
+                return refused
             return finish()
     except MainLockTimeout as exc:
         main_admission.update(mode="on", verdict="NO-GO", reason=str(exc), overridden=False, override_reason=None)
@@ -3387,6 +3458,12 @@ def _run_door(args: argparse.Namespace) -> int:
     main_exit = _run_main_preflight(args, evaluated, head_sha, refuse, main_admission)
     if main_exit is not None:
         return main_exit
+
+    pause_gate = _run_pause_gate(args)
+    evaluated.append(_preflight_record(PAUSE_GATE, pause_gate, head_sha))
+    if pause_gate["verdict"] != "GO":
+        return refuse(PAUSE_GATE, pause_gate, "morning_pause_gate")
+    print(("OVERRIDE: " if pause_gate["overridden"] else "Morning-pause gate: ") + pause_gate["message"])
 
     contract_invalid_override = {"flag": "--override-contract-invalid", "reason": contract_gate["override_reason"]} if contract_gate.get("overridden") else None
 
