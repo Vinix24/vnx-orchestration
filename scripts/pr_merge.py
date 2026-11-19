@@ -3224,9 +3224,14 @@ def _run_pause_gate(args: argparse.Namespace) -> Dict[str, Any]:
         gate["message"] += "; override refused: --override-morning-pause needs a non-empty reason"
     kind = "override" if reason else "refused"
     ref = f"PR #{args.pr}" + (f" {args.dispatch_id}" if args.dispatch_id else "")
-    pause.report_event_error(pause.record_event(
-        kind, verdict, project_id=project_id, state_dir=state_dir, surface="merge", ref=ref, reason=reason or verdict.reason))
-    if reason:
+    event_error = pause.record_event(
+        kind, verdict, project_id=project_id, state_dir=state_dir, surface="merge", ref=ref, reason=reason or verdict.reason)
+    pause.report_event_error(event_error)
+    if reason and event_error:
+        # An override is only valid with its audit line: the type is the text before the first colon, or the whole text.
+        error_type = event_error.split(":", 1)[0]
+        gate["message"] += f"; morning_pause_override_unrecorded: {error_type}"
+    elif reason:
         gate.update(verdict="GO", overridden=True, override_reason=reason, message=f"{gate['message']}; overridden: {reason}")
     return gate
 

@@ -180,6 +180,16 @@ def test_a_failing_append_keeps_the_refusal_and_shows_the_error(merge_seams, mon
     assert merge()["verdict"] == "NO-GO" and "OSError: disk full" in capsys.readouterr().err
 
 
+def test_an_override_whose_line_cannot_be_written_is_a_no_go_naming_the_type(merge_seams, monkeypatch, capsys):
+    snapshot(merge_seams["sd"])
+    monkeypatch.setattr(gate, "append_event", lambda *a, **k: (_ for _ in ()).throw(OSError("disk full")))
+    g = merge("operator says go")
+    assert g["verdict"] == "NO-GO" and not g["overridden"] and g["override_reason"] is None
+    assert "morning_pause_override_unrecorded: OSError" in g["message"]
+    assert "OSError: disk full" in capsys.readouterr().err
+    assert events(merge_seams["sd"]) == []
+
+
 def test_main_lands_the_refusal_in_the_preflight_ledger(merge_door, merge_seams):
     from test_pr_merge_door_permit import _refusal, _run
     snapshot(merge_seams["sd"])

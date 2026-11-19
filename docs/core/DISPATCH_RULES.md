@@ -113,7 +113,7 @@ The lock is one flock per project, the file `main_admission.lock` in the state d
 
 `--override-main "<reason>"` covers only this gate, never the CI gate (`--override-reason`). An empty reason is refused. The reason lands on the receipt. The way back on a red main is a revert PR or a fix-forward PR merged with `--override-main revert_or_fix_forward`.
 
-`--override-morning-pause "<reason>"` covers only the `morning_pause` preflight (it runs between `main` and `door`, ADR-095): inside the morning pause a merge is refused without it, an empty reason is refused, and every refusal and override is one line in the morning-round ledger.
+`--override-morning-pause "<reason>"` covers only the `morning_pause` preflight (it runs between `main` and `door`, ADR-095): inside the morning pause a merge is refused without it, an empty reason is refused, and every refusal and override is one line in the morning-round ledger, and an override whose ledger line cannot be written is refused too (`morning_pause_override_unrecorded: <exception type>`).
 
 Who sets the key: Vincent, or the T0 with his approval-id, through `config_store_db.set_config` (it writes an audit row). A builder never does.
 
