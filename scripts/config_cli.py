@@ -1,15 +1,20 @@
 #!/usr/bin/env python3
-"""vnx config list|get|explain|get --raw — read-only registry view (config-een-oppervlak PR-10a).
+"""vnx config list|get|explain|set|unset — the registry view and its operator writer (config-een-oppervlak).
 
 ``get --raw`` is the bash contract (plan V3.5): one stdout line per key in order, an empty line
 for no value, nothing else on stdout; exit 0 ok, 2 unknown key, 3 a storage layer unreadable
-(``strict_resolver=True``); diagnostics on stderr. There is no writer here.
+(``strict_resolver=True``); diagnostics on stderr.
+
+``set``/``unset`` (PR-10b) write the project row through ``config_store_db`` or, with ``--global``,
+the global file through ``config_global``; both need a non-blank ``--reason`` and operator mode.
+The layer that refuses names why: exit 2 unknown key, 3 a store unreadable, 4 refused.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import sqlite3
 import sys
 from pathlib import Path
 from typing import Any, Callable, List, Optional, Sequence, Tuple
@@ -24,12 +29,17 @@ import config_registry as cr  # noqa: E402
 EXIT_OK = 0
 EXIT_UNKNOWN_KEY = 2
 EXIT_UNREADABLE = 3
+EXIT_REFUSED = 4
+ACTOR = "operator"  # the operator user, as dashboard/api_config.py records a write without an actor
 
 
-def _project_and_resolver(project_id: Optional[str]) -> Tuple[Optional[str], Optional[cr.DbResolver]]:
-    """``(project_id, strict DB resolver)`` for the named project, else the active store's."""
+def _strict_resolver(state_dir: Path) -> cr.DbResolver:
     import config_store_db
+    return config_store_db.make_db_resolver(lambda _pid: state_dir, raise_on_error=True)
 
+
+def _project_store(project_id: Optional[str]) -> Tuple[Optional[str], Path]:
+    """``(project_id, state dir)`` for the named project, else the active store's."""
     if project_id:
         from project_root import resolve_central_data_dir
         state_dir: Optional[Path] = resolve_central_data_dir(project_id) / "state"
@@ -39,7 +49,7 @@ def _project_and_resolver(project_id: Optional[str]) -> Tuple[Optional[str], Opt
         if not project_id:
             from project_root import resolve_project_id
             project_id = resolve_project_id()
-    return project_id, config_store_db.make_db_resolver(lambda _pid: state_dir, raise_on_error=True)
+    return project_id, Path(state_dir)
 
 
 def _resolve(key: str, pid: Optional[str], resolver: Optional[cr.DbResolver],
@@ -128,6 +138,77 @@ def cmd_explain(args, pid, resolver, out, err) -> int:
     return EXIT_UNREADABLE if unreadable else EXIT_OK
 
 
+def cmd_write(args, pid, state_dir: Optional[Path], out, err) -> int:
+    """``set``/``unset``: refuse before any write unless every precondition holds; then show ``get``."""
+    from vnx_mode import VNXMode, read_mode
+
+    verb = f"vnx config {args.verb}"
+    if not args.reason.strip():
+        err(f"{verb}: --reason must not be blank")
+        return EXIT_REFUSED
+    entry = cr.CONFIG_REGISTRY.get(args.key)
+    if entry is None:
+        err(f"{verb}: unknown key {args.key}")
+        return EXIT_UNKNOWN_KEY
+    if state_dir is None:
+        err(f"{verb}: no project store resolved, nothing written")
+        return EXIT_UNREADABLE
+    mode = read_mode(str(state_dir.parent))  # mode.json sits in the data dir beside state/
+    if mode != VNXMode.OPERATOR:
+        err(f"{verb}: operator mode only (mode is {mode.value if mode else 'not initialized'}); "
+            "run 'vnx init --operator' first. Nothing written.")
+        return EXIT_REFUSED
+    try:
+        result = _write_global(args, entry) if args.glob else _write_project(args, pid, state_dir)
+    except (ValueError, TypeError, PermissionError) as exc:
+        err(f"{verb}: refused: {exc}")
+        return EXIT_REFUSED
+    except (sqlite3.Error, OSError, RuntimeError) as exc:  # GlobalConfigUnreadable is a RuntimeError
+        err(f"{verb}: store unreadable, nothing written: {type(exc).__name__}: {exc}")
+        return EXIT_UNREADABLE
+    if result is not None:
+        err(result)
+    row = _row(args.key, pid, _strict_resolver(state_dir))
+    out(_fmt(row))
+    return EXIT_UNREADABLE if _layer_error(row["source"]) else EXIT_OK
+
+
+def _write_global(args, entry: cr.ConfigEntry) -> Optional[str]:
+    import config_global
+    import config_store_db
+
+    if entry.scope != "global":
+        raise PermissionError(f"{args.key} has scope {entry.scope}: it has no global value; drop --global")
+    if args.verb == "unset":
+        config_global.unset_global(args.key, actor=ACTOR, reason=args.reason, approval_id=args.approval_id)
+        return None
+    # The enum check is G3's validator, the same one a project row goes through (config_global defers it).
+    value = config_store_db._coerce(entry.type, args.value, args.key, entry.allowed_values)  # shared G3 validator
+    config_global.set_global(args.key, value, actor=ACTOR, reason=args.reason, approval_id=args.approval_id)
+    return None
+
+
+def _write_project(args, pid: Optional[str], state_dir: Path) -> Optional[str]:
+    import config_store_db
+
+    if not pid:
+        raise RuntimeError("no project id resolved")
+    db = state_dir / "runtime_coordination.db"
+    if not db.is_file():
+        raise RuntimeError(f"{db} does not exist")
+    conn = sqlite3.connect(str(db))
+    try:
+        if args.verb == "set":
+            config_store_db.set_config(conn, pid, args.key, args.value, actor=ACTOR,
+                                       approval_id=args.approval_id, reason=args.reason)
+            return None
+        result = config_store_db.unset_config(conn, pid, args.key, actor=ACTOR,
+                                              approval_id=args.approval_id, reason=args.reason)
+    finally:
+        conn.close()
+    return None if result["removed"] else f"{args.key}: no project row for {pid}, nothing removed"
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="vnx config", description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="verb", required=True)
@@ -141,22 +222,35 @@ def build_parser() -> argparse.ArgumentParser:
     get.add_argument("--raw", action="store_true")
     get.add_argument("keys", nargs="+", metavar="KEY")
     exp.add_argument("key", metavar="KEY")
+    for verb in ("set", "unset"):
+        w = sub.add_parser(verb)
+        w.add_argument("key", metavar="KEY")
+        if verb == "set":
+            w.add_argument("value", metavar="VALUE")
+        w.add_argument("--reason", required=True)
+        w.add_argument("--global", dest="glob", action="store_true")
+        w.add_argument("--approval-id")
+        w.add_argument("--project-id")
     return parser
 
 
 def main(argv: Optional[Sequence[str]] = None, *, resolver: Optional[cr.DbResolver] = None,
-         project_id: Optional[str] = None, out: Callable[[str], Any] = print,
-         err: Optional[Callable[[str], Any]] = None) -> int:
+         project_id: Optional[str] = None, state_dir: Optional[Path] = None,
+         out: Callable[[str], Any] = print, err: Optional[Callable[[str], Any]] = None) -> int:
     err = err or (lambda msg: print(msg, file=sys.stderr))
     args = build_parser().parse_args(argv)
-    if resolver is None:
+    if resolver is None and state_dir is None:
         try:
-            project_id, resolver = _project_and_resolver(args.project_id)
+            project_id, state_dir = _project_store(args.project_id)
         except Exception as exc:
             err(f"vnx config: cannot resolve the project store ({type(exc).__name__}: {exc})")
             return EXIT_UNREADABLE
     elif args.project_id:
         project_id = args.project_id
+    if resolver is None:
+        resolver = _strict_resolver(state_dir)
+    if args.verb in ("set", "unset"):
+        return cmd_write(args, project_id, state_dir, out, err)
     if args.verb == "list":
         return cmd_list(args, project_id, resolver, out)
     if args.verb == "get":
