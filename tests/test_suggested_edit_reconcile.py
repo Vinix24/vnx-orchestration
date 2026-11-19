@@ -95,7 +95,7 @@ def test_reconcile_without_evidence_changes_nothing(env, ledger):
 def test_reconcile_corrupt_or_missing_ledger_is_refused(env, capsys):
     root, state, store = env
     did = _approve(env)["dispatch_id"]
-    # no ledger file at all
+    (state / "t0_receipts.ndjson").unlink()  # accept wrote the approval receipt; now no ledger file at all
     assert ase.cmd_reconcile() == 1
     _ledger(state, json.dumps(_merged(did)), "{not json")
     assert ase.cmd_reconcile() == 1
