@@ -410,15 +410,7 @@ class TestGovernanceCompatibility(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 class TestRollbackPath(unittest.TestCase):
-    """Rollback path to legacy transport is documented and tested."""
-
-    def test_rollback_script_exists(self) -> None:
-        rollback_script = _SCRIPTS_DIR / "rollback_runtime_core.py"
-        self.assertTrue(rollback_script.exists(), "rollback_runtime_core.py must exist")
-
-    def test_rollback_docs_exist(self) -> None:
-        docs = _SCRIPTS_DIR.parent / "docs" / "operations" / "RUNTIME_CORE_ROLLBACK.md"
-        self.assertTrue(docs.exists(), "docs/operations/RUNTIME_CORE_ROLLBACK.md must exist")
+    """The VNX_RUNTIME_PRIMARY flag itself still selects the legacy transport."""
 
     def test_runtime_core_disabled_when_primary_zero(self) -> None:
         """When VNX_RUNTIME_PRIMARY=0, load_runtime_core returns None (legacy path)."""
@@ -431,44 +423,7 @@ class TestRollbackPath(unittest.TestCase):
         finally:
             tmp.cleanup()
 
-    def test_rollback_write_updates_env_override(self) -> None:
-        """rollback_runtime_core.py rollback writes VNX_RUNTIME_PRIMARY=0."""
-        import subprocess
-        tmp = tempfile.TemporaryDirectory()
-        try:
-            env_override = Path(tmp.name) / ".env_override"
-            env = {**os.environ, "VNX_DATA_DIR": tmp.name}
-            result = subprocess.run(
-                [sys.executable, str(_SCRIPTS_DIR / "rollback_runtime_core.py"), "rollback"],
-                capture_output=True,
-                text=True,
-                env=env,
-            )
-            self.assertEqual(result.returncode, 0)
-            self.assertTrue(env_override.exists())
-            content = env_override.read_text()
-            self.assertIn("VNX_RUNTIME_PRIMARY=0", content)
-        finally:
-            tmp.cleanup()
 
-    def test_rollback_enable_writes_runtime_primary_one(self) -> None:
-        """rollback_runtime_core.py enable writes VNX_RUNTIME_PRIMARY=1."""
-        import subprocess
-        tmp = tempfile.TemporaryDirectory()
-        try:
-            env = {**os.environ, "VNX_DATA_DIR": tmp.name}
-            result = subprocess.run(
-                [sys.executable, str(_SCRIPTS_DIR / "rollback_runtime_core.py"), "enable"],
-                capture_output=True,
-                text=True,
-                env=env,
-            )
-            self.assertEqual(result.returncode, 0)
-            env_override = Path(tmp.name) / ".env_override"
-            content = env_override.read_text()
-            self.assertIn("VNX_RUNTIME_PRIMARY=1", content)
-        finally:
-            tmp.cleanup()
 
 
 # ---------------------------------------------------------------------------

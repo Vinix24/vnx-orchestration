@@ -23,7 +23,6 @@ For a five-minute version of the pip-only path, see [`docs/QUICKSTART.md`](../QU
 - Monitoring/ops: `../operations/CONTROL_CENTRE.md`
 - Receipt pipeline: `../operations/RECEIPT_PIPELINE.md`
 - T0 context rotation (guard and spawner): `../operations/T0_CONTEXT_ROTATION.md`
-- Runtime rollback: `../operations/RUNTIME_CORE_ROLLBACK.md`
 - Product modes: `../contracts/PRODUCTIZATION_CONTRACT.md`
 
 For full navigation, start at `../DOCS_INDEX.md`.
