@@ -879,7 +879,8 @@ def _complete_cycle(
     conn: sqlite3.Connection, consolidation: dict[str, Any], patterns: dict[str, list[dict]],
     cycle_id: str, project_id: str, provider: str, probe_health: str,
     restricted_rows_dropped: dict[str, int], proposal_only: bool, dry_run: bool, data_root: Path,
-XX, emit ``dream_cycle_completed`` (before the DB write), book the row, return the result."""
+) -> dict[str, Any]:
+    """Write the review, emit ``dream_cycle_completed`` (before the DB write), book the row, return the result."""
     total_input = sum(len(v) for v in patterns.values())
     input_hash, tables_without_valid_until = _input_hash(patterns), _unfiltered_tables(conn)
     review_path = _write_pending_review(
