@@ -1,13 +1,9 @@
 """Ochtendronde D2b: classify a morning point as project or fleet, and name the ref a fleet point carries.
 
-ADR-095 decision 5. A point is **fleet** (overkoepelend) when its target lies in the fabric (``FABRIC_PREFIXES``) or
-when the same fingerprint stands in two or more projects of the register; otherwise it is **project**. A point whose
-class cannot be told (another project's store cannot be read while counting) is **unknown** with a reason: never
-silently one or the other. Read-only: nothing here writes into any store.
-
-The fleet point lives in the ledger of ``FLEET_PROJECT`` with ref ``project:<owner>/<original ref>``. The owner is
-the lowest project id that holds the fingerprint, so every project computes the same ref and ``point_id`` (ADR-076
-decision 3) gives one point. ``operator_queue`` has no ``project:`` ref form; ``routed_ref`` validates it here.
+ADR-095 decision 5. **Fleet** when the target lies in the fabric or the same fingerprint stands in two or more
+projects of the register; otherwise **project**; **unknown** with a reason when another store cannot be read while
+counting. Read-only. A fleet point lives in the ``FLEET_PROJECT`` ledger as ``project:<owner>/<ref>``, the owner being
+the lowest project id holding the fingerprint (ADR-076 decision 3), so every project computes the same point_id.
 """
 
 from __future__ import annotations
@@ -67,18 +63,20 @@ def classify(project_id: str, ref: str, target: Any, fingerprint: Optional[str],
              holders: Mapping[str, str], unreadable: Mapping[str, str]) -> Classification:
     """The one rule. ``holders`` maps project id to its ref for ``fingerprint`` (other projects, read);
     ``unreadable`` maps a project id to why its store could not be read while counting."""
+    fab = in_fabric(target)
     if fingerprint is None:
-        return Classification(FLEET if in_fabric(target) else PROJECT,
-                              "fabric target" if in_fabric(target) else "no fingerprint in the source, no fabric target",
-                              project_id if in_fabric(target) else None)
+        return Classification(FLEET if fab else PROJECT,
+                              "fabric target" if fab else "no fingerprint in the source, no fabric target", project_id if fab else None)
     if unreadable:
         why = "; ".join(f"{p}: {r}" for p, r in sorted(unreadable.items()))
         return Classification(UNKNOWN, f"store not readable while counting the fingerprint ({why})")
     owners = {project_id: ref, **holders}
-    if in_fabric(target) or len(owners) >= 2:
-        owner = min(owners)
-        return Classification(FLEET, "fabric target" if in_fabric(target) else f"fingerprint in {len(owners)} projects", owner)
+    if fab or len(owners) >= 2:
+        return Classification(FLEET, "fabric target" if fab else f"fingerprint in {len(owners)} projects", min(owners))
     return Classification(PROJECT, "fingerprint in one project, no fabric target")
+
+
+ROUTED_PREFIX = "project:"
 
 
 def routed_ref(owner: str, ref: str) -> str:
@@ -88,7 +86,7 @@ def routed_ref(owner: str, ref: str) -> str:
     if (not isinstance(ref, str) or not ref.strip() or ref.startswith("/") or ".." in ref.split("/")
             or any(c in ref for c in "\n\r\x00") or len(ref) + len(owner) + 9 > _REF_MAX):
         raise RoutingRefused("routed ref: original ref is empty, absolute, has '..' or is too long")
-    return f"project:{owner}/{ref}"
+    return f"{ROUTED_PREFIX}{owner}/{ref}"
 
 
 def load_register(path: Optional[Path] = None) -> Dict[str, Path]:

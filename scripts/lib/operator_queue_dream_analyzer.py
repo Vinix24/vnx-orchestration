@@ -253,9 +253,10 @@ def _missing_verdict(src: dict, ref: str) -> _Verdict:
 
 
 def _sweep(run: _Run, verdicts: Dict[str, _Verdict], src: dict, prefix: str = "") -> None:
-    """Open points of ``run`` (those under ``prefix``) whose source line is gone get the history verdict."""
+    """Open points of ``run`` (those under ``prefix``) whose source line is gone get the history verdict.
+    Without a prefix a ``project:`` ref is another project's routed point; only its owner's sweep updates it."""
     for ref in run.open_refs():
-        if ref.startswith(prefix) and ref[len(prefix):] not in verdicts:
+        if ref.startswith(prefix) and (prefix or not ref.startswith(rt.ROUTED_PREFIX)) and ref[len(prefix):] not in verdicts:
             run.apply(ref, _missing_verdict(src, ref[len(prefix):]))
 
 

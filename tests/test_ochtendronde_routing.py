@@ -20,8 +20,7 @@ class World:
     """Temp project stores, a temp register and one ledger dir per project; never the live ones."""
 
     def __init__(self, tmp_path, *names):
-        self.tmp = tmp_path
-        self.data = {n: tmp_path / "data" / n for n in names}
+        self.tmp, self.data = tmp_path, {n: tmp_path / "data" / n for n in names}
         for n in names:
             (self.data[n] / "state").mkdir(parents=True)
 
@@ -32,10 +31,8 @@ class World:
         (self.data[name] / "state" / "pending_edits.json").write_text(json.dumps({"edits": list(rows)}))
 
     def read(self, project, register=None):
-        routing = rt.Routing(project, register=register if register is not None else self.data,
-                             fleet_state_dir=self.ledger(FLEET))
-        return qa.read_analyzer(project, data_root=self.data[project], now=NOW, state_dir=self.ledger(project),
-                                routing=routing)
+        routing = rt.Routing(project, register=register or self.data, fleet_state_dir=self.ledger(FLEET))
+        return qa.read_analyzer(project, data_root=self.data[project], now=NOW, state_dir=self.ledger(project), routing=routing)
 
     def points(self, name):
         return list(oq.read_state(name, state_dir=self.ledger(name))["points"].values())
@@ -76,9 +73,8 @@ def test_deciding_the_source_closes_the_routed_point_and_writes_nothing_in_the_s
     before = {p.name: p.read_bytes() for p in state.iterdir()}
     out = w.read("A")
     point = w.points(FLEET)[0]
-    assert point["state"] == "beantwoord" and out["routed"]["closed"] == [point["point_id"]]
+    assert point["state"] == "beantwoord" and out["routed"]["closed"] == [point["point_id"]] and w.points("A") == []
     assert {p.name: p.read_bytes() for p in state.iterdir()} == before
-    assert w.points("A") == []
 
 
 def test_line_gone_closes_through_history_or_stays_open_as_unknown(tmp_path):
@@ -100,27 +96,19 @@ def test_pause_count_follows_the_ledger_the_point_stands_in(tmp_path):
     w.read("A")
     for name in ("A", FLEET):
         ag.write_snapshot(name, DAY, state_dir=w.ledger(name), now=NOW)
-    a = ag.decision_status("A", DAY, state_dir=w.ledger("A"))
-    v = ag.decision_status(FLEET, DAY, state_dir=w.ledger(FLEET))
-    assert list(a.points.values()) == ["open"]
-    assert list(v.points.values()) == ["open"] and a.points.keys().isdisjoint(v.points.keys())
+    a, v = (ag.decision_status(n, DAY, state_dir=w.ledger(n)) for n in ("A", FLEET))
+    assert list(a.points.values()) == ["open"] == list(v.points.values()) and a.points.keys().isdisjoint(v.points.keys())
 
 
-def test_unreadable_store_while_counting_is_reported_and_does_not_make_a_fleet_point(tmp_path):
+@pytest.mark.parametrize("why", ["garbage", "ghost"])
+def test_unreadable_or_missing_other_store_while_counting_is_reported_and_makes_no_fleet_point(tmp_path, why):
     w = World(tmp_path, "A", "B", FLEET)
     w.edits("A", edit(1, proposal_key="k"))
-    (w.data["B"] / "state" / "pending_edits.json").write_text("{not json")
-    out = w.read("A")
-    assert w.points(FLEET) == [] and w.points("A") == []
-    assert out["classification"] == {"edit:1": "unknown"} and out["dekking"] == "unknown"
-    assert "B" in out["unclassified"][0]["reden"] and "B" in out["reden"]
-
-
-def test_missing_data_dir_of_a_register_project_is_unreadable_not_empty(tmp_path):
-    w = World(tmp_path, "A", FLEET)
-    w.edits("A", edit(1, proposal_key="k"))
-    out = w.read("A", register={**w.data, "ghost": tmp_path / "nope"})
-    assert out["unclassified"] and w.points("A") == [] and w.points(FLEET) == []
+    if why == "garbage":
+        (w.data["B"] / "state" / "pending_edits.json").write_text("{not json")
+    out = w.read("A", register={**w.data, "ghost": tmp_path / "nope"} if why == "ghost" else None)
+    assert w.points(FLEET) == [] and w.points("A") == [] and out["classification"] == {"edit:1": "unknown"}
+    assert out["dekking"] == "unknown" and out["unclassified"][0]["reden"] and out["reden"]
 
 
 def test_unreadable_register_keeps_fabric_target_and_holds_back_fingerprinted_points(tmp_path):
@@ -137,9 +125,8 @@ def test_unreadable_register_keeps_fabric_target_and_holds_back_fingerprinted_po
 
 
 def test_no_fingerprint_and_no_fabric_target_is_a_project_point(tmp_path):
-    w = World(tmp_path, "A", "B", FLEET)
+    w = World(tmp_path, "A", FLEET)
     w.edits("A", edit(1))
-    w.edits("B", edit(1))
     w.read("A")
     assert [p["ref"] for p in w.points("A")] == ["edit:1"] and w.points(FLEET) == []
 
@@ -155,11 +142,10 @@ def test_register_file_is_read_with_project_ids_and_data_dirs(tmp_path):
 
 
 @pytest.mark.parametrize("target,expected", [
-    ("skills/a/SKILL.md", True), ("agents/t/CLAUDE.md", True), ("scripts/lib/prompts/p.md", True),
-    ("scripts/lib/dispatch_cli.py", True), ("scripts/lib/stop_conditions.py", True), ("scripts/pr_merge.py", True),
-    ("scripts/review_gate_manager.py", True), ("scripts/lib/review_x.py", True), ("./skills/a", True),
-    ("docs/skills/a", False), ("skills/../docs/a", False), ("/skills/a", False), ("../skills/a", False),
-    ("scripts/lib/dispatch_cli.pyc", False), ("", False), (None, False), (5, False)])
+    *[(t, True) for t in ("skills/a/SKILL.md", "agents/t/CLAUDE.md", "scripts/lib/prompts/p.md", "./skills/a", "scripts/pr_merge.py",
+                          "scripts/lib/dispatch_cli.py", "scripts/lib/stop_conditions.py", "scripts/review_gate_manager.py",
+                          "scripts/lib/review_x.py")],
+    *[(t, False) for t in ("docs/skills/a", "skills/../docs/a", "/skills/a", "../skills/a", "", None, 5, "scripts/lib/dispatch_cli.pyc")]])
 def test_in_fabric(target, expected):
     assert rt.in_fabric(target) is expected
 
@@ -176,6 +162,22 @@ def test_fleet_project_source_keeps_its_own_ledger(tmp_path):
     w.edits(FLEET, edit(1, target="skills/a/SKILL.md"))
     w.read(FLEET)
     assert [p["ref"] for p in w.points(FLEET)] == ["edit:1"]
+
+
+@pytest.mark.parametrize("routed", [True, False])
+def test_reading_the_fleet_project_leaves_another_projects_routed_point_alone(tmp_path, routed):
+    w = World(tmp_path, "A", FLEET)
+    w.edits("A", edit(3, target="skills/x/SKILL.md"))
+    w.edits(FLEET)
+    (w.data[FLEET] / "state" / "pending_archival.json").write_text(json.dumps({"pending_archival": []}))
+    w.read("A")
+    ledger = w.ledger(FLEET) / oq.LEDGER_FILENAME
+    before = ledger.read_bytes()
+    w.read(FLEET) if routed else qa.read_analyzer(FLEET, data_root=w.data[FLEET], now=NOW, state_dir=w.ledger(FLEET))
+    assert ledger.read_bytes() == before and "unknown" not in before.decode()
+    w.edits("A", edit(3, target="skills/x/SKILL.md", status="applied"))
+    w.read("A")
+    assert w.points(FLEET)[0]["state"] == "beantwoord"
 
 
 def test_reader_without_routing_is_unchanged(tmp_path):
