@@ -1,4 +1,4 @@
-"""The four build rules must reach workers that only read the worktree CLAUDE.md.
+"""The five build rules must reach workers that only read the worktree CLAUDE.md.
 
 Harness-lane (glm, deepseek), kimi and codex workers never load the operator's
 global ~/.claude/CLAUDE.md, so the rules live in the project file, outside the
@@ -39,11 +39,11 @@ def _build_rules_section() -> str:
     return match.group(1)
 
 
-def test_b1_build_rules_section_carries_the_four_rules():
+def test_b1_build_rules_section_carries_the_five_rules():
     section = _build_rules_section()
     bullets = [line for line in section.splitlines() if line.lstrip().startswith("- ")]
-    assert len(bullets) == 4, f"expected four bullets, found {len(bullets)}"
-    for needle in ("TODO", "mock", "tests/", "_v2"):
+    assert len(bullets) == 5, f"expected five bullets, found {len(bullets)}"
+    for needle in ("TODO", "mock", "tests/", "_v2", "English"):
         assert needle in section, f"build rule marker {needle!r} missing from section"
 
 
