@@ -15,6 +15,7 @@ Applied edits are archived to edit_history.json.
 
 import argparse
 import json
+import os
 import re
 import sys
 from collections import defaultdict
@@ -34,6 +35,7 @@ except Exception as exc:
 PATHS = ensure_env()
 STATE_DIR = Path(PATHS["VNX_STATE_DIR"])
 PROJECT_ROOT = Path(PATHS["PROJECT_ROOT"])
+ROLE_SECTION = "## Wat review het vaakst vindt"
 PENDING_PATH = STATE_DIR / "pending_edits.json"
 HISTORY_PATH = STATE_DIR / "edit_history.json"
 
@@ -202,6 +204,7 @@ def cmd_review(weekly: bool = False):
         "rule": "RULE",
         "claude_md": "CLAUDE.MD",
         "skill": "SKILL",
+        "role": "ROLE",
         "hook": "HOOK",
     }
 
@@ -411,7 +414,50 @@ def _apply_skill_edit(edit: dict) -> bool:
     return True
 
 
+def _apply_role_edit(edit: dict) -> bool:
+    """Append under '## Wat review het vaakst vindt'; re-guards the target (hand-edited JSON)."""
+    from suggested_edit_targets import guard_target
+
+    target, reason = guard_target(edit.get("target"), PROJECT_ROOT)
+    if target is None:
+        print(f"  Role target refused ({reason}): {edit.get('target')!r}", file=sys.stderr)
+        return False
+    if not re.fullmatch(r"agents/[^/]+/CLAUDE\.md", edit["target"]):
+        print(f"  Role edit must target agents/<role>/CLAUDE.md: {edit['target']!r}", file=sys.stderr)
+        return False
+
+    content = (edit.get("content") or "").strip()
+    if not content:
+        print("  Role edit has no content", file=sys.stderr)
+        return False
+
+    section = ROLE_SECTION
+    text = target.read_text(encoding="utf-8")
+    if content in text:
+        print(f"  Rule already present in {target.name}", file=sys.stderr)
+        return False
+
+    match = re.search(rf"^{re.escape(section)}\s*$", text, re.MULTILINE)
+    if match:
+        section_end = match.end()
+        next_section = re.search(r"^## ", text[section_end:], re.MULTILINE)
+        if next_section:
+            insert_pos = section_end + next_section.start()
+            head = text[:insert_pos].rstrip() + "\n" + content + "\n\n"
+            text = head + text[insert_pos:]
+        else:
+            text = text.rstrip() + "\n" + content + "\n"
+    else:
+        text = text.rstrip() + "\n\n" + section + "\n\n" + content + "\n"
+
+    tmp = target.with_name(target.name + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, target)
+    return True
+
+
 APPLY_HANDLERS = {
+    "role": _apply_role_edit,
     "memory": _apply_memory_edit,
     "rule": _apply_rule_edit,
     "claude_md": _apply_claude_md_edit,

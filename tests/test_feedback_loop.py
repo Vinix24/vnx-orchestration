@@ -4,7 +4,6 @@ Tests for F50-PR3: feedback loop wiring.
 
 Covers:
 - update_confidence_from_outcome: success boosts / failure decays pattern confidence
-- generate_prevention_rule_suggestions: antipatterns with count >= 3 produce suggestions
 - GET /api/intelligence/learning-summary: endpoint returns valid metrics shape
 """
 
@@ -251,61 +250,6 @@ def test_confidence_event_written(tmp_path):
     assert row[0] == "success"
     assert row[1] == 1
     assert float(row[2]) > 0
-
-
-# ---------------------------------------------------------------------------
-# 3. test_prevention_rule_generated
-# ---------------------------------------------------------------------------
-
-def test_prevention_rule_generated(tmp_path):
-    """Antipattern with occurrence_count >= 3 must produce a prevention_rules suggestion."""
-    db = _make_db(tmp_path)
-    _insert_antipattern(db, "Missing gate check", 5)
-    _insert_antipattern(db, "Low occurrence", 2)  # should NOT qualify
-
-    sys.path.insert(0, str(SCRIPTS_DIR))
-    import importlib
-    import types
-
-    with patch.dict(os.environ, {
-        "VNX_HOME": str(tmp_path),
-        "VNX_STATE_DIR": str(tmp_path),
-        "PROJECT_ROOT": str(tmp_path),
-    }):
-        # Import with patched ensure_env
-        with patch("vnx_paths.ensure_env", return_value={
-            "VNX_HOME": str(tmp_path),
-            "VNX_STATE_DIR": str(tmp_path),
-            "PROJECT_ROOT": str(tmp_path),
-            "VNX_SKILLS_DIR": str(tmp_path),
-        }):
-            import generate_suggested_edits as gse
-            importlib.reload(gse)
-
-    conn = sqlite3.connect(str(db))
-    suggestions = gse.generate_prevention_rule_suggestions(conn)
-    conn.close()
-
-    # Only the antipattern with count >= 3 qualifies
-    titles = [s["proposed_change"] for s in suggestions]
-    assert any("Missing gate check" in t for t in titles), f"Expected suggestion for 'Missing gate check', got {titles}"
-    assert all("Low occurrence" not in t for t in titles)
-    # confidence = min(5 * 0.1, 0.9) = 0.5
-    matching = [s for s in suggestions if "Missing gate check" in s["proposed_change"]]
-    assert abs(matching[0]["confidence"] - 0.5) < 1e-6
-
-
-def test_prevention_rule_below_threshold_skipped(tmp_path):
-    db = _make_db(tmp_path)
-    _insert_antipattern(db, "Rare issue", 1)
-    _insert_antipattern(db, "Occasional issue", 2)
-
-    import generate_suggested_edits as gse
-    conn = sqlite3.connect(str(db))
-    suggestions = gse.generate_prevention_rule_suggestions(conn)
-    conn.close()
-
-    assert suggestions == []
 
 
 # ---------------------------------------------------------------------------

@@ -32,6 +32,7 @@ except Exception as exc:
 
 from model_inference_guard import evaluate_activity_routing, HINT
 from digest_text import smart_truncate, decision_grade, dedup_suggestions
+from suggested_edit_targets import guard_target
 
 PATHS = ensure_env()
 STATE_DIR = Path(PATHS["VNX_STATE_DIR"])
@@ -45,6 +46,10 @@ LOOKBACK_DAYS = 7
 MAX_SUGGESTIONS_PER_RUN = 5
 MIN_SESSIONS_FOR_SUGGESTION = 5
 MIN_CONFIDENCE = 0.7
+DEFAULT_ANTIPATTERN_MAX_AGE_DAYS = 30
+ROLE_SECTION = "## Wat review het vaakst vindt"
+# Every category a generator in this file can emit; apply_suggested_edits needs a handler for each.
+EMITTED_CATEGORIES = frozenset({"memory", "claude_md", "skill", "role"})
 
 
 def _load_existing_pending() -> dict:
@@ -230,38 +235,79 @@ def generate_onetime_suggestions() -> List[dict]:
     return suggestions
 
 
-def generate_prevention_rule_suggestions(conn: sqlite3.Connection) -> List[dict]:
-    """Generate prevention_rules suggestions from recurring antipatterns.
-
-    Qualifies antipatterns with occurrence_count >= 3.  Each generates a
-    suggestion with category='prevention_rules' so the human reviewer can
-    decide whether to codify the rule in a .claude/rules/*.md file.
-    """
-    suggestions = []
-    cur = conn.cursor()
-
+def _row_evidence(source_dispatch_ids: object) -> str:
+    """Distinct dispatches behind a row, or "aantal onbekend". Never occurrence_count."""
     try:
-        cur.execute(
-            "SELECT id, title, occurrence_count FROM antipatterns "
-            "WHERE occurrence_count >= 3 "
-            "ORDER BY occurrence_count DESC "
-            "LIMIT 20"
-        )
-    except sqlite3.OperationalError:
-        return suggestions
+        ids = json.loads(source_dispatch_ids) if isinstance(source_dispatch_ids, str) else None
+    except json.JSONDecodeError:
+        ids = None
+    if not isinstance(ids, list):
+        return "aantal onbekend"
+    distinct = {i for i in ids if isinstance(i, str) and i}
+    if not distinct:
+        return "aantal onbekend"
+    return f"{len(distinct)} dispatches"
 
-    for row in cur.fetchall():
-        ap_id, title, count = row[0], row[1] or "", int(row[2] or 0)
-        confidence = min(count * 0.1, 0.9)
+
+_SEVERITY_CONFIDENCE = {"critical": 0.9, "high": 0.8, "medium": 0.7}
+
+
+def _count_refusal(refusals: dict | None, reason: str) -> None:
+    if refusals is not None:
+        refusals[reason] = refusals.get(reason, 0) + 1
+
+
+def generate_prevention_rule_suggestions(
+    conn: sqlite3.Connection,
+    project_id: str | None = None,
+    root: Path | None = None,
+    max_age_days: int = DEFAULT_ANTIPATTERN_MAX_AGE_DAYS,
+    refusals: dict | None = None,
+) -> List[dict]:
+    """``role`` suggestions from antipatterns of ``project_id`` seen within ``max_age_days``.
+
+    The row's ``category`` names the role; no role file means a refusal counted
+    in ``refusals``. Evidence is the distinct dispatches behind the row, never
+    ``occurrence_count``. A missing table/column raises ``sqlite3.OperationalError``.
+    """
+    from project_scope import current_project_id
+    from suggested_edit_targets import guard_target, role_target, REASON_NOT_ON_LIST
+
+    pid = project_id if project_id is not None else current_project_id()
+    base = Path(root) if root is not None else PROJECT_ROOT
+    cutoff = (datetime.now(tz=_UTC) - timedelta(days=max_age_days)).strftime("%Y-%m-%d")
+
+    rows = conn.execute(
+        "SELECT title, description, severity, category, source_dispatch_ids "
+        "FROM antipatterns "
+        "WHERE project_id = ? AND last_seen IS NOT NULL AND substr(last_seen, 1, 10) >= ? "
+        "ORDER BY last_seen DESC LIMIT 20",
+        (pid, cutoff),
+    ).fetchall()
+
+    suggestions = []
+    for row in rows:
+        title, description, severity, category, src_ids = tuple(row)
+        target = role_target(category)
+        if target is None:
+            _count_refusal(refusals, REASON_NOT_ON_LIST)
+            continue
+        resolved, reason = guard_target(target, base)
+        if resolved is None:
+            _count_refusal(refusals, reason)
+            continue
+        text = (description or "").strip() or (title or "").strip()
+        if not text:
+            continue
         suggestions.append({
-            "category": "prevention_rules",
-            "target": ".claude/rules/antipatterns.md",
-            "section": "## Prevention Rules",
+            "category": "role",
+            "target": target,
+            "section": ROLE_SECTION,
             "action": "append",
-            "proposed_change": f"Add rule: {title}",
-            "content": f"Add rule: {title}",
-            "evidence": f"Occurred {count} times",
-            "confidence": round(confidence, 2),
+            "proposed_change": f"Add rule: {text}",
+            "content": f"- {text}",
+            "evidence": _row_evidence(src_ids),
+            "confidence": _SEVERITY_CONFIDENCE.get((severity or "").lower(), 0.0),
         })
 
     return suggestions
@@ -297,6 +343,7 @@ def generate_digest_section(edits: list) -> str:
         "rule": "RULE",
         "claude_md": "CLAUDE.MD",
         "skill": "SKILL",
+        "role": "ROLE",
         "hook": "HOOK",
     }
 
@@ -338,7 +385,11 @@ def main():
     all_suggestions = []
     all_suggestions.extend(generate_memory_suggestions(conn, since))
     all_suggestions.extend(generate_rule_suggestions(conn, since))
-    all_suggestions.extend(generate_prevention_rule_suggestions(conn))
+    refusals: dict = {}
+    try:
+        all_suggestions.extend(generate_prevention_rule_suggestions(conn, refusals=refusals))
+    except sqlite3.OperationalError as exc:
+        print(f"prevention rules not generated: {exc}", file=sys.stderr)
     all_suggestions.extend(generate_onetime_suggestions())
     conn.close()
 
@@ -347,6 +398,11 @@ def main():
     next_id = max((e.get("id", 0) for e in existing_edits), default=0) + 1
 
     for sg in all_suggestions:
+        # Closed reading list: a refused proposal is counted, never written.
+        _, refusal = guard_target(sg.get("target"), PROJECT_ROOT)
+        if refusal:
+            _count_refusal(refusals, refusal)
+            continue
         fp = _content_hash(sg["category"], sg["target"], sg["content"])
         if _is_already_suggested_or_applied(fp, existing_edits, history):
             continue
@@ -373,6 +429,7 @@ def main():
     output = {
         "generated_at": datetime.now(tz=_UTC).isoformat().replace("+00:00", "Z"),
         "edits": final_edits,
+        "refusals": refusals,
     }
 
     STATE_DIR.mkdir(parents=True, exist_ok=True)
@@ -383,6 +440,9 @@ def main():
 
     print(f"Suggested edits written to: {PENDING_PATH}")
     print(f"  New: {len(new_edits)} | Carried over: {len(kept_edits)} | Total pending: {len(final_edits)}")
+
+    for reason, count in sorted(refusals.items()):
+        print(f"  Refused ({reason}): {count}")
 
     if digest_section:
         print(f"\n{digest_section}")
