@@ -37,7 +37,6 @@ _REF = {
     "verdict": re.compile(rf"^verdict:({_ID})$"), "antwoord": re.compile(r"^antwoord:([0-9a-f]{12})$"),
     "pr": re.compile(r"^pr:([1-9][0-9]{0,8})$"),
 }
-_GH_TIMEOUT = 20
 OI_ANSWERED = frozenset({"closed", "done", "deferred", "wontfix"})
 MAX_QUOTE = 300
 
@@ -91,8 +90,7 @@ def _pr_points(state: Dict[str, Any], ref: str) -> List[Dict[str, Any]]:
 
 def _ask_pr(project_id: str, *, ref: str, ceiling: Any, reason: Any, now: Optional[str],
             state_dir: Optional[Path], **fields: Any) -> Optional[Dict[str, Any]]:
-    """Revision 1, or revision +1 for a ceiling above the latest point's, which then closes the earlier open ones as
-    ``vervallen``. The same or a lower ceiling writes nothing and is refused with the ceiling that stands."""
+    """Revision +1 for a ceiling above the latest (or none), lapsing older open ones; the same or lower is refused."""
     if not oq._int(ceiling, 1) or reason not in oq.GRANT_REASONS:
         raise oq.QueueRefused("ask: a pr:<n> ref needs --ceiling (an integer above 0) and --reason, one of: "
                               + ", ".join(sorted(oq.GRANT_REASONS)))
@@ -100,7 +98,7 @@ def _ask_pr(project_id: str, *, ref: str, ceiling: Any, reason: Any, now: Option
     if state["status"] != "ok":
         raise oq.QueueUnreadable(state["reason"], state["line"])
     mine = _pr_points(state, ref)
-    if mine and ceiling <= mine[-1]["ceiling"]:
+    if mine and mine[-1]["ceiling"] is not None and ceiling <= mine[-1]["ceiling"]:  # an older point has none
         raise oq.QueueRefused(f"ask: ceiling {ceiling} is not above ceiling {mine[-1]['ceiling']} of revision "
                               f"{mine[-1]['revisie']} for {ref}; no new point")
     revision = mine[-1]["revisie"] + 1 if mine else 1
@@ -258,7 +256,7 @@ def gh_pr_state(project_id: str, pr: int) -> str:
         raise OSError(f"no checkout registered for {project_id}")
     try:
         done = subprocess.run(["gh", "pr", "view", str(pr), "--json", "state", "--jq", ".state"], cwd=str(repo),
-                              capture_output=True, text=True, timeout=_GH_TIMEOUT)
+                              capture_output=True, text=True, timeout=20)
     except subprocess.SubprocessError as exc:
         raise OSError(f"gh pr view {pr}: {type(exc).__name__}") from exc
     state = done.stdout.strip()
@@ -267,8 +265,7 @@ def gh_pr_state(project_id: str, pr: int) -> str:
     return state
 
 def _eval_pr(src: _Source, number: str, point: Dict[str, Any]) -> tuple:
-    """ADR-088 decision 6: only an answer line closes as ``beantwoord``; a higher revision or a merged or closed PR
-    closes as ``vervallen``; an open PR keeps the point open. Unreadable raises, which ``_evaluate`` makes ``unknown``."""
+    """ADR-088 decision 6: an answer closes as beantwoord; a higher revision or a merged/closed PR as vervallen."""
     ts = _answer_ts(src.project_id, point["point_id"], src.state_dir)
     if ts is not None:
         return ("closed", "beantwoord", ts, "t0_namens_operator")

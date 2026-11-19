@@ -137,8 +137,8 @@ def _check_grant(grant: Any) -> None:
 
 
 def _check_pr_opened(line: Mapping[str, Any]) -> None:
-    """ADR-088 decision 6: a ``pr:`` point opens with bron 2, a ceiling above 0 and a reason from the closed set;
-    no other point carries either field (raises ValueError)."""
+    """ADR-088 decision 6, on write only (an older ``pr:`` line without them replays with ceiling None): a ``pr:``
+    point opens with bron 2, a ceiling above 0 and a reason from the closed set; no other point carries either."""
     if not str(line["ref"]).startswith("pr:"):
         if "ceiling" in line or "reason" in line:
             raise ValueError("opened: ceiling and reason are only on a pr: point")
@@ -157,7 +157,6 @@ def _check_values(project_id: str, kind: str, line: Mapping[str, Any]) -> None:
             raise ValueError("opened: bron, revisie or asked_at invalid")
         if line["point_id"] != point_id(project_id, line["bron"], str(line["ref"]), line["revisie"]):
             raise ValueError("opened: point_id does not match project_id, bron, ref and revisie")
-        _check_pr_opened(line)
     if kind == "push_reserved":
         ids = line["point_ids"]
         if not isinstance(ids, list) or not ids or not all(_text(i) for i in ids):
@@ -211,7 +210,7 @@ def _fold(lines: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
                 "point_id": line["point_id"], "state": "open", "bron": line["bron"], "ref": line["ref"],
                 "revisie": line["revisie"], "vraag": line["vraag"], "sluit_bij": line["sluit_bij"],
                 "asked_at": line["asked_at"], "presented": None, "bewijs": None, "unknown_reden": None,
-                "ceiling": line.get("ceiling")})
+                "ceiling": line.get("ceiling") if _int(line.get("ceiling"), 1) else None})
             continue
         point = points.get(line.get("point_id"))  # push_reserved has no point_id: None
         if point is None:
@@ -318,6 +317,8 @@ def append_line(project_id: str, kind: str, fields: Mapping[str, Any], *, now: O
     line = {**fields, "kind": kind, "project_id": project_id, "ts": now or _now()}
     try:
         check_line(project_id, line)
+        if kind == "opened":
+            _check_pr_opened(line)
     except ValueError as exc:
         raise QueueRefused(str(exc)) from exc
     hits = _secret_names(line)
