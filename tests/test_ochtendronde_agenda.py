@@ -78,7 +78,16 @@ def test_unreadable_ledger_gives_unknown_points(tmp_path):
     st = ag.decision_status(P, DAY, state_dir=tmp_path)
     assert st.points == {a: "unknown"} and st.all_decided is False and st.ledger == "unknown"
     (tmp_path / oq.LEDGER_FILENAME).write_text("")  # point gone from the ledger: also unknown
-    assert ag.decision_status(P, DAY, state_dir=tmp_path).points == {a: "unknown"}
+    st = ag.decision_status(P, DAY, state_dir=tmp_path)  # a point missing from a readable ledger is not decided
+    assert st.points == {a: "unknown"} and st.ledger == "ok" and st.all_decided is False
+
+
+def test_unreadable_ledger_with_empty_snapshot_is_not_all_decided(tmp_path):
+    assert _snap(tmp_path)["points"] == []
+    _garbage(tmp_path)
+    st = ag.decision_status(P, DAY, state_dir=tmp_path)
+    assert st.snapshot == "ok" and st.ledger == "unknown" and st.points == {}
+    assert st.all_decided is False
 
 
 def test_snapshot_refuses_unreadable_ledger(tmp_path):

@@ -33,8 +33,14 @@ class DayStatus:
 
     @property
     def all_decided(self) -> Optional[bool]:
+        """None without a readable snapshot; False on an unreadable ledger (ADR-095 d4, ADR-063).
+
+        An empty snapshot with a readable ledger is True: there is nothing to decide.
+        """
         if self.snapshot != "ok":
             return None  # no snapshot is unknown, never True (ADR-063)
+        if self.ledger != "ok":
+            return False  # an unreadable ledger is not decided, also with zero points
         return all(status == "decided" for status in self.points.values())
 
 
