@@ -89,7 +89,7 @@ def _injection_why_enabled() -> bool:
                 key, strict[1], strict[0], use_default_resolver=False, strict_resolver=True)
         else:
             value, source = config_registry.resolve_with_source(key, strict_resolver=True)
-        if source == "project_config_error":
+        if source in config_registry.ERROR_SOURCES:
             return False  # the registry already logged the key and the exception
         return (value or "").strip().lower() in config_registry._TRUTHY
     except Exception as exc:

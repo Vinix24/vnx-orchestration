@@ -512,6 +512,17 @@ def _provider_switch_isolation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
 
 
 @pytest.fixture(autouse=True)
+def _global_config_isolation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin the global config file (ADR-087 layer 3) to an absent file in an empty temp dir.
+
+    Layer 3 beats env (layer 4), so a developer's ~/.vnx/config.json would otherwise beat a
+    monkeypatched env value in a local test (plan V3.6). A test that needs a specific file
+    sets VNX_GLOBAL_CONFIG_FILE itself: same function-scoped monkeypatch, later call wins.
+    """
+    monkeypatch.setenv("VNX_GLOBAL_CONFIG_FILE", str(tmp_path / "_vnx_global_config" / "config.json"))
+
+
+@pytest.fixture(autouse=True)
 def _vnx_provider_env_file_isolation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """OI-2182: keep every test off the operator's real provider env file.
 
