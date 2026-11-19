@@ -916,6 +916,19 @@ def _main_checkout_state_diff(
     return "; ".join(diffs) if diffs else None
 
 
+def _main_checkout_drift_since(
+    project_root: Optional[Path], branch: str, before: Dict[str, str],
+) -> Optional[str]:
+    """Re-capture the orchestrator's checkout and diff it against *before*.
+
+    The after capture reuses the before snapshot's ``pr_head_sha``, so a push to
+    the PR during the seat does not move the reference point. None when nothing
+    moved (see ``_main_checkout_state_diff``).
+    """
+    after = _capture_main_checkout_state(project_root, branch, pr_head_sha=before.get("pr_head_sha"))
+    return _main_checkout_state_diff(before, after)
+
+
 def _codex_model_refusal(
     cmd: List[str], stdout: str, stderr: str, returncode: int,
 ) -> Optional[str]:
@@ -1562,12 +1575,7 @@ class GateRunner:
         # FIRST and ONLY write for a touched checkout, short-circuiting every
         # branch below (a raised exception included) rather than wrapping
         # each one's own write after the fact.
-        main_checkout_drift = _main_checkout_state_diff(
-            main_checkout_before,
-            _capture_main_checkout_state(
-                self._project_root, branch, pr_head_sha=main_checkout_before.get("pr_head_sha"),
-            ),
-        )
+        main_checkout_drift = _main_checkout_drift_since(self._project_root, branch, main_checkout_before)
         if main_checkout_drift:
             log.error(
                 "OI-1887: harness-lane gate=%s pr=%s touched the orchestrator's own "
