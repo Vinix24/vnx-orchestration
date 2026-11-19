@@ -41,17 +41,17 @@ def _ago(hours):
     return (NOW - timedelta(hours=hours)).isoformat()
 
 
-def test_record_appends_event(tmp_path):
-    pir.record_project_id_refusal("receipt", tmp_path, "no id", dispatch_id="d1")
+def _boom(*a, **k):
+    raise OSError(28, "No space left on device")
+
+
+def test_record_appends_event_and_logs_error(tmp_path, caplog):
+    with caplog.at_level(logging.ERROR):
+        pir.record_project_id_refusal("receipt", tmp_path, "no id", dispatch_id="d1")
     rec = json.loads((tmp_path / "skip_metrics.ndjson").read_text())
     assert rec["event_type"] == "project_id_unresolved"
     assert rec["context"] == "receipt" and rec["reason"] == "no id"
     assert rec["dispatch_id"] == "d1" and rec["ts"]
-
-
-def test_record_logs_error(tmp_path, caplog):
-    with caplog.at_level(logging.ERROR):
-        pir.record_project_id_refusal("hook", tmp_path, "why")
     assert any("project_id_unresolved" in r.message for r in caplog.records)
 
 
@@ -64,8 +64,7 @@ def test_record_defaults_to_data_home(tmp_path, monkeypatch):
 
 
 def test_data_home_follows_env(env):
-    _, home = env
-    assert pir.data_home() == home
+    assert pir.data_home() == env[1]
 
 
 def test_record_never_raises_on_unwritable_anchor(tmp_path, caplog):
@@ -74,55 +73,35 @@ def test_record_never_raises_on_unwritable_anchor(tmp_path, caplog):
     with caplog.at_level(logging.ERROR):
         pir.record_project_id_refusal("hook", blocker / "sub", "why")
     assert any("append failed" in r.message for r in caplog.records)
-
-
-def test_record_never_raises_on_missing_dir_and_full_disk(tmp_path, monkeypatch, caplog):
     pir.record_project_id_refusal("hook", tmp_path / "missing" / "dir", "why")
-    import state_writer
-
-    def boom(*a, **k):
-        raise OSError(28, "No space left on device")
-
-    monkeypatch.setattr(state_writer, "append_locked", boom)
-    with caplog.at_level(logging.ERROR):
-        pir.record_project_id_refusal("hook", tmp_path, "why")
-    assert any("No space" in r.message for r in caplog.records)
 
 
 def test_logging_failure_still_appends_and_names_it_on_stderr(tmp_path, monkeypatch, capsys):
-    def boom(*a, **k):
-        raise RuntimeError("log handler broke")
-
-    monkeypatch.setattr(pir.logger, "error", boom)
+    monkeypatch.setattr(pir.logger, "error", _boom)
     pir.record_project_id_refusal("hook", tmp_path, "why")
     rec = json.loads((tmp_path / "skip_metrics.ndjson").read_text())
     assert rec["context"] == "hook" and rec["event_type"] == "project_id_unresolved"
     err = capsys.readouterr().err
-    assert "context=hook" in err and "log handler broke" in err
+    assert "context=hook" in err and "logging failed" in err and "No space" in err
 
 
 def test_append_failure_still_logs_and_does_not_raise(tmp_path, monkeypatch, caplog):
     import state_writer
 
-    def boom(*a, **k):
-        raise OSError(28, "No space left on device")
-
-    monkeypatch.setattr(state_writer, "append_locked", boom)
+    monkeypatch.setattr(state_writer, "append_locked", _boom)
     with caplog.at_level(logging.ERROR):
         pir.record_project_id_refusal("hook", tmp_path, "why")
     messages = [r.getMessage() for r in caplog.records]
     assert any("project_id_unresolved: context=hook" in m for m in messages)
-    assert any("append failed" in m and "skip_metrics.ndjson" in m for m in messages)
+    assert any("append failed" in m and "skip_metrics.ndjson" in m and "No space" in m
+               for m in messages)
 
 
 def test_both_log_and_append_failing_never_raises_and_reaches_stderr(tmp_path, monkeypatch, capsys):
     import state_writer
 
-    def boom(*a, **k):
-        raise OSError(28, "No space left on device")
-
-    monkeypatch.setattr(pir.logger, "error", boom)
-    monkeypatch.setattr(state_writer, "append_locked", boom)
+    monkeypatch.setattr(pir.logger, "error", _boom)
+    monkeypatch.setattr(state_writer, "append_locked", _boom)
     pir.record_project_id_refusal("hook", tmp_path, "why")
     err = capsys.readouterr().err
     assert "logging failed" in err and "append failed" in err and "No space" in err
@@ -143,12 +122,8 @@ def test_section_counts_per_context_window_and_sources(env):
     assert sec["unattributed"] == {"ledger": False, "count": 0, "amount_usd": 0.0, "unreadable": 0}
     status, detail = pir.format_section(sec)
     assert status == "warn" and "receipt=2" in detail and "no ledger" in detail
-
-
-def test_section_clean_is_pass(env):
-    store, home = env
-    status, detail = pir.format_section(pir.project_id_refusal_section(store, home=home, now=NOW))
-    assert status == "pass" and "no ledger" in detail
+    clean = pir.format_section(pir.project_id_refusal_section(store / "none", home=home / "none", now=NOW))
+    assert clean[0] == "pass" and "no ledger" in clean[1]
 
 
 def test_unattributed_ledger_present_and_unreadable(env):
@@ -174,10 +149,6 @@ def test_unreadable_skip_metrics_line_is_reported(env):
     assert pir.format_section(sec)[0] == "warn"
 
 
-def _args(project):
-    return argparse.Namespace(project_dir=str(project), json=True, strict=False)
-
-
 def test_vnx_cli_doctor_shows_tenant_stamp_skip(env, capsys):
     """Red run on origin/main: a tenant_stamp_skip line never showed in ``vnx doctor``."""
     store, _ = env
@@ -189,7 +160,7 @@ def test_vnx_cli_doctor_shows_tenant_stamp_skip(env, capsys):
            {"event_type": "tenant_stamp_skip", "table": "dispatch_metadata", "timestamp": now})
     from vnx_cli.commands.doctor import vnx_doctor
 
-    vnx_doctor(_args(project))
+    vnx_doctor(argparse.Namespace(project_dir=str(project), json=True, strict=False))
     checks = {c["name"]: c for c in json.loads(capsys.readouterr().out)["checks"]}
     assert checks["project-id-refusals"]["status"] == "WARN"
     assert "dispatch_metadata=1" in checks["project-id-refusals"]["detail"]

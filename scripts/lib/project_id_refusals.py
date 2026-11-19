@@ -2,18 +2,12 @@
 
 Two halves:
 
-* :func:`record_project_id_refusal` — called by a context that refused to run
-  because no project id could be resolved. It never raises (a hook must not
-  break on it), logs ERROR and appends one ``project_id_unresolved`` line to
-  ``skip_metrics.ndjson`` in ``anchor_dir``. The anchor is the store directory
-  when it is known, otherwise the data home (:func:`data_home`): the parent of
-  every store asks no tenant. It reuses ``state_writer.append_locked``, the
-  same writer ``dispatch_metadata_db._log_tenant_stamp_skip`` uses.
-* :func:`project_id_refusal_section` — read-only; what ``vnx doctor`` shows:
-  per context the count of the last 24 hours, both event types, from the
-  project's and the data home's ``skip_metrics.ndjson``, plus count and amount
-  of ``provider_costs.unattributed.ndjson`` (ADR-094). An unreadable line is
-  counted as unreadable, never skipped silently.
+* :func:`record_project_id_refusal` — never raises; logs ERROR and appends one
+  ``project_id_unresolved`` line to ``skip_metrics.ndjson`` in ``anchor_dir``
+  (the store, else :func:`data_home`) via ``state_writer.append_locked``.
+* :func:`project_id_refusal_section` — read-only, for ``vnx doctor``: per
+  context the last 24 hours of both event types, plus count and amount of
+  ``provider_costs.unattributed.ndjson`` (ADR-094). Unreadable lines are counted.
 """
 from __future__ import annotations
 
@@ -50,7 +44,7 @@ def record_project_id_refusal(
     **fields: Any,
 ) -> None:
     """Log ERROR and count one refusal for ``context``. Never raises."""
-    # The log and the append are independent: a failure in one never skips the other.
+    # Log and append are independent: a failure in one never skips the other.
     try:
         logger.error(
             "project_id_unresolved: context=%s reason=%s fields=%s",
@@ -152,10 +146,7 @@ def project_id_refusal_section(
 ) -> Dict[str, Any]:
     """Counts for ``vnx doctor``: per context, last 24 hours, plus the cost ledger.
 
-    ``data_root`` is the project's store; ``home`` the data home (default
-    :func:`data_home`). Returns ``{"contexts": {name: count}, "total": int,
-    "unreadable": int, "errors": [str], "unattributed": {"ledger": bool,
-    "count": int, "amount_usd": float, "unreadable": int}}``.
+    ``data_root`` is the project's store; ``home`` defaults to :func:`data_home`.
     """
     now = now or datetime.now(timezone.utc)
     cutoff = now - WINDOW
