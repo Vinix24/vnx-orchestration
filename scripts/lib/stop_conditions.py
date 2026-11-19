@@ -340,6 +340,23 @@ GH_AUTH_TIMEOUT = 10
 GH_RATE_LIMIT_TIMEOUT = 10
 
 
+def check_morning_pause(
+    state_dir: Optional[Path] = None, *, now: Optional[datetime] = None,
+    get: Optional[Any] = None,
+) -> StopConditionResult:
+    """ADR-095: TRIGGERED while the morning pause holds, CLEAR otherwise (off by default, then nothing else is read)."""
+    import morning_pause_gate as gate
+    from vnx_paths import project_id_from_state_dir
+
+    project_id = (project_id_from_state_dir(state_dir) or None) if state_dir is not None else None
+    verdict = gate.morning_pause_verdict(
+        project_id, now or datetime.now(timezone.utc), state_dir=state_dir, get=get)
+    evidence = {"reason": verdict.reason, "day": verdict.day, "project_id": project_id}
+    if verdict.paused:
+        return _triggered("morning_pause", f"ochtendronde: pauze actief ({verdict.reason})", **evidence)
+    return _clear("morning_pause", f"geen pauze ({verdict.reason})", **evidence)
+
+
 def check_gh_auth_dead(*, gh_bin: str = "gh") -> StopConditionResult:
     """E4: GitHub auth/quota fully dead (cannot proceed).
 
@@ -1102,6 +1119,7 @@ ALL_CHECK_IDS = (
     "gh_auth_dead",
     "provider_exhausted",
     "repeated_gate_failure_cause",
+    "morning_pause",
 )
 
 
@@ -1148,6 +1166,7 @@ def run_all_checks(
         check_gh_auth_dead(),
         provider_result,
         gate_result,
+        check_morning_pause(resolved_state_dir),
     ]
 
     if write_halt and resolved_state_dir is not None and any(r.status == CheckStatus.TRIGGERED for r in results):

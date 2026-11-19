@@ -606,7 +606,7 @@ def test_halt_json_lists_scoped_out_check_separately_from_triggered(tmp_path, mo
     by_id = {c["check_id"]: c for c in payload["all_checks"]}
     assert by_id["repeated_gate_failure_cause"]["scope"] == "scoped_out"
     assert "scope" not in by_id["provider_exhausted"]
-    assert len(payload["all_checks"]) == 4
+    assert len(payload["all_checks"]) == 5
 
 
 def test_only_scoped_out_triggers_write_no_halt_json(tmp_path, monkeypatch):

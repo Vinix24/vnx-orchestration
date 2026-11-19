@@ -779,7 +779,7 @@ class TestRunAllChecksAndHalt:
         payload = json.loads(halt_path.read_text())
         assert len(payload["triggered"]) == 1
         assert payload["triggered"][0]["check_id"] == "gh_auth_dead"
-        assert len(payload["all_checks"]) == 4
+        assert len(payload["all_checks"]) == 5
 
     def test_no_halt_written_when_nothing_triggered(self, tmp_path):
         state_dir = tmp_path / "state"
