@@ -15,10 +15,12 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 try:
     import operator_queue as oq
+    import ochtendronde_routing as rt
     from dream_liveness import read_events, read_reviews, _parse_ts
     from project_root import resolve_central_data_dir
 except ImportError:  # vnx-silent-except: imported as scripts.lib.operator_queue_dream_analyzer
     from scripts.lib import operator_queue as oq
+    from scripts.lib import ochtendronde_routing as rt
     from scripts.lib.dream_liveness import read_events, read_reviews, _parse_ts
     from scripts.lib.project_root import resolve_central_data_dir
 
@@ -231,25 +233,90 @@ def _load_list(run: _Run, path: Path, key: str, required: bool) -> Optional[list
     return items
 
 
+def _entry_map(items: Any, key: str, prefix: str) -> Dict[str, dict]:
+    """ref -> source entry, the same refs ``_list_verdicts`` builds (entries it skips are skipped here too)."""
+    out: Dict[str, dict] = {}
+    for entry in items or []:
+        ident = entry.get(key) if isinstance(entry, dict) else None
+        if not (isinstance(ident, bool) or not isinstance(ident, (int, str)) or not str(ident).strip()):
+            out[f"{prefix}:{ident}"] = entry
+    return out
+
+
+def _missing_verdict(src: dict, ref: str) -> _Verdict:
+    """The verdict for an open point whose source line is no longer in the pending list."""
+    if ref.startswith("edit:"):
+        return (_history_verdict(src["history"], src["hist_why"], ref) if src["edits"] is not None
+                else ("unknown", "pending_edits.json niet te lezen"))
+    return ("unknown", "regel weg uit pending_archival.json" if src["archival"] is not None
+            else "pending_archival.json niet te lezen")
+
+
+def _sweep(run: _Run, verdicts: Dict[str, _Verdict], src: dict, prefix: str = "") -> None:
+    """Open points of ``run`` (those under ``prefix``) whose source line is gone get the history verdict.
+    Without a prefix a ``project:`` ref is another project's routed point; only its owner's sweep updates it."""
+    for ref in run.open_refs():
+        if ref.startswith(prefix) and (prefix or not ref.startswith(rt.ROUTED_PREFIX)) and ref[len(prefix):] not in verdicts:
+            run.apply(ref, _missing_verdict(src, ref[len(prefix):]))
+
+
+def _fleet_verdict(owner: str, verdict: _Verdict) -> _Verdict:
+    return (verdict[0], f"[{owner}] {verdict[1]}") + verdict[2:] if verdict[0] == "open" else verdict
+
+
+def _route_new(run: _Run, fleet: _Run, routing: Any, ref: str, verdict: _Verdict, entry: dict, extra: dict) -> None:
+    """A source line with no point yet: classify it (ADR-095 decision 5) and open it where it belongs, or report why not."""
+    index, pid = routing.index, run.project_id
+    cls = (index.classify(pid, ref, entry) if index is not None else
+           rt.classify(pid, ref, entry.get("target"), rt.fingerprint_of(entry), {}, {"register": routing.problems[0]}))
+    extra["classification"][ref] = cls.kind
+    if cls.kind == rt.UNKNOWN:
+        extra["unclassified"].append({"ref": ref, "reden": cls.reason})
+    elif cls.kind == rt.PROJECT:
+        run.apply(ref, verdict)
+    elif cls.owner == pid:  # the elected owner opens it; the fleet project's own ledger keeps the plain ref
+        (run.apply(ref, verdict) if pid == rt.FLEET_PROJECT else fleet.apply(rt.routed_ref(pid, ref), _fleet_verdict(pid, verdict)))
+    else:
+        extra["routed_elsewhere"].append({"ref": ref, "owner": cls.owner})
+
+
+def _route_analyzer(run: _Run, verdicts: Dict[str, _Verdict], entries: Dict[str, dict], src: dict, routing: Any) -> Dict[str, Any]:
+    fleet = _Run(rt.FLEET_PROJECT, BRON_ANALYZER, routing.fleet_state_dir, run.now)
+    prefix = f"project:{run.project_id}/"
+    extra: Dict[str, Any] = {"classification": {}, "unclassified": [], "routed_elsewhere": []}
+    for ref, verdict in verdicts.items():
+        if fleet.latest(prefix + ref) is not None:  # a point routed earlier keeps its ledger, closing on the source state
+            fleet.apply(prefix + ref, verdict)
+        elif run.latest(ref) is not None or verdict[0] != "open":
+            run.apply(ref, verdict)
+        else:
+            _route_new(run, fleet, routing, ref, verdict, entries.get(ref, {}), extra)
+    _sweep(run, verdicts, src)
+    _sweep(fleet, verdicts, src, prefix)
+    run.problems += routing.problems + [f"vnx-dev: {p}" for p in fleet.problems]
+    return {**extra, "routed": fleet.out}
+
+
 def read_analyzer(project_id: str, *, data_root: Optional[Path] = None, now: Any = None,
-                  state_dir: Optional[Path] = None) -> Dict[str, Any]:
-    """Source 4: pending edits and pending archival lines; a missing ``pending_edits.json`` is ``unknown``, not 0."""
+                  state_dir: Optional[Path] = None, routing: Any = None) -> Dict[str, Any]:
+    """Source 4: pending edits and pending archival lines; a missing ``pending_edits.json`` is ``unknown``, not 0.
+
+    With ``routing`` (ochtendronde_routing.Routing) a new fleet point opens in the vnx-dev ledger as
+    ``project:<owner>/<ref>`` instead of here, and closes on this project's source state; read-only on this store.
+    """
     run, sdir = _Run(project_id, BRON_ANALYZER, state_dir, now), _root(project_id, data_root) / "state"
     edits = _load_list(run, sdir / "pending_edits.json", "edits", True)
     archival = _load_list(run, sdir / "pending_archival.json", "pending_archival", False)
     history, hist_why = _read_json(sdir / "edit_history.json")
+    src = {"edits": edits, "archival": archival, "history": history, "hist_why": hist_why}
     verdicts = {**_list_verdicts(edits or [], "id", "edit", "#"), **_list_verdicts(archival or [], "pattern_id", "archival", "")}
+    if routing is not None:
+        entries = {**_entry_map(edits, "id", "edit"), **_entry_map(archival, "pattern_id", "archival")}
+        extra = _route_analyzer(run, verdicts, entries, src, routing)
+        return {**run.result(), **extra}
     for ref, verdict in verdicts.items():
         run.apply(ref, verdict)
-    for ref in run.open_refs():
-        if ref in verdicts:
-            continue
-        if ref.startswith("edit:"):
-            run.apply(ref, _history_verdict(history, hist_why, ref) if edits is not None
-                      else ("unknown", "pending_edits.json niet te lezen"))
-        else:
-            run.apply(ref, ("unknown", "regel weg uit pending_archival.json" if archival is not None
-                            else "pending_archival.json niet te lezen"))
+    _sweep(run, verdicts, src)
     return run.result()
 
 
