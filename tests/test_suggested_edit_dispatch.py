@@ -132,3 +132,51 @@ def test_apply_writes_nothing_and_says_where_accepted_edits_go(env, capsys):
     assert (state / "pending_edits.json").read_bytes() == pending_before
     assert not (state / "edit_history.json").exists()
     assert edit["status"] == "approved"
+
+
+def _mutations(state):
+    path = state / "t0_receipts.ndjson"
+    rows = [json.loads(x) for x in path.read_text().splitlines() if x.strip()] if path.exists() else []
+    return [r for r in rows if r.get("event_type") == "state_mutation"]
+
+
+def test_accept_records_one_state_mutation_before_pending_changes(env, monkeypatch):
+    state = env[1]
+    import append_receipt
+    seen = []
+    real = append_receipt.append_receipt_payload
+    monkeypatch.setattr(append_receipt, "append_receipt_payload",
+                        lambda r, **kw: (seen.append(_pending(state)[0]["status"]), real(r, **kw))[1])
+    edit = _approve(env)
+    assert seen == ["pending"]
+    (row,) = _mutations(state)
+    assert (row["edit_id"], row["from_status"], row["to_status"]) == (1, "pending", "approved")
+    assert (row["dispatch_id"], row["diff_sha256"]) == (edit["dispatch_id"], edit["diff_sha256"])
+
+
+def test_second_accept_of_reused_bundle_appends_no_second_receipt(env):
+    state = env[1]
+    _approve(env)
+    data = json.loads((state / "pending_edits.json").read_text())
+    data["edits"][0]["status"] = "pending"  # a lost save: the bundle is reused
+    ase._save_pending(data)
+    assert ase.cmd_accept("1") == 0
+    assert len(_mutations(state)) == 1 and _pending(state)[0]["status"] == "approved"
+
+
+def test_accept_receipt_failure_keeps_edit_pending(env, monkeypatch, capsys):
+    import append_receipt
+    state = env[1]
+    before = (state / "pending_edits.json").read_bytes()
+    def boom(receipt, **kw):
+        raise OSError("ledger disk full")
+    monkeypatch.setattr(append_receipt, "append_receipt_payload", boom)
+    assert ase.cmd_accept("1") == 1
+    assert "ledger disk full" in capsys.readouterr().err
+    assert (state / "pending_edits.json").read_bytes() == before
+
+
+def test_accept_unreadable_ledger_keeps_edit_pending(env, capsys):
+    state = env[1]
+    (state / "t0_receipts.ndjson").mkdir()  # a directory where the ledger should be
+    assert ase.cmd_accept("1") == 1 and _pending(state)[0]["status"] == "pending" and capsys.readouterr().err

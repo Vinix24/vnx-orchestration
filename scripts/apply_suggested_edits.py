@@ -292,6 +292,26 @@ def _stage_one(edit: dict, project_id: str):
     return did, diff, None
 
 
+def _record_accept(edit: dict, did: str, diff_sha256: str) -> None:
+    """Append the pending -> approved decision to t0_receipts.ndjson once per edit id and diff; raises if not recorded."""
+    from append_receipt import append_receipt_payload
+    ledger = STATE_DIR / "t0_receipts.ndjson"
+    for ln in (ledger.read_text(encoding="utf-8").splitlines() if ledger.exists() else []):  # a read error raises
+        try:
+            row = json.loads(ln)
+        except ValueError:
+            continue  # a corrupt line is no record of this accept
+        if isinstance(row, dict) and (row.get("event_type"), row.get("edit_id"), row.get("diff_sha256")) == (
+                "state_mutation", edit["id"], diff_sha256):
+            return
+    append_receipt_payload({
+        "timestamp": _now_z(), "event_type": "state_mutation", "receipt_kind": "state_mutation",
+        "terminal": "T0", "source": "vnx_state", "file": PENDING_PATH.name,
+        "trigger": "suggested_edit_accept", "section": f"edit-{edit['id']}",
+        "edit_id": edit["id"], "from_status": "pending", "to_status": "approved",
+        "dispatch_id": did, "diff_sha256": diff_sha256}, receipts_file=str(ledger), skip_enrichment=True)
+
+
 def cmd_accept(id_str: str):
     """Stage one dispatch per pending edit (exact diff); the edit becomes approved. Never fires, never writes."""
     ids = _parse_ids(id_str)
@@ -312,10 +332,18 @@ def cmd_accept(id_str: str):
             failed.append(edit["id"])
             print(f"{Colors.RED}#{edit['id']} not staged: {reason}{Colors.RESET}", file=sys.stderr)
             continue
+        diff_sha256 = hashlib.sha256(diff.encode("utf-8")).hexdigest()
+        try:
+            _record_accept(edit, did, diff_sha256)
+        except Exception as exc:
+            failed.append(edit["id"])
+            print(f"{Colors.RED}#{edit['id']} not approved: receipt not recorded: "
+                  f"{type(exc).__name__}: {exc}{Colors.RESET}", file=sys.stderr)
+            continue
         edit["status"] = "approved"
         edit["approved_at"] = _now_z()
         edit["dispatch_id"] = did
-        edit["diff_sha256"] = hashlib.sha256(diff.encode("utf-8")).hexdigest()
+        edit["diff_sha256"] = diff_sha256
         approved.append((edit["id"], did))
 
     _save_pending(data)
