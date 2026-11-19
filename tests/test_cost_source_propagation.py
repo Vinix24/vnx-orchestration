@@ -135,10 +135,10 @@ def test_measured_free_run_keeps_zero_with_non_unavailable_source():
 
 # Red run: on head df74d588 this test fails. The emitter raised
 # SchemaViolation("invalid type: cost_usd (expected number)") under
-# VNX_SCHEMA_STRICT=1, and the converter booked the report as task_failed
+# the profile enforced, and the converter booked the report as task_failed
 # with a frontmatter_v1 violation and no cost on the receipt (OI-2194).
 def test_unavailable_price_report_passes_strict_schema_and_reaches_receipt(tmp_path, monkeypatch):
-    monkeypatch.setenv("VNX_SCHEMA_STRICT", "1")
+    monkeypatch.setenv("VNX_OVERRIDE_ENFORCEMENT_PROFILE", "enforced")
     cost, cost_source = provider_dispatch._compute_cost(*_UNPRICED, _BILLABLE_USAGE)
     fm = _frontmatter(*_UNPRICED, _BILLABLE_USAGE, cost, cost_source,
                       dispatch_id="20261020-kp-k1-r3-unpriced")
@@ -185,7 +185,7 @@ def test_unavailable_source_next_to_a_number_fails_schema():
 
 
 def test_measured_free_run_report_validates_and_receipt_keeps_zero(tmp_path, monkeypatch):
-    monkeypatch.setenv("VNX_SCHEMA_STRICT", "1")
+    monkeypatch.setenv("VNX_OVERRIDE_ENFORCEMENT_PROFILE", "enforced")
     token_usage = {"input": 100, "output": 50, "cache_hit": 0}
     cost, cost_source = provider_dispatch._compute_cost("local-gemma", "gemma-4b-local", token_usage)
     fm = _frontmatter("local-gemma", "gemma-4b-local", token_usage, cost, cost_source,
@@ -204,7 +204,7 @@ def test_no_usage_null_cost_is_named_and_validates(tmp_path, monkeypatch):
     The report still says why: ``unavailable:no_usage``, never a bare null and
     never 0.0.
     """
-    monkeypatch.setenv("VNX_SCHEMA_STRICT", "1")
+    monkeypatch.setenv("VNX_OVERRIDE_ENFORCEMENT_PROFILE", "enforced")
     usage = {"unavailable": True}
     cost, cost_source = provider_dispatch._compute_cost(*_UNPRICED, usage)
     assert (cost, cost_source) == (None, "")
@@ -251,7 +251,7 @@ def test_missing_cost_key_keeps_its_fail_closed_violation(tmp_path, monkeypatch)
 
 def _govern_frontmatter(tmp_path: Path, monkeypatch, receipt: dict, dispatch_id: str) -> dict:
     monkeypatch.setenv("VNX_SHARED_GOVERN", "1")
-    monkeypatch.setenv("VNX_SCHEMA_STRICT", "1")
+    monkeypatch.setenv("VNX_OVERRIDE_ENFORCEMENT_PROFILE", "enforced")
     data_dir = tmp_path / "data"
     state_dir = tmp_path / "state"
     (data_dir / "unified_reports").mkdir(parents=True)
