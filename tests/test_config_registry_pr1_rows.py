@@ -95,3 +95,19 @@ def test_enforcement_profile_refuses_unknown_value_and_needs_approval(conn):
 def test_terminal_provider_default_is_empty_and_comes_from_default(n):
     value, source = cr.resolve_with_source(f"VNX_T{n}_PROVIDER", "vnx-dev", use_default_resolver=False)
     assert (value, source) == ("", "default")
+
+
+MAIN_CANONICAL = {
+    "governance-enforcement-stack": "VNX_GOVERNANCE_ENFORCED",
+    "intelligence-self-learning-loop": "VNX_LEARNING_LOOP_ENABLED",
+    "headless-dispatch-routing": "VNX_HEADLESS_ROUTING",
+}
+
+
+def test_pr1_rows_leave_the_cockpit_canonical_flags_unchanged():
+    from vnx_cli.commands.subsystems import _canonical_flags
+
+    canonical = _canonical_flags(cr)
+    for subsystem, flag in MAIN_CANONICAL.items():
+        assert canonical.get(subsystem) == flag, subsystem
+    assert not set(ROWS) & set(canonical.values())

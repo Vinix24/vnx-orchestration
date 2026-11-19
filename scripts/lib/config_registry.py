@@ -100,6 +100,77 @@ def _e(key, type_, default, category, description, *, writable=True, approval=Fa
 # flag-BACKED subsystems; the flag-LESS kernel subsystems (dispatch-plan, phantom_guard, etc.) live
 # in CONFIG_REGISTRY_SUBSYSTEMS below so the two sets never collide on the same subsystem name.
 CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
+    # config-een-oppervlak PR-1 (ADR-087): rows for the keys the reader PRs move onto config_runtime.
+    # Placed first on purpose: _canonical_flags lets the last-inserted key per subsystem win, so these
+    # rows must stay before the existing master flags to leave the cockpit ledger unchanged.
+    # Behaviour-neutral: every default equals what the reader uses today and every reader still
+    # reads os.environ, so read_site_wired=False until its own PR. The scope of a key follows plan V2.1.
+    "VNX_ANALYZER_LLM": _e(
+        "VNX_ANALYZER_LLM", "string", "ollama-only", "intelligence",
+        "Conversation-analyzer LLM strategy: auto | ollama-only | claude-only | deepseek-harness. "
+        "Governs unrestricted sessions only.", scope="global", subsystem="intelligence-self-learning-loop", status="ACTIVATE", read_site_wired=False,
+        allowed_values=("auto", "ollama-only", "claude-only", "deepseek-harness")),
+    "VNX_ANALYZER_RESTRICTED_CLAUDE_CAP": _e(
+        "VNX_ANALYZER_RESTRICTED_CLAUDE_CAP", "integer", "", "intelligence",
+        "Nightly cap on restricted sessions sent to Claude. Empty means the reader's own default (20).",
+        scope="global", subsystem="intelligence-self-learning-loop", status="ACTIVATE", read_site_wired=False),
+    "VNX_OLLAMA_HOST": _e(
+        "VNX_OLLAMA_HOST", "string", "http://localhost:11434", "intelligence",
+        "Ollama base URL.", scope="global", subsystem="intelligence-self-learning-loop", status="ACTIVATE", read_site_wired=False),
+    "VNX_OLLAMA_MODEL": _e(
+        "VNX_OLLAMA_MODEL", "string", "qwen2.5-coder:14b", "intelligence",
+        "Ollama model of the conversation analyzer. The ollama adapter and the classifier provider "
+        "still carry other defaults of their own (PR-4a unifies them).",
+        scope="global", subsystem="intelligence-self-learning-loop", status="ACTIVATE", read_site_wired=False),
+    "VNX_DIGEST_EMAIL": _e(
+        "VNX_DIGEST_EMAIL", "string", "", "intelligence",
+        "Recipient of the nightly digest email; empty skips the email phase.",
+        scope="global", subsystem="intelligence-self-learning-loop", status="ACTIVATE", read_site_wired=False),
+    "VNX_SMTP_HOST": _e(
+        "VNX_SMTP_HOST", "string", "smtp.gmail.com", "intelligence",
+        "SMTP server of the digest email.", scope="global", subsystem="intelligence-self-learning-loop", status="ACTIVATE", read_site_wired=False),
+    "VNX_RECEIPT_CLASSIFIER_ENABLED": _e(
+        "VNX_RECEIPT_CLASSIFIER_ENABLED", "bool", "0", "intelligence",
+        "Receipt classifier opt-in.", subsystem="intelligence-self-learning-loop", status="ACTIVATE", read_site_wired=False),
+    "VNX_AUTO_REPORT": _e(
+        "VNX_AUTO_REPORT", "bool", "0", "dispatch",
+        "Auto-report Stop hook gate.", subsystem="headless-dispatch-routing", status="ACTIVATE", read_site_wired=False),
+    "VNX_ENFORCE_WORKER_PERMISSIONS": _e(
+        "VNX_ENFORCE_WORKER_PERMISSIONS", "bool", "0", "gate",
+        "Worker permission enforcement (off by default).", subsystem="governance-enforcement-stack", status="ACTIVATE", read_site_wired=False),
+    "VNX_PROVENANCE_ENFORCEMENT": _e(
+        "VNX_PROVENANCE_ENFORCEMENT", "bool", "0", "gate",
+        "Provenance (trace token) check: 0 warns, 1 blocks.", subsystem="governance-enforcement-stack", status="ACTIVATE", read_site_wired=False),
+    "VNX_PROVENANCE_LEGACY_ACCEPTED": _e(
+        "VNX_PROVENANCE_LEGACY_ACCEPTED", "bool", "1", "gate",
+        "1 accepts legacy trace-token formats, 0 only the preferred one.", subsystem="governance-enforcement-stack", status="ACTIVATE", read_site_wired=False),
+    "VNX_SLUG_ENFORCEMENT": _e(
+        "VNX_SLUG_ENFORCEMENT", "bool", "0", "gate",
+        "CI slug match: 0 warns, 1 blocks.", subsystem="governance-enforcement-stack", status="ACTIVATE", read_site_wired=False),
+    "VNX_QUEUE_POPUP_ENABLED": _e(
+        "VNX_QUEUE_POPUP_ENABLED", "bool", "1", "dispatch",
+        "Queue popup of the start and resume commands; 0 turns it off.", subsystem="headless-dispatch-routing", status="ACTIVATE", read_site_wired=False),
+    "VNX_T1_PROVIDER": _e(
+        "VNX_T1_PROVIDER", "string", "", "dispatch",
+        "Provider of terminal T1 (layer 2 of the worker pair, ADR-091). Empty: this layer delivers "
+        "nothing and the worker registry decides.", subsystem="headless-dispatch-routing", status="ACTIVATE", read_site_wired=False),
+    "VNX_T2_PROVIDER": _e(
+        "VNX_T2_PROVIDER", "string", "", "dispatch",
+        "Provider of terminal T2 (layer 2 of the worker pair, ADR-091). Empty: this layer delivers "
+        "nothing and the worker registry decides.", subsystem="headless-dispatch-routing", status="ACTIVATE", read_site_wired=False),
+    "VNX_T3_PROVIDER": _e(
+        "VNX_T3_PROVIDER", "string", "", "dispatch",
+        "Provider of terminal T3 (layer 2 of the worker pair, ADR-091). Empty: this layer delivers "
+        "nothing and the worker registry decides.", subsystem="headless-dispatch-routing", status="ACTIVATE", read_site_wired=False),
+    "VNX_ENFORCEMENT_PROFILE": _e(
+        "VNX_ENFORCEMENT_PROFILE", "string", "shadow", "gate",
+        "Enforcement profile: shadow (default) | enforced.", approval=True, subsystem="governance-enforcement-stack", status="ACTIVATE", read_site_wired=False,
+        allowed_values=("shadow", "enforced")),
+    "VNX_ACCOUNT_DIRS": _e(
+        "VNX_ACCOUNT_DIRS", "string", "[]", "dispatch",
+        "Claude account directories as a JSON list (ADR-090). The reader validates the content.",
+        scope="global", approval=True, subsystem="headless-dispatch-routing", status="ACTIVATE", read_site_wired=False),
+
     "VNX_SCOUT_PREPASS": _e(
         "VNX_SCOUT_PREPASS", "bool", "0", "intelligence",
         "Cheap-model scout recon pre-pass in the door (fail-open).",
@@ -770,74 +841,6 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         "set per project by the operator). An unknown value reads as off.",
         subsystem="agent-layout", status="SCOPE"),
 
-    # config-een-oppervlak PR-1 (ADR-087): rows for the keys the reader PRs move onto config_runtime.
-    # Behaviour-neutral: every default equals what the reader uses today and every reader still
-    # reads os.environ, so read_site_wired=False until its own PR. The scope of a key follows plan V2.1.
-    "VNX_ANALYZER_LLM": _e(
-        "VNX_ANALYZER_LLM", "string", "ollama-only", "intelligence",
-        "Conversation-analyzer LLM strategy: auto | ollama-only | claude-only | deepseek-harness. "
-        "Governs unrestricted sessions only.", scope="global", subsystem="intelligence-self-learning-loop", status="ACTIVATE", read_site_wired=False,
-        allowed_values=("auto", "ollama-only", "claude-only", "deepseek-harness")),
-    "VNX_ANALYZER_RESTRICTED_CLAUDE_CAP": _e(
-        "VNX_ANALYZER_RESTRICTED_CLAUDE_CAP", "integer", "", "intelligence",
-        "Nightly cap on restricted sessions sent to Claude. Empty means the reader's own default (20).",
-        scope="global", subsystem="intelligence-self-learning-loop", status="ACTIVATE", read_site_wired=False),
-    "VNX_OLLAMA_HOST": _e(
-        "VNX_OLLAMA_HOST", "string", "http://localhost:11434", "intelligence",
-        "Ollama base URL.", scope="global", subsystem="intelligence-self-learning-loop", status="ACTIVATE", read_site_wired=False),
-    "VNX_OLLAMA_MODEL": _e(
-        "VNX_OLLAMA_MODEL", "string", "qwen2.5-coder:14b", "intelligence",
-        "Ollama model of the conversation analyzer. The ollama adapter and the classifier provider "
-        "still carry other defaults of their own (PR-4a unifies them).",
-        scope="global", subsystem="intelligence-self-learning-loop", status="ACTIVATE", read_site_wired=False),
-    "VNX_DIGEST_EMAIL": _e(
-        "VNX_DIGEST_EMAIL", "string", "", "intelligence",
-        "Recipient of the nightly digest email; empty skips the email phase.",
-        scope="global", subsystem="intelligence-self-learning-loop", status="ACTIVATE", read_site_wired=False),
-    "VNX_SMTP_HOST": _e(
-        "VNX_SMTP_HOST", "string", "smtp.gmail.com", "intelligence",
-        "SMTP server of the digest email.", scope="global", subsystem="intelligence-self-learning-loop", status="ACTIVATE", read_site_wired=False),
-    "VNX_RECEIPT_CLASSIFIER_ENABLED": _e(
-        "VNX_RECEIPT_CLASSIFIER_ENABLED", "bool", "0", "intelligence",
-        "Receipt classifier opt-in.", subsystem="intelligence-self-learning-loop", status="ACTIVATE", read_site_wired=False),
-    "VNX_AUTO_REPORT": _e(
-        "VNX_AUTO_REPORT", "bool", "0", "dispatch",
-        "Auto-report Stop hook gate.", subsystem="headless-dispatch-routing", status="ACTIVATE", read_site_wired=False),
-    "VNX_ENFORCE_WORKER_PERMISSIONS": _e(
-        "VNX_ENFORCE_WORKER_PERMISSIONS", "bool", "0", "gate",
-        "Worker permission enforcement (off by default).", subsystem="governance-enforcement-stack", status="ACTIVATE", read_site_wired=False),
-    "VNX_PROVENANCE_ENFORCEMENT": _e(
-        "VNX_PROVENANCE_ENFORCEMENT", "bool", "0", "gate",
-        "Provenance (trace token) check: 0 warns, 1 blocks.", subsystem="governance-enforcement-stack", status="ACTIVATE", read_site_wired=False),
-    "VNX_PROVENANCE_LEGACY_ACCEPTED": _e(
-        "VNX_PROVENANCE_LEGACY_ACCEPTED", "bool", "1", "gate",
-        "1 accepts legacy trace-token formats, 0 only the preferred one.", subsystem="governance-enforcement-stack", status="ACTIVATE", read_site_wired=False),
-    "VNX_SLUG_ENFORCEMENT": _e(
-        "VNX_SLUG_ENFORCEMENT", "bool", "0", "gate",
-        "CI slug match: 0 warns, 1 blocks.", subsystem="governance-enforcement-stack", status="ACTIVATE", read_site_wired=False),
-    "VNX_QUEUE_POPUP_ENABLED": _e(
-        "VNX_QUEUE_POPUP_ENABLED", "bool", "1", "dispatch",
-        "Queue popup of the start and resume commands; 0 turns it off.", subsystem="headless-dispatch-routing", status="ACTIVATE", read_site_wired=False),
-    "VNX_T1_PROVIDER": _e(
-        "VNX_T1_PROVIDER", "string", "", "dispatch",
-        "Provider of terminal T1 (layer 2 of the worker pair, ADR-091). Empty: this layer delivers "
-        "nothing and the worker registry decides.", subsystem="headless-dispatch-routing", status="ACTIVATE", read_site_wired=False),
-    "VNX_T2_PROVIDER": _e(
-        "VNX_T2_PROVIDER", "string", "", "dispatch",
-        "Provider of terminal T2 (layer 2 of the worker pair, ADR-091). Empty: this layer delivers "
-        "nothing and the worker registry decides.", subsystem="headless-dispatch-routing", status="ACTIVATE", read_site_wired=False),
-    "VNX_T3_PROVIDER": _e(
-        "VNX_T3_PROVIDER", "string", "", "dispatch",
-        "Provider of terminal T3 (layer 2 of the worker pair, ADR-091). Empty: this layer delivers "
-        "nothing and the worker registry decides.", subsystem="headless-dispatch-routing", status="ACTIVATE", read_site_wired=False),
-    "VNX_ENFORCEMENT_PROFILE": _e(
-        "VNX_ENFORCEMENT_PROFILE", "string", "shadow", "gate",
-        "Enforcement profile: shadow (default) | enforced.", approval=True, subsystem="governance-enforcement-stack", status="ACTIVATE", read_site_wired=False,
-        allowed_values=("shadow", "enforced")),
-    "VNX_ACCOUNT_DIRS": _e(
-        "VNX_ACCOUNT_DIRS", "string", "[]", "dispatch",
-        "Claude account directories as a JSON list (ADR-090). The reader validates the content.",
-        scope="global", approval=True, subsystem="headless-dispatch-routing", status="ACTIVATE", read_site_wired=False),
 }
 
 # Flag-LESS subsystems from the cockpit ledger (docs/core/SUBSYSTEMS.md) — kernel/meta subsystems
