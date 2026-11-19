@@ -2845,8 +2845,9 @@ def _check_stop_conditions_verdict(
     if not dry_run:
         _persist_halt_file(state_dir, results, scoped_out, relevant_spec_providers, relevant_gates)
     summary = "; ".join(f"{r.check_id}: {r.message}" for r in blocking_triggered)
-    reason = (override_reason or "").strip()
-    _book_morning_pause(blocking_triggered, state_dir=state_dir, dispatch_id=dispatch_id, override_reason=reason, dry_run=dry_run)
+    _book_morning_pause(
+        blocking_triggered, state_dir=state_dir, dispatch_id=dispatch_id, dry_run=dry_run,
+        override_reason=(reason := (override_reason or "").strip()))
     if reason:
         logger.warning(
             "[dispatch_cli] AUDIT stop-conditions-override-applied triggered=%s reason=%s",
