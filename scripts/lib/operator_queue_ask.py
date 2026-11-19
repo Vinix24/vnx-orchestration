@@ -109,24 +109,46 @@ def _ask_pr(project_id: str, *, ref: str, ceiling: Any, reason: Any, now: Option
                        now=now, state_dir=state_dir)
     return line
 
-def answer(project_id: str, point_id: str, *, quote: str, vastgelegd_door: str, now: Optional[str] = None,
-           state_dir: Optional[Path] = None) -> Dict[str, Any]:
-    """Record Vincent's own words for a chat question or a ``pr:`` point: one ``answer`` line, nothing else
-    (decision 6, ADR-088 decision 6). A ``pr:`` point is refused once a higher revision of it exists."""
-    state = oq.read_state(project_id, state_dir=state_dir)
-    if state["status"] != "ok":
-        raise oq.QueueUnreadable(state["reason"], state["line"])
-    point = state["points"].get(point_id) or {}
+def _answer_refusal(points: Dict[str, Any], lines: List[Dict[str, Any]], point_id: str, quote: Any,
+                    grant: bool) -> Optional[str]:
+    """Why ``answer`` (``--grant`` when ``grant``) is refused on this ledger, or None; run before and under the lock."""
+    point = points.get(point_id) or {}
     ref = str(point.get("ref"))
-    newer = [p["revisie"] for p in _pr_points(state, ref) if p["revisie"] > point["revisie"]] if ref.startswith("pr:") else []
+    newer = [p["revisie"] for p in _pr_points({"points": points}, ref) if p["revisie"] > point["revisie"]] if ref.startswith("pr:") else []
+    mine = [ln for ln in lines if ln.get("point_id") == point_id]
+    shown = any(ln["kind"] == "presented" and ln["kanaal"] != "cli" for ln in mine)
     for failed, why in ((not point, "the point does not exist"), (point.get("state") != "open", "the point is closed"),
+                        (any(ln["kind"] == "answer" for ln in mine), "the point is already answered"),
+                        (grant and not ref.startswith("pr:"), "--grant needs a pr:<n> point"),
                         (not ref.startswith(("antwoord:", "pr:")), "only an antwoord: or pr: point is answered here; the source decides the others"),
                         (bool(newer), f"revision {max(newer or [0])} of {ref} replaces this point"),
-                        (not isinstance(quote, str) or not quote.strip() or len(quote) > MAX_QUOTE, f"the quote is empty or over {MAX_QUOTE} characters")):
+                        (not isinstance(quote, str) or not quote.strip() or len(quote) > MAX_QUOTE, f"the quote is empty or over {MAX_QUOTE} characters"),
+                        (grant and not shown, "--grant needs the point presented to the operator on a channel other than cli"),
+                        (grant and (point.get("ceiling") is None or point.get("reason") is None),
+                         "--grant needs a ceiling and a reason on the point")):
         if failed:
-            raise oq.QueueRefused("answer: " + why)
-    return oq.append_line(project_id, "answer", {"point_id": point_id, "citaat": quote,
-                                                 "vastgelegd_door": vastgelegd_door}, now=now, state_dir=state_dir)
+            return "answer: " + why
+    return None
+
+def answer(project_id: str, point_id: str, *, quote: str, vastgelegd_door: str, now: Optional[str] = None,
+           state_dir: Optional[Path] = None, grant: bool = False, env: Optional[Dict[str, str]] = None,
+           isatty: Optional[bool] = None) -> Dict[str, Any]:
+    """Record Vincent's own words for a chat question or a ``pr:`` point: one ``answer`` line, nothing else
+    (decision 6, ADR-088 decisions 5 and 6); ``grant`` puts the PR-size exception on it (``operator_queue_grant``).
+    Refused (QueueRefused, nothing written) on an answered point or once a higher ``pr:`` revision exists."""
+    if grant:
+        import operator_queue_grant as qg  # lazy: it imports this module
+        qg.check_actor(env, isatty)
+    lines = oq.read_lines(project_id, state_dir=state_dir)
+    why = _answer_refusal(oq._fold(lines), lines, point_id, quote, grant)
+    if why:
+        raise oq.QueueRefused(why)
+    stamp = now or oq._now()
+    fields = {"point_id": point_id, "citaat": quote, "vastgelegd_door": vastgelegd_door}
+    if grant:
+        fields["grant"] = qg.measure_grant(project_id, oq._fold(lines)[point_id], stamp)
+    return oq.append_line(project_id, "answer", fields, now=stamp, state_dir=state_dir,
+                          guard=lambda points, lns: _answer_refusal(points, lns, point_id, quote, grant))
 
 def _answer_ts(project_id: str, pid: str, state_dir: Optional[Path]) -> Optional[str]:
     return next((r["ts"] for r in oq.answers(project_id, state_dir=state_dir) if r.get("point_id") == pid), None)

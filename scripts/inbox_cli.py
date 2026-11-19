@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """vnx inbox [--json] [--present] | ask | answer | push-due.
-Exit 0 done, 2 refused (bad ref, secret, bad field; nothing written), 78 ledger unreadable."""
+Exit 0 done, 1 the ledger write failed (named on stderr), 2 refused (bad ref, secret, bad field, an
+``answer --grant`` refusal; nothing written), 78 ledger unreadable."""
 from __future__ import annotations
 
 import argparse
@@ -46,6 +47,8 @@ def _parser() -> argparse.ArgumentParser:
     ans.add_argument("point_id")
     ans.add_argument("--quote", required=True)
     ans.add_argument("--by", default="T0")
+    ans.add_argument("--grant", action="store_true",
+                     help="pr:<n> only, operator or t0: record the PR-size exception, measured now, on this answer")
     push = sub.add_parser("push-due", help="print the points a push is due for (JSON), after reserving them")
     push.add_argument("--sessie", dest="push_sessie", default="cli")
     for name, text in (("audit", "late points per project (ADR-076 decision 13)"),
@@ -181,8 +184,11 @@ def main(argv: list) -> int:
                           ceiling=args.ceiling, reason=args.reason)
             print(f"point {line['point_id']} opened" if line else "point already open: nothing written")
         elif args.cmd == "answer":
-            line = qa.answer(project_id, args.point_id, quote=args.quote, vastgelegd_door=args.by, state_dir=sdir)
+            line = qa.answer(project_id, args.point_id, quote=args.quote, vastgelegd_door=args.by, state_dir=sdir,
+                             grant=args.grant)
             print(f"answer recorded for {line['point_id']}; the reader closes the point")
+            if "grant" in line:
+                print("grant: ceiling {ceiling} over {lines} measured lines at {head_sha}".format(**line["grant"]))
             _sync_decision(args, project_id, sdir, line["point_id"])
         elif args.cmd == "push-due":
             due = inbox.push_due(project_id, sessie=args.push_sessie, state_dir=sdir, data_root=root)
@@ -196,6 +202,9 @@ def main(argv: list) -> int:
     except oq.QueueUnreadable as exc:
         print(f"vnx inbox: ledger unreadable: {exc}", file=sys.stderr)
         return 78
+    except OSError as exc:
+        print(f"vnx inbox: ledger write failed ({type(exc).__name__}: {exc}); the point stays open", file=sys.stderr)
+        return 1
     return 0
 
 
