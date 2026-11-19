@@ -12,7 +12,7 @@
 -- No down file: nothing before 0039 reads the table; on an empty table the way back is
 -- DROP TABLE deliverable_dependencies plus PRAGMA user_version = 38.
 --
--- Target DB: runtime_coordination.db · Tested by: tests/test_deliverable_dependencies.py
+-- Target DB: runtime_coordination.db · Tested by: tests/test_migration_0039_deliverable_dependencies.py
 
 CREATE TABLE IF NOT EXISTS deliverable_dependencies (
     project_id     TEXT NOT NULL,

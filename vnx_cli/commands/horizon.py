@@ -332,13 +332,6 @@ def _cmd_deliverable_withdraw(args: Any) -> int:
     return pc.cmd_deliverable_withdraw(args)
 
 
-def _cmd_deliverable_dependency(args: Any) -> int:
-    pc = _require_planning_cli()
-    _prep(args)
-    args.action = args.deliverable_verb  # the engine reads the verb from `action`
-    return pc.cmd_deliverable_dependency(args)
-
-
 _DELIVERABLE_DISPATCH: dict[str, Callable[[Any], int]] = {
     "add": _cmd_deliverable_add,
     "list": _cmd_deliverable_list,
@@ -347,9 +340,6 @@ _DELIVERABLE_DISPATCH: dict[str, Callable[[Any], int]] = {
     "set": _cmd_deliverable_set,
     "retarget": _cmd_deliverable_retarget,
     "withdraw": _cmd_deliverable_withdraw,
-    "depend": _cmd_deliverable_dependency,
-    "undepend": _cmd_deliverable_dependency,
-    "deps": _cmd_deliverable_dependency,
 }
 
 
