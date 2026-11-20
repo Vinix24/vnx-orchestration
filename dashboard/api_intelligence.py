@@ -33,6 +33,9 @@ _UTC = timezone.utc
 # ---------------------------------------------------------------------------
 
 _SCRIPTS_LIB_PATH = str(Path(__file__).resolve().parent.parent / "scripts" / "lib")
+if _SCRIPTS_LIB_PATH not in sys.path:
+    sys.path.insert(0, _SCRIPTS_LIB_PATH)
+from config_runtime import central_db_flag as _central_db_flag
 
 try:
     if _SCRIPTS_LIB_PATH not in sys.path:
@@ -208,7 +211,7 @@ def _intelligence_get_patterns(params: dict) -> dict:
 
     sd = _sd()
     db_path: Path = sd.DB_PATH
-    flag = os.environ.get("VNX_USE_CENTRAL_DB", "").strip()
+    flag = _central_db_flag()
     if flag not in ("", "1", "shadow"):
         _logger.warning("unknown VNX_USE_CENTRAL_DB value %r; falling back to legacy", flag)
         flag = ""
@@ -799,7 +802,7 @@ def _intelligence_get_confidence_trends(params: dict) -> dict:
     """
     sd = _sd()
     db_path: Path = sd.DB_PATH
-    flag = os.environ.get("VNX_USE_CENTRAL_DB", "").strip()
+    flag = _central_db_flag()
     if flag not in ("", "1", "shadow"):
         _logger.warning("unknown VNX_USE_CENTRAL_DB value %r; falling back to legacy", flag)
         flag = ""
@@ -996,7 +999,7 @@ def _intelligence_get_learning_summary() -> tuple[dict, int]:
 
     sd = _sd()
     db_path: Path = sd.DB_PATH
-    flag = os.environ.get("VNX_USE_CENTRAL_DB", "").strip()
+    flag = _central_db_flag()
     if flag not in ("", "1", "shadow"):
         _logger.warning("unknown VNX_USE_CENTRAL_DB value %r; falling back to legacy", flag)
         flag = ""

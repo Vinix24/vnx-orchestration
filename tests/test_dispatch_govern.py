@@ -408,9 +408,9 @@ def test_govern_authored_not_double_stamped(tmp_data, tmp_state, monkeypatch):
 
 
 def test_govern_authored_schema_strict_valid(tmp_data, tmp_state, monkeypatch):
-    """VNX_SCHEMA_STRICT=1: authored report frontmatter validates against the schema."""
+    """Profile enforced: authored report frontmatter validates against the schema."""
     monkeypatch.setenv("VNX_SHARED_GOVERN", "1")
-    monkeypatch.setenv("VNX_SCHEMA_STRICT", "1")
+    monkeypatch.setenv("VNX_OVERRIDE_ENFORCEMENT_PROFILE", "enforced")
 
     reports_dir = tmp_data / "unified_reports"
     reports_dir.mkdir(parents=True)
@@ -895,18 +895,18 @@ def test_govern_synthesized_pr_section_passes_validate_body(tmp_data, tmp_state)
 
 
 # ---------------------------------------------------------------------------
-# govern() — VNX_SCHEMA_STRICT=1: overwrite must succeed + frontmatter valid
+# govern() — profile enforced: overwrite must succeed + frontmatter valid
 # ---------------------------------------------------------------------------
 
 def test_govern_strict_mode_overwrites_stale_placeholder(tmp_data, tmp_state, monkeypatch):
-    """VNX_SCHEMA_STRICT=1: stale placeholder is replaced with schema-valid synthesized report.
+    """Profile enforced: stale placeholder is replaced with schema-valid synthesized report.
 
     Before the fix, govern() emitted a 5-field frontmatter that failed strict-mode
     schema validation (missing schema_version + 9 other required fields), causing
     SchemaViolation to abort the atomic write and leaving the stale placeholder on disk.
     """
     monkeypatch.setenv("VNX_SHARED_GOVERN", "1")
-    monkeypatch.setenv("VNX_SCHEMA_STRICT", "1")
+    monkeypatch.setenv("VNX_OVERRIDE_ENFORCEMENT_PROFILE", "enforced")
 
     reports_dir = tmp_data / "unified_reports"
     reports_dir.mkdir(parents=True)

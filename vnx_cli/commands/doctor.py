@@ -1208,6 +1208,17 @@ def _check_cost_ledger_files(data_root: Path) -> Check:
     return Check(name="cost-ledger", status=PASS, detail=f"known files: {files.summary()}")
 
 
+def _check_project_id_refusals(data_root: Path) -> Check:
+    """Refusals for an unresolved project id in the last 24 hours, per context (AG-1o)."""
+    try:
+        _engine.ensure_engine_on_path()
+        from project_id_refusals import format_section, project_id_refusal_section
+        status, detail = format_section(project_id_refusal_section(data_root))
+    except Exception as exc:
+        return Check(name="project-id-refusals", status=WARN, detail=f"could not read the counter: {exc}")
+    return Check(name="project-id-refusals", status=WARN if status == "warn" else PASS, detail=detail)
+
+
 def _check_launchd_agents(project_dir: Path) -> list[Check]:
     """FAIL per ``REQUIRED_PER_PROJECT_FAMILIES`` family missing this
     project's launchd instance — golf C, C3 (absence-is-loud, OI-1509/OI-1510).
@@ -1588,6 +1599,7 @@ def vnx_doctor(args) -> int:
     checks.append(_check_user_guard())
     checks.append(_check_ledger_health(data_root, _engine.read_marker_project_id(project_dir) or ""))
     checks.append(_check_cost_ledger_files(data_root))
+    checks.append(_check_project_id_refusals(data_root))
     checks.extend(_check_launchd_agents(project_dir))
     checks.extend(_check_installed_plist_placeholders())
     checks.append(_check_embedded_path_assumptions())

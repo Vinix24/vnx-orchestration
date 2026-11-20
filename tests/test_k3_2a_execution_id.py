@@ -178,7 +178,7 @@ def _gate_request(store, gate: str, pr: int, **over) -> dict:
 def _harness_runner(store, monkeypatch, report: str) -> GateRunner:
     """A GateRunner whose harness lane returns ``report`` without touching git or a provider."""
     monkeypatch.setattr(gate_runner, "fetch_branch", lambda *a, **k: None)
-    monkeypatch.setattr(gate_runner, "_capture_main_checkout_state", lambda root: {})
+    monkeypatch.setattr(gate_runner, "_capture_main_checkout_state", lambda root, *a, **k: {})
     monkeypatch.setattr(gate_runner, "_build_harness_lane_dispatcher", lambda *a, **k: (lambda *a2, **k2: report))
     return GateRunner(state_dir=store.state, reports_dir=store.reports)
 

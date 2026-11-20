@@ -449,7 +449,8 @@ def _validate_assembler_output(content: str, dispatch_id: str) -> None:
     try:
         validate_frontmatter(content)
     except SchemaViolation as exc:
-        if os.environ.get("VNX_SCHEMA_STRICT") == "1":
+        import enforcement_profile
+        if enforcement_profile.enforced():
             raise
         logger.warning(
             "report_assembler: schema violation (shadow-mode) dispatch=%s: %s",

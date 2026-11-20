@@ -393,7 +393,7 @@ def test_sales_copilot_shape_gains_only_ux_indexes(make_store):
     """The ux_<table>_pid indexes and the upsert's per-project key are the only
     new objects of 0034 (0035 adds review_cap_verdicts and its two indexes, 0036
     replaces the deliverables view, 0038 adds two columns to intelligence_injections and
-    idx_injection_window_arm); the other table SQL and the rows stay as they were."""
+    idx_injection_window_arm, 0039 adds deliverable_dependencies and its index); the other table SQL and the rows stay as they were."""
     db = make_store("sales-copilot", "sales-copilot")
     schema_before = _schema(db)
     rows_before = {t: _rows_hash(db, t, ["*"]) for t in SEVEN}
@@ -408,6 +408,8 @@ def test_sales_copilot_shape_gains_only_ux_indexes(make_store):
         ("table", "review_cap_verdicts"), ("index", "sqlite_autoindex_review_cap_verdicts_1"),
         ("index", "ux_review_cap_verdicts_one_verkleinen"),
         ("index", "idx_injection_window_arm"),
+        ("table", "deliverable_dependencies"), ("index", "sqlite_autoindex_deliverable_dependencies_1"),
+        ("index", "idx_deliverable_dependencies_on"),
     }
     assert set(schema_before) <= set(schema_after)
     for key, value in schema_before.items():

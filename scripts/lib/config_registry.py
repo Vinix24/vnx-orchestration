@@ -133,8 +133,9 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         "VNX_RECEIPT_CLASSIFIER_ENABLED", "bool", "0", "intelligence",
         "Receipt classifier opt-in.", subsystem="intelligence-self-learning-loop", status="ACTIVATE", read_site_wired=False),
     "VNX_AUTO_REPORT": _e(
-        "VNX_AUTO_REPORT", "bool", "0", "dispatch",
-        "Auto-report Stop hook gate.", subsystem="headless-dispatch-routing", status="ACTIVATE", read_site_wired=False),
+        "VNX_AUTO_REPORT", "bool", "1", "dispatch",
+        "Auto-report Stop hook gate. Default on: the value every fabric process saw while "
+        "vnx_paths.sh exported it.", subsystem="headless-dispatch-routing", status="ACTIVATE"),
     "VNX_ENFORCE_WORKER_PERMISSIONS": _e(
         "VNX_ENFORCE_WORKER_PERMISSIONS", "bool", "0", "gate",
         "Worker permission enforcement (off by default).", subsystem="governance-enforcement-stack", status="ACTIVATE", read_site_wired=False),
@@ -202,7 +203,7 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
     "VNX_HEADLESS_ROUTING": _e(
         "VNX_HEADLESS_ROUTING", "string", "0", "dispatch",
         "Headless dispatch routing mode.",
-        subsystem="headless-dispatch-routing", status="ACTIVATE"),
+        subsystem="headless-dispatch-routing", status="ACTIVATE", cockpit_canonical=True),
     "VNX_BUILDER_SETTING_SOURCES": _e(
         "VNX_BUILDER_SETTING_SOURCES", "string", "project,local", "dispatch",
         "Comma list passed as --setting-sources to headless claude builders (the claude_headless "

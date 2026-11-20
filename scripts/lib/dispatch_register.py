@@ -25,6 +25,7 @@ from typing import Optional
 log = logging.getLogger(__name__)
 
 import state_writer
+from config_runtime import central_db_flag as _central_db_flag
 from vnx_ids import PROJECT_ID_RE as _PROJECT_ID_RE
 
 try:
@@ -656,7 +657,7 @@ def _read_register_locked(path: Path) -> str:
     | shadow             | per-project authoritative; central read compared via metric 4 |
     | 1                  | central read only |
     """
-    flag = os.environ.get("VNX_USE_CENTRAL_DB", "")
+    flag = _central_db_flag()
     if flag == "":
         return _read_register_locked_per_project(path)
     project_id = _project_id_from_state_dir(path.parent) or os.environ.get("VNX_PROJECT_ID", "")
@@ -838,7 +839,7 @@ def _query_recent_dispatches(
     | shadow             | per-project authoritative; central compared via metric 1 + metric 4 |
     | 1                  | central read only (project_id-scoped) |
     """
-    flag = os.environ.get("VNX_USE_CENTRAL_DB", "")
+    flag = _central_db_flag()
     if flag == "":
         return _query_recent_dispatches_per_project(path, since_iso)
     if flag == "1":

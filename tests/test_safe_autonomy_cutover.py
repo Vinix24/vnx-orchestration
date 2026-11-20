@@ -80,19 +80,19 @@ def hooks_dir(tmp_path):
 # ---------------------------------------------------------------------------
 
 class TestPhaseDetection:
-    @patch.dict(os.environ, {"VNX_AUTONOMY_EVALUATION": "0", "VNX_PROVENANCE_ENFORCEMENT": "0"})
+    @patch.dict(os.environ, {"VNX_OVERRIDE_ENFORCEMENT_PROFILE": "shadow", "VNX_PROVENANCE_ENFORCEMENT": "0"})
     def test_shadow_phase(self):
         assert detect_current_phase() == PHASE_SHADOW
 
-    @patch.dict(os.environ, {"VNX_AUTONOMY_EVALUATION": "0", "VNX_PROVENANCE_ENFORCEMENT": "1"})
+    @patch.dict(os.environ, {"VNX_OVERRIDE_ENFORCEMENT_PROFILE": "shadow", "VNX_PROVENANCE_ENFORCEMENT": "1"})
     def test_provenance_only_phase(self):
         assert detect_current_phase() == PHASE_PROVENANCE_ONLY
 
-    @patch.dict(os.environ, {"VNX_AUTONOMY_EVALUATION": "1", "VNX_PROVENANCE_ENFORCEMENT": "1"})
+    @patch.dict(os.environ, {"VNX_OVERRIDE_ENFORCEMENT_PROFILE": "enforced", "VNX_PROVENANCE_ENFORCEMENT": "1"})
     def test_full_enforcement_phase(self):
         assert detect_current_phase() == PHASE_FULL_ENFORCEMENT
 
-    @patch.dict(os.environ, {"VNX_AUTONOMY_EVALUATION": "1", "VNX_PROVENANCE_ENFORCEMENT": "0"})
+    @patch.dict(os.environ, {"VNX_OVERRIDE_ENFORCEMENT_PROFILE": "enforced", "VNX_PROVENANCE_ENFORCEMENT": "0"})
     def test_unusual_state_defaults_to_shadow(self):
         # Autonomy without provenance is unusual, defaults to shadow
         assert detect_current_phase() == PHASE_SHADOW
@@ -160,7 +160,7 @@ class TestPrerequisites:
 # ---------------------------------------------------------------------------
 
 class TestCutoverStatus:
-    @patch.dict(os.environ, {"VNX_AUTONOMY_EVALUATION": "0", "VNX_PROVENANCE_ENFORCEMENT": "0"})
+    @patch.dict(os.environ, {"VNX_OVERRIDE_ENFORCEMENT_PROFILE": "shadow", "VNX_PROVENANCE_ENFORCEMENT": "0"})
     def test_status_in_shadow(self, conn):
         status = get_cutover_status(conn)
         assert status.phase == PHASE_SHADOW
@@ -227,7 +227,7 @@ class TestExecuteCutover:
     def test_cutover_returns_flag_instructions(self, conn):
         result = execute_cutover(conn, actor="t0", justification="test")
         flags = result["flag_instructions"]
-        assert flags["VNX_AUTONOMY_EVALUATION"] == "1"
+        assert flags["VNX_ENFORCEMENT_PROFILE"] == "enforced"
         assert flags["VNX_PROVENANCE_ENFORCEMENT"] == "1"
 
 
@@ -256,7 +256,7 @@ class TestRollback:
         ).fetchall()
         assert len(events) >= 1
 
-    @patch.dict(os.environ, {"VNX_AUTONOMY_EVALUATION": "1", "VNX_PROVENANCE_ENFORCEMENT": "1"})
+    @patch.dict(os.environ, {"VNX_OVERRIDE_ENFORCEMENT_PROFILE": "enforced", "VNX_PROVENANCE_ENFORCEMENT": "1"})
     def test_rollback_from_enforcement_warns(self, conn):
         result = execute_rollback(conn, actor="t0", justification="Emergency rollback")
         assert result.success
@@ -291,14 +291,14 @@ class TestAutonomyEnvelope:
 # ---------------------------------------------------------------------------
 
 class TestEnforcementIntegration:
-    @patch.dict(os.environ, {"VNX_AUTONOMY_EVALUATION": "1"})
+    @patch.dict(os.environ, {"VNX_OVERRIDE_ENFORCEMENT_PROFILE": "enforced"})
     def test_enforcement_blocks_forbidden_action(self, conn):
         from governance_evaluator import ForbiddenActionError, check_action
         with pytest.raises(ForbiddenActionError):
             check_action(conn, action="branch_merge", actor="runtime",
                 context={"dispatch_id": "enforce-test"})
 
-    @patch.dict(os.environ, {"VNX_AUTONOMY_EVALUATION": "0"})
+    @patch.dict(os.environ, {"VNX_OVERRIDE_ENFORCEMENT_PROFILE": "shadow"})
     def test_shadow_does_not_block(self, conn):
         from governance_evaluator import check_action
         result = check_action(conn, action="branch_merge", actor="runtime",

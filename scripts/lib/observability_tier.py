@@ -17,7 +17,6 @@ Governance defaults:
 from __future__ import annotations
 
 import logging
-import os
 from typing import Literal
 
 logger = logging.getLogger(__name__)
@@ -29,7 +28,7 @@ ObservabilityTier = Literal[1, 2, 3]
 ADAPTER_DEFAULT_TIERS: dict[str, int] = {
     "claude": 1,   # Live streaming via subprocess_adapter
     "codex": 1,    # Live streaming via StreamingDrainerMixin
-    "gemini": 1,   # Tier 1 when VNX_GEMINI_STREAM=1 (streaming); Tier 3 otherwise
+    "gemini": 1,   # Tier 1 with the streaming drainer; resolve_effective_tier() gives 3 (streaming off)
     "litellm": 1,  # Tier 1 when streaming SSE works; Tier 2 when only [DONE]
     "ollama": 2,   # Tier 2 baseline (text-only); Tier 1 when tool_use detected
     # kimi streams per-event content-block messages over stream-json with full
@@ -55,7 +54,7 @@ ADAPTER_DEFAULT_TIERS: dict[str, int] = {
 ADAPTER_MINIMUM_TIERS: dict[str, int] = {
     "claude": 1,
     "codex": 1,
-    "gemini": 3,   # Legacy path (VNX_GEMINI_STREAM=0) emits single synthetic result
+    "gemini": 3,   # Legacy path emits single synthetic result
     "litellm": 2,  # Fallback when streaming SSE unavailable
     "ollama": 2,   # Text-only baseline for non-tool-trained models
     # kimi has no final-only fallback path: _build_kimi_cmd always passes
@@ -85,7 +84,7 @@ GOVERNANCE_MIN_TIERS: dict[str, int] = {
 def resolve_effective_tier(provider: str, *, streaming_enabled: bool = True) -> int:
     """Return the effective observability tier for a provider given runtime config.
 
-    For Gemini: checks VNX_GEMINI_STREAM env var when streaming_enabled is True.
+    For Gemini: always Tier 3 (streaming is off).
     For all others: returns ADAPTER_DEFAULT_TIERS[provider]. An unregistered
     provider falls back to tier 2 (safe default) and logs a WARNING with the
     provider name so a missing entry is never silent.
@@ -93,8 +92,7 @@ def resolve_effective_tier(provider: str, *, streaming_enabled: bool = True) -> 
     provider = provider.lower()
 
     if provider == "gemini":
-        gemini_stream = os.environ.get("VNX_GEMINI_STREAM", "0").strip() == "1"
-        return 1 if gemini_stream else 3
+        return 3
 
     if provider == "litellm":
         # Tier 1 when streaming is enabled (default), Tier 2 otherwise

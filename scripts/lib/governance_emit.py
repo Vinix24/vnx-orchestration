@@ -55,6 +55,7 @@ from append_receipt_internals.validation import _validate_receipt
 from receipt_schema import DISPATCH_GOVERNED_EVENT_TYPE, RECEIPT_V2_EVENT_TYPE, ReceiptV2
 from report_body_contract import validate_body
 from token_harvest import CLAUDE_HARNESS_PROVIDERS
+import enforcement_profile
 
 logger = logging.getLogger(__name__)
 
@@ -617,7 +618,7 @@ def _validate_report_via_shell(report_path: Path, dispatch_id: str) -> None:
         )
         if result.returncode != 0:
             msg = (result.stdout or result.stderr or "unknown error").strip()
-            if os.environ.get("VNX_SCHEMA_STRICT") == "1":
+            if enforcement_profile.enforced():
                 raise ValueError(f"schema validation failed (shell): {msg}")
             logger.warning(
                 "governance_emit: schema violation via shell (shadow-mode) dispatch=%s: %s",
@@ -632,7 +633,7 @@ def _validate_report_frontmatter(content: str, dispatch_id: str, report_path: Op
 
     Uses Python jsonschema when available (UnifiedReportValidator class), falls
     back to shell wrapper (verify_report_schema.sh) when jsonschema is missing.
-    Shadow-mode by default (log violations). Raises only when VNX_SCHEMA_STRICT=1.
+    Shadow-mode by default (log violations). Raises only when the enforcement profile is ``enforced``.
     """
     try:
         from unified_report_schema import UnifiedReportValidator, SchemaViolation
@@ -647,7 +648,7 @@ def _validate_report_frontmatter(content: str, dispatch_id: str, report_path: Op
     result = validator.validate(content)
     if not result.valid:
         violation_msg = result.errors[0] if result.errors else "unknown schema violation"
-        if os.environ.get("VNX_SCHEMA_STRICT") == "1":
+        if enforcement_profile.enforced():
             raise SchemaViolation(violation_msg)
         logger.warning(
             "governance_emit: schema violation (shadow-mode) dispatch=%s: %s",
@@ -955,7 +956,7 @@ def emit_unified_report(
 
     When *frontmatter* is provided, prepends a YAML frontmatter block and
     validates against unified_report_v1 schema.  Default is shadow-mode (log
-    violations, do not raise).  Set VNX_SCHEMA_STRICT=1 to raise on violation.
+    violations, do not raise).  The enforcement profile ``enforced`` raises on violation.
 
     Raises:
         RuntimeError: write failed

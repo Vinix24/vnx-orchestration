@@ -141,6 +141,7 @@ def _prefer_lib_path() -> None:
 
 _prefer_lib_path()
 
+from config_runtime import central_db_flag as _central_db_flag  # noqa: E402
 from health_status import worst_status  # noqa: E402
 from event_outcome_semantics import COMPLETION_EVENT_TYPES  # noqa: E402
 from vnx_paths import ensure_env, project_id_from_state_dir  # noqa: E402
@@ -256,7 +257,7 @@ def _central_state_dir_for(state_dir: Path) -> Optional[Path]:
     - central state dir does not exist on filesystem
     - central == primary (P5 cutover guard — skip double-read)
     """
-    if os.environ.get("VNX_USE_CENTRAL_DB") != "1":
+    if _central_db_flag() != "1":
         return None
     if resolve_central_data_dir is None:
         return None
@@ -987,7 +988,7 @@ def _collect_open_items_central(project_id: str) -> Dict[str, Any]:
 
 
 def _collect_open_items(project_id: str, state_dir: Path) -> Dict[str, Any]:
-    flag = os.environ.get("VNX_USE_CENTRAL_DB", "")
+    flag = _central_db_flag()
     if flag == "":
         return _collect_open_items_per_project(project_id, state_dir)
     if flag == "1":
