@@ -54,6 +54,9 @@ _gate_config_lock = threading.Lock()
 # ---------------------------------------------------------------------------
 
 _OP_SCRIPTS_LIB = str(VNX_DIR / "scripts" / "lib")
+if _OP_SCRIPTS_LIB not in sys.path:
+    sys.path.insert(0, _OP_SCRIPTS_LIB)
+from config_runtime import central_db_flag as _central_db_flag
 
 try:
     if _OP_SCRIPTS_LIB not in sys.path:
@@ -1125,7 +1128,7 @@ def _operator_get_system_health() -> dict:
     """
     now = datetime.now(timezone.utc)
     components: dict[str, dict] = {}
-    flag = os.environ.get("VNX_USE_CENTRAL_DB", "").strip()
+    flag = _central_db_flag()
     if flag not in ("", "1", "shadow"):
         _logger.warning("unknown VNX_USE_CENTRAL_DB value %r; falling back to legacy", flag)
         flag = ""

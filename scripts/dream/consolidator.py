@@ -67,6 +67,7 @@ _PROBE_HEALTH_RUNNABLE: frozenset[str] = frozenset(
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 import vnx_paths as _vnx_paths
 import config_registry
+import config_runtime
 import content_class
 import provider_switch
 
@@ -781,7 +782,7 @@ def run_dream_cycle(
     # review_gate.approve_cycle does). A degraded probe is the very state this
     # cycle exists to fix, so skipping on it deadlocked the remedy. Everything
     # outside _PROBE_HEALTH_RUNNABLE (produces_crap, unknown, unrecognised) skips.
-    if os.environ.get("VNX_DREAM_SCHEDULER_ENABLED", "0") != "1":
+    if not config_runtime.get_bool("VNX_DREAM_SCHEDULER_ENABLED"):
         detail = "VNX_DREAM_SCHEDULER_ENABLED=0"
         return _emit_skipped(
             cycle_id, project_id, _data_root, "scheduler_disabled", detail,

@@ -338,8 +338,10 @@ def evaluate_activation_gate(state_dir: Optional[Path] = None) -> Dict[str, Any]
     Returns ``{"action": "dormant"|"degraded"|"run", "probe_health": str|None,
     "detail": str}``.
     """
-    learning_enabled = os.environ.get("VNX_LEARNING_LOOP_ENABLED", "0") == "1"
-    feedback_enabled = os.environ.get("VNX_INJECTION_FEEDBACK_ENABLED", "0") == "1"
+    import config_runtime
+
+    learning_enabled = config_runtime.get_bool("VNX_LEARNING_LOOP_ENABLED")
+    feedback_enabled = config_runtime.get_bool("VNX_INJECTION_FEEDBACK_ENABLED")
 
     if not learning_enabled:
         return {"action": "dormant", "probe_health": None, "detail": "VNX_LEARNING_LOOP_ENABLED=0"}
