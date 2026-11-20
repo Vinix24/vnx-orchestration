@@ -1,0 +1,1 @@
+- The morning agenda prints a decide command only where it exists: vnx deliverable promote, apply_suggested_edits.py accept, vnx dream review --approve, and vnx inbox answer for antwoord: and pr: points only; other decision refs show none (ochtendronde D2c)
