@@ -35,7 +35,7 @@ def test_the_real_workflow_is_the_aggregator_shape():
     assert a.job_running("Side-door exhaustiveness audit").name == "Profile A guards"
     assert a.job_running("Legacy path gate").name == "Profile A guards"
     timeouts = a.timeouts()
-    assert [timeouts.pop(f"profile-a-shard-{k}") for k in range(1, 5)] == [38] * 4
+    assert [timeouts.pop(f"profile-a-shard-{k}") for k in range(1, 5)] == [26] * 4
     assert timeouts.pop("profile-a-guards") == 15 and "80" in timeouts.pop("profile-a") and timeouts == {}
     assert shape.profile_a(_single()).shape == shape.SINGLE
 
@@ -47,7 +47,7 @@ def test_the_aggregator_fixture_is_the_aggregator_shape():
     assert [j.name for j in a.jobs_with_role(shape.ROLE_GUARDS)] == ["Profile A guards"]
     assert a.required_job.role == shape.ROLE_AGGREGATOR and a.required_job.job_id == "aggregate"
     assert sorted(a.required_job.needs) == ["guards", "shard-1", "shard-2", "shard-3", "shard-4"]
-    assert a.timeouts() == {"shard-1": 38, "shard-2": 38, "shard-3": 38, "shard-4": 38, "guards": 15, "aggregate": 80}
+    assert a.timeouts() == {"shard-1": 26, "shard-2": 26, "shard-3": 26, "shard-4": 26, "guards": 15, "aggregate": 80}
 
 
 def test_steps_are_one_list_tagged_with_their_job_and_found_by_name():

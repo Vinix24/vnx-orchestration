@@ -31,7 +31,7 @@ deliverable dismiss dispatch dispatch-agent dispatch-cleanup doctor done dream d
 gate-check gate-profile gate-reanchor grounding-shadow guard handoff help history horizon impact inbox init init-db
 insights install install-check install-git-hooks install-scheduler install-shell-helper install-validate
 intelligence-export intelligence-import issue jump learning link-pr list list-projects main-window mandate mark-ready
-memory merge-preflight migrate missing-reasons new new-worktree objective observe oi-close override package-check park
+memory merge-preflight migrate missing-reasons morning-round new new-worktree objective observe oi-close override package-check park
 patch-agent-files pause plan-gate pool pr-ready preflight promote providers ps publish queue queue-status
 quiesce-check reblock reconcile reconcile-review reconcile-streak recover regen-settings regen-worker-permissions
 register release remove-dependency reopen replay report restart restore resume retarget review revoke

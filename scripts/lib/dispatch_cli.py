@@ -1948,8 +1948,8 @@ def _raise_plan_scope_at_door(spec: DispatchSpec, *, state_dir: Path) -> None:
 
     Track plan-gate-alleen-voor-architectuur: a build dispatch on a light track
     whose paths fall in an architecture class (``plan_scope.dispatch_rule``:
-    schema, security, gate or merge logic, store resolution, a coding-strict
-    variant, or no paths at all) makes the track architecture and seeds
+    schema, security, gate or merge logic, store resolution, task_class
+    03_refactoring, a coding-strict variant, or no paths at all) makes the track architecture and seeds
     ``OI-PLAN-<track>`` in the same transaction. Any build dispatch on a stored
     architecture track that has no OI-PLAN row of any status seeds one. The
     door refuses nothing here: it writes the scope, seeds the blocker, prints
@@ -2406,7 +2406,7 @@ def _log_checkout_lag(spec: DispatchSpec, lag: Optional[int]) -> None:
 # ---------------------------------------------------------------------------
 
 # See point 3 above for the full reasoning and the CI evidence this is based on.
-# ochtendronde D1b (ADR-095): morning_pause is a state_dir-scoped project fact too, so it blocks.
+# morning round D1b (ADR-095): morning_pause is a state_dir-scoped project fact too, so it blocks.
 _STOP_CONDITIONS_BLOCKING_CHECK_IDS = frozenset({"provider_exhausted", "repeated_gate_failure_cause", "morning_pause"})
 
 # 6. OI-1694: a blocking-eligible TRIGGERED check still measures BROADLY (see
@@ -4598,7 +4598,7 @@ def run_dispatch(
         return _invariant_violation_exit(vspec, handover, exc, state_dir=state_dir)
     except LockWaitTimeout as exc:
         # Point 5 (golf 1A): serialize_lane's own lock-wait timeout — no free
-        # claude-lane slot within VNX_CLAUDE_LOCK_TIMEOUT_SECONDS (default
+        # claude-lane slot within _DEFAULT_TIMEOUT_SECONDS (a constant,
         # 4h, dispatch-20260904-lock-timeout-eindig). This is a caught-before
         # -spawn failure of the door's OWN serialization mechanism, not a
         # generic runtime error: route it to failed_delivery via the same

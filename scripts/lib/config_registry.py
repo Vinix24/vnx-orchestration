@@ -391,28 +391,28 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         "that is not a positive integer, or below VNX_PR_SIZE_WARN, falls back to 450 and is "
         "named in the gate detail.", approval=True,
         subsystem="governance-enforcement-stack", status="LIVE"),
-    # ADR-088 besluit 1, 3 and 8 (track pr-grootte-afgedwongen PG-0). No reader yet: the merge
-    # door reads these three from PG-1 on, so read_site_wired=False until then. The door reads
+    # ADR-088 besluit 1, 3 and 8 (track pr-grootte-afgedwongen PG-0). Read by the pr_size
+    # preflight of the merge door since PG-1d (pr_size_policy.read_policy). The door reads
     # the floor (layers=("project_config", "default")) and the full chain and compares; an override only tightens.
     "VNX_PR_SIZE_ENFORCE": _e(
         "VNX_PR_SIZE_ENFORCE", "string", "warn", "gate",
         "How the merge door treats a PR above the size limit: off (not measured), warn (a line "
-        "on the receipt) or refuse (NO-GO). Read by the door from PG-1 on (ADR-088); no reader "
-        "yet. The reader validates the value until the registry carries allowed values: any "
+        "on the receipt) or refuse (NO-GO). Read by the merge door's pr_size preflight (ADR-088, "
+        "PG-1d). The reader validates the value until the registry carries allowed values: any "
         "other value reads as refuse and is named.", approval=True,
-        subsystem="governance-enforcement-stack", status="ACTIVATE", read_site_wired=False),
+        subsystem="governance-enforcement-stack", status="ACTIVATE"),
     "VNX_PR_SIZE_HOLD_SECURITY": _e(
         "VNX_PR_SIZE_HOLD_SECURITY", "integer", "300", "gate",
         "PR size limit (lines added + removed) when one changed path is a security path "
-        "(ADR-088 besluit 8). Read by the merge door from PG-1 on; no reader yet.",
+        "(ADR-088 besluit 8). Read by the merge door's pr_size preflight (PG-1d).",
         approval=True,
-        subsystem="governance-enforcement-stack", status="ACTIVATE", read_site_wired=False),
+        subsystem="governance-enforcement-stack", status="ACTIVATE"),
     "VNX_SECURITY_PATHS": _e(
         "VNX_SECURITY_PATHS", "string", "", "gate",
         "Comma-separated path prefixes this project adds to the security set of the PR-size "
         "check. It only adds to the set built from code; a shorter list removes nothing. Read "
-        "by the merge door from PG-1 on (ADR-088 besluit 8); no reader yet.", approval=True,
-        subsystem="governance-enforcement-stack", status="ACTIVATE", read_site_wired=False),
+        "by the merge door's pr_size preflight (ADR-088 besluit 8, PG-1d).", approval=True,
+        subsystem="governance-enforcement-stack", status="ACTIVATE"),
     # The admission contract of the main window (ADR-073 besluit 3 and 6), read by
     # main_window.read_admission_config. Unset N is mode off: the gate records GO and the
     # merge behaviour is unchanged.
@@ -474,7 +474,8 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         "VNX_PLAN_GATE_ENFORCE", "enum", "advisory", "gate",
         "Plan-first-gate enforcement mode: off | advisory | required (ADR-030). "
         "Advisory warns when a track-linked dispatch has an unresolved plan gate; required blocks it. "
-        "The process env var overrides this; operator override VNX_OVERRIDE_PLAN_GATE=1. Default advisory.",
+        "A stored value beats the env var; VNX_OVERRIDE_PLAN_GATE_ENFORCE beats both. "
+        "Operator override VNX_OVERRIDE_PLAN_GATE=1. Default advisory.",
         approval=True,
         subsystem="plan-gate-panel", status="SCOPE"),
     "VNX_USE_CENTRAL_DB": _e(
@@ -558,17 +559,6 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         # Explicit canonical pick (OI-1385): preserves the pre-existing last-wins winner for
         # this subsystem's 5 entries. Not re-audited by this dispatch — out of scope.
         cockpit_canonical=True),
-    "VNX_PLAN_GATE_COMPLEX_ONLY": _e(
-        "VNX_PLAN_GATE_COMPLEX_ONLY", "bool", "0", "gate",
-        "Flag with no effect since P1: plan_gate_enforcement.complex_only_active() "
-        "still reads it, but nothing consults that result to change a plan-gate run "
-        "(the LIGHT/HEAVY scope-skip and its reduced 2-seat panel were removed). "
-        "Kept until P4 reworks the effectiveness probe.",
-        # subsystem matches the docs/core/SUBSYSTEMS.md seed row
-        # "plan-gate-task-class-scope" (framework-status-audit-and-cockpit PR-3
-        # fix) — distinct from "plan-gate-panel" (VNX_PLAN_GATE_ENFORCE), so the
-        # cockpit generator has exactly one canonical flag per ledger row.
-        subsystem="plan-gate-task-class-scope", status="SCOPE"),
     "VNX_HASH_CHAIN_REQUIRED": _e(
         "VNX_HASH_CHAIN_REQUIRED", "bool", "0", "gate",
         "Tamper-evident NDJSON hash-chain requirement (display metadata only; no read-site wired).",
@@ -665,8 +655,8 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         "N-slot concurrency cap for the claude-tmux serial lock "
         "(scripts/lib/dispatch_serialization.py). ACCOUNT-wide: shared with every "
         "other project and worktree running on the same Claude subscription, not "
-        "scoped to this project. The process env var still wins over this "
-        "config-store value as an explicit per-session override.",
+        "scoped to this project. A stored value beats the env var; "
+        "VNX_OVERRIDE_TMUX_MAX_CONCURRENT beats both.",
         approval=True,
         subsystem="claude-tmux-serialization", status="ACTIVATE"),
 
@@ -841,7 +831,7 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         ".vnx-agent-skills/) or on (the skills at the provider's native, discovered destination, "
         "set per project by the operator). An unknown value reads as off.",
         subsystem="agent-layout", status="SCOPE"),
-    # ochtendronde (ADR-095): morning_pause.py reads these through a getter; since D1b the door
+    # morning round (ADR-095): morning_pause.py reads these through a getter; since D1b the door
     # (stop_conditions.check_morning_pause) and pr_merge read them (morning_pause_gate.py), so all
     # four are wired. VNX_MORNING_PAUSE_ENABLED is the subsystem's canonical flag, inserted last
     # so the CLI's last-inserted rule agrees.

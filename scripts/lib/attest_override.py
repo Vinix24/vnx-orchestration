@@ -8,8 +8,8 @@ This is NOT a blanket skip.  An override is itself a signed attestation of
 type "override".  The ISO/ISAE principle: zero UNRECORDED deviations, but a
 RECORDED+SIGNED override is allowed.
 
-Override budget: N overrides per rolling 30-day window, configurable via
-VNX_ATTEST_OVERRIDE_BUDGET (default: 5).  The count is derived from the
+Override budget: DEFAULT_OVERRIDE_BUDGET (5) overrides per rolling 30-day
+window; there is no environment override.  The count is derived from the
 append-only NDJSON trail, never a mutable counter.
 
 Override record:  .vnx-attest/override-<content-key>.json
@@ -33,7 +33,6 @@ References:
 from __future__ import annotations
 
 import json
-import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -67,10 +66,7 @@ class OverrideRecord:
 
 
 def get_override_budget() -> int:
-    """Return the per-window override budget from VNX_ATTEST_OVERRIDE_BUDGET (default: 5)."""
-    raw = os.environ.get("VNX_ATTEST_OVERRIDE_BUDGET", "").strip()
-    if raw.isdigit():
-        return int(raw)
+    """Return the per-window override budget: the constant ``DEFAULT_OVERRIDE_BUDGET``."""
     return DEFAULT_OVERRIDE_BUDGET
 
 

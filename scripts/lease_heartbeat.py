@@ -7,12 +7,7 @@ their terminal lease and prevent TTL expiry. Each renewal must supply the
 correct generation number to prevent stale renewals from racing with a new
 lease acquisition on the same terminal (G-R3).
 
-Usage (environment variables):
-    VNX_TERMINAL_ID=T2 \
-    VNX_LEASE_GENERATION=3 \
-    python lease_heartbeat.py
-
-Command-line flags override environment variables:
+Usage:
     python lease_heartbeat.py --terminal T2 --generation 3 [--lease-seconds 600]
 
 Exit codes:
@@ -26,7 +21,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 from pathlib import Path
 
@@ -51,14 +45,14 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--terminal",
-        default=os.environ.get("VNX_TERMINAL_ID"),
-        help="Terminal ID (e.g. T1, T2, T3). Also: VNX_TERMINAL_ID env var.",
+        default=None,
+        help="Terminal ID (e.g. T1, T2, T3). Required.",
     )
     parser.add_argument(
         "--generation",
         type=int,
         default=None,
-        help="Lease generation to renew. Also: VNX_LEASE_GENERATION env var.",
+        help="Lease generation to renew. Required, a positive integer.",
     )
     parser.add_argument(
         "--lease-seconds",
@@ -85,12 +79,6 @@ def _parse_args() -> argparse.Namespace:
 def _resolve_generation(args: argparse.Namespace) -> int:
     if args.generation is not None:
         return args.generation
-    env_val = os.environ.get("VNX_LEASE_GENERATION")
-    if env_val:
-        try:
-            return int(env_val)
-        except ValueError:
-            pass
     return -1  # sentinel: validation below will catch this
 
 
@@ -99,13 +87,13 @@ def main() -> int:
 
     terminal_id = args.terminal
     if not terminal_id:
-        print("[ERROR] --terminal or VNX_TERMINAL_ID is required", file=sys.stderr)
+        print("[ERROR] --terminal is required", file=sys.stderr)
         return 3
 
     generation = _resolve_generation(args)
     if generation < 1:
         print(
-            "[ERROR] --generation or VNX_LEASE_GENERATION must be a positive integer",
+            "[ERROR] --generation must be a positive integer",
             file=sys.stderr,
         )
         return 3

@@ -1,5 +1,73 @@
 fingerprint	path	name	count	category	reason	group
 0e204a0d50fc8efa	bin/vnx	Vinix24	1	upstream_url	Clone URL that `vnx update` fetches; the upstream repository is Vinix24/vnx-orchestration by definition	
+3ed942ea083977e3	scripts/dream/consolidator.py	kimi-k3	1	model_catalog	Docstring: the consolidator takes kimi_cli.default_model from the catalogue, no model is hardcoded here	
+721ae45369e7cecb	scripts/forge/branch_protection.yaml	Vinix24	1	upstream_url	Comment in the shipped branch_protection.yaml naming the upstream repo whose protection it describes; no value is read from it	
+98f31f2f73fee809	scripts/gate_obligation_retire_backlog.py	Vinix24	1	upstream_url	Docstring quoting an earlier wrong owner_repo result for the upstream repo; prose, no behaviour	
+d5069bc35eef81db	scripts/gate_obligation_retire_backlog.py	Vinix24	1	upstream_url	Docstring quoting an earlier wrong owner_repo result for the upstream repo; prose, no behaviour	
+e5ab7a676dd36fe0	scripts/lib/append_receipt_internals/payload.py	kimi-k3	1	model_catalog	Docstring example of the model-name normalisation applied to receipts	
+8c270fd840a8d4da	scripts/lib/append_receipt_internals/validation.py	kimi-k3	1	model_catalog	Comment listing kimi-k3 as an example of a real model-name shape for the receipt model guard	
+094fe9de1ad79547	scripts/lib/deliberation_panel.py	kimi-k3	1	model_catalog	Default panel roster pairs provider kimi with its catalogue model; the roster composition itself is PR-10 (phase 2), the name is the catalogue key	
+5ebd553219efd4be	scripts/lib/dispatch_bridge.py	kimi-k3	1	model_catalog	Comment on the provider='' -> AUTO fix, quoting the old kimi-k3 pin rejection; prose	
+753ba93170bedf23	scripts/lib/dispatch_cli.py	kimi-k3	1	model_catalog	Comment on the door's pin handling (sonnet is the default; kimi-k3 stays an explicit per-dispatch choice); prose about the pin, no value is set	
+f35fe97e4ed6d870	scripts/lib/dispatch_cli.py	kimi-k3	1	model_catalog	Comment on the door's pin handling (sonnet is the default; kimi-k3 stays an explicit per-dispatch choice); prose about the pin, no value is set	
+6daf78be68d1c152	scripts/lib/dispatch_cli.py	kimi-k3	1	model_catalog	Comment on the door's pin handling (sonnet is the default; kimi-k3 stays an explicit per-dispatch choice); prose about the pin, no value is set	
+550c126447341332	scripts/lib/dispatch_cli.py	kimi-k3	1	model_catalog	Comment on the door's pin handling (sonnet is the default; kimi-k3 stays an explicit per-dispatch choice); prose about the pin, no value is set	
+b603cbbfaa326fe6	scripts/lib/dispatch_cli.py	kimi-k3	1	model_catalog	Comment on the door's pin handling (sonnet is the default; kimi-k3 stays an explicit per-dispatch choice); prose about the pin, no value is set	
+f825ee6ae0a69300	scripts/lib/dispatch_cli.py	kimi-k3	1	model_catalog	Comment on the door's pin handling (sonnet is the default; kimi-k3 stays an explicit per-dispatch choice); prose about the pin, no value is set	
+9e9f8f2127dba6ca	scripts/lib/dispatch_cli.py	kimi-k3	1	model_catalog	Comment on the door's pin handling (sonnet is the default; kimi-k3 stays an explicit per-dispatch choice); prose about the pin, no value is set	
+efc69096a0df164d	scripts/lib/dispatch_plan.py	kimi-k3	1	model_catalog	Comment on step D4: a spec naming kimi-k3 still hard-rejects on the claude lane; prose	
+650c25cb5164e680	scripts/lib/dispatch_prepare.py	kimi-k3	1	te_repareren	Signature default model='kimi-k3' makes every caller that omits the model a kimi-k3 dispatch	AG-2
+c2ec10395f8dd227	scripts/lib/dispatch_spec.py	kimi-k3	1	model_catalog	Known-model allowlist entry for spec validation; a catalogue member, not a default	
+839c01e0e9298ff0	scripts/lib/gate_lane_contract.py	kimi-k3	1	model_catalog	Comment listing model context windows including kimi-k3; catalogue prose	
+afbf9abfd0f8b16d	scripts/lib/gate_lane_rows.py	kimi-k3	1	model_catalog	kimi_gate lane row: the lane is defined as running kimi-k3 (model_env VNX_KIMI_GATE_MODEL overrides); lane catalogue, not a builder default	
+022215f7319e3289	scripts/lib/gate_lane_rows.py	kimi-k3	1	model_catalog	kimi_gate lane row: the lane is defined as running kimi-k3 (model_env VNX_KIMI_GATE_MODEL overrides); lane catalogue, not a builder default	
+61ae89f24612cb02	scripts/lib/governance_emit.py	kimi-k3	1	model_catalog	Comment example of the model-name normalisation (kimi-code/k3 -> kimi-k3)	
+1de7ee7e7ac06543	scripts/lib/harness_run_cost.py	kimi-k3	1	model_catalog	Docstring: the kimi model the lane's own resolver returns; prose	
+ac1df096c475d1e2	scripts/lib/headless_dispatch_daemon.py	kimi-k3	1	te_repareren	Comment documents the kimi-k3 code fallback that AG-2b removes; must be reworded with it	AG-2
+0106b7ac7f0f9f70	scripts/lib/headless_dispatch_daemon.py	kimi-k3	1	te_repareren	Headless daemon falls back to model kimi-k3 when VNX_DISPATCH_MODEL is unset, ignoring the registry default (sonnet)	AG-2
+d94485efe2ecf4c5	scripts/lib/kimi_wrapper.py	kimi-k3	1	model_catalog	DEFAULT_KIMI_MODEL of the kimi CLI wrapper: applies only when the kimi provider is chosen explicitly	
+933a21cbf3bc2404	scripts/lib/merge_target.py	Vinix24	1	upstream_url	Docstring quoting the incident in which the resolved slug was the upstream repo; prose, no behaviour	
+42e5fbf6e025e0e5	scripts/lib/permission_applied_check.py	claude-salesminds	1	te_repareren	USER_FILES maps slot 'sm' to the operator's ~/.claude-salesminds/settings.json in the applied-permission check	AG-3
+374fdf3fc913c2b5	scripts/lib/permission_events_sources.py	claude-salesminds	1	te_repareren	DEFAULT_ACCOUNT_CONFIGS fixes the operator's second account directory ~/.claude-salesminds as a config source of the permission-event reader	AG-3
+83bfba7c234cb7a8	scripts/lib/plan_gate_panel.py	kimi-k3	1	model_catalog	Default plan-gate seat for provider kimi names its catalogue model; the seat list itself is PR-10 (phase 2)	
+6ac4ff1b2a2f1376	scripts/lib/plan_gate_panel.py	Vinix24	1	issue_link	Link to upstream issue #225 (project-root resolution) in a refusal message or docstring; a link, not a default	
+b7f0e1247225626e	scripts/lib/pool_worker_runner.py	kimi-k3	1	te_repareren	Pool runner falls back to model kimi-k3 when the bundle and VNX_DISPATCH_MODEL name none (the provider fallback is the separate `or "kimi"` at :285-288)	AG-2
+206704a85501cfa3	scripts/lib/project_root.py	Vinix24	1	issue_link	Link to upstream issue #225 (project-root resolution) in a refusal message or docstring; a link, not a default	
+c2e1ae40604dbede	scripts/lib/project_root.py	Vinix24	1	issue_link	Link to upstream issue #225 (project-root resolution) in a refusal message or docstring; a link, not a default	
+6ac4ff1b2a2f1376	scripts/lib/project_root.py	Vinix24	1	issue_link	Link to upstream issue #225 (project-root resolution) in a refusal message or docstring; a link, not a default	
+82f83a011df2e88a	scripts/lib/provider_dispatch.py	kimi-k3	1	model_catalog	kimi provider lane text: price-table incident prose or the kimi-only fallback when the registry is unreadable; applies only when provider kimi is chosen	
+40e4e04ac380b37d	scripts/lib/provider_dispatch.py	kimi-k3	1	model_catalog	kimi provider lane text: price-table incident prose or the kimi-only fallback when the registry is unreadable; applies only when provider kimi is chosen	
+daf8489caca50352	scripts/lib/provider_dispatch.py	kimi-k3	1	model_catalog	kimi provider lane text: price-table incident prose or the kimi-only fallback when the registry is unreadable; applies only when provider kimi is chosen	
+7f51c99f7c30a5e7	scripts/lib/provider_dispatch.py	kimi-k3	1	model_catalog	kimi provider lane text: price-table incident prose or the kimi-only fallback when the registry is unreadable; applies only when provider kimi is chosen	
+cf86b0111453c4d8	scripts/lib/provider_dispatch.py	kimi-k3	1	model_catalog	kimi provider lane text: price-table incident prose or the kimi-only fallback when the registry is unreadable; applies only when provider kimi is chosen	
+a7dd8ba4f3615323	scripts/lib/provider_spawns/harness_config_dir.py	claude-salesminds	1	te_repareren	Docstring names ~/.claude-salesminds as the operator's alternative config dir; reword with the ADR-A account list	AG-3
+b5cdac9b25a60f7e	scripts/lib/providers/model_normalizer.py	kimi-k3	1	model_catalog	Docstring example of a normalised model name; the normaliser maps catalogue keys, kimi-k3 is an example	
+5d822395cf4a8853	scripts/lib/providers/model_normalizer.py	kimi-k3	1	model_catalog	Docstring example of a normalised model name; the normaliser maps catalogue keys, kimi-k3 is an example	
+7f13fd4f78f2f2c9	scripts/lib/providers/provider_constraints.yaml	kimi-k3	1	model_catalog	Comment in provider_constraints.yaml explaining why kimi-k3 is no longer the pin default; prose about the model	
+207fde7a21a2d87d	scripts/lib/providers/provider_constraints.yaml	kimi-k3	1	model_catalog	Comment in provider_constraints.yaml explaining why kimi-k3 is no longer the pin default; prose about the model	
+6f0b61280b1696c6	scripts/lib/providers/provider_registry.py	kimi-k3	1	model_catalog	Comment on registry key resolution using kimi-k3 as the example catalogue entry	
+265734b84d37be88	scripts/lib/providers/provider_registry.py	kimi-k3	1	model_catalog	Comment on registry key resolution using kimi-k3 as the example catalogue entry	
+6e4292cdc2b09592	scripts/lib/providers/smart_router/tier_routing.py	kimi-k3	1	model_catalog	Comment naming kimi-k3 as a dispatchable catalogue tier outside escalation_order; describes the catalogue	
+ee03d91b2e95ba71	scripts/lib/providers/smart_router/tier_routing.py	kimi-k3	1	model_catalog	Comment naming kimi-k3 as a dispatchable catalogue tier outside escalation_order; describes the catalogue	
+29a59516438e1e69	scripts/lib/providers/wave7_models.yaml	kimi-k3	1	model_catalog	Model catalogue (wave7_models.yaml): kimi-k3 is data here (provider kimi_cli default_model, tier map, price); a catalogue entry, not a builder default	
+021f5210c701d438	scripts/lib/providers/wave7_models.yaml	kimi-k3	2	model_catalog	Model catalogue (wave7_models.yaml): kimi-k3 is data here (provider kimi_cli default_model, tier map, price); a catalogue entry, not a builder default	
+786b4a3b8cdadd36	scripts/lib/providers/wave7_models.yaml	kimi-k3	1	model_catalog	Model catalogue (wave7_models.yaml): kimi-k3 is data here (provider kimi_cli default_model, tier map, price); a catalogue entry, not a builder default	
+be0727339c98edbd	scripts/lib/providers/wave7_models.yaml	kimi-k3	1	model_catalog	Model catalogue (wave7_models.yaml): kimi-k3 is data here (provider kimi_cli default_model, tier map, price); a catalogue entry, not a builder default	
+eeedf5a50fd42ef2	scripts/lib/providers/wave7_models.yaml	kimi-k3	1	model_catalog	Model catalogue (wave7_models.yaml): kimi-k3 is data here (provider kimi_cli default_model, tier map, price); a catalogue entry, not a builder default	
+01ede07d60f8c296	scripts/lib/providers/wave7_models.yaml	kimi-k3	1	model_catalog	Model catalogue (wave7_models.yaml): kimi-k3 is data here (provider kimi_cli default_model, tier map, price); a catalogue entry, not a builder default	
+ba5a05809e842665	scripts/lib/providers/wave7_models.yaml	kimi-k3	1	model_catalog	Model catalogue (wave7_models.yaml): kimi-k3 is data here (provider kimi_cli default_model, tier map, price); a catalogue entry, not a builder default	
+869b0ba6d9fffd5b	scripts/lib/providers/wave7_models.yaml	kimi-k3	1	model_catalog	Model catalogue (wave7_models.yaml): kimi-k3 is data here (provider kimi_cli default_model, tier map, price); a catalogue entry, not a builder default	
+3d7bc01e1225de52	scripts/lib/providers/wave7_models.yaml	kimi-k3	3	model_catalog	Model catalogue (wave7_models.yaml): kimi-k3 is data here (provider kimi_cli default_model, tier map, price); a catalogue entry, not a builder default	
+7470363e627535f2	scripts/lib/providers/wave7_models.yaml	kimi-k3	1	model_catalog	Model catalogue (wave7_models.yaml): kimi-k3 is data here (provider kimi_cli default_model, tier map, price); a catalogue entry, not a builder default	
+344f895c361a8779	scripts/lib/report_to_receipt_converter.py	kimi-k3	1	model_catalog	Docstring listing the model strings seen in historical reports	
+745ecd51eda5700c	scripts/lib/subprocess_dispatch.py	kimi-k3	1	model_catalog	Comment on the fail-loud guard against `claude --model kimi-k3`; prose	
+6ac4ff1b2a2f1376	scripts/lib/vnx_paths.py	Vinix24	1	issue_link	Link to upstream issue #225 (project-root resolution) in a refusal message or docstring; a link, not a default	
+05835688f33a20f8	scripts/lib/vnx_resolve_root.sh	Vinix24	1	issue_link	Link to upstream issue #225 (project-root resolution) in a refusal message or docstring; a link, not a default	
+d1a96d68f101b552	scripts/lib/vnx_start_runtime.py	kimi-k3	1	te_repareren	T1/T2 start without VNX_T{n}_MODEL default to provider kimi and model kimi-k3 in code instead of the worker registry	AG-2
+a4a9d03cf2530126	scripts/lib/vnx_start_runtime.py	kimi-k3	1	te_repareren	T1/T2 start without VNX_T{n}_MODEL default to provider kimi and model kimi-k3 in code instead of the worker registry	AG-2
+697d82f91fbb570d	scripts/report_parser.py	kimi-k3	1	model_catalog	Comment/example of model-name shapes the report parser accepts	
+4ac9d261116567af	scripts/report_parser.py	kimi-k3	1	model_catalog	Comment/example of model-name shapes the report parser accepts	
+0c84f49590acbeb9	vnx_cli/commands/update.py	Vinix24	1	upstream_url	pip-side twin of bin/vnx VNX_ORIGIN_URL: the upstream remote `vnx update` pulls from	
 16cf4ecb9ca62883	schemas/migrations/0010_add_project_id.sql	vnx-dev	1	frozen_migration	0010_add_project_id.sql: project_id DEFAULT 'vnx-dev' on pattern_usage: QI table; run_qi_three_phase_migration drops it for a non-vnx-dev store (measured: no project_id default on a fresh QI db)	
 1ac7c30790101c0d	schemas/migrations/0010_add_project_id.sql	vnx-dev	1	frozen_migration	0010_add_project_id.sql: project_id DEFAULT 'vnx-dev' on intelligence_injections: replaced by the owning project at apply time (measured default on a fresh store: the resolved id)	
 28d16afbd4232cef	schemas/migrations/0010_add_project_id.sql	vnx-dev	1	frozen_migration	0010_add_project_id.sql: project_id DEFAULT 'vnx-dev' on prevention_rules: QI table; run_qi_three_phase_migration drops it for a non-vnx-dev store (measured: no project_id default on a fresh QI db)	
@@ -76,66 +144,34 @@ d94f52d9499667e2	scripts/ci/test_exclusions.txt	vnx-dev	1	legacy_tenant_reader	C
 f0fe2fe1c4e5f186	scripts/ci/test_exclusions.txt	vnx-dev	1	legacy_tenant_reader	Comment quoting a measured ADR-007 init-backfill conflict (env value) for an excluded test; prose in a CI list	
 633705d1f8f11068	scripts/conversation_analyzer/runner.py	vnx-dev	1	legacy_tenant_reader	Comment or docstring stating that this path refuses to default to vnx-dev (ADR-007); prose, no behaviour	
 74da2524e00d01ad	scripts/crash_recovery_sweep.py	vnx-dev	1	te_repareren	CLI --project-id default is env or vnx-dev	AG-1
-3ed942ea083977e3	scripts/dream/consolidator.py	kimi-k3	1	model_catalog	Docstring: the consolidator takes kimi_cli.default_model from the catalogue, no model is hardcoded here	
 3510281b6cdf3022	scripts/fleet_role_drift.py	vnx-dev	1	te_repareren	Fleet role drift takes the canon source from the registry entry named vnx-dev	AG-5
-721ae45369e7cecb	scripts/forge/branch_protection.yaml	Vinix24	1	upstream_url	Comment in the shipped branch_protection.yaml naming the upstream repo whose protection it describes; no value is read from it	
-98f31f2f73fee809	scripts/gate_obligation_retire_backlog.py	Vinix24	1	upstream_url	Docstring quoting an earlier wrong owner_repo result for the upstream repo; prose, no behaviour	
-d5069bc35eef81db	scripts/gate_obligation_retire_backlog.py	Vinix24	1	upstream_url	Docstring quoting an earlier wrong owner_repo result for the upstream repo; prose, no behaviour	
 1deff95b46e74135	scripts/hooks/vnx_hook_shim.sh	vnx-dev	1	te_repareren	Hook shim prefers the in-repo hook scripts only for the registry entry whose project_id is vnx-dev, i.e. the operator's fabric checkout	AG-5
 ceba80628ecc8347	scripts/hooks/vnx_hook_shim.sh	vnx-dev	1	te_repareren	Hook shim prefers the in-repo hook scripts only for the registry entry whose project_id is vnx-dev, i.e. the operator's fabric checkout	AG-5
 398eb9c02fa29d4d	scripts/index_adrs.py	vnx-dev	1	legacy_tenant_reader	Comment or docstring stating that this path refuses to default to vnx-dev (ADR-007); prose, no behaviour	
 0005beeca958ef5a	scripts/intel_injection_join.py	vnx-dev	1	te_repareren	Join script hardcodes the operator's state dir ~/.vnx-data/vnx-dev/state	AG-1
 2a4474ace24708c1	scripts/intelligence_backfill.py	vnx-dev	1	legacy_tenant_reader	Comment or docstring stating that this path refuses to default to vnx-dev (ADR-007); prose, no behaviour	
-e5ab7a676dd36fe0	scripts/lib/append_receipt_internals/payload.py	kimi-k3	1	model_catalog	Docstring example of the model-name normalisation applied to receipts	
-8c270fd840a8d4da	scripts/lib/append_receipt_internals/validation.py	kimi-k3	1	model_catalog	Comment listing kimi-k3 as an example of a real model-name shape for the receipt model guard	
 53ccc8dcb6f37c81	scripts/lib/crash_recovery_sweep.py	vnx-dev	1	te_repareren	Library signature default project_id='vnx-dev' for the sweep	AG-1
-094fe9de1ad79547	scripts/lib/deliberation_panel.py	kimi-k3	1	model_catalog	Default panel roster pairs provider kimi with its catalogue model; the roster composition itself is PR-10 (phase 2), the name is the catalogue key	
-5ebd553219efd4be	scripts/lib/dispatch_bridge.py	kimi-k3	1	model_catalog	Comment on the provider='' -> AUTO fix, quoting the old kimi-k3 pin rejection; prose	
-550c126447341332	scripts/lib/dispatch_cli.py	kimi-k3	1	model_catalog	Comment on the door's pin handling (sonnet is the default; kimi-k3 stays an explicit per-dispatch choice); prose about the pin, no value is set	
 6342078068775165	scripts/lib/dispatch_cli.py	vnx-dev	1	te_repareren	_resolve_data_dir resolves the store of ~/.vnx-data/<pid> with a vnx-dev fallback when neither argument nor env names a project	AG-1
-6daf78be68d1c152	scripts/lib/dispatch_cli.py	kimi-k3	1	model_catalog	Comment on the door's pin handling (sonnet is the default; kimi-k3 stays an explicit per-dispatch choice); prose about the pin, no value is set	
-753ba93170bedf23	scripts/lib/dispatch_cli.py	kimi-k3	1	model_catalog	Comment on the door's pin handling (sonnet is the default; kimi-k3 stays an explicit per-dispatch choice); prose about the pin, no value is set	
 7b3abb4e9f671577	scripts/lib/dispatch_cli.py	vnx-dev	1	legacy_tenant_reader	Comment or docstring stating that this path refuses to default to vnx-dev (ADR-007); prose, no behaviour	
-9e9f8f2127dba6ca	scripts/lib/dispatch_cli.py	kimi-k3	1	model_catalog	Comment on the door's pin handling (sonnet is the default; kimi-k3 stays an explicit per-dispatch choice); prose about the pin, no value is set	
-b603cbbfaa326fe6	scripts/lib/dispatch_cli.py	kimi-k3	1	model_catalog	Comment on the door's pin handling (sonnet is the default; kimi-k3 stays an explicit per-dispatch choice); prose about the pin, no value is set	
-f35fe97e4ed6d870	scripts/lib/dispatch_cli.py	kimi-k3	1	model_catalog	Comment on the door's pin handling (sonnet is the default; kimi-k3 stays an explicit per-dispatch choice); prose about the pin, no value is set	
-f825ee6ae0a69300	scripts/lib/dispatch_cli.py	kimi-k3	1	model_catalog	Comment on the door's pin handling (sonnet is the default; kimi-k3 stays an explicit per-dispatch choice); prose about the pin, no value is set	
 8e19c3fa19c9a1e6	scripts/lib/dispatch_metadata_db.py	vnx-dev	1	legacy_tenant_reader	Comment or docstring stating that this path refuses to default to vnx-dev (ADR-007); prose, no behaviour	
 92f1bed2af0d0324	scripts/lib/dispatch_outcome_classifier.py	vnx-dev	1	legacy_tenant_reader	Legacy receipts without a project are read as the legacy default project (_LEGACY_RECEIPT_PROJECT_ID)	
 c86ca0e98b02e330	scripts/lib/dispatch_outcome_classifier.py	vnx-dev	1	legacy_tenant_reader	Legacy receipts without a project are read as the legacy default project (_LEGACY_RECEIPT_PROJECT_ID)	
-efc69096a0df164d	scripts/lib/dispatch_plan.py	kimi-k3	1	model_catalog	Comment on step D4: a spec naming kimi-k3 still hard-rejects on the claude lane; prose	
-650c25cb5164e680	scripts/lib/dispatch_prepare.py	kimi-k3	1	te_repareren	Signature default model='kimi-k3' makes every caller that omits the model a kimi-k3 dispatch	AG-2
 b8d60e8524cf7180	scripts/lib/dispatch_project_guard.sh	vnx-dev	1	te_repareren	Doc line of vnx_dispatch_resolve_project_id whose real default is ${1:-vnx-dev} at :38 (missed by the quoted grep) used by dispatcher_minimal.sh:95	AG-1
 5c8a1189488b913a	scripts/lib/dispatch_spec.py	vnx-dev	1	legacy_tenant_reader	Comment or docstring stating that this path refuses to default to vnx-dev (ADR-007); prose, no behaviour	
-c2ec10395f8dd227	scripts/lib/dispatch_spec.py	kimi-k3	1	model_catalog	Known-model allowlist entry for spec validation; a catalogue member, not a default	
 a75f1268bd5bc9a6	scripts/lib/gate_findings_bridge.py	vnx-dev	1	legacy_tenant_reader	Comment or docstring stating that this path refuses to default to vnx-dev (ADR-007); prose, no behaviour	
-839c01e0e9298ff0	scripts/lib/gate_lane_contract.py	kimi-k3	1	model_catalog	Comment listing model context windows including kimi-k3; catalogue prose	
-022215f7319e3289	scripts/lib/gate_lane_rows.py	kimi-k3	1	model_catalog	kimi_gate lane row: the lane is defined as running kimi-k3 (model_env VNX_KIMI_GATE_MODEL overrides); lane catalogue, not a builder default	
-afbf9abfd0f8b16d	scripts/lib/gate_lane_rows.py	kimi-k3	1	model_catalog	kimi_gate lane row: the lane is defined as running kimi-k3 (model_env VNX_KIMI_GATE_MODEL overrides); lane catalogue, not a builder default	
-61ae89f24612cb02	scripts/lib/governance_emit.py	kimi-k3	1	model_catalog	Comment example of the model-name normalisation (kimi-code/k3 -> kimi-k3)	
-1de7ee7e7ac06543	scripts/lib/harness_run_cost.py	kimi-k3	1	model_catalog	Docstring: the kimi model the lane's own resolver returns; prose	
 b513d5b3731c55b7	scripts/lib/harness_run_cost.py	vnx-dev	1	te_repareren	ledger_project_id falls back to vnx-dev when neither the store nor env names a tenant (stamps the cost row)	AG-1
-0106b7ac7f0f9f70	scripts/lib/headless_dispatch_daemon.py	kimi-k3	1	te_repareren	Headless daemon falls back to model kimi-k3 when VNX_DISPATCH_MODEL is unset, ignoring the registry default (sonnet)	AG-2
-ac1df096c475d1e2	scripts/lib/headless_dispatch_daemon.py	kimi-k3	1	te_repareren	Comment documents the kimi-k3 code fallback that AG-2b removes; must be reworded with it	AG-2
 afa63c3cb59cdb1b	scripts/lib/hook_coverage.py	vnx-dev	1	te_repareren	Hook coverage identifies the fabric source repo by the literal project id vnx-dev	AG-5
 92e2fa78e8d47aae	scripts/lib/injection_effectiveness_probe.py	vnx-dev	1	te_repareren	Probe reads its project from env with a vnx-dev fallback	AG-1
 ac8222ca4f054c1a	scripts/lib/intelligence_injection.py	vnx-dev	1	te_repareren	Injection falls back to _pid='vnx-dev' when the dispatch context has no project	AG-1
-d94485efe2ecf4c5	scripts/lib/kimi_wrapper.py	kimi-k3	1	model_catalog	DEFAULT_KIMI_MODEL of the kimi CLI wrapper: applies only when the kimi provider is chosen explicitly	
-933a21cbf3bc2404	scripts/lib/merge_target.py	Vinix24	1	upstream_url	Docstring quoting the incident in which the resolved slug was the upstream repo; prose, no behaviour	
 1c950cc09685c545	scripts/lib/migrate_schema.py	vnx-dev	1	legacy_tenant_reader	Comment on preserving the original DEFAULT clause (e.g. 'vnx-dev') when rebuilding a table	
 36388c51ffa330d5	scripts/lib/migration_inventory.py	vnx-dev	1	legacy_tenant_reader	Docstring describing the legacy column default the inventory looks for	
 b546d9907a58fde8	scripts/lib/migrations/apply_0015.py	vnx-dev	1	frozen_migration	Runner of a frozen numbered migration: it substitutes or references the file's vnx-dev placeholder; the runner resolves the owning project at apply time	
 af9e0cf7532f60c7	scripts/lib/migrations/apply_0017.py	vnx-dev	1	frozen_migration	Runner of a frozen numbered migration: it substitutes or references the file's vnx-dev placeholder; the runner resolves the owning project at apply time	
 eae6031e02467c76	scripts/lib/migrations/apply_0026.py	vnx-dev	1	frozen_migration	Runner of a frozen numbered migration: it substitutes or references the file's vnx-dev placeholder; the runner resolves the owning project at apply time	
 a31cf1138573bd69	scripts/lib/migrations/apply_0031.py	vnx-dev	1	frozen_migration	Runner of a frozen numbered migration: it substitutes or references the file's vnx-dev placeholder; the runner resolves the owning project at apply time	
-775cb30658c03167	scripts/lib/ochtendronde_routing.py	vnx-dev	1	te_repareren	FLEET_PROJECT constant names the fabric ledger by the operator project id; the fleet ledger id belongs in the registry	AG-5
+775cb30658c03167	scripts/lib/morning_round_routing.py	vnx-dev	1	te_repareren	FLEET_PROJECT constant names the fabric ledger by the operator project id; the fleet ledger id belongs in the registry	AG-5
 53ccc8dcb6f37c81	scripts/lib/orphan_sweep.py	vnx-dev	1	te_repareren	Library signature default project_id='vnx-dev' for the sweep	AG-1
 243ebead13135458	scripts/lib/pattern_dedup.py	vnx-dev	1	legacy_tenant_reader	Comment on the table default 'vnx-dev' of migration 0010 that a tenant-blind write would hit; prose	
-42e5fbf6e025e0e5	scripts/lib/permission_applied_check.py	claude-salesminds	1	te_repareren	USER_FILES maps slot 'sm' to the operator's ~/.claude-salesminds/settings.json in the applied-permission check	AG-3
-374fdf3fc913c2b5	scripts/lib/permission_events_sources.py	claude-salesminds	1	te_repareren	DEFAULT_ACCOUNT_CONFIGS fixes the operator's second account directory ~/.claude-salesminds as a config source of the permission-event reader	AG-3
-6ac4ff1b2a2f1376	scripts/lib/plan_gate_panel.py	Vinix24	1	issue_link	Link to upstream issue #225 (project-root resolution) in a refusal message or docstring; a link, not a default	
-83bfba7c234cb7a8	scripts/lib/plan_gate_panel.py	kimi-k3	1	model_catalog	Default plan-gate seat for provider kimi names its catalogue model; the seat list itself is PR-10 (phase 2)	
-b7f0e1247225626e	scripts/lib/pool_worker_runner.py	kimi-k3	1	te_repareren	Pool runner falls back to model kimi-k3 when the bundle and VNX_DISPATCH_MODEL name none (the provider fallback is the separate `or "kimi"` at :285-288)	AG-2
 3e40a3ce39b27014	scripts/lib/project_id_migration.py	vnx-dev	1	te_repareren	resolve_init_project_id(strict=False) returns the vnx-dev sentinel when no source resolves (apply_0015, runtime_coordination_init, quality_db_init and the 0010 runners call it non-strict)	AG-1
 7dfa1f528ffb5de1	scripts/lib/project_id_migration.py	vnx-dev	1	te_repareren	resolve_init_project_id(strict=False) returns the vnx-dev sentinel when no source resolves (apply_0015, runtime_coordination_init, quality_db_init and the 0010 runners call it non-strict)	AG-1
 bf9402960b1521da	scripts/lib/project_id_migration.py	vnx-dev	1	legacy_tenant_reader	Comment or docstring stating that this path refuses to default to vnx-dev (ADR-007); prose, no behaviour	
@@ -143,43 +179,14 @@ d8d7268931e179a0	scripts/lib/project_id_migration.py	vnx-dev	1	te_repareren	reso
 def1b820e88207af	scripts/lib/project_id_migration.py	vnx-dev	1	legacy_tenant_reader	Comment or docstring stating that this path refuses to default to vnx-dev (ADR-007); prose, no behaviour	
 e4bded0d36c920aa	scripts/lib/project_id_migration.py	vnx-dev	1	te_repareren	resolve_init_project_id(strict=False) returns the vnx-dev sentinel when no source resolves (apply_0015, runtime_coordination_init, quality_db_init and the 0010 runners call it non-strict)	AG-1
 ebd617fc17ba1e2e	scripts/lib/project_id_migration.py	vnx-dev	1	legacy_tenant_reader	Comment or docstring stating that this path refuses to default to vnx-dev (ADR-007); prose, no behaviour	
-206704a85501cfa3	scripts/lib/project_root.py	Vinix24	1	issue_link	Link to upstream issue #225 (project-root resolution) in a refusal message or docstring; a link, not a default	
-6ac4ff1b2a2f1376	scripts/lib/project_root.py	Vinix24	1	issue_link	Link to upstream issue #225 (project-root resolution) in a refusal message or docstring; a link, not a default	
-c2e1ae40604dbede	scripts/lib/project_root.py	Vinix24	1	issue_link	Link to upstream issue #225 (project-root resolution) in a refusal message or docstring; a link, not a default	
 544bfe4f836bbeae	scripts/lib/project_scope.py	vnx-dev	1	te_repareren	Docstring documents the 'vnx-dev' default of current_project_id(); reword with the fix	AG-1
 68a0519421a3db82	scripts/lib/project_scope.py	vnx-dev	1	te_repareren	Docstring contrasts resolve_stamp_project_id with the vnx-dev-degrading current_project_id(); reword with the fix	AG-1
 c1021c6076e9d0e1	scripts/lib/project_scope.py	vnx-dev	1	te_repareren	Docstring documents the 'vnx-dev' default of current_project_id(); reword with the fix	AG-1
 c1fe867782fad0d7	scripts/lib/project_scope.py	vnx-dev	1	te_repareren	DEFAULT_PROJECT constant is what current_project_id() returns when VNX_PROJECT_ID is unset	AG-1
 82286a33204c833a	scripts/lib/provider_costs.py	vnx-dev	1	te_repareren	Cost-ledger writer falls back to vnx-dev when VNX_PROJECT_ID is unset	AG-1
 92e2fa78e8d47aae	scripts/lib/provider_costs.py	vnx-dev	1	te_repareren	Cost-ledger writer falls back to vnx-dev when VNX_PROJECT_ID is unset	AG-1
-40e4e04ac380b37d	scripts/lib/provider_dispatch.py	kimi-k3	1	model_catalog	kimi provider lane text: price-table incident prose or the kimi-only fallback when the registry is unreadable; applies only when provider kimi is chosen	
 6b6adbe801e52656	scripts/lib/provider_dispatch.py	vnx-dev	1	legacy_tenant_reader	Comment or docstring stating that this path refuses to default to vnx-dev (ADR-007); prose, no behaviour	
-7f51c99f7c30a5e7	scripts/lib/provider_dispatch.py	kimi-k3	1	model_catalog	kimi provider lane text: price-table incident prose or the kimi-only fallback when the registry is unreadable; applies only when provider kimi is chosen	
-82f83a011df2e88a	scripts/lib/provider_dispatch.py	kimi-k3	1	model_catalog	kimi provider lane text: price-table incident prose or the kimi-only fallback when the registry is unreadable; applies only when provider kimi is chosen	
-cf86b0111453c4d8	scripts/lib/provider_dispatch.py	kimi-k3	1	model_catalog	kimi provider lane text: price-table incident prose or the kimi-only fallback when the registry is unreadable; applies only when provider kimi is chosen	
-daf8489caca50352	scripts/lib/provider_dispatch.py	kimi-k3	1	model_catalog	kimi provider lane text: price-table incident prose or the kimi-only fallback when the registry is unreadable; applies only when provider kimi is chosen	
-a7dd8ba4f3615323	scripts/lib/provider_spawns/harness_config_dir.py	claude-salesminds	1	te_repareren	Docstring names ~/.claude-salesminds as the operator's alternative config dir; reword with the ADR-A account list	AG-3
-5d822395cf4a8853	scripts/lib/providers/model_normalizer.py	kimi-k3	1	model_catalog	Docstring example of a normalised model name; the normaliser maps catalogue keys, kimi-k3 is an example	
-b5cdac9b25a60f7e	scripts/lib/providers/model_normalizer.py	kimi-k3	1	model_catalog	Docstring example of a normalised model name; the normaliser maps catalogue keys, kimi-k3 is an example	
-207fde7a21a2d87d	scripts/lib/providers/provider_constraints.yaml	kimi-k3	1	model_catalog	Comment in provider_constraints.yaml explaining why kimi-k3 is no longer the pin default; prose about the model	
-7f13fd4f78f2f2c9	scripts/lib/providers/provider_constraints.yaml	kimi-k3	1	model_catalog	Comment in provider_constraints.yaml explaining why kimi-k3 is no longer the pin default; prose about the model	
-265734b84d37be88	scripts/lib/providers/provider_registry.py	kimi-k3	1	model_catalog	Comment on registry key resolution using kimi-k3 as the example catalogue entry	
-6f0b61280b1696c6	scripts/lib/providers/provider_registry.py	kimi-k3	1	model_catalog	Comment on registry key resolution using kimi-k3 as the example catalogue entry	
-6e4292cdc2b09592	scripts/lib/providers/smart_router/tier_routing.py	kimi-k3	1	model_catalog	Comment naming kimi-k3 as a dispatchable catalogue tier outside escalation_order; describes the catalogue	
-ee03d91b2e95ba71	scripts/lib/providers/smart_router/tier_routing.py	kimi-k3	1	model_catalog	Comment naming kimi-k3 as a dispatchable catalogue tier outside escalation_order; describes the catalogue	
-01ede07d60f8c296	scripts/lib/providers/wave7_models.yaml	kimi-k3	1	model_catalog	Model catalogue (wave7_models.yaml): kimi-k3 is data here (provider kimi_cli default_model, tier map, price); a catalogue entry, not a builder default	
-021f5210c701d438	scripts/lib/providers/wave7_models.yaml	kimi-k3	2	model_catalog	Model catalogue (wave7_models.yaml): kimi-k3 is data here (provider kimi_cli default_model, tier map, price); a catalogue entry, not a builder default	
-29a59516438e1e69	scripts/lib/providers/wave7_models.yaml	kimi-k3	1	model_catalog	Model catalogue (wave7_models.yaml): kimi-k3 is data here (provider kimi_cli default_model, tier map, price); a catalogue entry, not a builder default	
-3d7bc01e1225de52	scripts/lib/providers/wave7_models.yaml	kimi-k3	3	model_catalog	Model catalogue (wave7_models.yaml): kimi-k3 is data here (provider kimi_cli default_model, tier map, price); a catalogue entry, not a builder default	
-7470363e627535f2	scripts/lib/providers/wave7_models.yaml	kimi-k3	1	model_catalog	Model catalogue (wave7_models.yaml): kimi-k3 is data here (provider kimi_cli default_model, tier map, price); a catalogue entry, not a builder default	
-786b4a3b8cdadd36	scripts/lib/providers/wave7_models.yaml	kimi-k3	1	model_catalog	Model catalogue (wave7_models.yaml): kimi-k3 is data here (provider kimi_cli default_model, tier map, price); a catalogue entry, not a builder default	
-869b0ba6d9fffd5b	scripts/lib/providers/wave7_models.yaml	kimi-k3	1	model_catalog	Model catalogue (wave7_models.yaml): kimi-k3 is data here (provider kimi_cli default_model, tier map, price); a catalogue entry, not a builder default	
-ba5a05809e842665	scripts/lib/providers/wave7_models.yaml	kimi-k3	1	model_catalog	Model catalogue (wave7_models.yaml): kimi-k3 is data here (provider kimi_cli default_model, tier map, price); a catalogue entry, not a builder default	
-be0727339c98edbd	scripts/lib/providers/wave7_models.yaml	kimi-k3	1	model_catalog	Model catalogue (wave7_models.yaml): kimi-k3 is data here (provider kimi_cli default_model, tier map, price); a catalogue entry, not a builder default	
-eeedf5a50fd42ef2	scripts/lib/providers/wave7_models.yaml	kimi-k3	1	model_catalog	Model catalogue (wave7_models.yaml): kimi-k3 is data here (provider kimi_cli default_model, tier map, price); a catalogue entry, not a builder default	
 93016fa240fbc390	scripts/lib/receipt_provenance.py	vnx-dev	1	legacy_tenant_reader	Reader of a legacy DB without a project_id column: rows there belong to the pre-tenant vnx-dev store	
-344f895c361a8779	scripts/lib/report_to_receipt_converter.py	kimi-k3	1	model_catalog	Docstring listing the model strings seen in historical reports	
-745ecd51eda5700c	scripts/lib/subprocess_dispatch.py	kimi-k3	1	model_catalog	Comment on the fail-loud guard against `claude --model kimi-k3`; prose	
 f0d9d0d63cbfde41	scripts/lib/subprocess_dispatch.py	vnx-dev	1	te_repareren	Terminal-pinned dispatch path stamps _project_id from env with a vnx-dev fallback	AG-1
 0480dc1c25b282b5	scripts/lib/tenant_stamping.py	vnx-dev	1	legacy_tenant_reader	W1 tenant-stamping tool: vnx-dev is the legacy sentinel it detects and re-stamps to the owning project	
 097e241ef0c61c51	scripts/lib/tenant_stamping.py	vnx-dev	1	legacy_tenant_reader	W1 tenant-stamping tool: vnx-dev is the legacy sentinel it detects and re-stamps to the owning project	
@@ -204,10 +211,6 @@ b8a806391a924d65	scripts/lib/tenant_stamping.py	vnx-dev	1	legacy_tenant_reader	W
 f9624877d6f5bf6f	scripts/lib/tenant_stamping.py	vnx-dev	1	legacy_tenant_reader	W1 tenant-stamping tool: vnx-dev is the legacy sentinel it detects and re-stamps to the owning project	
 fb35e418bd98c7a7	scripts/lib/tenant_stamping.py	vnx-dev	1	legacy_tenant_reader	W1 tenant-stamping tool: vnx-dev is the legacy sentinel it detects and re-stamps to the owning project	
 6e2868bb06a24ec5	scripts/lib/tracks.py	vnx-dev	1	legacy_tenant_reader	Comment or docstring stating that this path refuses to default to vnx-dev (ADR-007); prose, no behaviour	
-6ac4ff1b2a2f1376	scripts/lib/vnx_paths.py	Vinix24	1	issue_link	Link to upstream issue #225 (project-root resolution) in a refusal message or docstring; a link, not a default	
-05835688f33a20f8	scripts/lib/vnx_resolve_root.sh	Vinix24	1	issue_link	Link to upstream issue #225 (project-root resolution) in a refusal message or docstring; a link, not a default	
-f231162d721e9682	scripts/lib/vnx_start_runtime.py	kimi-k3	1	te_repareren	T1/T2 start without VNX_T{n}_MODEL default to provider kimi and model kimi-k3 in code instead of the worker registry	AG-2
-f260c8d082ec2405	scripts/lib/vnx_start_runtime.py	kimi-k3	1	te_repareren	T1/T2 start without VNX_T{n}_MODEL default to provider kimi and model kimi-k3 in code instead of the worker registry	AG-2
 2dc415b697046803	scripts/lib/vnx_tagger.py	vnx-dev	1	te_repareren	tagging_events is created by the tagger with project_id DEFAULT 'vnx-dev'; new stores of another project get the sentinel as column default	AG-1
 83ca7eac9ad5bddc	scripts/lib/vnx_tagger.py	vnx-dev	1	te_repareren	Tagger audit event stamps vnx-dev when a row carries no project and VNX_PROJECT_ID is unset (an explicit but guessed stamp)	AG-1
 1208a1eef40b4f5b	scripts/log_dispatch_metadata.py	vnx-dev	1	legacy_tenant_reader	Comment or docstring stating that this path refuses to default to vnx-dev (ADR-007); prose, no behaviour	
@@ -247,8 +250,6 @@ dfc0c06e249950dd	scripts/planning_cli.py	vnx-dev	1	te_repareren	planning_cli arg
 815d7138f2cef0e8	scripts/quality_db_init.py	vnx-dev	1	legacy_tenant_reader	QI bootstrap reconcile: runs the three-phase tenant migration only when the owning pid is not the vnx-dev sentinel	
 a41a800cd1e53f7c	scripts/quality_db_init.py	vnx-dev	1	frozen_migration	Python-embedded QI migration step (v10-v29) that stamps the vnx-dev sentinel; for a non-vnx-dev pid run_qi_three_phase_migration re-stamps and drops it at the end of bootstrap	
 c43e3f9fb39d41a1	scripts/receipt_query.py	vnx-dev	1	te_repareren	COHORT_PROJECTS lists the operator's own five projects as the default cohort	AG-5
-4ac9d261116567af	scripts/report_parser.py	kimi-k3	1	model_catalog	Comment/example of model-name shapes the report parser accepts	
-697d82f91fbb570d	scripts/report_parser.py	kimi-k3	1	model_catalog	Comment/example of model-name shapes the report parser accepts	
 00edc6fedfc34f4d	scripts/runtime_coordination_init.py	vnx-dev	1	legacy_tenant_reader	Comment or docstring stating that this path refuses to default to vnx-dev (ADR-007); prose, no behaviour	
 4dbb6e2ef184aa0b	scripts/runtime_coordination_init.py	vnx-dev	1	legacy_tenant_reader	Comment or docstring stating that this path refuses to default to vnx-dev (ADR-007); prose, no behaviour	
 8d4c5d894d779e6c	scripts/runtime_coordination_init.py	vnx-dev	1	legacy_tenant_reader	Comment or docstring stating that this path refuses to default to vnx-dev (ADR-007); prose, no behaviour	
@@ -267,5 +268,4 @@ ca9645c4897f6c19	vnx_cli/commands/init_cmd.py	vnx-dev	1	legacy_tenant_reader	See
 da9622e3a1bbc28f	vnx_cli/commands/init_cmd.py	vnx-dev	1	legacy_tenant_reader	Seed upgrade of the legacy ('vnx-dev','default') pool_config/worker_pools row from migration 0020 to the owning project	
 00175cfb24c9753e	vnx_cli/commands/migrate.py	vnx-dev	1	legacy_tenant_reader	Comment on the dual-seed collision of legacy ('vnx-dev', key) rows during `vnx migrate`	
 ef705d0003c82bc4	vnx_cli/commands/migrate.py	vnx-dev	1	legacy_tenant_reader	Comment on the dual-seed collision of legacy ('vnx-dev', key) rows during `vnx migrate`	
-0c84f49590acbeb9	vnx_cli/commands/update.py	Vinix24	1	upstream_url	pip-side twin of bin/vnx VNX_ORIGIN_URL: the upstream remote `vnx update` pulls from	
 23c335be696ea58b	vnx_cli/main.py	vnx-dev	1	legacy_tenant_reader	Comment or docstring stating that this path refuses to default to vnx-dev (ADR-007); prose, no behaviour	

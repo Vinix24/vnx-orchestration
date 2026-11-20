@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 import morning_pause as mp
-from ochtendronde_agenda import append_event, decision_status
+from morning_snapshot import append_event, decision_status
 
 REASON_CONFIG_INVALID = "morning_pause_config_invalid"
 

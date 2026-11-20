@@ -1,4 +1,4 @@
-"""ochtendronde D1b: the morning pause at the door (stop condition, part A) and in pr_merge (part B)."""
+"""morning round D1b: the morning pause at the door (stop condition, part A) and in pr_merge (part B)."""
 import argparse
 import json
 import sys
@@ -13,7 +13,7 @@ for _p in (ROOT / "scripts", ROOT / "scripts" / "lib"):
 
 import dispatch_cli
 import morning_pause_gate as gate
-import ochtendronde_agenda as ag
+import morning_snapshot as ag
 import operator_queue as oq
 import pr_merge
 import stop_conditions as sc

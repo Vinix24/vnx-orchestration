@@ -195,20 +195,6 @@ def test_supersede_does_not_auto_apply_without_operator(loop_env):
     assert len(sp_candidates) == 1, "second call must not duplicate the pending entry"
 
 
-def test_supersede_off_switch(loop_env, monkeypatch):
-    """VNX_LEARN_SUPERSEDE=0 skips the entire step."""
-    loop, state_dir = loop_env
-    _bootstrap_schema(loop.conn)
-    _seed_success_pattern(loop, title="off-switch-pat", confidence=0.05)
-
-    monkeypatch.setenv("VNX_LEARN_SUPERSEDE", "0")
-    count = loop._supersede_stale_patterns()
-    assert count == 0
-
-    pending_path = state_dir / "pending_archival.json"
-    assert not pending_path.exists(), "pending_archival.json must not be written when off"
-
-
 # ---------------------------------------------------------------------------
 # 2. No-provider failure receipts are filtered before mining
 # ---------------------------------------------------------------------------

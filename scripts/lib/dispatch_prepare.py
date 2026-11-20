@@ -9,7 +9,7 @@ Output order (top to bottom):
   ---
   [skill body + instruction]  _inject_skill_context       (+ repo-map prepended)
   [scope guard]               dispatch_paths, when non-empty
-  [worker rules footer]       VNX_WORKER_RULES_FOOTER=1   (gap #3a, default on)
+  [worker rules footer]       always appended             (gap #3a)
   [report contract directive] VNX_REPORT_CONTRACT_DIRECTIVE=1 (gap #3b, default on)
 
 The trailer sentinel (<!-- VNX-END-OF-INSTRUCTION -->) is NOT appended by
@@ -19,7 +19,6 @@ lane-specific content (e.g. the tmux completion-protocol).
 
 from __future__ import annotations
 
-import os
 import sys
 from pathlib import Path
 
@@ -103,12 +102,9 @@ def prepare(
     if dispatch_paths:
         body = body + _scope_note_block(dispatch_paths)
 
-    # 4. Worker rules footer — gated by VNX_WORKER_RULES_FOOTER (default on, gap #3a)
-    if os.environ.get("VNX_WORKER_RULES_FOOTER", "1").strip().lower() not in (
-        "0", "false", "no", "off"
-    ):
-        if _WORKER_RULES_FOOTER_SENTINEL not in body:
-            body = body + "\n\n" + _wrf.build(role, dispatch_id)
+    # 4. Worker rules footer — always appended unless the body already carries it (gap #3a)
+    if _WORKER_RULES_FOOTER_SENTINEL not in body:
+        body = body + "\n\n" + _wrf.build(role, dispatch_id)
 
     # 5. Report contract directive — gated by VNX_REPORT_CONTRACT_DIRECTIVE (default on,
     # gap #3b). with_directive is the one door every lane appends it through (OI-1850).

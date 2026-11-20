@@ -390,14 +390,17 @@ def test_an_unreadable_row_after_the_intent_is_still_recorded_as_aborted(store):
     assert aborted["reread_error"]
 
 
-def test_fourth_deliverable_raises_the_target_and_keeps_stdout_json(store):
-    for _ in range(3):
-        _add(store, DST)
-    dlv = _add(store)
+def test_refactor_deliverable_raises_the_target_and_keeps_stdout_json(store):
+    rc, out, err = _cli(store, "deliverable", "add", "--objective", SRC, "--output-kind", "pr",
+                        "--title", "t", "--task-class", "03_refactoring")
+    assert rc == 0, err
+    dlv = out.splitlines()[0].split(": ", 1)[1]
+    assert json.loads(tracks_lib.get_track(store, SRC, PID)["metadata_json"])["plan_scope"] == "architecture"
     rc, out, err = _retarget(store, dlv, DST, "--json")
     assert rc == 0, err
     assert json.loads(out)["to_track"] == DST
     assert f"plan-scope: {DST} light -> architecture" in err
     meta = lambda t: json.loads(tracks_lib.get_track(store, t, PID)["metadata_json"])
-    assert (meta(DST)["plan_scope"], meta(SRC)["plan_scope"]) == ("architecture", "light")
+    assert (meta(DST)["plan_scope"], meta(DST)["plan_scope_rule"]) == \
+        ("architecture", "deliverable retarget: task_class 03_refactoring")
     assert _sql(store, "SELECT 1 FROM track_open_items WHERE oi_id = ? AND resolved_at IS NULL", (f"OI-PLAN-{DST}",))

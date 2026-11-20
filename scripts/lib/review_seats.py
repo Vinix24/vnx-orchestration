@@ -40,15 +40,11 @@ Where the seats come from (``ReviewSeats.source``):
   explicit stack may name no seat at all (``--review-stack ci_gate``), a config
   stack may not.
 
-Governance profiles (``VNX_PROFILE_SELECTOR=1``): a profile adds no seat and
-removes no seat. The seats of a config-sourced review are always the project's
-``VNX_DEFAULT_REVIEW_STACK``; the profile only decides the extra gates (its
-non-seat entries, such as ``ci``). The profile's ``required_gates`` list is a
-hard-coded seat pair in every built-in profile, so letting it name seats meant
-a project whose stack said ``glm_gate`` was reviewed by codex and kimi, and a
-``light`` profile (``required_gates: [ci]``) asked for no review at all while
-the door still required one. A file glob in a YAML must not decide how many
-reviewers a merge needs.
+The seats of a config-sourced review are always the project's
+``VNX_DEFAULT_REVIEW_STACK``; ``ci_gate`` joins as an extra gate when
+``VNX_CI_GATE_REQUIRED`` is on. A file glob must not decide how many reviewers a
+merge needs, so no governance profile derived from the changed files takes part
+(the profile-selector switch and its resolver are deleted).
 
 BILLING SAFETY: no Anthropic SDK, no network, no subprocess.
 """
@@ -95,8 +91,8 @@ class ReviewSeats:
 
     ``stack`` is every entry to request, in order: the seats and the extra
     gates. ``value`` is the stack as configured or named, verbatim.
-    ``profile_stack`` is the stack a governance profile derived from the changed
-    files when one applied (its extra gates are in ``stack``), else ``None``.
+    ``profile_stack`` is always ``None`` now that no glob governance profile
+    derives a stack; the field stays so a record keeps its shape.
 
     ``stack_source`` says who supplied the stack: ``profile`` (the gate profile's
     ``review_stack``), ``override``, ``project_config``, ``env`` or ``default`` (the source
@@ -105,7 +101,7 @@ class ReviewSeats:
 
     ``profile``, ``profile_source`` and ``profile_error`` are the gate profile
     (``gate_profile``, ``VNX_GOVERNANCE_PROFILE``) in force when the seats were
-    resolved. Not the glob governance profile above. A config-sourced review that
+    resolved. A config-sourced review that
     meets an invalid profile value raises ``GateProfileConfigError``; only an
     explicit stack, which does not read the profile, records the error here and
     ``profile`` stays ``None``: a record never says ``standard`` for a value that failed.
@@ -188,35 +184,14 @@ def classify_stack(names: Iterable[str], *, origin: str, value: str) -> Tuple[Tu
     return seats, tuple(stack)
 
 
-def _profile_stack(changed_files: Sequence[str], project_root: Optional[Path]) -> Optional[List[str]]:
-    # Looked up on the module at call time, so the resolver and anything that
-    # replaces it read the same function.
-    import profile_gate_resolver
-
-    if project_root is None:
-        return profile_gate_resolver.resolve_gate_stack(list(changed_files))
-    return profile_gate_resolver.resolve_gate_stack(list(changed_files), project_root=project_root)
-
-
-def _config_stack_entries(raw: str, changed_files: Sequence[str], project_root: Optional[Path]) -> "tuple[List[str], Optional[List[str]]]":
-    """The entries to request for a config-sourced review, and the profile stack when one applied."""
+def _config_stack_entries(raw: str) -> List[str]:
+    """The entries to request for a config-sourced review: the configured stack, plus ``ci_gate`` when required."""
     import config_runtime
 
-    configured = _split(raw)
-    profile = _profile_stack(changed_files, project_root) if changed_files else None
-    if profile is None:
-        entries = list(configured)
-        if config_runtime.get_bool("VNX_CI_GATE_REQUIRED"):
-            entries.append("ci_gate")
-        return entries, None
-    config_seats, _stack = classify_stack(configured, origin=REVIEW_STACK_KEY, value=raw)
-    profile_seats, _stack = classify_stack(profile, origin="the governance profile", value=",".join(profile))
-    if profile_seats != config_seats:
-        logger.info(
-            "review_seats: the governance profile names the reviewers %r; a profile adds and "
-            "removes no seat, so the seats stay %s=%r", list(profile_seats), REVIEW_STACK_KEY, raw,
-        )
-    return list(config_seats) + [gate for gate in profile if gate not in profile_seats], profile
+    entries = list(_split(raw))
+    if config_runtime.get_bool("VNX_CI_GATE_REQUIRED"):
+        entries.append("ci_gate")
+    return entries
 
 
 def _explicit_profile_fields(project_id: Optional[str] = None) -> Dict[str, Optional[str]]:
@@ -266,8 +241,9 @@ def resolve_review_seats(
 
     ``explicit_stack`` is a stack the caller named; ``None`` reads
     ``VNX_DEFAULT_REVIEW_STACK`` through ``config_runtime.get`` now, and applies
-    a governance profile for ``changed_files`` when the profile selector is on
-    (see the module docstring for what a profile may change).
+    ``ci_gate`` when ``VNX_CI_GATE_REQUIRED`` is on. ``changed_files`` and
+    ``project_root`` are accepted for the callers that pass them and do not
+    change the seats.
     """
     if explicit_stack is not None:
         names = [str(item).strip() for item in explicit_stack if str(item).strip()]
@@ -285,7 +261,7 @@ def resolve_review_seats(
     contributed = gate_profile.value("review_stack", resolution=resolution)
     raw = contributed if contributed is not None else (config_runtime.get(REVIEW_STACK_KEY) or "")
     stack_source = _config_stack_source(contributed)
-    entries, profile = _config_stack_entries(raw, changed_files, project_root)
+    entries = _config_stack_entries(raw)
     seats, stack = classify_stack(entries, origin=REVIEW_STACK_KEY, value=raw)
     if not seats:
         raise ReviewSeatError(
@@ -295,7 +271,6 @@ def resolve_review_seats(
         )
     return ReviewSeats(
         seats=seats, stack=stack, source=SOURCE_CONFIG, value=raw,
-        profile_stack=tuple(profile) if profile is not None else None,
         profile=resolution.profile, profile_source=resolution.source, profile_error=None,
         stack_source=stack_source,
     )

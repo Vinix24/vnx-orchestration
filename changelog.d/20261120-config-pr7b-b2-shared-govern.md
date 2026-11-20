@@ -1,0 +1,1 @@
+- Removed `VNX_SHARED_GOVERN` and the `_shared_govern_enabled`/`_govern_report` plumbing in the claude-subprocess lane (config-een-oppervlak PR-7b-b2). The flag was off by default and nothing set it; the default that now holds is the lane's own contract-valid close-out report (`_ensure_unified_report`) on success and no report on the budget-exhausted failure path.

@@ -700,8 +700,14 @@ class GateRequestHandlerMixin:
         return os.environ.get("VNX_CLAUDE_GITHUB_REVIEW_ENABLED", "0") == "1" and shutil.which("gh") is not None
 
     def _ci_gate_available(self) -> bool:
-        import config_runtime
-        return config_runtime.get_bool("VNX_CI_GATE_REQUIRED") and shutil.which("gh") is not None
+        # OF-4: the requirement comes from gate_profile.ci_requirement (flag, dial,
+        # branch protection, review stack). A requirement that cannot be read raises
+        # (ReviewGateConfigError / BranchProtectionUnreadable): never "not required".
+        # Required with no gh is refused by name in _classify_unavailable.
+        from gate_profile import ci_requirement
+
+        required, _sources = ci_requirement()
+        return required and shutil.which("gh") is not None
 
     def _check_ci_gate_requirement_mismatch(self, dispatch_id: str) -> None:
         """OI-1462: compare THIS process's (the vervuller's) own resolution of

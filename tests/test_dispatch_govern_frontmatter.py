@@ -94,7 +94,6 @@ def _run_govern(
     **spec_kwargs,
 ):
     """Drive the real govern() and return its outcome (synthesized lane path)."""
-    monkeypatch.setenv("VNX_SHARED_GOVERN", "1")
     monkeypatch.delenv("VNX_CONTRACT_VALIDATE", raising=False)
     for var in _CHAIN_ENV_VARS:
         monkeypatch.delenv(var, raising=False)
@@ -236,7 +235,6 @@ def test_frontmatter_without_receipt_falls_back_to_spec(tmp_data, tmp_state, mon
 
 def test_frontmatter_receipt_without_token_usage_uses_raw_usage(tmp_data, tmp_state, monkeypatch):
     """A receipt without ``token_usage`` falls back to ``raw.token_usage``."""
-    monkeypatch.setenv("VNX_SHARED_GOVERN", "1")
     spec = _make_spec(tmp_data, tmp_state)
     raw = GovernRaw(
         receipt={"status": "done", "model": "sonnet", "exit_code": 0},

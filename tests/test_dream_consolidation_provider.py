@@ -208,7 +208,7 @@ def test_deepseek_without_a_json_object_fails_the_cycle(world):
 
 
 def test_deepseek_timeout_reports_deepseek_timeout(world, monkeypatch):
-    monkeypatch.setenv("VNX_DREAM_TIMEOUT", "42")
+    monkeypatch.setattr(consolidator, "_DEFAULT_TIMEOUT", 42)
     world.deepseek.result = SimpleNamespace(error="timeout after 42s: x", parsed_json=None,
                                             raw_response="", cost_usd=None)
     result = world.run()

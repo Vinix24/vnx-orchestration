@@ -1,4 +1,4 @@
-"""Ochtendronde sweep: one learning beacon and one dream run per registered project."""
+"""Morning round sweep: one learning beacon and one dream run per registered project."""
 from __future__ import annotations
 
 import json
@@ -12,7 +12,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts" / "lib"))
 
-import ochtendronde_sweep as sw
+import morning_round_sweep as sw
 from learning_loop_beacon import read_beacon, write_beacon, beacon_path
 
 
