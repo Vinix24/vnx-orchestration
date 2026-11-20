@@ -5,9 +5,8 @@ VNX Supervisor Shadow — Observer that mirrors supervisor outcomes as typed inc
 PR-1 deliverable: thin shadow wrapper that records incidents from the existing
 supervisor without changing its recovery behavior.
 
-Shadow mode is controlled by VNX_INCIDENT_SHADOW (default "1" = on).
-When shadow mode is off (VNX_INCIDENT_SHADOW=0), all functions are no-ops
-and the supervisor runs exactly as before.
+Shadow mode is always on: the supervisor's own recovery stays authoritative and
+these functions only record.
 
 Design rules:
   - Shadow mode NEVER changes restart decisions (A-R9: legacy paths stay active).
@@ -52,7 +51,6 @@ from incident_log import (  # noqa: E402  # sys.path adjusted above for standalo
     detect_repeated_failure_loop,
     escalate_incident,
     generate_incident_summary,
-    is_shadow_mode,
     resolve_incident,
 )
 from incident_taxonomy import IncidentClass, REPEATED_FAILURE_THRESHOLD  # noqa: E402
@@ -98,11 +96,7 @@ def record_process_crash(
     Called by the supervisor monitor loop when a process is found dead.
 
     Returns the incident_id if the record was written, None otherwise.
-    Shadow mode off → returns None immediately (no-op).
     """
-    if not is_shadow_mode():
-        return None
-
     sd = Path(state_dir) if state_dir else _get_state_dir()
     if sd is None:
         return None
@@ -178,11 +172,7 @@ def record_process_restart_success(
     """Record that a crashed component was successfully restarted.
 
     Resolves the open incident and resets the retry budget.
-    Shadow mode off → no-op.
     """
-    if not is_shadow_mode():
-        return
-
     sd = Path(state_dir) if state_dir else _get_state_dir()
     if sd is None:
         return
@@ -212,11 +202,7 @@ def record_restart_budget_exhausted(
     """Record that a component has exhausted its restart budget.
 
     This mirrors the supervisor's MAX_RESTART_ATTEMPTS logic as an incident trail.
-    Shadow mode off → no-op.
     """
-    if not is_shadow_mode():
-        return
-
     sd = Path(state_dir) if state_dir else _get_state_dir()
     if sd is None:
         return
@@ -246,12 +232,7 @@ def get_shadow_summary(
     state_dir: Optional[str | Path] = None,
 ) -> Optional[Dict[str, Any]]:
     """Return the current incident summary for operator display.
-
-    Shadow mode off → returns None.
     """
-    if not is_shadow_mode():
-        return None
-
     sd = Path(state_dir) if state_dir else _get_state_dir()
     if sd is None:
         return None

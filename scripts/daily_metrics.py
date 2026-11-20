@@ -42,14 +42,10 @@ EXIT_IMPORT_FAILURE = 1
 EXIT_USAGE = 2
 
 COMMANDS_DIR = Path(__file__).resolve().parent / "lib" / "daily_metrics" / "commands"
-COMMANDS_DIR_ENV = "VNX_DAILY_METRICS_COMMANDS_DIR"
 
 
 def commands_dir() -> Path:
-    """The commands directory: default under this package, or the env override (decision 18)."""
-    override = os.environ.get(COMMANDS_DIR_ENV)
-    if override:
-        return Path(override)
+    """The commands directory: ``COMMANDS_DIR``, read at call time."""
     return COMMANDS_DIR
 
 

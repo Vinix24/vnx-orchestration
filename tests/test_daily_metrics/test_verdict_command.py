@@ -1,7 +1,7 @@
 """The ``verdict`` command tests (doorloop PR-12b split 2, decisions 14 and 26).
 
 Every run goes through ``subprocess`` with ``--store``, ``--state-dir``,
-``VNX_DAILY_METRICS_SOURCES_DIR`` and ``VNX_DAILY_METRICS_COMMANDS_DIR`` pinned
+the sources and commands directories pinned
 under ``tmp_path`` and the clock fixed through ``--now``. The day files are
 written by the test through the real ``DayStore``; nothing touches the real
 store. The pure ``judge`` cases live in ``test_verdict.py``. On ``origin/main``
@@ -20,6 +20,7 @@ from pathlib import Path
 
 from daily_metrics import proposal_ledger
 from daily_metrics.store import DayStore
+from .cli_boot import cli_command
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CLI = REPO_ROOT / "scripts" / "daily_metrics.py"
@@ -61,9 +62,7 @@ def _run(tmp_path, args, commands=None):
     env = dict(os.environ)
     env.pop("VNX_PROJECT_ID", None)
     env.pop("PYTEST_CURRENT_TEST", None)
-    env["VNX_DAILY_METRICS_SOURCES_DIR"] = str(tmp_path / "sources")
-    env["VNX_DAILY_METRICS_COMMANDS_DIR"] = str(commands or COMMANDS)
-    return subprocess.run([sys.executable, str(CLI), *args], env=env,
+    return subprocess.run(cli_command(tmp_path / "sources", args, commands or COMMANDS), env=env,
                           capture_output=True, text=True, cwd=str(REPO_ROOT))
 
 

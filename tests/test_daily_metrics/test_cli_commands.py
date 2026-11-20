@@ -1,8 +1,7 @@
 """Command discovery tests for the daily-metrics CLI (PR-3c, decision 4/14).
 
 Each test runs ``scripts/daily_metrics.py`` through ``subprocess`` with
-``--store``, ``--state-dir``, ``VNX_DAILY_METRICS_SOURCES_DIR`` and
-``VNX_DAILY_METRICS_COMMANDS_DIR`` pinned under ``tmp_path`` and the clock fixed
+``--store``, ``--state-dir``, the sources and commands directories pinned under ``tmp_path`` and the clock fixed
 through ``--now``, following ``test_cli.py``; no test touches the real store.
 """
 
@@ -16,6 +15,8 @@ import sys
 from pathlib import Path
 
 import pytest
+
+from .cli_boot import cli_command
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CLI = REPO_ROOT / "scripts" / "daily_metrics.py"
@@ -116,11 +117,9 @@ def _run_cli(tmp_path: Path, commands: Path, args: list[str]) -> subprocess.Comp
     env = dict(os.environ)
     env.pop("VNX_PROJECT_ID", None)
     env.pop("PYTEST_CURRENT_TEST", None)
-    env["VNX_DAILY_METRICS_SOURCES_DIR"] = str(_empty_dir(tmp_path / "sources"))
-    env["VNX_DAILY_METRICS_COMMANDS_DIR"] = str(commands)
     env["ORDER_FILE"] = str(tmp_path / "order.jsonl")
     return subprocess.run(
-        [sys.executable, str(CLI), *args],
+        cli_command(_empty_dir(tmp_path / "sources"), args, commands),
         env=env, capture_output=True, text=True, cwd=str(REPO_ROOT),
     )
 

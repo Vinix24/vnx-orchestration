@@ -4679,7 +4679,6 @@ def _run_scout_prepass(plan: ExecutionPlan, vspec, *, state_dir: Path) -> None:
 def _export_worker_env(plan: ExecutionPlan, spec, *, state_dir: Path) -> None:
     """Export the track, chain-link and attribution fields a real fire hands its worker (R29b)."""
     if spec.track_id:
-        os.environ["VNX_CURRENT_TRACK_ID"] = spec.track_id
         _door_track_bookkeeping(spec, state_dir=state_dir)
     if plan.parent_dispatch:
         os.environ["VNX_PARENT_DISPATCH"] = plan.parent_dispatch

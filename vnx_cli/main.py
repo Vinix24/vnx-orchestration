@@ -517,7 +517,7 @@ def _register_dispatch_agent_subparser(subparsers: argparse.Action) -> None:
         "--model",
         default=None,
         metavar="MODEL",
-        help="model to use (default: sonnet, or the agent's config.yaml model when VNX_AGENT_FOLDERS is enabled)",
+        help="model to use (default: sonnet, or the agent's config.yaml model)",
     )
     dispatch_parser.add_argument(
         "--project-dir",

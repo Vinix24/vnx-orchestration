@@ -9,17 +9,14 @@ schema into a typed, backward-compatible result.
 from __future__ import annotations
 
 import logging
-import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 import yaml
 
 logger = logging.getLogger(__name__)
-
-VNX_AGENT_FOLDERS_ENV = "VNX_AGENT_FOLDERS"
 
 # Agent names are simple slugs; reject anything that could traverse the filesystem
 # (path separators, `..`, dots) before the name is ever joined into a path.
@@ -44,12 +41,6 @@ class AgentConfig:
     isolation: dict[str, Any] = field(default_factory=dict)
     permissions: dict[str, Any] = field(default_factory=dict)
     skills: list[str] = field(default_factory=list)
-
-
-def agent_folders_enabled(env: Mapping[str, str] | None = None) -> bool:
-    """Return True unless ``VNX_AGENT_FOLDERS=0`` is set (default: ON)."""
-    env = env if env is not None else os.environ
-    return env.get(VNX_AGENT_FOLDERS_ENV, "1") != "0"
 
 
 def _resolve_agent_claude_md(

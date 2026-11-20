@@ -115,7 +115,6 @@ def test_the_21st_pair_and_a_full_chain_run_nothing(tmp_path, shadow, monkeypatc
     for _ in range(20):
         ds.book(ds.shadow_path(state / "review_gates"), {"pr_number": 1, "delta_verdict": "pass"})
     assert shadow(state) is None and not shadow.calls
-    monkeypatch.setenv(ds.MAX_CHAIN_KEY, "x")
     assert ds.max_chain() == 2
 
 

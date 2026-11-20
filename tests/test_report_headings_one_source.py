@@ -61,7 +61,6 @@ def _isolated_prompt_assembly(monkeypatch):
     """Deterministic prompt assembly: no repo map, no central intelligence DB,
     no operator flags leaking in from the shell."""
     for var in (
-        "VNX_REPORT_CONTRACT_DIRECTIVE",
         "VNX_SHARED_PREPARE",
         "VNX_BENCH_EQUAL_CONTEXT",
     ):
@@ -217,12 +216,6 @@ def test_directive_follows_the_role_text(tmp_path):
     _assert_one_directive(prompt)
     assert "# Role: Backend Developer" in prompt
     assert prompt.index("# Role: Backend Developer") < prompt.index(DIRECTIVE_SENTINEL)
-
-
-def test_directive_switch_off_is_honoured_on_the_headless_lane(tmp_path, monkeypatch):
-    monkeypatch.setenv("VNX_REPORT_CONTRACT_DIRECTIVE", "0")
-
-    assert DIRECTIVE_SENTINEL not in _headless_prompt(tmp_path)
 
 
 def test_seam_without_a_dispatch_id_adds_no_directive():

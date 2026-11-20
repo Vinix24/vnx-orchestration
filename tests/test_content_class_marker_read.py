@@ -123,17 +123,17 @@ def _register(world, entries):
 def _classify(world, steps, *, block=(), timeout=None, boundary=None, set_attrs=None):
     """Run ``classify_path`` on each step in one child process under the 30 s guard."""
     env = {k: v for k, v in os.environ.items()
-           if k not in ("VNX_MARKER_READ_TIMEOUT_SECONDS", "VNX_CONTENT_BOUNDARY_FILE",
-                        "VNX_PROJECT_ID")}
+           if k not in ("VNX_PROJECT_ID",)}
     env["HOME"] = str(world["home"])
     env["PYTHONDONTWRITEBYTECODE"] = "1"
+    set_attrs = dict(set_attrs or {})
     if timeout is not None:
-        env["VNX_MARKER_READ_TIMEOUT_SECONDS"] = str(timeout)
+        set_attrs["MARKER_TIMEOUT_DEFAULT"] = float(timeout)
     spec = {
         "boundary": str(boundary or world["boundary_file"]),
         "registry": str(world["registry"]),
         "block": [_real(d) for d in block],
-        "set": set_attrs or {},
+        "set": set_attrs,
         "steps": [s if s == "release" else str(s) for s in steps],
     }
     try:

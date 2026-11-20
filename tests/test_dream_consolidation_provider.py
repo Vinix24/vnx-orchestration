@@ -24,6 +24,7 @@ import consolidator  # noqa: E402
 import classifier_providers  # noqa: E402
 import kimi_wrapper  # noqa: E402
 import provider_switch  # noqa: E402
+from content_boundary_pin import pin_boundary
 
 PROJECT = "vnx-dev"
 VALID = {
@@ -66,7 +67,7 @@ def ok_result(payload=None):
 def world(tmp_path, monkeypatch):
     boundary = tmp_path / "boundary.json"
     boundary.write_text(json.dumps({"version": 1}), encoding="utf-8")
-    monkeypatch.setenv("VNX_CONTENT_BOUNDARY_FILE", str(boundary))
+    pin_boundary(monkeypatch, str(boundary))
     monkeypatch.setenv("VNX_PROVIDER_SWITCH_FILE", str(tmp_path / "switch" / "providers.json"))
     monkeypatch.setenv("VNX_DREAM_SCHEDULER_ENABLED", "1")
     monkeypatch.delenv("VNX_DREAM_PROVIDER", raising=False)
