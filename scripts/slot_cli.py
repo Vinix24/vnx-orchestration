@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 """vnx slot — host capacity slots (ADR-062). RS-2 shipped ``doctor``; RS-8 wires the rest.
 
-``acquire``, ``run`` and ``release`` connect the store (RS-2),
+``acquire``, ``run``, ``status``, ``release`` and ``mode show|set`` connect the store (RS-2),
 admission (RS-3), liveness (RS-4), memory (RS-5), supervisor (RS-6) and shadow queue (RS-7);
 every slot event goes to the slotlog. Exit codes: 0 done (observe admits at once), 75 temporary
 capacity refusal (``queue_full``, ``wait_timeout``), 78 invalid store, policy, state, request,
-owner or token, 2 a usage error. ``run`` returns the workload's own exit code once
+owner, token or activation, 2 a usage error. ``run`` returns the workload's own exit code once
 the workload started. A corrupt state or policy is 78, never mode ``off``.
 """
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import subprocess
 import sys
@@ -22,12 +23,12 @@ from typing import Any, Callable, Dict, List, Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
 
-from slot import slot_memory, slot_shadow
+from slot import slot_activation, slot_memory, slot_shadow
 from slot import slot_liveness as liveness
 from slot.slot_admission import (AdmissionInvalid, StateCorrupt, _event, _grown, _make_lease,
-                                 check_token, decide_round, nested_plan)
-from slot.slot_log import SlotLog
-from slot.slot_store import SlotError, SlotStore
+                                 check_token, decide_round, free_slots, is_safe, nested_plan)
+from slot.slot_log import SlotLog, read_events
+from slot.slot_store import MODES, SlotError, SlotStore
 from slot.slot_supervisor import PARENT_ENV, StartRefused, Supervisor, _children_of
 
 EXIT_TEMPFAIL, EXIT_INVALID, EXIT_USAGE = 75, 78, 2
@@ -35,7 +36,10 @@ POLL_SECONDS = 2
 USAGE = """usage: vnx slot doctor
        vnx slot acquire <profile> --project-id <id> --owner-pid <pid>
        vnx slot run <profile> --project-id <id> -- <command> [args...]
-       vnx slot release <lease-id:token> [--project-id <id>]"""
+       vnx slot status
+       vnx slot release <lease-id:token> [--project-id <id>]
+       vnx slot mode show
+       vnx slot mode set off|observe|enforce --project-id <id>"""
 _WAIT, _OFF = object(), object()
 
 
@@ -73,22 +77,59 @@ def _refuse_now(ctx: Ctx, src: dict, reason: str, detail: str = "") -> None:
         _refuse(ctx, state, src, reason, detail=detail)
 
 
+# -- modes and the enforce transition (besluiten 5 and 10) ------------------------------------
 
-def _mode_changed(ctx: Ctx, state: dict, now: float, project_id: Optional[str], to: str) -> None:
+def _mode_changed(ctx: Ctx, state: dict, now: float, project_id: Optional[str], to: str,
+                  transition_s: Optional[float] = None, reasons: tuple = ()) -> None:
     ev = _event(state, "mode_changed", now, {"project_id": project_id, "uid": os.getuid()},
-                from_mode=state["mode"], to_mode=to, transition_s=None, reasons=[])
+                from_mode=state["mode"], to_mode=to, transition_s=transition_s, reasons=list(reasons))
     state["mode"] = ev["mode"] = to
     ctx.log(ev)
 
 
+def _end_grandfather(state: dict) -> None:
+    for lease in state["holders"].values():
+        lease["grandfathered"] = False
+        if lease.get("state") == "grandfathered":
+            lease["state"] = "active"   # a lease in releasing keeps its release request
+
+
+def _start_transition(ctx: Ctx, state: dict, now: float, project_id: str) -> None:
+    for lease in state["holders"].values():
+        lease["grandfathered"] = True
+        if lease.get("state") == "active":
+            lease["state"] = "grandfathered"
+    state["transition"] = {"started_at": now, "finished_at": None, "outcome": "pending"}
+    _mode_changed(ctx, state, now, project_id, "enforce_pending")
+
+
 def _sync_mode(ctx: Ctx, state: dict, policy: dict, now: float, project_id: Optional[str]) -> None:
-    """Follow the policy mode for ``off`` and ``observe``. ``enforce`` is only entered through the
-    activation gate of ``mode set enforce`` (pending first), never by a read of the policy."""
-    want = policy["mode"]
-    if want in ("off", "observe") and state["mode"] != want:
-        _mode_changed(ctx, state, now, project_id, want)
+    """Follow the policy mode. ``enforce`` is only entered through ``mode set enforce`` (pending first);
+    a timed-out transition stays observe until a new explicit mode command."""
+    want, have = policy["mode"], state["mode"]
+    if want in ("off", "observe"):
+        if have != want:
+            _end_grandfather(state)
+            _mode_changed(ctx, state, now, project_id, want)
+        return
+    if have != "enforce_pending":
+        return
+    trans = state["transition"]
+    started = trans.get("started_at") if isinstance(trans, dict) else None
+    if isinstance(started, bool) or not isinstance(started, (int, float)):
+        raise SlotError("state_corrupt", "enforce_pending without a transition start")
+    if not any(h.get("grandfathered") is True for h in state["holders"].values()) or is_safe(state, policy):
+        _end_grandfather(state)
+        trans.update(finished_at=now, outcome="activated")
+        _mode_changed(ctx, state, now, project_id, "enforce", transition_s=now - started)
+    elif now - started >= policy["max_transition"]:
+        _end_grandfather(state)
+        trans.update(finished_at=now, outcome="timed_out")
+        _mode_changed(ctx, state, now, project_id, "observe", transition_s=now - started,
+                      reasons=("transition_timeout",))
 
 
+# -- liveness, reaping and the shadow (besluiten 2, 9) ----------------------------------------
 
 def _tree_verdict(state: dict, lease_id: str, table) -> str:
     """GONE only when the lease and every child lease are positively gone; acquire leases learn descendants."""
@@ -143,6 +184,7 @@ def _reap(ctx: Ctx, state: dict, now: float):
     return table
 
 
+# -- admission ---------------------------------------------------------------------------------
 
 @dataclass
 class _Pending:
@@ -186,7 +228,7 @@ def _new_request(ctx: Ctx, state: dict, policy: dict, profile: str, project_id: 
     return rec
 
 
-def _grant_nested(ctx: Ctx, state: dict, policy: dict, rec: dict, now: float) -> dict:
+def _grant_nested(ctx: Ctx, state: dict, policy: dict, rec: dict, now: float, grandfathered: bool) -> dict:
     try:
         plan = nested_plan(state, policy, rec["parent_lease"], rec["profile"], rec["slots"])["plan"]
     except StateCorrupt:
@@ -200,6 +242,8 @@ def _grant_nested(ctx: Ctx, state: dict, policy: dict, rec: dict, now: float) ->
                        grandfathered=grown[key].get("grandfathered") is True))
     state["holders"] = grown
     child = _make_lease(state, policy, rec, now, rec["parent_lease"])
+    if grandfathered:
+        child.update(grandfathered=True, state="grandfathered")
     state["holders"][child["lease_id"]] = child
     ctx.log(_event(state, "nested", now, child, request_id=rec["request_id"],
                    wait_s=now - rec["requested_at"], reasons=[]))
@@ -223,7 +267,7 @@ def _observe_grant(ctx: Ctx, state: dict, policy: dict, rec: dict, now: float) -
     record = {k: v for k, v in result["record"].items() if k not in ("event", "request_id")}
     ctx.log(_event(state, "would_wait", now, rec, **record))
     if rec["parent_lease"] is not None:
-        return _grant_nested(ctx, state, policy, rec, now)
+        return _grant_nested(ctx, state, policy, rec, now, grandfathered=False)
     lease = _make_lease(state, policy, rec, now, None)
     state["holders"][lease["lease_id"]] = lease
     ctx.log(_event(state, "admitted", now, lease, request_id=rec["request_id"], wait_s=now - rec["requested_at"],
@@ -283,6 +327,9 @@ def _step(ctx: Ctx, state: dict, policy: dict, req: _Pending, now: float, table)
         return _OFF
     if mode == "observe":
         return _observe_grant(ctx, state, policy, req.rec, now)
+    parent = state["holders"].get(req.rec["parent_lease"] or "")
+    if mode == "enforce_pending" and parent is not None and parent.get("grandfathered") is True:
+        return _grant_nested(ctx, state, policy, req.rec, now, grandfathered=True)
     return _enforce_step(ctx, state, policy, req, now, table)
 
 
@@ -307,6 +354,7 @@ def _admit(ctx: Ctx, profile: str, project_id: str, owner: dict):
         ctx.sleep(ctx.poll)
 
 
+# -- commands ----------------------------------------------------------------------------------
 
 def _parse(argv: List[str], *specs) -> Optional[argparse.Namespace]:
     parser = argparse.ArgumentParser(prog="vnx slot", add_help=False, usage=USAGE)
@@ -428,7 +476,87 @@ def cmd_release(ctx: Ctx, argv: List[str]) -> int:
     return 0
 
 
-COMMANDS = {"acquire": cmd_acquire, "run": cmd_run, "release": cmd_release}
+def _summary(rec: dict, keys) -> dict:
+    return {k: rec.get(k) for k in keys}
+
+
+def cmd_status(ctx: Ctx, argv: List[str]) -> int:
+    if argv:
+        print(USAGE, file=sys.stderr)
+        return EXIT_USAGE
+    reasons = ctx.store.check_store() + ctx.store.check_policy()
+    if reasons:
+        raise SlotError(reasons[0].split(":")[0], "; ".join(reasons))
+    policy, state = ctx.store.read_policy(), ctx.store.read_state()
+    try:
+        free = free_slots(state, policy)
+    except AdmissionInvalid as exc:
+        raise SlotError("state_corrupt", exc.reason) from exc
+    ctx.out(json.dumps({
+        "policy_mode": policy["mode"], "mode": state["mode"], "transition": state["transition"],
+        "pool": policy["total"] - policy["reserved"] - policy["runner_reserve"], "free": free,
+        "holders": [_summary(h, ("lease_id", "profile", "project_id", "slots_granted", "max_slots", "owner_kind",
+                                 "state", "grandfathered", "parent_lease", "admitted_at"))
+                    for h in state["holders"].values()],
+        "queue": [_summary(r, ("request_id", "kind", "profile", "project_id", "slots", "requested_at", "reasons"))
+                  for r in state["queue"]]}, indent=2, sort_keys=True))
+    return 0
+
+
+def _write_policy_mode(store: SlotStore, policy: dict, mode: str) -> None:
+    """Atomic rewrite of host.json by its owner; the policy keeps 0644 and no group right (besluit 3)."""
+    path = store.policy_path
+    tmp = path.parent / f".host.json.{os.getpid()}.tmp"
+    payload = json.dumps({**policy, "mode": mode}, indent=2, sort_keys=True, allow_nan=False) + "\n"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+    try:
+        os.fchmod(fd, 0o644)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fd = -1
+            fh.write(payload)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)  # vnx-atomic-write: temp file + replace in the policy directory
+    except BaseException:
+        if fd >= 0:
+            os.close(fd)
+        if tmp.exists():
+            os.unlink(tmp)
+        raise
+
+
+def cmd_mode(ctx: Ctx, argv: List[str]) -> int:
+    if argv == ["show"]:
+        policy, state = ctx.store.read_policy(), ctx.store.read_state()
+        ctx.out(json.dumps({"policy_mode": policy["mode"], "mode": state["mode"],
+                            "transition": state["transition"]}, indent=2, sort_keys=True))
+        return 0
+    ns = _parse(argv, (("action",), {"choices": ["set"]}), (("target",), {"choices": list(MODES)}), PROJECT)
+    if ns is None:
+        return EXIT_USAGE
+    src = {"project_id": ns.project_id, "uid": os.getuid()}
+    policy = ctx.store.read_policy()
+    if os.stat(ctx.store.policy_path).st_uid != os.getuid():
+        _refuse_now(ctx, src, "owner_mismatch", detail="only the policy owner sets the mode")
+    if ns.target == "enforce":
+        if policy["mode"] == "off":
+            _refuse_now(ctx, src, "activation_incomplete", detail="off goes to observe first")
+        missing = slot_activation.missing(policy, read_events(ctx.store.store_dir), ctx.clock())
+        if missing:
+            _refuse_now(ctx, src, "activation_incomplete", detail="; ".join(missing))
+    _write_policy_mode(ctx.store, policy, ns.target)
+    policy = ctx.store.read_policy()
+    with ctx.store.transaction() as state:
+        now = ctx.clock()
+        if ns.target == "enforce" and state["mode"] in ("off", "observe"):
+            _start_transition(ctx, state, now, ns.project_id)
+        _sync_mode(ctx, state, policy, now, ns.project_id)
+        effective = state["mode"]
+    ctx.out(f"policy mode {ns.target}; effective {effective}")
+    return 0
+
+
+COMMANDS = {"acquire": cmd_acquire, "run": cmd_run, "release": cmd_release, "status": cmd_status, "mode": cmd_mode}
 
 
 def main(argv: list, **seams: Any) -> int:

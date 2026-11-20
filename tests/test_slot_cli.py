@@ -6,6 +6,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -20,11 +21,21 @@ from slot.slot_store import SlotStore
 ACL = " 0: group:vnxslot allow list,add_file,search,delete_child,file_inherit,directory_inherit"
 SWAP = "vm.swapusage: total = 5120.00M  used = 100.00M  free = 5020.00M  (encrypted)\n"
 VM_STAT = "Mach Virtual Memory Statistics: (page size of 16384 bytes)\nPages occupied by compressor: 1024.\n"
+DAY = 86400
 POLICY = {"total": 3, "reserved": 1, "runner_reserve": 1, "max_bypass": 3, "max_transition": 600, "max_queue": 5,
           "mode": "observe", "enforce_activation": {},
           "memory": {"swap_growth_mb": 256, "swap_level_mb": 4096, "compressor_gb": 8},
           "profiles": {"runner": {"slots": 1, "max_slots": 8, "max_wait_s": 30, "heavy": False, "children": ["seo-gate"]},
                        "seo-gate": {"slots": 1, "max_slots": 4, "max_wait_s": 30, "heavy": True, "children": []}}}
+
+
+def evidence(now):
+    return {"calibration": {"measured_at": now - 9 * DAY, "measurement_ref": "rs1.md", "seo_slots": 1},
+            "doctor": {a: {"checked_at": now - DAY, "exit_code": 0, "evidence_ref": "log#1"}
+                       for a in ("vincentvandeth", "ci-runner")},
+            "observe": {"started_at": now - 8 * DAY, "ended_at": now - DAY, "project_ids": ["vnx-dev", "seo"],
+                        "evidence_ref": "slotlog"},
+            "operator": {"decided_at": now - 100, "decision_ref": "besluit 2026-11-20"}}
 
 
 @pytest.fixture
@@ -101,7 +112,8 @@ def test_observe_admits_at_once_and_logs_would_wait_from_the_shadow(env):
 
 
 @pytest.mark.parametrize("content", ["{", "[]", json.dumps({"holders": {}})])
-@pytest.mark.parametrize("argv", [("acquire", "runner", "--project-id", "p", "--owner-pid", "1"), ("release", "L-x:1")])
+@pytest.mark.parametrize("argv", [("status",), ("acquire", "runner", "--project-id", "p", "--owner-pid", "1"),
+                                  ("release", "L-x:1"), ("mode", "show")])
 def test_corrupt_state_refuses_78_never_off(env, content, argv):
     (env.store_dir / "state.json").write_text(content)
     assert cli(env, *argv)[0] == 78
@@ -197,6 +209,98 @@ def test_a_full_queue_refuses_75(env):
                              "uid": os.getuid(), "lease_id": "L-0", "owner": {}}])
     assert cli(env, "acquire", "runner", "--project-id", "b", "--owner-pid", str(os.getpid()))[0] == 75
     assert events(env, "refused")[-1]["reasons"] == ["queue_full"]
+
+
+def test_mode_set_enforce_without_evidence_refuses_and_leaves_the_policy(env):
+    assert cli(env, "mode", "set", "enforce", "--project-id", "vnx-dev")[0] == 78
+    assert json.loads(env.policy_path.read_text())["mode"] == "observe"
+    assert events(env, "refused")[0]["reasons"] == ["activation_incomplete"]
+
+
+def _heavy_log(env, now, projects):
+    log = slot_cli.SlotLog(env.store_dir)
+    for i, project in enumerate(projects):
+        log.write({"ts": now - 5 * DAY + i, "event": "requested", "project_id": project, "profile": "seo-gate"})
+
+
+@pytest.mark.parametrize("break_it", [
+    lambda e: e["doctor"]["ci-runner"].update(exit_code=True),
+    lambda e: e["doctor"]["ci-runner"].update(exit_code="0"),
+    lambda e: e["doctor"].pop("ci-runner"),
+    lambda e: e["calibration"].update(seo_slots=2),
+    lambda e: e["observe"].update(started_at=e["observe"]["ended_at"] - 6 * DAY),
+    lambda e: e["observe"].update(project_ids=["vnx-dev"]),
+    lambda e: e["operator"].update(decided_at=None),
+    lambda e: e["operator"].update(decided_at=e["observe"]["ended_at"] - 1),
+    lambda e: e.pop("calibration"),
+])
+def test_each_missing_activation_condition_blocks(env, break_it):
+    now = time.time()
+    proof = evidence(now)
+    break_it(proof)
+    patch_policy(env, enforce_activation=proof)
+    _heavy_log(env, now, ["vnx-dev", "seo"])
+    assert cli(env, "mode", "set", "enforce", "--project-id", "vnx-dev")[0] == 78
+    assert json.loads(env.policy_path.read_text())["mode"] == "observe"
+
+
+def test_heavy_requests_of_only_one_project_in_the_slotlog_block(env):
+    now = time.time()
+    patch_policy(env, enforce_activation=evidence(now))
+    _heavy_log(env, now, ["vnx-dev", "vnx-dev"])
+    assert cli(env, "mode", "set", "enforce", "--project-id", "vnx-dev")[0] == 78
+
+
+def test_a_corrupt_slotlog_line_blocks_activation(env):
+    now = time.time()
+    patch_policy(env, enforce_activation=evidence(now))
+    _heavy_log(env, now, ["vnx-dev", "seo"])
+    with open(next((env.store_dir / "slotlog").glob("*.ndjson")), "a") as fh:
+        fh.write("{not json\n")
+    assert cli(env, "mode", "set", "enforce", "--project-id", "vnx-dev")[0] == 78
+    assert json.loads(env.policy_path.read_text())["mode"] == "observe"
+
+
+def test_mode_set_enforce_with_evidence_activates_an_empty_host(env):
+    now = time.time()
+    patch_policy(env, enforce_activation=evidence(now))
+    _heavy_log(env, now, ["vnx-dev", "seo"])
+    assert cli(env, "mode", "set", "enforce", "--project-id", "vnx-dev")[0] == 0
+    assert json.loads(env.policy_path.read_text())["mode"] == "enforce"
+    assert state(env)["mode"] == "enforce" and state(env)["transition"]["outcome"] == "activated"
+    assert [(e["from_mode"], e["to_mode"]) for e in events(env, "mode_changed")] == [
+        ("observe", "enforce_pending"), ("enforce_pending", "enforce")]
+
+
+def test_enforce_drains_grandfathered_leases_and_times_out_to_observe(env):
+    now = time.time()
+    assert cli(env, "acquire", "runner", "--project-id", "a", "--owner-pid", str(os.getpid()))[0] == 0
+    patch_policy(env, enforce_activation=evidence(now))
+    _heavy_log(env, now, ["vnx-dev", "seo"])
+    assert cli(env, "mode", "set", "enforce", "--project-id", "vnx-dev")[0] == 0
+    (held,) = state(env)["holders"].values()   # need 7 against pool 1: unsafe, so it drains
+    assert state(env)["mode"] == "enforce_pending" and held["grandfathered"] is True and held["state"] == "grandfathered"
+    clock = Clock(now + 601)
+    assert cli(env, "acquire", "runner", "--project-id", "b", "--owner-pid", str(os.getpid()),
+               clock=clock, sleep=clock.sleep)[0] == 0   # fell back to observe: admitted at once
+    last = events(env, "mode_changed")[-1]
+    assert (last["to_mode"], last["reasons"], last["transition_s"] >= 600) == ("observe", ["transition_timeout"], True)
+    assert state(env)["transition"]["outcome"] == "timed_out" and state(env)["mode"] == "observe"
+
+
+def test_mode_set_by_someone_else_than_the_policy_owner_refuses(env, monkeypatch):
+    other = os.getuid() + 1
+    monkeypatch.setattr(os, "getuid", lambda: other)   # the policy file belongs to the real uid
+    assert cli(env, "mode", "set", "off", "--project-id", "p")[0] == 78
+    assert json.loads(env.policy_path.read_text())["mode"] == "observe"
+
+
+def test_status_shows_holders_without_tokens(env):
+    cli(env, "acquire", "runner", "--project-id", "a", "--owner-pid", str(os.getpid()))
+    code, out = cli(env, "status")
+    shown = json.loads(out[0])
+    assert code == 0 and shown["free"] == 0 and shown["pool"] == 1 and "token" not in out[0]
+    assert shown["holders"][0]["project_id"] == "a"
 
 
 def test_usage_errors_exit_2(env):
