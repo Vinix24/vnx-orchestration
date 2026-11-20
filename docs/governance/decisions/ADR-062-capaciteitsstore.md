@@ -226,6 +226,7 @@ De host schrijft NDJSON naar `slotlog/YYYY-MM.ndjson`, zonder paden, commando's,
 | `refused` | Weigering, `exit_code` exact 75 of 78 en concrete reden. |
 | `topped_up` | Bijvraag toegekend: `slots` is toename, `slots_granted` het nieuwe totaal; `grandfathered` boolean. |
 | `nested` | Deellease binnen ouderbudget; `parent_lease` verplicht. |
+| `parent_hint_ignored` | A `VNX_SLOT_LEASE` hint not taken as parent: `lease_id` is the hint, reason `hint_unknown_lease` or `hint_session_mismatch` (the lease belongs to another session); the request goes on as new. |
 | `released`, `reaped` | Respectievelijk releaseverzoek afgerond en opruiming na levenscheck; werkelijke houdtijd. |
 | `release_requested` | `release` op levende werklast zet de lease op `releasing`; gelogd vóór die overgang vastligt, één keer per lease. |
 | `lease_held` | Nog levende werklast na verdwijnen toezichthouder, reden `owner_gone_tree_alive`. |

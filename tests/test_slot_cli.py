@@ -305,3 +305,42 @@ def test_off_mode_start_failure_is_structured_78(env, tmp_path, capsys, make):
     err = capsys.readouterr().err
     assert code == 78 and "vnx slot run: command not started:" in err and "Traceback" not in err
     assert state(env)["holders"] == {}
+
+
+def test_a_lease_hint_from_another_session_is_ignored_by_name(env):
+    other = subprocess.Popen(["sleep", "30"], start_new_session=True)   # a lease owned in another session
+    try:
+        _, out = cli(env, "acquire", "runner", "--project-id", "a", "--owner-pid", str(other.pid))
+        foreign = out[0].split(":")[0]
+        assert state(env)["holders"][foreign]["session_id"] != str(os.getsid(0))
+        code, out = cli(env, "acquire", "seo-gate", "--project-id", "b", "--owner-pid", str(os.getpid()),
+                        env={"VNX_SLOT_LEASE": foreign})
+        assert code == 0
+        mine = state(env)["holders"][out[0].split(":")[0]]
+        assert mine["parent_lease"] is None   # the foreign lease's budget is not consumed
+        ignored = events(env, "parent_hint_ignored")
+        assert [(e["lease_id"], e["project_id"], e["reasons"]) for e in ignored] == [
+            (foreign, "b", ["hint_session_mismatch"])]
+    finally:
+        other.kill()
+        other.wait()
+
+
+def test_a_lease_hint_for_an_unknown_lease_is_ignored_by_name(env):
+    code, _ = cli(env, "acquire", "runner", "--project-id", "a", "--owner-pid", str(os.getpid()),
+                  env={"VNX_SLOT_LEASE": "L-gone"})
+    assert code == 0
+    assert [e["reasons"] for e in events(env, "parent_hint_ignored")] == [["hint_unknown_lease"]]
+
+
+def test_slotlog_sets_the_mode_only_on_the_file_it_creates(env, monkeypatch):
+    from slot import slot_log
+    calls = []
+    monkeypatch.setattr(slot_log.os, "fchmod", lambda fd, mode: calls.append(mode))
+    log = slot_log.SlotLog(env.store_dir)
+    log.write({"ts": 1_800_000_000, "event": "released", "project_id": "p"})
+    assert calls == [0o660]   # created here: group write is set despite the umask
+    # an existing monthly log (another user's file) is appended to without fchmod, which would raise EPERM
+    log.write({"ts": 1_800_000_001, "event": "released", "project_id": "p"})
+    assert calls == [0o660]
+    assert len(events(env, "released")) == 2

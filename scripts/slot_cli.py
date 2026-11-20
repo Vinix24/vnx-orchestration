@@ -159,8 +159,11 @@ def _memory(ctx: Ctx, state: dict, policy: dict, profile: str, now: float):
     return slot_memory.memory_verdict(state, policy, profile, now)
 
 
-def _parent(ctx: Ctx, state: dict) -> Optional[str]:
-    """The caller's session names the parent (besluit 6); ``VNX_SLOT_LEASE`` is only a hint."""
+def _parent(ctx: Ctx, state: dict, project_id: str, now: float) -> Optional[str]:
+    """The caller's session names the parent (besluit 6); ``VNX_SLOT_LEASE`` is only a hint.
+
+    The hint is taken only for a lease recorded in the caller's own session, so another session's lease
+    budget is never consumed. A hint that is not taken leaves a ``parent_hint_ignored`` line with its reason."""
     try:
         mine = str(os.getsid(0))
     except OSError:
@@ -170,11 +173,22 @@ def _parent(ctx: Ctx, state: dict) -> Optional[str]:
     if len(by_session) == 1:
         return by_session[0]
     hint = ctx.env.get(PARENT_ENV) or None
-    return hint if hint in state["holders"] else None
+    if hint is None:
+        return None
+    held = state["holders"].get(hint)
+    if held is None:
+        reason = "hint_unknown_lease"
+    elif mine is None or held.get("session_id") != mine:
+        reason = "hint_session_mismatch"
+    else:
+        return hint
+    ctx.log(_event(state, "parent_hint_ignored", now, {}, lease_id=hint, project_id=project_id,
+                   uid=os.getuid(), reasons=[reason]))
+    return None
 
 
 def _new_request(ctx: Ctx, state: dict, policy: dict, profile: str, project_id: str, owner: dict, now: float) -> dict:
-    parent = _parent(ctx, state)
+    parent = _parent(ctx, state, project_id, now)
     rec = {"request_id": f"r-{uuid.uuid4().hex}", "lease_id": f"L-{uuid.uuid4().hex}", "requested_at": now,
            "kind": "nested" if parent else "new", "parent_lease": parent, "profile": profile,
            "project_id": project_id, "uid": os.getuid(), "owner": owner, "bypassed_n": 0, "reasons": []}
