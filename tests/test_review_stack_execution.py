@@ -354,13 +354,11 @@ def default_stack(env, monkeypatch):
     left out so no test path reaches for ``gh``; codex counted as installed."""
     import review_gate_manager as rgm
     import gate_request_handler
-    import profile_gate_resolver
 
     monkeypatch.setenv("VNX_CI_GATE_REQUIRED", "0")
     stack = rgm._build_default_review_stack()
     assert stack == ["codex_gate", "kimi_gate"]
     monkeypatch.setattr(rgm, "DEFAULT_REVIEW_STACK", stack)
-    monkeypatch.setattr(profile_gate_resolver, "resolve_gate_stack", lambda _files: None)
     monkeypatch.setattr(gate_request_handler.GateRequestHandlerMixin, "_codex_headless_available", lambda self: True)
     return stack
 
