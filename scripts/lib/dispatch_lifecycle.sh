@@ -62,7 +62,7 @@ acquire_terminal_claim() {
     if ! python3 "$VNX_DIR/scripts/terminal_state_shadow.py" \
         --state-dir "$STATE_DIR" --terminal-id "$terminal_id" --status working \
         --claimed-by "$dispatch_id" --claimed-at "$now_iso" --last-activity "$now_iso" \
-        --lease-seconds "${VNX_DISPATCH_LEASE_SECONDS:-600}" >/dev/null 2>&1; then
+        --lease-seconds 600 >/dev/null 2>&1; then
         log "V8 LOCK: acquire_failed terminal=$terminal_id dispatch=$dispatch_id"; return 1
     fi
     log "V8 LOCK: acquired terminal=$terminal_id dispatch=$dispatch_id"; return 0
@@ -151,7 +151,7 @@ rc_check_terminal() {
 # Fail-closed: on failure, outputs FAIL and returns 1. Caller must block dispatch.
 rc_acquire_lease() {
     local terminal_id="$1" dispatch_id="$2"
-    local lease_seconds="${VNX_DISPATCH_LEASE_SECONDS:-600}"
+    local lease_seconds=600
     _rc_enabled || { echo "0"; return 0; }
 
     local result

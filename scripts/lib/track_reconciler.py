@@ -25,7 +25,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import re
 import sqlite3
 import subprocess
@@ -287,8 +286,7 @@ def _load_merged_pr_numbers(
     Sources (all optional; errors silently ignored):
       1. {state_dir}/../events/pr_merged.ndjson  — ADR-005 event ledger
       2. {state_dir}/t0_receipts.ndjson           — receipt log
-      3. git/GitHub via ``gh`` (DEFAULT-ON since OI-1155; opt out with
-         ``VNX_RECONCILE_GIT=0``) — cache-first (10-min TTL), silent-on-failure.
+      3. git/GitHub via ``gh`` (always on since OI-1155) — cache-first (10-min TTL), silent-on-failure.
          Closes the gap where a PR merged via raw ``gh pr merge`` emits no local
          ``pr_merged`` receipt, so a merged track would otherwise stay ``queued``
          forever (the git-reality drift). Measured 2026-08-15: sources 1-2 both
@@ -335,18 +333,14 @@ def _load_merged_pr_numbers(
         except OSError:
             pass
 
-    # Source 3 (network, DEFAULT-ON since OI-1155): git/GitHub merge state via gh,
+    # Source 3 (network, always on since OI-1155): git/GitHub merge state via gh,
     # cache-first + silent-on-failure. This is the ONLY source that sees a PR
     # merged via a bare ``gh pr merge`` (no local pr_merged receipt is written),
     # so it must run by default or such merged tracks never derive 'done'.
-    # Explicit opt-out for offline / deterministic callers: VNX_RECONCILE_GIT=0
-    # (also 'false'/'no'/'off').
-    _git_flag = os.environ.get("VNX_RECONCILE_GIT", "").strip().lower()
-    if _git_flag not in ("0", "false", "no", "off"):
-        gh_cwd = Path(repo_root) if repo_root is not None else _git_toplevel(Path.cwd())
-        merged |= _load_merged_prs_from_gh(
-            state_path, cwd=str(gh_cwd) if gh_cwd is not None else None
-        )
+    gh_cwd = Path(repo_root) if repo_root is not None else _git_toplevel(Path.cwd())
+    merged |= _load_merged_prs_from_gh(
+        state_path, cwd=str(gh_cwd) if gh_cwd is not None else None
+    )
 
     return frozenset(merged)
 
@@ -663,7 +657,7 @@ def reconcile_track(
           ``gh pr view`` sweep) MUST pass the UNION of its gh-confirmed numbers
           and the locally-loaded set here. Otherwise reconcile_track falls back
           to _load_merged_pr_numbers, whose gh source (source 3) is default-ON
-          since OI-1155 (opt out with VNX_RECONCILE_GIT=0) — so a track the
+          since OI-1155 — so a track the
           caller just confirmed merged via gh would re-derive as 'queued' from
           the weaker local sources, and no close path could close it. The caller
           performs the union (gh evidence is additive: it never replaces local

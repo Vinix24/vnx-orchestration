@@ -104,7 +104,7 @@ def data_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         monkeypatch.setenv(name, str(data / name.removeprefix("VNX_").removesuffix("_DIR").lower()))
     monkeypatch.setenv("VNX_DATA_HOME", str(data / "account-home"))
     for name in ("VNX_PROJECT_ROOT", "VNX_PROJECT_FILTER", "VNX_CHAIN_RECEIPTS",
-                 "VNX_REQUESTED_BY", "VNX_PARENT_DISPATCH", "VNX_TASK_CLASS",
+                 "VNX_PARENT_DISPATCH", "VNX_TASK_CLASS",
                  "VNX_CANONICAL_ROOT", "VNX_HOME"):
         monkeypatch.delenv(name, raising=False)
     return data
@@ -516,7 +516,6 @@ def foreign_env(tmp_path_factory: pytest.TempPathFactory,
     monkeypatch.setenv("VNX_PROJECT_ROOT", str(foreign))
     monkeypatch.setenv("VNX_PROJECT_FILTER", "0")
     monkeypatch.setenv("VNX_CHAIN_RECEIPTS", "1")
-    monkeypatch.setenv("VNX_REQUESTED_BY", "a-foreign-test")
     monkeypatch.setenv("VNX_PARENT_DISPATCH", "d-foreign-parent")
     monkeypatch.setenv("VNX_TASK_CLASS", "foreign-class")
     monkeypatch.setenv("VNX_CURRENT_DISPATCH_ID", "d-foreign-current")

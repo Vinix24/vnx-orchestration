@@ -102,7 +102,6 @@ def _valid_body() -> str:
 
 def test_govern_authored_uses_worker_report(tmp_data, tmp_state, monkeypatch):
     """When a valid worker report exists, govern() uses it and marks authored."""
-    monkeypatch.setenv("VNX_SHARED_GOVERN", "1")
 
     reports_dir = tmp_data / "unified_reports"
     reports_dir.mkdir(parents=True)
@@ -124,7 +123,6 @@ def test_govern_authored_finds_legacy_report_suffix_filename(tmp_data, tmp_state
     convention, receipt_writer._ensure_unified_report) is detected as authored
     even though govern()'s primary lookup is "<id>.md" (tmux-lane convention).
     """
-    monkeypatch.setenv("VNX_SHARED_GOVERN", "1")
 
     reports_dir = tmp_data / "unified_reports"
     reports_dir.mkdir(parents=True)
@@ -147,7 +145,6 @@ def test_govern_authored_finds_legacy_report_suffix_filename(tmp_data, tmp_state
 
 def test_govern_prefers_canonical_filename_over_legacy(tmp_data, tmp_state, monkeypatch):
     """When both "<id>.md" and "<id>_report.md" exist, the canonical name wins."""
-    monkeypatch.setenv("VNX_SHARED_GOVERN", "1")
 
     reports_dir = tmp_data / "unified_reports"
     reports_dir.mkdir(parents=True)
@@ -172,7 +169,6 @@ def test_govern_prefers_canonical_filename_over_legacy(tmp_data, tmp_state, monk
 
 def test_govern_authored_stamps_frontmatter_on_worker_report(tmp_data, tmp_state, monkeypatch):
     """After govern(), a frontmatter-less worker report has a YAML frontmatter block stamped."""
-    monkeypatch.setenv("VNX_SHARED_GOVERN", "1")
 
     reports_dir = tmp_data / "unified_reports"
     reports_dir.mkdir(parents=True)
@@ -195,7 +191,6 @@ def test_govern_authored_stamps_frontmatter_on_worker_report(tmp_data, tmp_state
 
 def test_govern_authored_preserves_worker_body(tmp_data, tmp_state, monkeypatch):
     """Worker body is preserved below the stamped frontmatter."""
-    monkeypatch.setenv("VNX_SHARED_GOVERN", "1")
 
     reports_dir = tmp_data / "unified_reports"
     reports_dir.mkdir(parents=True)
@@ -227,7 +222,6 @@ def test_govern_frontmatter_model_falls_back_to_spec_model(tmp_data, tmp_state, 
     """A worker receipt with no "model" key must not stamp frontmatter model:
     "unknown" when spec.model carries the real value — the receipt_data lookup
     must fall back to spec.model before defaulting to "unknown"."""
-    monkeypatch.setenv("VNX_SHARED_GOVERN", "1")
 
     reports_dir = tmp_data / "unified_reports"
     reports_dir.mkdir(parents=True)
@@ -251,7 +245,6 @@ def test_govern_frontmatter_model_falls_back_to_spec_model(tmp_data, tmp_state, 
 def test_govern_frontmatter_model_prefers_worker_receipt_over_spec(tmp_data, tmp_state, monkeypatch):
     """A worker receipt that DOES carry a model must still win over spec.model —
     the fallback only applies when the worker receipt is silent on model."""
-    monkeypatch.setenv("VNX_SHARED_GOVERN", "1")
 
     reports_dir = tmp_data / "unified_reports"
     reports_dir.mkdir(parents=True)
@@ -273,7 +266,6 @@ def test_govern_frontmatter_model_prefers_worker_receipt_over_spec(tmp_data, tmp
 def test_govern_frontmatter_route_decision_selected_model_matches_model(tmp_data, tmp_state, monkeypatch):
     """route_decision.selected_model must carry the same value as the top-level
     model field — both are stamped from the same resolved _model variable."""
-    monkeypatch.setenv("VNX_SHARED_GOVERN", "1")
 
     reports_dir = tmp_data / "unified_reports"
     reports_dir.mkdir(parents=True)
@@ -308,7 +300,6 @@ def test_govern_deliberation_panelist_report_accepted_as_authored_without_fence(
     vnx-plan-verdict fence — it is free-form panel analysis. It must still be accepted
     as authored (not synthesized-over, which would replace it with an empty git-diff
     body since a panel dispatch produces no commit)."""
-    monkeypatch.setenv("VNX_SHARED_GOVERN", "1")
 
     reports_dir = tmp_data / "unified_reports"
     reports_dir.mkdir(parents=True)
@@ -334,7 +325,6 @@ def test_govern_deliberation_panelist_empty_report_falls_through_to_synthesis(
 ):
     """An empty deliberation-panelist report (the seat produced nothing) must NOT be
     accepted as authored — it falls through to synthesis like any other empty report."""
-    monkeypatch.setenv("VNX_SHARED_GOVERN", "1")
 
     reports_dir = tmp_data / "unified_reports"
     reports_dir.mkdir(parents=True)
@@ -354,7 +344,6 @@ def test_govern_deliberation_panelist_skips_standard_contract_validation(
     """A deliberation-panelist authored body — which by design lacks ## Changes/##
     Verification/## Open Items — must not be flagged 'violated' by the standard
     report-body contract, even in enforce mode."""
-    monkeypatch.setenv("VNX_SHARED_GOVERN", "1")
     monkeypatch.setenv("VNX_CONTRACT_VALIDATE", "enforce")
 
     reports_dir = tmp_data / "unified_reports"
@@ -371,7 +360,6 @@ def test_govern_deliberation_panelist_skips_standard_contract_validation(
 
 def test_govern_authored_not_double_stamped(tmp_data, tmp_state, monkeypatch):
     """Defensive: a worker report that already has frontmatter is not double-stamped."""
-    monkeypatch.setenv("VNX_SHARED_GOVERN", "1")
 
     reports_dir = tmp_data / "unified_reports"
     reports_dir.mkdir(parents=True)
@@ -409,7 +397,6 @@ def test_govern_authored_not_double_stamped(tmp_data, tmp_state, monkeypatch):
 
 def test_govern_authored_schema_strict_valid(tmp_data, tmp_state, monkeypatch):
     """Profile enforced: authored report frontmatter validates against the schema."""
-    monkeypatch.setenv("VNX_SHARED_GOVERN", "1")
     monkeypatch.setenv("VNX_OVERRIDE_ENFORCEMENT_PROFILE", "enforced")
 
     reports_dir = tmp_data / "unified_reports"
@@ -441,7 +428,6 @@ def test_govern_authored_schema_strict_valid(tmp_data, tmp_state, monkeypatch):
 
 def test_govern_synthesized_when_no_worker_report(tmp_data, tmp_state, monkeypatch):
     """Missing worker report -> synthesized body, contract_status=synthesized."""
-    monkeypatch.setenv("VNX_SHARED_GOVERN", "1")
 
     spec = _make_spec(tmp_data, tmp_state)
     raw = _make_raw()
@@ -457,7 +443,6 @@ def test_govern_synthesized_when_no_worker_report(tmp_data, tmp_state, monkeypat
 
 def test_govern_synthesized_never_contains_placeholder(tmp_data, tmp_state, monkeypatch):
     """Synthesized body must not contain the old placeholder string."""
-    monkeypatch.setenv("VNX_SHARED_GOVERN", "1")
 
     spec = _make_spec(tmp_data, tmp_state)
     raw = _make_raw()
@@ -475,7 +460,6 @@ def test_govern_synthesized_never_contains_placeholder(tmp_data, tmp_state, monk
 
 def test_govern_synthesis_stamped_synthesized(tmp_data, tmp_state, monkeypatch):
     """Synthesized body carries 'contract_status: synthesized' in content."""
-    monkeypatch.setenv("VNX_SHARED_GOVERN", "1")
 
     spec = _make_spec(tmp_data, tmp_state)
     raw = _make_raw()
@@ -490,7 +474,6 @@ def test_govern_synthesis_stamped_synthesized(tmp_data, tmp_state, monkeypatch):
 
 def test_govern_synthesized_includes_real_summary_not_placeholder(tmp_data, tmp_state, monkeypatch):
     """Synthesized ## Summary uses git log output, not the placeholder string."""
-    monkeypatch.setenv("VNX_SHARED_GOVERN", "1")
 
     spec = _make_spec(tmp_data, tmp_state)
     raw = _make_raw()
@@ -506,7 +489,6 @@ def test_govern_synthesized_includes_real_summary_not_placeholder(tmp_data, tmp_
 
 def test_govern_synthesized_includes_git_changes(tmp_data, tmp_state, monkeypatch):
     """Synthesized ## Changes section uses git diff --stat output."""
-    monkeypatch.setenv("VNX_SHARED_GOVERN", "1")
 
     spec = _make_spec(tmp_data, tmp_state)
     raw = _make_raw()
@@ -526,7 +508,6 @@ def test_govern_synthesized_includes_git_changes(tmp_data, tmp_state, monkeypatc
 
 def test_govern_placeholder_worker_report_triggers_synthesis(tmp_data, tmp_state, monkeypatch):
     """A placeholder worker report is rejected, synthesized, and the file is OVERWRITTEN."""
-    monkeypatch.setenv("VNX_SHARED_GOVERN", "1")
 
     reports_dir = tmp_data / "unified_reports"
     reports_dir.mkdir(parents=True)
@@ -567,7 +548,6 @@ def test_govern_placeholder_worker_report_triggers_synthesis(tmp_data, tmp_state
 
 def test_govern_body_override_passed_to_emit(tmp_data, tmp_state, monkeypatch):
     """emit_unified_report is called with body_override when synthesizing."""
-    monkeypatch.setenv("VNX_SHARED_GOVERN", "1")
 
     spec = _make_spec(tmp_data, tmp_state)
     raw = _make_raw()
@@ -746,7 +726,6 @@ def test_govern_error_fallback_stamps_marker(tmp_data, tmp_state):
 def test_govern_timeout_path_stamps_marker(tmp_data, tmp_state, monkeypatch):
     """End-to-end through govern(): a timeout (receipt=None) produces a synthesized
     report carrying the marker — the real-world symptom OI-1066 traces."""
-    monkeypatch.setenv("VNX_SHARED_GOVERN", "1")
     spec = _make_spec(tmp_data, tmp_state)
     raw = GovernRaw(receipt=None, duration_seconds=3600.0)
 
@@ -776,7 +755,6 @@ def test_synthesized_marker_is_stable_token_not_prose():
 
 def test_govern_timeout_path_synthesizes(tmp_data, tmp_state, monkeypatch):
     """Receipt=None (timeout) -> synthesized body emitted."""
-    monkeypatch.setenv("VNX_SHARED_GOVERN", "1")
 
     spec = _make_spec(tmp_data, tmp_state)
     raw = GovernRaw(receipt=None, duration_seconds=3600.0)
@@ -788,27 +766,6 @@ def test_govern_timeout_path_synthesizes(tmp_data, tmp_state, monkeypatch):
 
     assert outcome.contract_status == "synthesized"
     assert outcome.report_path is not None
-
-
-# ---------------------------------------------------------------------------
-# govern() — VNX_SHARED_GOVERN=0 does not route through govern()
-# ---------------------------------------------------------------------------
-
-def test_govern_flag_off_uses_legacy_path(tmp_data, tmp_state, monkeypatch):
-    """When VNX_SHARED_GOVERN=0, govern() is not called via the tmux lane."""
-    monkeypatch.setenv("VNX_SHARED_GOVERN", "0")
-
-    # When govern() IS called directly with flag off, it still works (the flag
-    # is checked by the caller, not govern() itself).  Here we just verify that
-    # govern() returns a valid outcome regardless of flag state.
-    spec = _make_spec(tmp_data, tmp_state)
-    raw = _make_raw()
-
-    with patch("dispatch_govern._git_summary", return_value="feat: something with enough characters for the summary check"), \
-         patch("dispatch_govern._git_changes", return_value="scripts/lib/foo.py | 5 ++"):
-        outcome = govern(spec, raw, lane="tmux_interactive")
-
-    assert isinstance(outcome, GovernedOutcome)
 
 
 # ---------------------------------------------------------------------------
@@ -905,7 +862,6 @@ def test_govern_strict_mode_overwrites_stale_placeholder(tmp_data, tmp_state, mo
     schema validation (missing schema_version + 9 other required fields), causing
     SchemaViolation to abort the atomic write and leaving the stale placeholder on disk.
     """
-    monkeypatch.setenv("VNX_SHARED_GOVERN", "1")
     monkeypatch.setenv("VNX_OVERRIDE_ENFORCEMENT_PROFILE", "enforced")
 
     reports_dir = tmp_data / "unified_reports"
@@ -1391,7 +1347,6 @@ def test_ensure_receipt_fake_default_spec_role_falls_through(tmp_data, tmp_state
 def test_govern_synthesized_frontmatter_role_from_metadata(tmp_data, tmp_state, monkeypatch):
     """The govern-emitted report frontmatter stamps the resolved role, not the
     hardcoded backend-developer default."""
-    monkeypatch.setenv("VNX_SHARED_GOVERN", "1")
     monkeypatch.setenv("VNX_RECEIPT_FALLBACK", "1")
     monkeypatch.setenv("VNX_PROJECT_ID", "vnx-dev")
     _make_metadata_db(tmp_state, [("test-govern-001", "vnx-dev", "debugger")])
@@ -1415,7 +1370,6 @@ def test_govern_synthesized_frontmatter_role_from_metadata(tmp_data, tmp_state, 
 def test_govern_synthesized_frontmatter_identity_unresolved(tmp_data, tmp_state, monkeypatch):
     """Unresolved identity stamps identity_unresolved in frontmatter — never the
     fake backend-developer hardcode."""
-    monkeypatch.setenv("VNX_SHARED_GOVERN", "1")
     monkeypatch.setenv("VNX_RECEIPT_FALLBACK", "1")
     monkeypatch.setenv("VNX_PROJECT_ID", "vnx-dev")
     monkeypatch.delenv("VNX_STATE_DIR", raising=False)
@@ -1442,7 +1396,6 @@ def test_govern_synthesized_frontmatter_identity_unresolved(tmp_data, tmp_state,
 
 def test_govern_timeout_appends_synthesized_receipt(tmp_data, tmp_state, monkeypatch):
     """govern() with receipt=None must append a lane-synthesized receipt to t0_receipts.ndjson."""
-    monkeypatch.setenv("VNX_SHARED_GOVERN", "1")
     monkeypatch.setenv("VNX_RECEIPT_FALLBACK", "1")
 
     spec = _make_spec(tmp_data, tmp_state)
@@ -1468,7 +1421,6 @@ def test_govern_authored_report_no_receipt_status_done(tmp_data, tmp_state, monk
     """OI-1202: a successful tmux dispatch whose worker receipt never landed (but
     whose valid 4-heading report did) must NOT leave a 'failed' receipt. The
     lane-synthesized fallback derives status='done' from the authored report."""
-    monkeypatch.setenv("VNX_SHARED_GOVERN", "1")
     monkeypatch.setenv("VNX_RECEIPT_FALLBACK", "1")
 
     reports_dir = tmp_data / "unified_reports"
@@ -1494,7 +1446,6 @@ def test_govern_authored_failure_report_no_receipt_status_failed(tmp_data, tmp_s
     """OI-1202: a worker report that passes the 4-heading contract but DECLARES
     failure (**Status**: failed, the heartbeat-kill shape) must stay 'failed' —
     the fallback must not dress a declared failure as success."""
-    monkeypatch.setenv("VNX_SHARED_GOVERN", "1")
     monkeypatch.setenv("VNX_RECEIPT_FALLBACK", "1")
 
     reports_dir = tmp_data / "unified_reports"
@@ -1524,7 +1475,6 @@ def test_govern_authored_failure_report_no_receipt_status_failed(tmp_data, tmp_s
 
 def test_govern_normal_path_no_synthesized_receipt(tmp_data, tmp_state, monkeypatch):
     """govern() with a worker receipt must NOT append a synthesized one."""
-    monkeypatch.setenv("VNX_SHARED_GOVERN", "1")
     monkeypatch.setenv("VNX_RECEIPT_FALLBACK", "1")
 
     spec = _make_spec(tmp_data, tmp_state)
@@ -1545,7 +1495,6 @@ def test_govern_normal_path_no_synthesized_receipt(tmp_data, tmp_state, monkeypa
 
 def test_govern_fallback_disabled_no_receipt_appended(tmp_data, tmp_state, monkeypatch):
     """VNX_RECEIPT_FALLBACK=0: timeout path must NOT append a synthesized receipt."""
-    monkeypatch.setenv("VNX_SHARED_GOVERN", "1")
     monkeypatch.setenv("VNX_RECEIPT_FALLBACK", "0")
 
     spec = _make_spec(tmp_data, tmp_state)

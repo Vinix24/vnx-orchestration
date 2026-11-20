@@ -1,13 +1,11 @@
-"""test_pool_consumer.py — VNX_POOL_TASK_CONSUMER flag integration tests (N-3).
+"""test_pool_consumer.py — pool consumer route integration tests (N-3).
 
 Verifies:
-- Flag on  → _spawn_via_provider_dispatch uses pool_worker_runner (not subprocess_dispatch)
-- Door default (T-D0, 2026-10-27) → pool_worker_runner too; the consumer flag no longer
-  selects between the two workers on its own
+- Door default (T-D0, 2026-10-27) → _spawn_via_provider_dispatch uses pool_worker_runner
+  (not subprocess_dispatch); the door predicate alone selects the worker
 - VNX_SINGLE_ENTRY_DISPATCH=0 → the legacy subprocess_dispatch worker (rollback net)
-- PoolManager.tick() with 6 queued dispatches + flag on spawns runner for each worker
+- PoolManager.tick() with 6 queued dispatches spawns the runner for each worker
 - pool_id passed through to runner args
-- Exact-match on '1': other values do not force the runner
 
 ADR-007: project_id-scoped pool lease + dispatch match (FM-4).
 ADR-018: pool sizing via tick (Rule 2); single-claim, no loop.
@@ -66,17 +64,16 @@ class TestConsumerFlagOnSpawn:
     @patch("pool_worktree_manager.create_worker_worktree")
     @patch("pool_manager.subprocess.Popen")
     @patch("pool_manager.os.kill")
-    def test_flag_on_uses_pool_worker_runner(self, mock_kill, mock_popen, mock_wt):
-        """VNX_POOL_TASK_CONSUMER=1 → cmd invokes pool_worker_runner, not subprocess_dispatch."""
+    def test_door_default_uses_pool_worker_runner(self, mock_kill, mock_popen, mock_wt):
+        """The door default → cmd invokes pool_worker_runner, not subprocess_dispatch."""
         mock_wt.return_value = Path("/tmp/fake-worktree")
         mock_proc = MagicMock()
         mock_proc.pid = 11111
         mock_popen.return_value = mock_proc
 
-        with patch.dict(os.environ, {"VNX_POOL_TASK_CONSUMER": "1"}):
-            result = _spawn_via_provider_dispatch(
-                "vnx-dev", "default", "T1", "claude", "backend-developer"
-            )
+        result = _spawn_via_provider_dispatch(
+            "vnx-dev", "default", "T1", "claude", "backend-developer"
+        )
 
         assert result.success is True
         assert result.pid == 11111
@@ -94,17 +91,16 @@ class TestConsumerFlagOnSpawn:
     @patch("pool_worktree_manager.create_worker_worktree")
     @patch("pool_manager.subprocess.Popen")
     @patch("pool_manager.os.kill")
-    def test_flag_on_passes_pool_id(self, mock_kill, mock_popen, mock_wt):
+    def test_door_default_passes_pool_id(self, mock_kill, mock_popen, mock_wt):
         """pool_id forwarded to pool_worker_runner via --pool-id."""
         mock_wt.return_value = Path("/tmp/fake-worktree")
         mock_proc = MagicMock()
         mock_proc.pid = 22222
         mock_popen.return_value = mock_proc
 
-        with patch.dict(os.environ, {"VNX_POOL_TASK_CONSUMER": "1"}):
-            result = _spawn_via_provider_dispatch(
-                "vnx-dev", "batch-pool", "T2", "claude", "backend-developer"
-            )
+        result = _spawn_via_provider_dispatch(
+            "vnx-dev", "batch-pool", "T2", "claude", "backend-developer"
+        )
 
         assert result.success is True
         cmd = mock_popen.call_args[0][0]
@@ -115,16 +111,15 @@ class TestConsumerFlagOnSpawn:
     @patch("pool_worktree_manager.create_worker_worktree")
     @patch("pool_manager.subprocess.Popen")
     @patch("pool_manager.os.kill")
-    def test_flag_unset_uses_door_route(self, mock_kill, mock_popen, mock_wt):
-        """Flag unset → the door route (pool_worker_runner), not the legacy worker (T-D0)."""
+    def test_door_default_uses_door_route(self, mock_kill, mock_popen, mock_wt):
+        """Door default → the door route (pool_worker_runner), not the legacy worker (T-D0)."""
         mock_wt.return_value = Path("/tmp/fake-worktree")
         mock_proc = MagicMock()
         mock_proc.pid = 33333
         mock_popen.return_value = mock_proc
 
         env = {k: v for k, v in os.environ.items()
-               if k not in ("VNX_POOL_TASK_CONSUMER", "VNX_SINGLE_ENTRY_DISPATCH",
-                            "VNX_DISPATCH_LEGACY")}
+               if k not in ("VNX_SINGLE_ENTRY_DISPATCH", "VNX_DISPATCH_LEGACY")}
         with patch.dict(os.environ, env, clear=True):
             result = _spawn_via_provider_dispatch(
                 "vnx-dev", "default", "T3", "claude", "code-reviewer"
@@ -140,15 +135,14 @@ class TestConsumerFlagOnSpawn:
     @patch("pool_worktree_manager.create_worker_worktree")
     @patch("pool_manager.subprocess.Popen")
     @patch("pool_manager.os.kill")
-    def test_flag_value_0_keeps_legacy_path_only_when_door_is_rolled_back(self, mock_kill, mock_popen, mock_wt):
-        """VNX_POOL_TASK_CONSUMER=0 (not '1') does not name a route; the door rollback does."""
+    def test_door_rollback_keeps_legacy_path(self, mock_kill, mock_popen, mock_wt):
+        """The door rollback (VNX_SINGLE_ENTRY_DISPATCH=0) picks the legacy worker."""
         mock_wt.return_value = Path("/tmp/fake-worktree")
         mock_proc = MagicMock()
         mock_proc.pid = 44444
         mock_popen.return_value = mock_proc
 
-        with patch.dict(os.environ, {"VNX_POOL_TASK_CONSUMER": "0",
-                                     "VNX_SINGLE_ENTRY_DISPATCH": "0",
+        with patch.dict(os.environ, {"VNX_SINGLE_ENTRY_DISPATCH": "0",
                                      "VNX_DISPATCH_LEGACY": ""}):
             result = _spawn_via_provider_dispatch(
                 "vnx-dev", "default", "T4", "claude", "backend-developer"
@@ -163,15 +157,14 @@ class TestConsumerFlagOnSpawn:
     @patch("pool_worktree_manager.create_worker_worktree")
     @patch("pool_manager.subprocess.Popen")
     @patch("pool_manager.os.kill")
-    def test_flag_on_preserves_start_new_session(self, mock_kill, mock_popen, mock_wt):
+    def test_door_default_preserves_start_new_session(self, mock_kill, mock_popen, mock_wt):
         """Consumer mode still spawns detached (start_new_session=True)."""
         mock_wt.return_value = Path("/tmp/fake-worktree")
         mock_proc = MagicMock()
         mock_proc.pid = 55555
         mock_popen.return_value = mock_proc
 
-        with patch.dict(os.environ, {"VNX_POOL_TASK_CONSUMER": "1"}):
-            _spawn_via_provider_dispatch("vnx-dev", "default", "T5", "claude", "backend-developer")
+        _spawn_via_provider_dispatch("vnx-dev", "default", "T5", "claude", "backend-developer")
 
         call_kwargs = mock_popen.call_args[1]
         assert call_kwargs.get("start_new_session") is True
@@ -179,7 +172,7 @@ class TestConsumerFlagOnSpawn:
     @patch("pool_worktree_manager.create_worker_worktree")
     @patch("pool_manager.subprocess.Popen")
     @patch("pool_manager.os.kill")
-    def test_flag_on_uses_worktree_cwd(self, mock_kill, mock_popen, mock_wt, tmp_path):
+    def test_door_default_uses_worktree_cwd(self, mock_kill, mock_popen, mock_wt, tmp_path):
         """Consumer mode still creates a worktree and sets cwd to it."""
         wt = tmp_path / "worktrees" / "T6"
         wt.mkdir(parents=True)
@@ -188,10 +181,9 @@ class TestConsumerFlagOnSpawn:
         mock_proc.pid = 66666
         mock_popen.return_value = mock_proc
 
-        with patch.dict(os.environ, {"VNX_POOL_TASK_CONSUMER": "1"}):
-            result = _spawn_via_provider_dispatch(
-                "vnx-dev", "default", "T6", "claude", "backend-developer"
-            )
+        result = _spawn_via_provider_dispatch(
+            "vnx-dev", "default", "T6", "claude", "backend-developer"
+        )
 
         assert result.success is True
         mock_wt.assert_called_once_with("T6")
@@ -204,14 +196,13 @@ class TestConsumerFlagOnSpawn:
 
 class TestConsumerFlagNegativePaths:
     @patch("pool_worktree_manager.create_worker_worktree")
-    def test_flag_on_worktree_failure(self, mock_wt):
+    def test_door_default_worktree_failure(self, mock_wt):
         """Worktree failure in consumer mode surfaces as SpawnResult(success=False)."""
         mock_wt.side_effect = RuntimeError("git worktree add failed")
 
-        with patch.dict(os.environ, {"VNX_POOL_TASK_CONSUMER": "1"}):
-            result = _spawn_via_provider_dispatch(
-                "vnx-dev", "default", "T1", "claude", "backend-developer"
-            )
+        result = _spawn_via_provider_dispatch(
+            "vnx-dev", "default", "T1", "claude", "backend-developer"
+        )
 
         assert result.success is False
         assert "worktree creation failed" in result.error
@@ -219,7 +210,7 @@ class TestConsumerFlagNegativePaths:
     @patch("pool_worktree_manager.create_worker_worktree")
     @patch("pool_manager.subprocess.Popen")
     @patch("pool_manager.os.kill")
-    def test_flag_on_process_dies_immediately(self, mock_kill, mock_popen, mock_wt):
+    def test_door_default_process_dies_immediately(self, mock_kill, mock_popen, mock_wt):
         """Immediate exit in consumer mode surfaces as SpawnResult(success=False)."""
         mock_wt.return_value = Path("/tmp/fake-worktree")
         mock_proc = MagicMock()
@@ -227,10 +218,9 @@ class TestConsumerFlagNegativePaths:
         mock_popen.return_value = mock_proc
         mock_kill.side_effect = ProcessLookupError("No such process")
 
-        with patch.dict(os.environ, {"VNX_POOL_TASK_CONSUMER": "1"}):
-            result = _spawn_via_provider_dispatch(
-                "vnx-dev", "default", "T1", "claude", "backend-developer"
-            )
+        result = _spawn_via_provider_dispatch(
+            "vnx-dev", "default", "T1", "claude", "backend-developer"
+        )
 
         assert result.success is False
         assert "died immediately" in result.error
@@ -263,8 +253,7 @@ class TestPoolManagerConsumerIntegration:
 
         mgr = PoolManager("vnx-dev", "default", db_path)
 
-        with patch.dict(os.environ, {"VNX_POOL_TASK_CONSUMER": "1"}):
-            result = mgr.tick()
+        result = mgr.tick()
 
         assert len(result.spawned) >= 1
         assert len(result.errors) == 0
@@ -299,7 +288,7 @@ class TestPoolManagerConsumerIntegration:
         mgr = PoolManager("vnx-dev", "default", db_path)
 
         env = {k: v for k, v in os.environ.items()
-               if k not in ("VNX_POOL_TASK_CONSUMER", "VNX_DISPATCH_LEGACY")}
+               if k not in ("VNX_DISPATCH_LEGACY",)}
         env["VNX_SINGLE_ENTRY_DISPATCH"] = "0"
         with patch.dict(os.environ, env, clear=True):
             result = mgr.tick()
@@ -333,8 +322,7 @@ class TestPoolManagerConsumerIntegration:
 
         mgr = PoolManager("vnx-dev", "default", db_path)
 
-        with patch.dict(os.environ, {"VNX_POOL_TASK_CONSUMER": "1"}):
-            result = mgr.tick()
+        result = mgr.tick()
 
         # terminal_ids returned by tick must be distinct
         assert len(result.spawned) == len(set(result.spawned))
