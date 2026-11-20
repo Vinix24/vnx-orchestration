@@ -1,0 +1,1 @@
+- `vnx morning-round tick` and `stop` start and end the morning round per project (idempotent per day), `VNX_MORNING_PAUSE_ENABLED` now defaults to on, and a day without a snapshot is `not_started`, not paused (ADR-095, ochtendronde D4).

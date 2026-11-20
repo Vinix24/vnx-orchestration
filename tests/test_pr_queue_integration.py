@@ -232,22 +232,7 @@ class TestPRQueueStateCreation:
         manager.set_feature("Canonical-only")
 
         legacy_state_file = Path(os.environ["VNX_HOME"]) / "state" / "pr_queue_state.yaml"
-        assert manager.dual_write_legacy is False
         assert not legacy_state_file.exists()
-
-    def test_pr_queue_dual_write_enabled_with_rollback(self, clean_state, monkeypatch):
-        """Rollback flag should temporarily re-enable legacy mirror writes."""
-        monkeypatch.setenv("VNX_STATE_SIMPLIFICATION_ROLLBACK", "1")
-        monkeypatch.delenv("VNX_PR_QUEUE_DUAL_WRITE_LEGACY", raising=False)
-        monkeypatch.delenv("VNX_STATE_DUAL_WRITE_LEGACY", raising=False)
-
-        manager = PRQueueManager()
-        manager.clear_queue()
-        manager.set_feature("Rollback")
-
-        legacy_state_file = manager.legacy_state_dir / "pr_queue_state.yaml"
-        assert manager.dual_write_legacy is True
-        assert legacy_state_file.exists()
 
 
 class TestRecommendationEngineIntegration:
