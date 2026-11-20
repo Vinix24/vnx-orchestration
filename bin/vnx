@@ -445,6 +445,12 @@ Process commands (visibility and control):
   jump <terminal>    Switch tmux focus to T0/T1/T2/T3 pane
   jump --attention   Jump to highest-priority terminal needing attention
   slot doctor        Check the host capacity slot store (exit 0 valid, 78 invalid store, policy or state)
+  slot run <profile> --project-id <id> -- <cmd>
+                     Run <cmd> in its own session under a slot lease; exits with the command's code
+  slot acquire <profile> --project-id <id> --owner-pid <pid>
+                     Take a lease for an existing process; prints lease-id:token
+  slot release <lease-id:token>  Release a lease (frees it once the owner's work is gone)
+                     (slot exit codes: 0 done, 75 capacity refusal after the wait, 78 invalid)
   inbox [--json] [--present]  Operator queue: open points to answer; also ask, answer, push-due
                      (exit 0 done, 2 refused, 78 ledger unreadable)
 
