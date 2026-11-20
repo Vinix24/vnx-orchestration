@@ -157,3 +157,26 @@ def test_cli_refuses_an_unknown_project_and_a_bad_reason(tmp_path):
     done = subprocess.run([sys.executable, str(cli), "stop", "--reason", "whenever", "--registry", str(reg)],
                           capture_output=True, text=True)
     assert done.returncode == 2
+
+
+def test_tmux_that_does_not_run_gives_an_inbox_point_in_both_steps(world):
+    from tmux_adapter import AdapterTransportError
+
+    def broken(args):
+        raise AdapterTransportError("tmux did not run", transport_detail="missing")
+
+    out = tick(world, START, tmux=broken)
+    assert "inbox point opened" in out[1] and "no wake" in out[1]
+
+    class SendBroken(Tmux):
+        def __call__(self, args):
+            if args[0] == "send-keys":
+                raise AdapterTransportError("tmux did not run", transport_detail="timeout")
+            return super().__call__(args)
+
+    assert mt.wake("w:0", P, "2026-11-20", SendBroken()).startswith("tmux send-keys did not run")
+
+
+def test_run_tmux_is_the_adapter_primitive():
+    import tmux_adapter
+    assert mt.run_tmux is tmux_adapter.run_tmux

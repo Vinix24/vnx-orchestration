@@ -14,15 +14,12 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional, Sequence
 
 import morning_pause as mp
+from tmux_adapter import AdapterTransportError, run_tmux  # re-exported: morning_round_cli passes run_tmux in
 from morning_snapshot import EVENTS_FILENAME, _next_seq, _snapshot_path, append_event, decision_status, write_snapshot
 
 FLEET_PROJECT = "vnx-dev"
 HARNESS = re.compile(r"claude|\d+\.\d+\.\d+")  # pane_current_command of Claude Code: its name or its version
 Tmux = Callable[[Sequence[str]], "subprocess.CompletedProcess[str]"]
-
-
-def run_tmux(args: Sequence[str]) -> "subprocess.CompletedProcess[str]":
-    return subprocess.run(["tmux", *args], capture_output=True, text=True, timeout=10)
 
 
 def _stamp(now: datetime) -> str:
@@ -46,7 +43,10 @@ def live_window(state_dir: Path, tmux: Tmux) -> "tuple[Optional[str], str]":
     window = latest_window(state_dir)
     if window is None:
         return None, "no rotation state with a new_window"
-    shown = tmux(["display-message", "-p", "-t", window, "#{pane_current_command}"])
+    try:
+        shown = tmux(["display-message", "-p", "-t", window, "#{pane_current_command}"])
+    except AdapterTransportError as exc:
+        return None, f"window {window}: tmux did not answer ({exc})"
     command = (shown.stdout or "").strip()
     if shown.returncode != 0 or not HARNESS.fullmatch(command):
         return None, f"window {window} is not running the harness ({command or 'no answer'})"
@@ -58,7 +58,10 @@ def wake(window: str, project_id: str, day: str, tmux: Tmux) -> Optional[str]:
     line = (f"Morning round {day}: run `vnx morning-round agenda --project-id {project_id}`, put every open point "
             "with advice before the operator, and hold firing and merging until all are decided or the deadline.")
     for keys in (["send-keys", "-t", window, "-l", line], ["send-keys", "-t", window, "Enter"]):
-        done = tmux(keys)
+        try:
+            done = tmux(keys)
+        except AdapterTransportError as exc:
+            return f"tmux {keys[0]} did not run ({exc})"
         if done.returncode != 0:
             return f"tmux {keys[0]} failed ({(done.stderr or '').strip()[:80]})"
     return None
