@@ -11,8 +11,8 @@ Coverage:
      is unset.
   B. ``current_project_id()`` honours an explicit ``VNX_PROJECT_ID``.
   C. Writers stamp ``project_id`` on the rows they create.
-  D. Cross-tenant query: opt-out via ``VNX_PROJECT_FILTER=0`` returns rows
-     from every project; default ON returns only the caller's project.
+  D. The tenant filter has no opt-out: the deleted ``VNX_PROJECT_FILTER=0``
+     still returns only the caller's project (config-een-oppervlak N5).
   E. Backward compat: rows that pre-date Phase 0 (and thus carry the
      ``vnx-dev`` default) remain readable by the default-tenant caller.
 """
@@ -37,7 +37,6 @@ import project_scope  # noqa: E402
 from project_scope import (  # noqa: E402
     DEFAULT_PROJECT,
     ENV_VAR,
-    FILTER_ENV_VAR,
     current_project_id,
     project_filter_enabled,
 )
@@ -195,23 +194,15 @@ def test_case_b_invalid_env_var_rejected():
 
 
 # ---------------------------------------------------------------------------
-# project_filter_enabled() — VNX_PROJECT_FILTER opt-out
+# project_filter_enabled() — always on; the deleted VNX_PROJECT_FILTER is not read
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("value", ["0", "false", "FALSE", "no", "off"])
-def test_filter_enabled_falsy_values_disable(value: str) -> None:
+FILTER_ENV_VAR = "VNX_PROJECT_FILTER"
+
+
+@pytest.mark.parametrize("value", [None, "0", "false", "FALSE", "no", "off", "1"])
+def test_filter_enabled_whatever_the_environment_says(value) -> None:
     with _env(**{FILTER_ENV_VAR: value}):
-        assert project_filter_enabled() is False
-
-
-@pytest.mark.parametrize("value", ["1", "true", "yes", "on", "anything-else"])
-def test_filter_enabled_truthy_values_enable(value: str) -> None:
-    with _env(**{FILTER_ENV_VAR: value}):
-        assert project_filter_enabled() is True
-
-
-def test_filter_enabled_defaults_on():
-    with _env(**{FILTER_ENV_VAR: None}):
         assert project_filter_enabled() is True
 
 
@@ -329,11 +320,12 @@ def test_case_d_selector_filters_to_current_project(tmp_path):
     assert "dev-pattern" not in titles
 
 
-def test_case_d_filter_opt_out_returns_cross_tenant_rows(tmp_path):
+def test_case_d_filter_holds_when_the_environment_says_0(tmp_path):
     db = tmp_path / "quality_intelligence.db"
     _build_quality_db(db)
     _seed_pattern(db, title="dev-pattern", project_id="vnx-dev")
-    _seed_pattern(db, title="foo-pattern", project_id="tenant-foo")
+    # The foreign row ranks higher: without the filter it would be the one chosen.
+    _seed_pattern(db, title="foo-pattern", project_id="tenant-foo", confidence=0.99)
 
     import intelligence_selector  # noqa: PLC0415
 
@@ -349,11 +341,8 @@ def test_case_d_filter_opt_out_returns_cross_tenant_rows(tmp_path):
         finally:
             sel.close()
     titles = {item.title for item in result.items}
-    # Only one proven_pattern slot per call, but the candidate pool is now
-    # cross-tenant; ranking by confidence must surface a pattern. We assert
-    # that the chosen pattern came from one of the two tenants and that the
-    # selector did not raise.
-    assert titles & {"dev-pattern", "foo-pattern"}
+    assert "dev-pattern" in titles
+    assert "foo-pattern" not in titles
 
 
 # ---------------------------------------------------------------------------
