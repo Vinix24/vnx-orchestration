@@ -304,8 +304,11 @@ def _enforce_step(ctx: Ctx, state: dict, policy: dict, req: _Pending, now: float
         if mine is None and rec["lease_id"] in state["holders"]:
             return state["holders"][rec["lease_id"]]
         refused = [e for e in result["events"] if e["event"] == "refused" and e["request_id"] == rid]
-        if refused or mine is None:
-            raise Refused(refused[-1]["reasons"][0] if refused else "state_corrupt")
+        if refused:   # the round's admissions and its dequeue commit; raised after the commit
+            return Refused(refused[-1]["reasons"][0], "", refused[-1]["exit_code"])
+        if mine is None:
+            ctx.log(_event(state, "refused", now, rec, reasons=["state_corrupt"], exit_code=EXIT_INVALID))
+            return Refused("state_corrupt", "request left the queue without a lease")
         reasons = list(mine["reasons"])
     if now >= rec["deadline_at"]:
         state["queue"] = [r for r in state["queue"] if r["request_id"] != rid]
@@ -334,7 +337,10 @@ def _step(ctx: Ctx, state: dict, policy: dict, req: _Pending, now: float, table)
 
 
 def _admit(ctx: Ctx, profile: str, project_id: str, owner: dict):
-    """Poll under the control lock until admitted (lease dict), refused (raises) or off (None)."""
+    """Poll under the control lock until admitted (lease dict), refused (raises) or off (None).
+
+    A refusal never aborts the transaction: every refusal is raised only before the request itself
+    changes state, and the round's earlier events are already in the slotlog, so the state commits."""
     req = _Pending()
     while True:
         policy = ctx.store.read_policy()
@@ -342,9 +348,12 @@ def _admit(ctx: Ctx, profile: str, project_id: str, owner: dict):
             now = ctx.clock()
             _sync_mode(ctx, state, policy, now, project_id)
             table = _reap(ctx, state, now)
-            if req.rec is None:
-                req.rec = _new_request(ctx, state, policy, profile, project_id, owner, now)
-            result = _step(ctx, state, policy, req, now, table)
+            try:
+                if req.rec is None:
+                    req.rec = _new_request(ctx, state, policy, profile, project_id, owner, now)
+                result = _step(ctx, state, policy, req, now, table)
+            except Refused as exc:   # logged already: commit the round (reaps, mode) so store and slotlog agree
+                result = exc
         if isinstance(result, Refused):
             raise result
         if result is _OFF:
@@ -420,7 +429,12 @@ def cmd_run(ctx: Ctx, argv: List[str]) -> int:
              "runner": None, "descendants": []}
     lease = _admit(ctx, ns.profile, ns.project_id, owner)
     if lease is None:   # the operator chose off: no admission, no bookkeeping
-        return ctx.spawn(command).wait()
+        try:
+            proc = ctx.spawn(command)
+        except OSError as exc:   # same boundary as the supervised modes: structured, exit 78
+            print(f"vnx slot run: command not started: {exc}", file=sys.stderr)
+            return EXIT_INVALID
+        return proc.wait()
     env = {k: v for k, v in ctx.env.items() if k != PARENT_ENV}
     if lease["parent_lease"] is not None:
         env[PARENT_ENV] = lease["parent_lease"]
@@ -471,6 +485,8 @@ def cmd_release(ctx: Ctx, argv: List[str]) -> int:
         else:
             if liveness.supervisor_gone_tree_alive(lease, table, state["holders"]):
                 ctx.log(_event(state, "lease_held", now, lease, reasons=["owner_gone_tree_alive"]))
+            if lease.get("state") != "releasing":   # ADR-005: the transition is logged before it commits
+                ctx.log(_event(state, "release_requested", now, lease, reasons=[]))
             lease["state"], outcome = "releasing", "releasing"
     ctx.out(outcome)
     return 0
