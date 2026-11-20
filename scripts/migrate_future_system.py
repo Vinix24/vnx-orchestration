@@ -83,7 +83,7 @@ import schema_migration
 import schema_manifest
 from atomic_io import audit_event_append
 import tenant_stamping
-from db_backup_rotation import parse_backup_keep, rotate_backups_safe
+from db_backup_rotation import rotate_backups_safe
 from migrations.auto_apply import auto_apply
 from migrations.auto_apply import highest_auto_applicable_migration
 from migrations.apply_0027 import ensure_dispatches_output_columns
@@ -3282,8 +3282,7 @@ def _backup_before_migration(db_path: Path) -> None:
         # abort the migration. The backup prefix is derived from the live
         # DB's name so rotation works regardless of the DB path.
         _premigrate_prefix = f"{db_path.name}.premigrate-"
-        _premigrate_keep = parse_backup_keep(
-            os.environ.get("VNX_PREMIGRATE_BACKUP_KEEP"))
+        _premigrate_keep = 3
         rotate_backups_safe(
             db_path.parent, _premigrate_prefix, _premigrate_keep)
     else:

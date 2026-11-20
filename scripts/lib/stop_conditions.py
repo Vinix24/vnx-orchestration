@@ -353,8 +353,8 @@ def check_morning_pause(
         project_id, now or datetime.now(timezone.utc), state_dir=state_dir, get=get)
     evidence = {"reason": verdict.reason, "day": verdict.day, "project_id": project_id}
     if verdict.paused:
-        return _triggered("morning_pause", f"ochtendronde: pauze actief ({verdict.reason})", **evidence)
-    return _clear("morning_pause", f"geen pauze ({verdict.reason})", **evidence)
+        return _triggered("morning_pause", f"morning round: pause active ({verdict.reason})", **evidence)
+    return _clear("morning_pause", f"morning round: no pause ({verdict.reason})", **evidence)
 
 
 def check_gh_auth_dead(*, gh_bin: str = "gh") -> StopConditionResult:

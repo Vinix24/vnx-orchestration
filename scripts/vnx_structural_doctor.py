@@ -48,7 +48,7 @@ if str(_LIB) not in sys.path:
     sys.path.insert(0, str(_LIB))
 
 from project_root import resolve_project_root
-from db_backup_rotation import parse_backup_keep, rotate_backups_safe
+from db_backup_rotation import rotate_backups_safe
 
 
 # ---------------------------------------------------------------------------
@@ -507,7 +507,7 @@ def apply_to_live(db_path: Path) -> None:
     # the repair. The backup prefix is derived from the live DB's name so the
     # rotation works regardless of the DB path.
     _doctor_backup_prefix = f"{db_path.name}.bak-"
-    _doctor_keep = parse_backup_keep(os.environ.get("VNX_DOCTOR_BACKUP_KEEP"))
+    _doctor_keep = 3
     rotate_backups_safe(db_path.parent, _doctor_backup_prefix, _doctor_keep)
 
     # 3. Repair in a single transaction

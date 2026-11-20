@@ -1538,7 +1538,7 @@ Process locks in `.vnx-data/locks/<name>.lock/` now include:
 - `created_at` — epoch timestamp when lock was acquired
 - `heartbeat` — epoch timestamp, updated periodically by long-running processes
 
-**Stale-lock expiry**: Locks older than `VNX_LOCK_MAX_AGE` (default 3600s) are auto-cleaned on next acquisition attempt, even if the PID still exists.
+**Stale-lock expiry**: Locks older than 3600s are auto-cleaned on next acquisition attempt, even if the PID still exists.
 
 **Unclean-shutdown marker**: `.vnx-data/locks/.unclean_shutdown` is written before risky operations and cleared on clean exit. `vnx recover` detects and clears this.
 

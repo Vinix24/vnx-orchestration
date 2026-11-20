@@ -118,7 +118,7 @@ from scripts.lib.migrate_schema import (  # noqa: E402
     _rebuild_fts5_code_snippets,
     _rebuild_one_table_dynamic,
 )
-from db_backup_rotation import parse_backup_keep, rotate_backups_safe
+from db_backup_rotation import rotate_backups_safe
 
 LOG = logging.getLogger("vnx.migrate.apply")
 
@@ -2248,7 +2248,7 @@ def _prune_and_finish(
     # auto-cleaned because a prior run crashed).  These are sorted by mtime
     # (newest first) because the filename embeds a PID rather than a
     # timestamp.
-    _presnap_keep = parse_backup_keep(os.environ.get("VNX_PRESNAP_BACKUP_KEEP"))
+    _presnap_keep = 3
     rotate_backups_safe(
         central_state, ".presnap.", _presnap_keep,
         sort_key=os.path.getmtime,
@@ -2351,7 +2351,7 @@ def _snapshot_central(qi: Path, rc: Path) -> dict[str, Path]:
     # runs. Sorted by mtime (PID isn't monotonic). The keep count is
     # intentionally small (default 3) — presnap files are temporary
     # rollback snapshots, not long-term archives.
-    _presnap_keep = parse_backup_keep(os.environ.get("VNX_PRESNAP_BACKUP_KEEP"))
+    _presnap_keep = 3
     for _label, _db in (("qi", qi), ("rc", rc)):
         if _db.exists():
             _prefix = f"{_db.name}.presnap."

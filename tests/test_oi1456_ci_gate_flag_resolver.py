@@ -22,7 +22,11 @@ KEY = "VNX_CI_GATE_REQUIRED"
 
 
 @pytest.fixture(autouse=True)
-def _isolated(monkeypatch):
+def _isolated(monkeypatch, tmp_path):
+    # OF-4: availability reads gate_profile.ci_requirement, which also looks at the
+    # branch-protection file under PROJECT_ROOT; point it at an empty directory.
+    monkeypatch.setenv("PROJECT_ROOT", str(tmp_path))
+    monkeypatch.setenv("VNX_HOME", str(tmp_path))
     yield from isolate_config_registry(monkeypatch)
 
 
@@ -101,3 +105,42 @@ def test_unregistered_gate_enabled_is_not_disabled(monkeypatch):
     monkeypatch.setenv("VNX_CODEX_HEADLESS_ENABLED", "1")
     _which(monkeypatch, True)
     assert _Parser()._classify_unavailable("codex_gate")[0] == "provider_not_configured"
+
+
+def test_of4_required_and_gh_missing_refuses_naming_tool_and_setting(monkeypatch, tmp_path):
+    """OF-4: required CI gate + no gh is a named refusal, not a silent drop."""
+    monkeypatch.setenv(KEY, "1")
+    monkeypatch.setenv("PROJECT_ROOT", str(tmp_path))
+    _which(monkeypatch, False)
+    monkeypatch.setattr(gate_request_handler.shutil, "which", lambda name: None)
+    assert _Handler()._ci_gate_available() is False
+    reason, detail = _Parser()._classify_unavailable("ci_gate")
+    assert reason == "provider_not_installed"
+    assert "gh" in detail and "not found in PATH" in detail
+    assert KEY in detail and "required" in detail
+
+
+def test_of4_not_required_and_gh_missing_keeps_the_old_reason(monkeypatch, tmp_path):
+    _db("0")
+    monkeypatch.setenv("PROJECT_ROOT", str(tmp_path))
+    _which(monkeypatch, False)
+    monkeypatch.setattr(gate_request_handler.shutil, "which", lambda name: None)
+    assert _Handler()._ci_gate_available() is False
+    reason, detail = _Parser()._classify_unavailable("ci_gate")
+    assert reason == "provider_disabled"
+    assert "is required by" not in detail
+
+
+def test_of4_required_and_gh_present_is_available(monkeypatch, tmp_path):
+    monkeypatch.setenv(KEY, "1")
+    monkeypatch.setenv("PROJECT_ROOT", str(tmp_path))
+    monkeypatch.setattr(gate_request_handler.shutil, "which", lambda name: "/usr/bin/gh")
+    assert _Handler()._ci_gate_available() is True
+
+
+def test_of4_unreadable_requirement_is_not_availability(monkeypatch, tmp_path):
+    monkeypatch.setenv(KEY, "banana")
+    monkeypatch.setenv("PROJECT_ROOT", str(tmp_path))
+    monkeypatch.setattr(gate_request_handler.shutil, "which", lambda name: "/usr/bin/gh")
+    with pytest.raises(Exception):
+        _Handler()._ci_gate_available()

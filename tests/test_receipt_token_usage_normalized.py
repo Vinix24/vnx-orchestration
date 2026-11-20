@@ -45,7 +45,8 @@ def store(tmp_path, monkeypatch):
     monkeypatch.setenv("VNX_STATE_DIR", str(data_dir / "state"))
     monkeypatch.setenv("VNX_PROJECT_ID", "proj-a")
     (tmp_path / "projects" / "p").mkdir(parents=True)
-    monkeypatch.setenv("VNX_CLAUDE_PROJECTS_DIR", str(tmp_path / "projects"))
+    import token_harvest
+    monkeypatch.setattr(token_harvest, "_default_claude_projects_dir", lambda: tmp_path / "projects")
     return data_dir
 
 

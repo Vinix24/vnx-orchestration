@@ -11,7 +11,7 @@ Usage:
     # Export global facet as JSON:
     python3 scripts/intelligence_aggregator_cli.py export --output .vnx-data/aggregator/global_facet.json
 
-Project DB paths are resolved via VNX_AGGREGATOR_DB_DIR (default: ~/.vnx-aggregator/projects/)
+Project DB paths are resolved under ~/.vnx-aggregator/projects/
 with the layout: <dir>/<project_id>/quality_intelligence.db.
 An explicit mapping can be provided via --db-map 'vnx-dev:/path/to/db,...'.
 """
@@ -21,7 +21,6 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import os
 import sys
 from pathlib import Path
 
@@ -75,7 +74,7 @@ def cmd_mine(args: argparse.Namespace) -> int:
     if not projects:
         log.error("--projects must name at least one project ID")
         return 1
-    base_dir = Path(os.environ.get("VNX_AGGREGATOR_DB_DIR", str(_DEFAULT_AGGREGATOR_DIR)))
+    base_dir = _DEFAULT_AGGREGATOR_DIR
     db_paths = _resolve_db_paths(projects, args.db_map, base_dir)
     agg = IntelligenceAggregator(db_paths)
     patterns = agg.mine_global_patterns(
@@ -107,7 +106,7 @@ def cmd_recommend(args: argparse.Namespace) -> int:
     projects = _parse_project_list(projects_raw)
     if target not in projects:
         projects.append(target)
-    base_dir = Path(os.environ.get("VNX_AGGREGATOR_DB_DIR", str(_DEFAULT_AGGREGATOR_DIR)))
+    base_dir = _DEFAULT_AGGREGATOR_DIR
     db_paths = _resolve_db_paths(projects, args.db_map, base_dir)
     agg = IntelligenceAggregator(db_paths)
     recs = agg.recommend_cross_project(target, max_recommendations=args.max)
@@ -130,7 +129,7 @@ def cmd_export(args: argparse.Namespace) -> int:
         log.error("--projects must name at least one project ID")
         return 1
     output = Path(args.output).expanduser()
-    base_dir = Path(os.environ.get("VNX_AGGREGATOR_DB_DIR", str(_DEFAULT_AGGREGATOR_DIR)))
+    base_dir = _DEFAULT_AGGREGATOR_DIR
     db_paths = _resolve_db_paths(projects, args.db_map, base_dir)
     agg = IntelligenceAggregator(db_paths)
     agg.export_global_facet(output)

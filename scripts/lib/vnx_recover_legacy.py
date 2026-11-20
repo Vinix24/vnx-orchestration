@@ -453,7 +453,7 @@ if __name__ == "__main__":
     parser.add_argument("--dispatch-dir", default=os.environ.get("VNX_DISPATCH_DIR", ""))
     parser.add_argument("--state-dir", default=os.environ.get("VNX_STATE_DIR", ""))
     parser.add_argument("--data-dir", default=os.environ.get("VNX_DATA_DIR", ""))
-    parser.add_argument("--max-lock-age", type=int, default=int(os.environ.get("VNX_LOCK_MAX_AGE", "3600")))
+    parser.add_argument("--max-lock-age", type=int, default=3600)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--runtime-primary", action="store_true", default=True)

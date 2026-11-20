@@ -43,6 +43,7 @@ if str(REPO_ROOT / "scripts" / "lib") not in sys.path:
     sys.path.insert(0, str(REPO_ROOT / "scripts" / "lib"))
 
 import config_registry as cr
+import vnx_cli.commands.release as release_module
 import vnx_cli.commands.update as update_module
 from vnx_cli.commands.update import (
     _atomic_symlink_flip,
@@ -522,7 +523,7 @@ def stub_install_central(tmp_path, monkeypatch):
     stub = tmp_path / "install-central.sh"
     stub.write_text(STUB_INSTALL_CENTRAL, encoding="utf-8")
     stub.chmod(stub.stat().st_mode | stat.S_IXUSR)
-    monkeypatch.setenv("VNX_INSTALL_CENTRAL_SCRIPT", str(stub))
+    monkeypatch.setattr(release_module, "INSTALL_CENTRAL_SCRIPT", stub)
     return stub
 
 

@@ -35,7 +35,7 @@ DEEPSEEK_TIEBREAKER = ("deepseek-harness", "deepseek-v4-pro", "deepseek-v4-pro")
 
 @pytest.fixture(autouse=True)
 def _no_retry(monkeypatch):
-    monkeypatch.setenv("VNX_PANEL_RETRY", "0")
+    monkeypatch.setattr(pgp, "PANEL_RETRY_COUNT", 0)
 
 
 def _ledger_lines(data_dir) -> list:

@@ -377,21 +377,14 @@ def resolve_allowed_signers_for_runtime(
 ) -> Optional[Path]:
     """Resolve a trust-anchor allowed_signers file for mandate verification.
 
-    Priority:
-      1. ``VNX_ALLOWED_SIGNERS`` env override (operator explicit).
-      2. ``.vnx-attest/allowed_signers`` at ``base_ref`` (base-branch trust).
-      3. ``.vnx-attest/allowed_signers`` in the working tree (fallback).
-      4. ``.vnx/allowed_signers`` in the working tree (fallback).
+    Priority (the signer files are the only source; no environment override):
+      1. ``.vnx-attest/allowed_signers`` at ``base_ref`` (base-branch trust).
+      2. ``.vnx-attest/allowed_signers`` in the working tree (fallback).
+      3. ``.vnx/allowed_signers`` in the working tree (fallback).
 
     Returns a path to a temporary file when reading from base branch; the file
     is intentionally not deleted so the short-lived dispatch process can use it.
     """
-    env_override = os.environ.get("VNX_ALLOWED_SIGNERS")
-    if env_override:
-        path = Path(env_override)
-        if path.exists():
-            return path
-
     repo_root = Path(repo_root)
 
     # Try base branch first so a PR cannot plant its own signer set.

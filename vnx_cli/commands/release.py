@@ -61,9 +61,6 @@ _DEFAULT_BRANCH_REFS = (
 
 
 def _resolve_install_central() -> Path:
-    env = os.environ.get("VNX_INSTALL_CENTRAL_SCRIPT")
-    if env:
-        return Path(env).expanduser().resolve()
     return INSTALL_CENTRAL_SCRIPT
 
 

@@ -1133,14 +1133,8 @@ class T0IntelligenceGatherer:
 
     def extract_task_paths(self, text: str) -> List[str]:
         """Extract file paths from task description"""
-        # Build path prefix pattern from known dirs + VNX_DOCS_DIRS entries
+        # Build path prefix pattern from the known dirs
         prefixes = ['src', 'tests', 'docs', '\\.claude']
-        docs_dirs_raw = os.environ.get("VNX_DOCS_DIRS", "")
-        if docs_dirs_raw:
-            for entry in docs_dirs_raw.split(","):
-                name = Path(entry.strip()).name
-                if name and name not in prefixes:
-                    prefixes.append(re.escape(name))
         path_pattern = r'(?:' + '|'.join(prefixes) + r')/(?:[^\\s`),]+)'
         paths = [p.strip() for p in re.findall(path_pattern, text)]
 

@@ -5,7 +5,6 @@ To be called by unified_state_manager.py
 """
 
 import logging
-import os
 import json
 import psutil
 import sqlite3
@@ -174,19 +173,10 @@ def get_intelligence_daemon_status(paths: Dict[str, str]) -> dict[str, object]:
 
 
 def update_dashboard_with_intelligence(dashboard_file: str, paths: Dict[str, str]) -> dict[str, object]:
-    """Legacy dashboard updater (disabled by default for single-writer ownership)."""
+    """Legacy dashboard updater: reports the daemon status and never writes the dashboard file (single-writer ownership)."""
 
     # Get intelligence daemon status
     intel_status = get_intelligence_daemon_status(paths)
-
-    if os.getenv("VNX_INTELLIGENCE_DASHBOARD_WRITE", "0") == "1":
-        dashboard = {}
-        if os.path.exists(dashboard_file):
-            with open(dashboard_file, 'r') as f:
-                dashboard = json.load(f)
-        dashboard["intelligence_daemon"] = intel_status
-        with open(dashboard_file, 'w') as f:
-            json.dump(dashboard, f, indent=2)
 
     return intel_status
 

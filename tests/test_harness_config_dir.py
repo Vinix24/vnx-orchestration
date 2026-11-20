@@ -420,11 +420,12 @@ def _write_transcript(projects: Path, sid: str) -> None:
 
 
 def test_a8_token_harvest_finds_harness_transcript(data_dir, tmp_path, monkeypatch):
+    import token_harvest as harvest_module
     from token_harvest import harvest_session_tokens
 
     empty = tmp_path / "empty-claude-projects"
     empty.mkdir()
-    monkeypatch.setenv("VNX_CLAUDE_PROJECTS_DIR", str(empty))
+    monkeypatch.setattr(harvest_module, "_default_claude_projects_dir", lambda: empty)
     _write_transcript(data_dir / "harness-config" / "glm-harness" / "projects", "sid-1")
     usage = harvest_session_tokens("sid-1")
     assert not usage.get("unavailable")
@@ -433,11 +434,12 @@ def test_a8_token_harvest_finds_harness_transcript(data_dir, tmp_path, monkeypat
 
 def test_a8_token_harvest_does_not_cross_projects(data_dir, tmp_path, monkeypatch):
     """ADR-007: a colliding session id under another project's data dir must not leak."""
+    import token_harvest as harvest_module
     from token_harvest import harvest_session_tokens
 
     empty = tmp_path / "empty-claude-projects"
     empty.mkdir()
-    monkeypatch.setenv("VNX_CLAUDE_PROJECTS_DIR", str(empty))
+    monkeypatch.setattr(harvest_module, "_default_claude_projects_dir", lambda: empty)
     other = tmp_path / "data" / "proj-b"
     _write_transcript(other / "harness-config" / "glm-harness" / "projects", "sid-1")
     assert harvest_session_tokens("sid-1")["unavailable"] is True

@@ -620,19 +620,20 @@ WINDOW_LONGEST_WALL_S = 1134
 # The branches of "xdist off" (C3): the repository variable, the workflow_dispatch input, or neither.
 OFF = ({"VNX_CI_XDIST": "0"}, {"inputs.xdist_off": True}, {"VNX_CI_XDIST": "0", "inputs.xdist_off": False})
 ON = ({}, {"VNX_CI_XDIST": "1"}, {"inputs.xdist_off": False}, {"VNX_CI_XDIST": ""})
+C5_LONGEST_SHARD_MIN = 12.73  # 30 heavy runs to 44713236371, see the C5 PR
 XDIST_OFF = "((vars.VNX_CI_XDIST || '1') == '0' || inputs.xdist_off)"
 
 
 def test_profile_a_timeout_follows_the_switch_on_every_branch():
-    """The aggregator: 80 for the serial sweep (OI-2523, OI-2525), 15 otherwise; each shard 38 (D4's xdist bound)."""
+    """The aggregator: 80 for the serial sweep (OI-2523, OI-2525), 15 otherwise; each shard 26 (C5: twice the longest shard of 30 heavy runs)."""
     expression = _timeout_expression()
     assert [ActionsExpression(expression, v).value() for v in OFF] == [80, 80, 80], expression
     assert [ActionsExpression(expression, v).value() for v in ON] == [15, 15, 15, 15], expression
     # The serial Profile A takes 52, 52 and 54.8 minutes on main (OI-2523).
     assert ActionsExpression(expression, OFF[0]).value() >= 55
     for job in _profile_a().jobs_with_role(shape.ROLE_SHARD):
-        # Twice the longest suite wall time of D4's merge window (1134 s, run 41827919472), rounded up.
-        assert job.timeout == 38 and job.timeout >= 2 * WINDOW_LONGEST_WALL_S / 60, job.name
+        # C5: twice the longest shard of the last 30 heavy runs (12.73 min, to run 44713236371), rounded up.
+        assert job.timeout == 26 and job.timeout >= 2 * C5_LONGEST_SHARD_MIN, job.name
 
 
 def test_every_profile_a_step_timeout_fires_inside_both_job_bounds():
@@ -653,7 +654,7 @@ def test_the_profile_a_timeout_comments_name_the_measured_wall_times():
     for token in ("52", "54.8", "OI-2523", "OI-2525", "#2378"):
         assert token in comment, (token, comment)
     shard_comment = WORKFLOW.read_text(encoding="utf-8").split("\n  profile-a-shard-1:\n", 1)[0].rsplit("\n\n", 1)[1]
-    assert "1134" in shard_comment and "41827919472" in shard_comment, shard_comment
+    assert "763.6" in shard_comment and "44713236371" in shard_comment, shard_comment
 
 
 def _xdist_off_places() -> dict:
@@ -873,7 +874,7 @@ def test_the_serial_truth_job_allows_eighty_minutes_and_the_others_keep_theirs()
     assert jobs["serial-truth"]["timeout-minutes"] == 80
     assert jobs["xdist-shape"]["timeout-minutes"] == 35
     assert jobs["parity"]["timeout-minutes"] == 20
-    assert [jobs[j]["timeout-minutes"] for j in ("shard-parity", "shard-shape")] == [20, 38] == [20, _jobs(WORKFLOW)["profile-a-shard-1"]["timeout-minutes"]]
+    assert [jobs[j]["timeout-minutes"] for j in ("shard-parity", "shard-shape")] == [20, 26] == [20, _jobs(WORKFLOW)["profile-a-shard-1"]["timeout-minutes"]]
 
 
 def test_the_serial_truth_timeout_comment_names_the_measured_wall_time():

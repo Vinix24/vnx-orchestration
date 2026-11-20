@@ -27,7 +27,7 @@ FIELDS = "schema ts invocation_id project_id vorm actor_class exit_code duration
 KNOWN_SUBCOMMANDS = tuple("""
 activate add analyze-sessions approve attest backfill backfill-reason batch bootstrap-hooks bootstrap-skills
 bootstrap-terminals check cleanup close config context-manifest cost-report costs daily-metrics decide-rule decide-steering
-deliverable dismiss dispatch dispatch-agent dispatch-cleanup doctor done dream drift fabric-audit finish-worktree gate
+deliverable depend deps dismiss dispatch dispatch-agent dispatch-cleanup doctor done dream drift fabric-audit finish-worktree gate
 gate-check gate-profile gate-reanchor grounding-shadow guard handoff help history horizon impact inbox init init-db
 insights install install-check install-git-hooks install-scheduler install-shell-helper install-validate
 intelligence-export intelligence-import issue jump learning link-pr list list-projects main-window mandate mark-ready
@@ -37,7 +37,7 @@ quiesce-check reblock reconcile reconcile-review reconcile-streak recover regen-
 register release remove-dependency reopen replay report restart restore resume retarget review revoke
 rework-attribution roadmap role run seed set set-autonomous-promotion set-goal set-horizon set-lane-hint
 set-plan-scope setup show sign skill-refine skill-review skills slot smoke snapshot staging-list start status steering
-stop subsystems suggest sync tagger-ab track uninstall-git-hooks uninstall-scheduler unlink-pr unmark-delivery unpark
+stop subsystems suggest sync tagger-ab track uninstall-git-hooks uninstall-scheduler undepend unlink-pr unmark-delivery unpark
 unregister update verify verify-pr version withdraw worktree-refresh worktree-release worktree-start worktree-status
 worktree-stop write""".split())
 _KNOWN = frozenset(KNOWN_SUBCOMMANDS)

@@ -7,7 +7,6 @@ Purpose: Initialize SQLite Quality Intelligence Database from schema
 
 from __future__ import annotations  # PEP 563: lazy annotation evaluation — Python 3.9 compat
 
-import os
 import re
 import sqlite3
 import shutil
@@ -84,14 +83,7 @@ def check_prerequisites() -> bool:
 _BACKUP_PREFIX = "quality_intelligence.db.backup_"
 
 
-def _parse_backup_keep(raw: str | None, default: int = 3) -> int:
-    """Return a sane keep count from VNX_DB_BACKUP_KEEP.
-
-    Delegates to the shared :func:`db_backup_rotation.parse_backup_keep`.
-    Kept as a module-level wrapper for backward compatibility with callers that
-    import this function directly.
-    """
-    return parse_backup_keep(raw, default=default)
+_BACKUP_KEEP = 3
 
 
 def _rotate_quality_db_backups(state_dir: Path, keep: int) -> None:
@@ -128,8 +120,7 @@ def backup_existing_db() -> bool:
 
         # Rotate older backups best-effort; never let cleanup abort the migration.
         try:
-            keep = _parse_backup_keep(os.environ.get("VNX_DB_BACKUP_KEEP"))
-            _rotate_quality_db_backups(STATE_DIR, keep)
+            _rotate_quality_db_backups(STATE_DIR, _BACKUP_KEEP)
         except Exception as e:
             log('WARNING', f'Backup rotation failed (backup itself succeeded): {e}')
 

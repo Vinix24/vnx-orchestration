@@ -15,12 +15,12 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 try:
     import operator_queue as oq
-    import ochtendronde_routing as rt
+    import morning_round_routing as rt
     from dream_liveness import read_events, read_reviews, _parse_ts
     from project_root import resolve_central_data_dir
 except ImportError:  # vnx-silent-except: imported as scripts.lib.operator_queue_dream_analyzer
     from scripts.lib import operator_queue as oq
-    from scripts.lib import ochtendronde_routing as rt
+    from scripts.lib import morning_round_routing as rt
     from scripts.lib.dream_liveness import read_events, read_reviews, _parse_ts
     from scripts.lib.project_root import resolve_central_data_dir
 
@@ -301,7 +301,7 @@ def read_analyzer(project_id: str, *, data_root: Optional[Path] = None, now: Any
                   state_dir: Optional[Path] = None, routing: Any = None) -> Dict[str, Any]:
     """Source 4: pending edits and pending archival lines; a missing ``pending_edits.json`` is ``unknown``, not 0.
 
-    With ``routing`` (ochtendronde_routing.Routing) a new fleet point opens in the vnx-dev ledger as
+    With ``routing`` (morning_round_routing.Routing) a new fleet point opens in the vnx-dev ledger as
     ``project:<owner>/<ref>`` instead of here, and closes on this project's source state; read-only on this store.
     """
     run, sdir = _Run(project_id, BRON_ANALYZER, state_dir, now), _root(project_id, data_root) / "state"

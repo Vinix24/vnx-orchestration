@@ -929,7 +929,8 @@ class TestEnvelopeCostUsd:
         self.projects.mkdir()
         monkeypatch.setenv("VNX_DATA_DIR", str(self.store))
         monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
-        monkeypatch.setenv("VNX_CLAUDE_PROJECTS_DIR", str(self.projects))
+        import token_harvest
+        monkeypatch.setattr(token_harvest, "_default_claude_projects_dir", lambda: self.projects)
 
     def _transcript(self, session_id, model, input_tokens, output_tokens, cache_read=0):
         """One assistant message on a weekday inside the DeepSeek peak window."""

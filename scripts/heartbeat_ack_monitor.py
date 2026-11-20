@@ -118,7 +118,7 @@ class HeartbeatACKMonitor:
         self.heartbeat_poll_interval = 2  # seconds
         self.confirmation_threshold = 3  # seconds after dispatch
         self.timeout_seconds = 60  # max wait for confirmation
-        self.dispatch_lease_seconds = int(os.environ.get("VNX_DISPATCH_LEASE_SECONDS", "600"))
+        self.dispatch_lease_seconds = 600
         self._shadow_terminal_state_enabled = SHADOW_TERMINAL_STATE_AVAILABLE
         self._terminal_state_update = update_terminal_state
         self._terminal_update_type = TerminalUpdate
@@ -598,9 +598,7 @@ class HeartbeatACKMonitor:
 
         # Send direct ACK notification to T0 for immediate visibility.
         # This monitor is now the reliable ACK source in modern runtime flows.
-        # Can be disabled explicitly via VNX_ACK_DIRECT_NOTIFY=0.
-        if os.environ.get("VNX_ACK_DIRECT_NOTIFY", "1") != "0":
-            self._notify_t0_ack(receipt, signals)
+        self._notify_t0_ack(receipt, signals)
 
     def _notify_t0_ack(self, receipt: Dict, signals: List[Dict]):
         """Send ACK notification to T0 using tmux buffer paste"""

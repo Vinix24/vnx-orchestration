@@ -296,7 +296,6 @@ class TestIntelligenceInjection:
     def test_intelligence_payload_present(self, router, state_env):
         with mock.patch.dict(os.environ, {
             "VNX_MIXED_EXECUTION": "1",
-            "VNX_INTELLIGENCE_INJECTION": "1",
         }):
             did = f"test_{uuid.uuid4().hex[:8]}"
             _register_dispatch(state_env["state_dir"], did)
@@ -312,21 +311,9 @@ class TestIntelligenceInjection:
             assert result.intelligence_payload is not None
             assert "injection_point" in result.intelligence_payload
 
-    def test_intelligence_disabled(self, router, state_env):
-        with mock.patch.dict(os.environ, {
-            "VNX_MIXED_EXECUTION": "0",
-            "VNX_INTELLIGENCE_INJECTION": "0",
-        }):
-            did = f"test_{uuid.uuid4().hex[:8]}"
-            _register_dispatch(state_env["state_dir"], did)
-            result = router.route_dispatch(did, task_class="coding_interactive")
-
-            assert result.intelligence_payload is None
-
     def test_intelligence_in_evidence_trail(self, router, state_env):
         with mock.patch.dict(os.environ, {
             "VNX_MIXED_EXECUTION": "1",
-            "VNX_INTELLIGENCE_INJECTION": "1",
         }):
             did = f"test_{uuid.uuid4().hex[:8]}"
             _register_dispatch(state_env["state_dir"], did)
@@ -435,7 +422,6 @@ class TestEvidenceTrail:
     def test_evidence_trail_has_steps(self, router, state_env):
         with mock.patch.dict(os.environ, {
             "VNX_MIXED_EXECUTION": "1",
-            "VNX_INTELLIGENCE_INJECTION": "1",
         }):
             did = f"test_{uuid.uuid4().hex[:8]}"
             _register_dispatch(state_env["state_dir"], did)
@@ -467,8 +453,7 @@ class TestFeatureFlags:
         with mock.patch.dict(os.environ, {}, clear=True):
             # Set only the ones we need, clear others
             for key in ["VNX_MIXED_EXECUTION", "VNX_HEADLESS_ROUTING",
-                        "VNX_HEADLESS_ENABLED", "VNX_BROKER_SHADOW",
-                        "VNX_INTELLIGENCE_INJECTION"]:
+                        "VNX_HEADLESS_ENABLED", "VNX_BROKER_SHADOW"]:
                 os.environ.pop(key, None)
 
             config = cutover_config_from_env()
@@ -482,7 +467,6 @@ class TestFeatureFlags:
             "VNX_HEADLESS_ROUTING": "1",
             "VNX_HEADLESS_ENABLED": "1",
             "VNX_BROKER_SHADOW": "0",
-            "VNX_INTELLIGENCE_INJECTION": "1",
         }):
             config = cutover_config_from_env()
             assert config["mixed_execution"] is True

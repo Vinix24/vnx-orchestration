@@ -63,8 +63,7 @@ def _marker_path() -> Path:
 
 def _granted_by() -> str:
     return (
-        os.environ.get("VNX_ACTOR")
-        or os.environ.get("USER")
+        os.environ.get("USER")
         or os.environ.get("LOGNAME")
         or "unknown"
     )
