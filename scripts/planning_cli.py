@@ -2748,6 +2748,72 @@ def cmd_objective_set_plan_scope(args: argparse.Namespace) -> int:
     return 0
 
 
+def _plan_scope_deliverables(state_dir: Path, project_id: str, track_id: str) -> list[dict]:
+    """The track's deliverables as ``plan_scope.propose`` reads them."""
+    recs = _fetch_deliverable_records(state_dir, project_id, track_id, include_metadata=True)
+    return [{**(r["metadata"] if isinstance(r.get("metadata"), dict) else {}), "ref": r.get("deliverable_ref")}
+            for r in recs]
+
+
+def _confirm_plan_scope(
+    state_dir: Path, project_id: str, printed: "plan_scope.ReviewRow", approval_id: str,
+) -> dict:
+    """Store the proposal of one printed row; a light one also resolves its OI-PLAN."""
+    now = {r.track_id: r for r in plan_scope.review(state_dir, project_id, lambda t: _plan_scope_deliverables(state_dir, project_id, t))}
+    current = now.get(printed.track_id)
+    if current is None or current.proposal != printed.proposal:
+        return {"track_id": printed.track_id, "outcome": "skipped",
+                "detail": "its proposal changed or its OI-PLAN closed since the review"}
+    reason = f"operator-decision: {approval_id}"
+    change = plan_scope.set_by_hand(
+        state_dir, printed.track_id, project_id, printed.proposal.scope, reason=reason)
+    if printed.proposal.scope == plan_scope.LIGHT:
+        _resolve_plan_blocker(state_dir, printed.track_id, project_id,
+                              reason=reason, resolver="attest", approval_id=approval_id)
+    return {"track_id": printed.track_id, "outcome": "confirmed", "detail": change.line()}
+
+
+def cmd_objective_plan_scope_review(args: argparse.Namespace) -> int:
+    """``plan-scope review``: read-only; ``--confirm``/``--confirm-all`` write, only with ``--approval-id``."""
+    state_dir = _resolve_state_dir(args.state_dir)
+    names = [n.strip() for n in (args.confirm or "").split(",") if n.strip()]
+    approval_id = (args.approval_id or "").strip()
+    confirming = bool(names) or args.confirm_all
+    refusal = None
+    if names and args.confirm_all:
+        refusal = "use --confirm or --confirm-all, not both"
+    elif confirming and not approval_id:
+        refusal = "--confirm and --confirm-all require --approval-id (the operator's gate token)"
+    elif approval_id and not confirming:
+        refusal = "--approval-id belongs to --confirm or --confirm-all"
+    rows = plan_scope.review(
+        state_dir, args.project_id, lambda t: _plan_scope_deliverables(state_dir, args.project_id, t))
+    unknown = [n for n in names if n not in {r.track_id for r in rows}]
+    if refusal is None and unknown:
+        refusal = f"no open OI-PLAN for: {', '.join(unknown)}"
+    if refusal:
+        print(f"objective plan-scope review: {refusal}. No change made.", file=sys.stderr)
+        return 2
+    targets = [r for r in rows if args.confirm_all or r.track_id in names]
+    results, failed = [], False
+    for row in targets if confirming else []:
+        try:
+            results.append(_confirm_plan_scope(state_dir, args.project_id, row, approval_id))
+        except Exception as exc:
+            failed = True
+            results.append({"track_id": row.track_id, "outcome": "failed", "detail": str(exc)})
+    if args.json:
+        print(json.dumps({"project_id": args.project_id, "tracks": [r.as_dict() for r in rows],
+                          "confirm": results}, indent=2))
+    else:
+        for r in rows:
+            print(f"{r.track_id}  horizon={r.horizon or '-'}  plan_scope={r.reading.scope} "
+                  f"({r.reading.source})  proposal={r.proposal.scope}  reason: {r.proposal.reason}")
+        for res in results:
+            print(f"{res['outcome']}: {res['track_id']}: {res['detail']}")
+    return 1 if failed else 0
+
+
 def cmd_objective_set_goal(args: argparse.Namespace) -> int:
     """Set a track's ``goal_state``, validated against the plan-gate threshold.
 
@@ -7370,6 +7436,17 @@ def _add_objective_hint_and_review_parsers(obj_sub, _common) -> None:
     p_plan_scope.add_argument("plan_scope", choices=plan_scope.PLAN_SCOPES)
     p_plan_scope.add_argument("--reason", default="", help="REQUIRED: why the scope changes")
     p_plan_scope.set_defaults(func=cmd_objective_set_plan_scope)
+
+    p_ps_review = obj_sub.add_parser(
+        "plan-scope", help="clean up open OI-PLAN: review proposes a scope per track, confirm needs --approval-id",
+    ).add_subparsers(dest="scope_action", required=True).add_parser(
+        "review", help="list tracks with an open OI-PLAN and the proposed scope (read-only)",
+    )
+    _common(p_ps_review)
+    p_ps_review.add_argument("--confirm", default="", help="comma-separated tracks whose proposal to store")
+    p_ps_review.add_argument("--confirm-all", action="store_true", help="confirm every track the review prints")
+    p_ps_review.add_argument("--approval-id", default="", help="REQUIRED with --confirm/--confirm-all")
+    p_ps_review.set_defaults(func=cmd_objective_plan_scope_review)
 
     p_rec_review = obj_sub.add_parser(
         "reconcile-review",

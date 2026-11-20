@@ -37,7 +37,7 @@ import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterator, Optional, Sequence
+from typing import Any, Callable, Iterator, Optional, Sequence
 
 import track_reconciler
 import tracks as tracks_lib
@@ -467,3 +467,93 @@ def dispatch_rule(
     if derived.variant == "coding-strict":
         return f"variant coding-strict ({derived.reason})"
     return None
+
+
+@dataclass(frozen=True)
+class Proposal:
+    """The scope the existing rules give a track, and the deliverable and path that decided it."""
+    scope: str
+    reason: str
+
+
+def propose(deliverables: Sequence[Any]) -> Proposal:
+    """The clean-up proposal for one track from its deliverables (``plan-scope review``).
+
+    The existing rules, in order: a ``03_refactoring`` deliverable; paths in a
+    plan-scope category (``smart_router``, as the door reads them); a
+    deliverable without readable ``dispatch_paths``; otherwise light. No
+    deliverable, or an unreadable entry, is architecture (closed on doubt).
+    """
+    import smart_router
+
+    if not deliverables:
+        return Proposal(ARCHITECTURE, "no deliverables: cannot be judged (closed on doubt)")
+    items = [d if isinstance(d, dict) else {} for d in deliverables]
+    for d in items:
+        rule = deliverable_task_class_rule(d.get("task_class"))
+        if rule:
+            return Proposal(ARCHITECTURE, f"deliverable {d.get('ref') or '?'}: {rule}")
+    unjudged: Optional[str] = None
+    for d in items:
+        ref, raw = d.get("ref") or "?", d.get("dispatch_paths")
+        if not isinstance(raw, list) or not all(isinstance(p, str) for p in raw):
+            unjudged = unjudged or f"deliverable {ref}: dispatch_paths missing or unreadable"
+            continue
+        paths = [n for n in (smart_router.normalize_dispatch_path(p) for p in raw if p) if n]
+        if not paths:
+            unjudged = unjudged or f"deliverable {ref}: no dispatch_paths, cannot be judged"
+        for path in paths:
+            category = smart_router.plan_scope_path_category(path)
+            if category:
+                return Proposal(ARCHITECTURE, f"deliverable {ref}: {category} path {path}")
+    if unjudged:
+        return Proposal(ARCHITECTURE, unjudged)
+    return Proposal(LIGHT, f"{len(items)} deliverable(s), none refactor, none in a schema or security path")
+
+
+@dataclass(frozen=True)
+class ReviewRow:
+    """One track with an open OI-PLAN: how its scope reads now and what is proposed."""
+    track_id: str
+    horizon: Optional[str]
+    reading: ScopeReading
+    proposal: Proposal
+
+    def as_dict(self) -> dict:
+        return {
+            "track_id": self.track_id, "horizon": self.horizon,
+            "plan_scope": self.reading.scope, "source": self.reading.source,
+            "proposal": self.proposal.scope, "reason": self.proposal.reason,
+        }
+
+
+def review(
+    state_dir: Path, project_id: str, deliverables_of: Callable[[str], Sequence[Any]],
+) -> list[ReviewRow]:
+    """Every track of the project with an open OI-PLAN, with its proposal. Read-only.
+
+    ``deliverables_of(track_id)`` returns the track's deliverables as mappings
+    with ``ref``, ``task_class`` and ``dispatch_paths``. A store without the
+    plan-gate schema has no OI-PLAN to clear: no rows.
+    """
+    conn = _connect(state_dir)
+    try:
+        if not plan_gate_supported(conn):
+            return []
+        found = conn.execute(
+            "SELECT t.track_id, t.horizon, t.metadata_json FROM tracks t "
+            "WHERE t.project_id = ? AND EXISTS (SELECT 1 FROM track_open_items o "
+            "WHERE o.track_id = t.track_id AND o.project_id = t.project_id "
+            "AND o.oi_id = ? || t.track_id AND o.link_type = 'blocks' AND o.resolved_at IS NULL) "
+            "ORDER BY t.track_id",
+            (project_id, PLAN_OI_PREFIX),
+        ).fetchall()
+    finally:
+        conn.close()
+    return [
+        ReviewRow(
+            r["track_id"], r["horizon"], read_scope(r["metadata_json"], open_plan_blocker=True),
+            propose(deliverables_of(r["track_id"])),
+        )
+        for r in found
+    ]
