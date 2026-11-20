@@ -1463,6 +1463,8 @@ def _no_go_protection(message: str, mode: str = "") -> Dict[str, Any]:
 #: This tuple lists every file whose content decides what the door allows or
 #: publishes; the two forge files (``forge_gate_publisher.py``,
 #: ``forge_check_run.py``) decide whether a permit is published (OI-2667).
+#: The ``pr_size`` preflight (ADR-088) trusts ``pr_size_policy.py`` for its verdict
+#: and ``review_risk_class.py`` for the changed-line count it judges.
 _DOOR_INTEGRITY_PATHS = (
     "scripts/pr_merge.py",
     "scripts/lib/forge_protection_drift.py",
@@ -1474,6 +1476,8 @@ _DOOR_INTEGRITY_PATHS = (
     "scripts/lib/ci_contexts.py",
     "scripts/lib/forge_gate_publisher.py",
     "scripts/lib/forge_check_run.py",
+    "scripts/lib/pr_size_policy.py",
+    "scripts/lib/review_risk_class.py",
 )
 
 
