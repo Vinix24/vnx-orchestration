@@ -250,7 +250,6 @@ def test_missing_cost_key_keeps_its_fail_closed_violation(tmp_path, monkeypatch)
 # ---------------------------------------------------------------------------
 
 def _govern_frontmatter(tmp_path: Path, monkeypatch, receipt: dict, dispatch_id: str) -> dict:
-    monkeypatch.setenv("VNX_SHARED_GOVERN", "1")
     monkeypatch.setenv("VNX_OVERRIDE_ENFORCEMENT_PROFILE", "enforced")
     data_dir = tmp_path / "data"
     state_dir = tmp_path / "state"
