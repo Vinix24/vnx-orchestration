@@ -53,8 +53,8 @@ headless lane without an override.
 
 **Concurrency (#1017):** the claude serial lock is an N-slot semaphore, not a
 single mutex. Default `N=10` (operator directive 2026-08-21, the
-subscription-safe default); `VNX_TMUX_MAX_CONCURRENT` (env var, or the
-registry-backed config-store value) raises or lowers it as an explicit
+subscription-safe default); `VNX_TMUX_MAX_CONCURRENT` (the stored config row, else
+the env var; `VNX_OVERRIDE_TMUX_MAX_CONCURRENT` beats both) raises or lowers it as an explicit
 operator opt-in. See `DISPATCH_RULES.md` §6.
 
 ### claude-subprocess
