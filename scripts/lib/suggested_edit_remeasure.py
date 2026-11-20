@@ -8,11 +8,14 @@ Two quantities are measured over the window after ``applied_at``, each against t
 better): the distinct dispatches that showed the pattern (the baseline's own quantity, ``count_dispatches_in_window``)
 and the codex FAIL rounds of ``review_gates/rounds.ndjson``. Both better or equal -> ``kept``; both worse ->
 ``revert_proposed``; one each, or either unreadable -> ``unmeasurable`` with both values in the entry.
-Each outcome opens one inbox point (source 4, ref ``effect:<dispatch id>``) before the outcome is written.
+Each outcome opens one inbox point before the outcome is written: source 8 (vraag), ref ``antwoord:<12 hex of
+sha256 of "effect:<dispatch id>">``. No inbox module sweeps an ``antwoord:`` point (the analyzer sweeps sources 3 and 4
+only, the steering reader 5 to 7); ``operator_queue_ask`` closes it only on the operator's answer line.
 """
 
 from __future__ import annotations
 
+import hashlib
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
@@ -21,7 +24,7 @@ import operator_queue as oq
 import review_rounds as rr
 import suggested_edit_dispatch as sed
 
-BRON_ANALYZER = 4
+BRON_QUESTION = 8
 EFFECT_PREFIX = "effect:"
 KEPT, REVERT, UNMEASURABLE = "kept", "revert_proposed", "unmeasurable"
 _UTC = timezone.utc
@@ -29,6 +32,11 @@ _UTC = timezone.utc
 
 def _iso(ts: datetime) -> str:
     return ts.astimezone(_UTC).isoformat().replace("+00:00", "Z")
+
+
+def effect_ref(dispatch_id: str) -> str:
+    """The ``antwoord:<hash>`` ref of an entry's point: fixed by the dispatch id, so a rerun finds the same point."""
+    return "antwoord:" + hashlib.sha256((EFFECT_PREFIX + dispatch_id).encode("utf-8")).hexdigest()[:12]
 
 
 def _count(value: Any) -> Optional[int]:
@@ -97,7 +105,7 @@ def open_effect_point(project_id: str, entry: dict, fields: dict, now: datetime,
     Raises ``operator_queue.QueueRefused`` or ``QueueUnreadable`` when the inbox cannot take it."""
     detail = fields["reason"] or f"patterns {entry['baseline'].get('count')}->{fields['measured']['count']}"
     question = f"Edit #{entry.get('id')} {entry.get('target')}: effect after 14 days is {fields['outcome']} ({detail})"
-    line = oq.open_point(project_id, bron=BRON_ANALYZER, ref=EFFECT_PREFIX + str(entry["dispatch_id"]),
+    line = oq.open_point(project_id, bron=BRON_QUESTION, ref=effect_ref(str(entry["dispatch_id"])),
                          vraag=question[:200], sluit_bij="operator decides to keep or revert the edit",
                          opened_by="effect_remeasure", now=_iso(now), state_dir=queue_state_dir)
     return line is not None

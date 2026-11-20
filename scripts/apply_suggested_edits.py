@@ -16,6 +16,8 @@ Applied edits are archived to edit_history.json with a baseline and remeasure_at
 """
 
 import argparse
+import fcntl
+import functools
 import hashlib
 import json
 import os
@@ -74,6 +76,21 @@ def _load_history() -> list:
         except (json.JSONDecodeError, KeyError):
             pass
     return []
+
+
+def _history_locked(func):
+    """Run ``func`` under one exclusive flock on ``edit_history.json.lock``: a second holder waits, it never skips.
+    The lock covers the whole read-modify-write, so reconcile and remeasure cannot overwrite each other."""
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        with open(HISTORY_PATH.with_name(HISTORY_PATH.name + ".lock"), "a") as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            try:
+                return func(*args, **kwargs)
+            finally:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+    return wrapper
 
 
 def _save_history(history: list):
@@ -556,6 +573,7 @@ def _dispatch_states(project_id: str, wanted: set):
             for i in result.get("items", []) if i.get("dispatch_id") in wanted}
 
 
+@_history_locked
 def cmd_reconcile():
     """Mark approved edits applied on a pr_merged receipt of their dispatch; that receipt is the only evidence."""
     import suggested_edit_dispatch as sed
@@ -618,6 +636,7 @@ def cmd_reconcile():
     return 1 if problems else 0
 
 
+@_history_locked
 def cmd_remeasure():
     """Write the 14-day outcome on every applied edit that is due, and open one inbox point per outcome."""
     import suggested_edit_dispatch as sed

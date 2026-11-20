@@ -25,7 +25,6 @@ except ImportError:  # vnx-silent-except: imported as scripts.lib.operator_queue
     from scripts.lib.project_root import resolve_central_data_dir
 
 BRON_DREAM, BRON_ANALYZER = 3, 4
-EFFECT_PREFIX = "effect:"  # D3d: opened by suggested_edit_remeasure, not by a pending line
 REVIEW_SUFFIX = "-pending-review"
 _REVIEW_EVENTS = ("dream_cycle_approved", "dream_cycle_rejected")
 _TIME_KEYS = ("rejected_at", "decided_at", "accepted_at", "applied_at")
@@ -257,8 +256,6 @@ def _sweep(run: _Run, verdicts: Dict[str, _Verdict], src: dict, prefix: str = ""
     """Open points of ``run`` (those under ``prefix``) whose source line is gone get the history verdict.
     Without a prefix a ``project:`` ref is another project's routed point; only its owner's sweep updates it."""
     for ref in run.open_refs():
-        if ref[len(prefix):].startswith(EFFECT_PREFIX):  # an effect point has no pending line: its closer is the operator
-            continue
         if ref.startswith(prefix) and (prefix or not ref.startswith(rt.ROUTED_PREFIX)) and ref[len(prefix):] not in verdicts:
             run.apply(ref, _missing_verdict(src, ref[len(prefix):]))
 
