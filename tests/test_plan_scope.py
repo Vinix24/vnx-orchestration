@@ -1,7 +1,7 @@
 """P1 of track plan-gate-alleen-voor-architectuur: one plan scope per track, only upward by itself.
 
 A track carries ``plan_scope`` (architecture | light) in tracks.metadata_json,
-next to ``lane_hint``. ``horizon add`` requires it; the fourth deliverable and
+next to ``lane_hint``. ``horizon add`` requires it; a ``03_refactoring`` deliverable and
 an architecture-class build dispatch at the door move a light track up and
 seed ``OI-PLAN-<track>``; only ``set-plan-scope ... --reason`` moves it down.
 Old tracks without the key read from their open OI-PLAN. A plan-gate run whose
@@ -242,54 +242,115 @@ def test_horizon_add_rejects_an_unknown_plan_scope(state_dir):
 
 
 # --------------------------------------------------------------------------
-# Upward by itself: the fourth deliverable
+# Upward by itself: a refactor deliverable, never the deliverable count (P6)
 # --------------------------------------------------------------------------
 
-def test_fourth_deliverable_moves_a_light_track_up_and_seeds_oi_plan(state_dir):
-    _make_track(state_dir, "feat-four", {"plan_scope": "light"})
-    for n in range(1, 4):
-        rc, out, err = _add_deliverable(state_dir, "feat-four", f"PR {n}")
+REFACTOR = "03_refactoring"
+REFACTOR_RULE = "task_class 03_refactoring"
+
+
+@pytest.mark.parametrize("count", [4, 8])
+def test_the_deliverable_count_never_moves_a_light_track_up(state_dir, count):
+    _make_track(state_dir, "feat-many", {"plan_scope": "light"})
+    for n in range(1, count + 1):
+        rc, out, err = _add_deliverable(state_dir, "feat-many", f"PR {n}", "--task-class", "01_code_generation")
         assert rc == 0, err
         assert "plan-scope" not in out
-    assert _meta(state_dir, "feat-four")["plan_scope"] == "light"
-    assert _plan_rows(state_dir, "feat-four") == []
+    assert _meta(state_dir, "feat-many")["plan_scope"] == "light"
+    assert _plan_rows(state_dir, "feat-many") == []
+    assert _scope_changes(state_dir, "feat-many") == []
 
-    rc, out, err = _add_deliverable(state_dir, "feat-four", "PR 4")
+
+def test_a_deliverable_without_a_task_class_raises_nothing(state_dir):
+    _make_track(state_dir, "feat-bare", {"plan_scope": "light"})
+    rc, out, err = _add_deliverable(state_dir, "feat-bare", "PR 1")
+    assert rc == 0, err
+    assert "plan-scope" not in out
+    assert _meta(state_dir, "feat-bare")["plan_scope"] == "light"
+    assert _plan_rows(state_dir, "feat-bare") == []
+
+
+def test_a_refactor_deliverable_moves_a_light_track_up_and_seeds_oi_plan(state_dir):
+    _make_track(state_dir, "feat-ref", {"plan_scope": "light"})
+    rc, out, err = _add_deliverable(state_dir, "feat-ref", "Refactor", "--task-class", REFACTOR)
     assert rc == 0, err
     scope_lines = [line for line in out.splitlines() if line.startswith("plan-scope:")]
     assert len(scope_lines) == 1, out
     assert "light -> architecture" in scope_lines[0]
-    assert "OI-PLAN-feat-four seeded" in scope_lines[0]
-    meta = _meta(state_dir, "feat-four")
+    assert "OI-PLAN-feat-ref seeded" in scope_lines[0]
+    meta = _meta(state_dir, "feat-ref")
     assert meta["plan_scope"] == "architecture"
-    assert "4 deliverables" in meta.get("plan_scope_rule", "")
-    assert _open_plan_blocker(state_dir, "feat-four")
+    assert meta["plan_scope_rule"] == f"deliverable add: {REFACTOR_RULE}"
+    assert _open_plan_blocker(state_dir, "feat-ref")
 
 
-def test_fourth_deliverable_leaves_an_architecture_track_alone(state_dir):
-    _make_track(state_dir, "feat-a4", {"plan_scope": "architecture"}, seed=True)
-    for n in range(1, 5):
-        rc, out, err = _add_deliverable(state_dir, "feat-a4", f"PR {n}")
-        assert rc == 0, err
-        assert "plan-scope" not in out
-    assert _meta(state_dir, "feat-a4")["plan_scope"] == "architecture"
-    assert _scope_changes(state_dir, "feat-a4") == []
+def test_a_refactor_deliverable_leaves_an_architecture_track_alone(state_dir):
+    _make_track(state_dir, "feat-a", {"plan_scope": "architecture"}, seed=True)
+    rc, out, err = _add_deliverable(state_dir, "feat-a", "Refactor", "--task-class", REFACTOR)
+    assert rc == 0, err
+    assert "plan-scope" not in out
+    assert _scope_changes(state_dir, "feat-a") == []
+
+
+def test_deliverable_task_class_rule_names_only_the_refactor_class():
+    rule = _new("plan_scope", "deliverable_task_class_rule")
+    assert rule(REFACTOR) == REFACTOR_RULE
+    for other in (None, "", "01_code_generation", "04_documentation", "03_refactoring ", "03_REFACTORING"):
+        assert rule(other) is None, other
+
+
+def test_the_count_rule_is_gone():
+    import plan_scope
+    assert not hasattr(plan_scope, "DELIVERABLE_LIMIT")
+    assert not hasattr(plan_scope, "deliverable_rule")
+
+
+def test_retarget_of_a_refactor_deliverable_moves_the_light_target_up(state_dir, tmp_path, monkeypatch):
+    from conftest import pin_vnx_data_dir
+    pin_vnx_data_dir(monkeypatch, tmp_path / "data")
+    _make_track(state_dir, "feat-src", {"plan_scope": "architecture"}, seed=True)
+    _make_track(state_dir, "feat-dst", {"plan_scope": "light"})
+    rc, out, err = _add_deliverable(state_dir, "feat-src", "Refactor", "--task-class", REFACTOR)
+    assert rc == 0, err
+    dlv = out.splitlines()[0].split(": ", 1)[1]
+    rc, out, err = _cli(state_dir, "deliverable", "retarget", dlv, "--objective", "feat-dst",
+                        "--reason", "belongs there")
+    assert rc == 0, err
+    assert "plan-scope: feat-dst light -> architecture" in out
+    meta = _meta(state_dir, "feat-dst")
+    assert meta["plan_scope"] == "architecture"
+    assert meta["plan_scope_rule"] == f"deliverable retarget: {REFACTOR_RULE}"
+    assert _open_plan_blocker(state_dir, "feat-dst")
+
+
+def test_retarget_of_a_plain_deliverable_leaves_the_light_target_light(state_dir, tmp_path, monkeypatch):
+    from conftest import pin_vnx_data_dir
+    pin_vnx_data_dir(monkeypatch, tmp_path / "data")
+    _make_track(state_dir, "feat-src", {"plan_scope": "light"})
+    _make_track(state_dir, "feat-dst", {"plan_scope": "light"})
+    for n in range(4):
+        _cli(state_dir, "deliverable", "add", "--objective", "feat-dst", "--output-kind", "pr", "--title", f"d{n}")
+    rc, out, err = _add_deliverable(state_dir, "feat-src", "Plain", "--task-class", "01_code_generation")
+    dlv = out.splitlines()[0].split(": ", 1)[1]
+    rc, out, err = _cli(state_dir, "deliverable", "retarget", dlv, "--objective", "feat-dst",
+                        "--reason", "belongs there")
+    assert rc == 0, err
+    assert "plan-scope" not in out
+    assert _meta(state_dir, "feat-dst")["plan_scope"] == "light"
+    assert _plan_rows(state_dir, "feat-dst") == []
 
 
 def test_deliverable_add_returns_0_when_the_scope_rule_cannot_run(state_dir):
     """The deliverable row is committed before the scope rule runs, so a failed
     scope-raise is a warning, not a failed add: the exit code must stay 0."""
-    _make_track(state_dir, "feat-four", {"plan_scope": "light"})
+    _make_track(state_dir, "feat-ref", {"plan_scope": "light"})
     _fail_plan_seeds(state_dir)
-    for n in range(1, 4):
-        rc, _, err = _add_deliverable(state_dir, "feat-four", f"PR {n}")
-        assert rc == 0, err
-    rc, out, err = _add_deliverable(state_dir, "feat-four", "PR 4")
+    rc, out, err = _add_deliverable(state_dir, "feat-ref", "Refactor", "--task-class", REFACTOR)
     assert rc == 0, err
     assert "the deliverable was created, but the plan-scope rule" in err
-    assert "set-plan-scope feat-four architecture" in err
-    assert len(planning_cli._fetch_deliverable_records(state_dir, PID, "feat-four")) == 4
-    assert _meta(state_dir, "feat-four").get("plan_scope") == "light", "the failed raise wrote nothing"
+    assert "set-plan-scope feat-ref architecture" in err
+    assert len(planning_cli._fetch_deliverable_records(state_dir, PID, "feat-ref")) == 1
+    assert _meta(state_dir, "feat-ref").get("plan_scope") == "light", "the failed raise wrote nothing"
 
 
 # --------------------------------------------------------------------------
@@ -489,16 +550,15 @@ def test_an_unknown_stored_scope_reads_architecture(state_dir):
 
 def test_show_names_the_scope_and_the_rule_that_set_it(state_dir):
     _make_track(state_dir, "feat-show", {"plan_scope": "light"})
-    for n in range(1, 5):
-        _add_deliverable(state_dir, "feat-show", f"PR {n}")
+    _add_deliverable(state_dir, "feat-show", "Refactor", "--task-class", REFACTOR)
     shown = _show(state_dir, "feat-show")
     assert shown.get("plan_scope") == "architecture"
-    assert "4 deliverables" in (shown.get("plan_scope_rule") or "")
+    assert shown.get("plan_scope_rule") == f"deliverable add: {REFACTOR_RULE}"
     rc, out, _ = _cli(state_dir, "horizon", "show", "feat-show")
     assert rc == 0
     lines = [ln for ln in out.splitlines() if "plan_scope:" in ln]
     assert len(lines) == 1
-    assert "architecture (rule: deliverable add: 4 deliverables" in lines[0]
+    assert f"architecture (rule: deliverable add: {REFACTOR_RULE})" in lines[0]
 
 
 def test_show_says_set_at_creation_for_a_track_born_with_a_scope(state_dir):
@@ -674,6 +734,16 @@ def test_dispatch_rule_is_none_for_a_light_change_and_names_the_rule_otherwise()
     assert dispatch_rule(["scripts/lib/gate_executor.py"]) == "gate-merge path scripts/lib/gate_executor.py"
     assert dispatch_rule(["scripts/lib/dispatch_cli.py"]).startswith("variant coding-strict")
     assert dispatch_rule(["vnx_cli/_engine.py"]) == "store-resolution path vnx_cli/_engine.py"
+
+
+def test_dispatch_rule_names_a_refactor_on_a_light_path():
+    dispatch_rule = _new("plan_scope", "dispatch_rule")
+    light = ["docs/core/HORIZON_PLANNING.md"]
+    assert dispatch_rule(light, task_class="03_refactoring") == "task_class 03_refactoring"
+    assert dispatch_rule(light, task_class="01_code_generation") is None
+    # A path category still wins: its text names the path.
+    assert dispatch_rule(["vnx_cli/_engine.py"], task_class="03_refactoring") == \
+        "store-resolution path vnx_cli/_engine.py"
 
 
 # --------------------------------------------------------------------------
@@ -861,7 +931,7 @@ def test_a_failed_ledger_write_leaves_neither_the_scope_nor_the_blocker(state_di
 
     monkeypatch.setattr(state_writer, "append_locked", refuse)
     with pytest.raises(OSError, match="injected"):
-        plan_scope.raise_to_architecture(state_dir, "feat-ledger", PID, rule="4 deliverables (limit 4)")
+        plan_scope.raise_to_architecture(state_dir, "feat-ledger", PID, rule="deliverable add: task_class 03_refactoring")
     monkeypatch.undo()
 
     assert _meta(state_dir, "feat-ledger") == {
@@ -1211,13 +1281,13 @@ def test_a_repeat_scope_change_reconciles_after_the_first_reconcile_failed(state
     monkeypatch.setattr(plan_scope.track_reconciler, "reconcile_track", fail_first)
 
     with pytest.raises(RuntimeError, match="injected"):
-        plan_scope.raise_to_architecture(state_dir, "feat-retry", PID, rule="4 deliverables (limit 4)")
+        plan_scope.raise_to_architecture(state_dir, "feat-retry", PID, rule="deliverable add: task_class 03_refactoring")
 
     assert _meta(state_dir, "feat-retry")["plan_scope"] == "architecture"
     assert _open_plan_blocker(state_dir, "feat-retry")
     assert tracks.get_track(state_dir, "feat-retry", PID)["derived_status"] != "blocked"
 
-    change = plan_scope.raise_to_architecture(state_dir, "feat-retry", PID, rule="4 deliverables (limit 4)")
+    change = plan_scope.raise_to_architecture(state_dir, "feat-retry", PID, rule="deliverable add: task_class 03_refactoring")
     assert change is None
     assert tracks.get_track(state_dir, "feat-retry", PID)["derived_status"] == "blocked"
 
@@ -1240,7 +1310,7 @@ def test_set_plan_scope_retry_reconciles_after_the_first_reconcile_failed(state_
     monkeypatch.setattr(plan_scope.track_reconciler, "reconcile_track", fail_first)
 
     with pytest.raises(RuntimeError, match="injected"):
-        plan_scope.raise_to_architecture(state_dir, "feat-op", PID, rule="4 deliverables (limit 4)")
+        plan_scope.raise_to_architecture(state_dir, "feat-op", PID, rule="deliverable add: task_class 03_refactoring")
     assert tracks.get_track(state_dir, "feat-op", PID)["derived_status"] != "blocked"
 
     rc, out, err = _cli(state_dir, "horizon", "set-plan-scope", "feat-op", "architecture",

@@ -1948,8 +1948,8 @@ def _raise_plan_scope_at_door(spec: DispatchSpec, *, state_dir: Path) -> None:
 
     Track plan-gate-alleen-voor-architectuur: a build dispatch on a light track
     whose paths fall in an architecture class (``plan_scope.dispatch_rule``:
-    schema, security, gate or merge logic, store resolution, a coding-strict
-    variant, or no paths at all) makes the track architecture and seeds
+    schema, security, gate or merge logic, store resolution, task_class
+    03_refactoring, a coding-strict variant, or no paths at all) makes the track architecture and seeds
     ``OI-PLAN-<track>`` in the same transaction. Any build dispatch on a stored
     architecture track that has no OI-PLAN row of any status seeds one. The
     door refuses nothing here: it writes the scope, seeds the blocker, prints

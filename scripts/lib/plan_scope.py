@@ -10,9 +10,12 @@ creation. No migration and no new column.
 How the value moves:
 
 - ``vnx horizon add --plan-scope architecture|light`` sets it at birth.
-- It goes UP by itself, never down: the fourth deliverable on a light track
-  (``deliverable add``), or a build dispatch at the door whose paths fall in an
-  architecture class (``dispatch_rule``). Going up seeds ``OI-PLAN-<track>``
+- It goes UP by itself, never down: a deliverable with task_class
+  ``03_refactoring`` added to or retargeted onto a light track
+  (``deliverable_task_class_rule``), or a build dispatch at the door whose paths
+  fall in an architecture class or whose task_class is ``03_refactoring``
+  (``dispatch_rule``). How many deliverables a track has never counts (P6,
+  operator decision 2026-11-19). Going up seeds ``OI-PLAN-<track>``
   unless the track already has a plan-gate record, in the same transaction as
   the scope: both commit or neither does.
 - It goes DOWN only by hand: ``vnx horizon set-plan-scope <track> light
@@ -45,8 +48,9 @@ PLAN_SCOPES = (ARCHITECTURE, LIGHT)
 SCOPE_KEY = "plan_scope"
 RULE_KEY = "plan_scope_rule"
 
-# The deliverable count at which a light track becomes architecture.
-DELIVERABLE_LIMIT = 4
+# The task_class that makes a light track architecture: a refactor, a pure
+# deletion included (P6, operator decision 2026-11-19).
+REFACTOR_TASK_CLASS = "03_refactoring"
 
 PLAN_OI_PREFIX = "OI-PLAN-"
 
@@ -419,10 +423,11 @@ def set_by_hand(
     return _reconciled(state_dir, project_id, track_id, change)
 
 
-def deliverable_rule(deliverable_count: int) -> Optional[str]:
-    """The size rule: a track with DELIVERABLE_LIMIT or more deliverables is architecture."""
-    if deliverable_count >= DELIVERABLE_LIMIT:
-        return f"{deliverable_count} deliverables (limit {DELIVERABLE_LIMIT})"
+def deliverable_task_class_rule(task_class: Optional[str]) -> Optional[str]:
+    """The refactor rule: a deliverable or dispatch with task_class 03_refactoring
+    makes its track architecture. Exact match only; no task_class raises nothing."""
+    if task_class == REFACTOR_TASK_CLASS:
+        return f"task_class {REFACTOR_TASK_CLASS}"
     return None
 
 
@@ -439,7 +444,10 @@ def dispatch_rule(
     No paths at all counts as architecture: a dispatch that names nothing cannot
     be judged, and nothing may escape the classification by naming nothing.
     Then the path categories (outside-repo, schema, security, gate-merge,
-    store-resolution), then ``derive_variant`` giving coding-strict.
+    store-resolution), then task_class ``03_refactoring``, then
+    ``derive_variant`` giving coding-strict. The refactor check is explicit
+    here: the router maps a refactor to its path category, not to
+    coding-strict, and this rule must not hang on the router's variant table.
     """
     # Lazy, so importing this module (planning_cli does) pulls in no router.
     import smart_router
@@ -452,6 +460,9 @@ def dispatch_rule(
         category = smart_router.plan_scope_path_category(path)
         if category:
             return f"{category} path {path}"
+    refactor = deliverable_task_class_rule(task_class)
+    if refactor:
+        return refactor
     derived = smart_router.derive_variant(paths, task_class=task_class, irreversible=irreversible)
     if derived.variant == "coding-strict":
         return f"variant coding-strict ({derived.reason})"
