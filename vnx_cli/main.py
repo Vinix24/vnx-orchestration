@@ -1022,9 +1022,8 @@ def _register_objective_set_verbs(subs: argparse.Action) -> None:
     p_autonomous.add_argument("eligible", choices=("true", "false"), metavar="ELIGIBLE")
 
 
-def _register_deliverable_verbs(subs: argparse.Action) -> None:
-    """Register the deliverable-domain verbs shared by `vnx horizon deliverable`
-    and the top-level `vnx deliverable` backward-compat alias."""
+def _register_deliverable_add_verb(subs: argparse.Action) -> None:
+    """`deliverable add`: plan a deliverable, optionally with its hard dependencies."""
     p_dadd = subs.add_parser("add", help="plan a deliverable (proposed dispatch)")
     _common_horizon_args(p_dadd)
     p_dadd.add_argument("--objective", required=True, metavar="TRACK_ID",
@@ -1051,6 +1050,12 @@ def _register_deliverable_verbs(subs: argparse.Action) -> None:
     p_dadd.add_argument("--depends-on", dest="depends_on", default=None, metavar="DLV1,DLV2",
                         help="comma-separated deliverables this one depends on (hard); an unknown id "
                              "or a cycle refuses the whole add (ADR-096)")
+
+
+def _register_deliverable_verbs(subs: argparse.Action) -> None:
+    """Register the deliverable-domain verbs shared by `vnx horizon deliverable`
+    and the top-level `vnx deliverable` backward-compat alias."""
+    _register_deliverable_add_verb(subs)
 
     _register_deliverable_list_verb(subs)
 
