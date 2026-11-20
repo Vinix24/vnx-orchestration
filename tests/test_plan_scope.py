@@ -782,7 +782,6 @@ def gate(tmp_path, monkeypatch, state_dir):
     import track_reconciler
 
     monkeypatch.delenv("VNX_DATA_DIR", raising=False)
-    monkeypatch.delenv("VNX_PANEL_RETRY", raising=False)
     monkeypatch.setattr(track_reconciler, "reconcile_track", lambda *a, **k: None)
     cfg = tmp_path / "plan_gate_panel.yaml"
     cfg.write_text(_PANEL_CFG, encoding="utf-8")
