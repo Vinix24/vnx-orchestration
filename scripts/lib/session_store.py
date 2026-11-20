@@ -6,7 +6,7 @@ events so subsequent dispatches can pass ``--resume <session_id>`` and skip the
 cold-start latency of a fresh session.
 
 Storage: ``subprocess_sessions.json`` in VNX state dir (resolved via vnx_paths).
-Activation: gated by ``VNX_SESSION_RESUME=1`` — callers must check before loading.
+Readers: the dashboard session observability (``all_entries``). The subprocess lane no longer resumes a stored session.
 
 BILLING SAFETY: No Anthropic SDK. Pure file I/O.
 """

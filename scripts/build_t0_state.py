@@ -322,19 +322,8 @@ _STALE_STAGED_MAX_ITEMS = 10
 
 
 def _stale_staged_threshold() -> Tuple[int, Optional[str]]:
-    """(minutes, note); an invalid env value falls back to 30 and says so."""
-    raw = os.environ.get("VNX_STALE_STAGED_MINUTES")
-    if not (raw or "").strip():
-        return _STALE_STAGED_DEFAULT_MINUTES, None
-    try:
-        minutes = int(raw.strip())
-    except ValueError:
-        minutes = 0
-    if minutes <= 0:
-        return _STALE_STAGED_DEFAULT_MINUTES, (
-            f"invalid VNX_STALE_STAGED_MINUTES={raw!r}: using {_STALE_STAGED_DEFAULT_MINUTES}"
-        )
-    return minutes, None
+    """(minutes, note): the staleness threshold is the constant, and there is never a note."""
+    return _STALE_STAGED_DEFAULT_MINUTES, None
 
 
 def _receipt_dispatch_ids(receipts_path: Path) -> set:
@@ -2910,8 +2899,8 @@ def _build_operator_inbox(project_id: str, state_dir: Path) -> Dict[str, Any]:
 
 
 def _besluiten_logdir() -> Path:
-    """The register folder: VNX_BESLUITEN_LOGDIR when set (tests), else <project root>/daily-log."""
-    return Path(os.environ.get("VNX_BESLUITEN_LOGDIR") or _PROJECT_ROOT / "daily-log")
+    """The register folder: <project root>/daily-log."""
+    return _PROJECT_ROOT / "daily-log"
 
 
 def _build_besluiten(project_id: str, state_dir: Path) -> Dict[str, Any]:
@@ -3259,21 +3248,17 @@ def _write_detail_files(state: Dict[str, Any], detail_dir: Path) -> Dict[str, st
 # GC: retention sweep for t0_detail snapshots (W-UX-4)
 # ---------------------------------------------------------------------------
 
-def _gc_t0_detail(detail_dir: Path) -> int:
-    """Prune t0_detail/*.json files older than VNX_T0_DETAIL_RETENTION_DAYS days.
+_T0_DETAIL_RETENTION_DAYS = 14
 
-    Env-var VNX_T0_DETAIL_RETENTION_DAYS (default 14). Set to 0 to disable GC.
+
+def _gc_t0_detail(detail_dir: Path) -> int:
+    """Prune t0_detail/*.json files older than _T0_DETAIL_RETENTION_DAYS (14) days.
+
     Only touches *.json files inside detail_dir — never t0_state.json or t0_index.json.
     Idempotent: a second call after files are already pruned deletes nothing more.
     Returns the count of files deleted.
     """
-    try:
-        retention_days = int(os.environ.get("VNX_T0_DETAIL_RETENTION_DAYS", "14"))
-    except (ValueError, TypeError):
-        retention_days = 14
-
-    if retention_days == 0:
-        return 0
+    retention_days = _T0_DETAIL_RETENTION_DAYS
 
     if not detail_dir.is_dir():
         return 0

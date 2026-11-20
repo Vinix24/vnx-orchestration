@@ -450,7 +450,18 @@ def _no_ambient_vnx_project_id(monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.fixture(autouse=True)
 def _besluiten_register_isolation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # No test reads the checkout's real daily-log/besluiten.ndjson: build_t0_state resolves the folder from here.
-    monkeypatch.setenv("VNX_BESLUITEN_LOGDIR", str(tmp_path / "_besluiten_isolated"))
+    import besluiten_adapter
+
+    real_state_block = besluiten_adapter.state_block
+    checkout_logdir = (_ROOT_DIR / "daily-log").resolve()
+
+    def _isolated_state_block(project_id, logdir, **kwargs):
+        # Only the checkout's own folder is redirected; a test that names another folder keeps it.
+        if Path(logdir).resolve() == checkout_logdir:
+            logdir = tmp_path / "_besluiten_isolated"
+        return real_state_block(project_id, logdir, **kwargs)
+
+    monkeypatch.setattr(besluiten_adapter, "state_block", _isolated_state_block)
 
 
 @pytest.fixture(autouse=True)
@@ -537,20 +548,30 @@ def _vnx_provider_env_file_isolation(tmp_path: Path, monkeypatch: pytest.MonkeyP
     monkeypatch.setenv("VNX_PROVIDER_ENV_FILE", str(tmp_path / "absent-provider-usage.env"))
 
 
+_REAL_GH_SOURCE: dict = {}
+
+
 @pytest.fixture(autouse=True)
 def _reconcile_git_off(monkeypatch: pytest.MonkeyPatch) -> None:
-    """OI-1155: pin track_reconciler source 4 (``gh pr list``) OFF for the suite.
+    """OI-1155: stub track_reconciler source 3 (``gh pr list``) to an empty set for the suite.
 
-    source 4 is default-ON in production (_load_merged_pr_numbers), which would
+    The source is always on in production (_load_merged_pr_numbers), which would
     make every reconciler test shell out to a live, network ``gh pr list`` from
     the repo-root CWD and pollute local-only assertions with real merged PR
-    numbers. Pinning VNX_RECONCILE_GIT=0 keeps the suite deterministic and
-    offline-safe. Tests that pin the default-ON behaviour
-    (tests/test_track_reconciler_prref_evidence.py: test_gh_source_on_by_default
-    / test_gh_source_opt_out_by_flag) monkeypatch-delenv / setenv this flag
-    per-test — the last write wins within the same function scope.
+    numbers. The stub keeps the suite deterministic and offline-safe. A test that
+    needs a gh answer patches ``_load_merged_prs_from_gh`` itself (the later write
+    wins) or takes the ``real_load_merged_prs_from_gh`` fixture to run the real one.
     """
-    monkeypatch.setenv("VNX_RECONCILE_GIT", "0")
+    import track_reconciler
+
+    _REAL_GH_SOURCE.setdefault("fn", track_reconciler._load_merged_prs_from_gh)
+    monkeypatch.setattr(track_reconciler, "_load_merged_prs_from_gh", lambda *a, **k: frozenset())
+
+
+@pytest.fixture
+def real_load_merged_prs_from_gh():
+    """The unstubbed gh merged-PR source, for the tests that exercise it directly."""
+    return _REAL_GH_SOURCE["fn"]
 
 
 @pytest.fixture(autouse=True)

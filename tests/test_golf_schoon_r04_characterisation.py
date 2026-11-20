@@ -121,7 +121,7 @@ def test_completed_cycle_result_review_events_row_and_stdout(world, capsys):
 
 
 def test_provider_receives_patterns_project_provider_and_timeout(world, monkeypatch):
-    monkeypatch.setenv("VNX_DREAM_TIMEOUT", "42")
+    monkeypatch.setattr(consolidator, "_DEFAULT_TIMEOUT", 42)
     world.run()
     patterns, project, provider, timeout = world.calls[0]
     assert project == PROJECT and provider == "deepseek" and timeout == 42.0
@@ -177,7 +177,7 @@ def test_no_patterns_skips_without_calling_the_provider(world):
 
 
 def test_timeout_returns_timeout_result_and_writes_no_review_or_row(world, monkeypatch):
-    monkeypatch.setenv("VNX_DREAM_TIMEOUT", "7")
+    monkeypatch.setattr(consolidator, "_DEFAULT_TIMEOUT", 7)
     world.behaviour["raise"] = subprocess.TimeoutExpired("deepseek", 7)
     result = world.run()
     assert result == {"status": "timeout", "cycle_id": result["cycle_id"],

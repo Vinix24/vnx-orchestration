@@ -38,7 +38,6 @@ _STEP_METHODS = (
 def env(tmp_path, monkeypatch):
     monkeypatch.delenv("VNX_LEARNING_LOOP_PERSIST", raising=False)
     monkeypatch.delenv("VNX_LEARNING_LOOP_CUTOFF", raising=False)
-    monkeypatch.delenv("VNX_LEARN_PERSIST", raising=False)
     monkeypatch.setenv("VNX_PROJECT_ID", "vnx-dev")
     state_dir = tmp_path / "vnx-data" / "vnx-dev" / "state"
     state_dir.mkdir(parents=True)
@@ -228,8 +227,7 @@ def test_persist_cycle_heartbeat_ok_and_reconcile_order(persist_loop, monkeypatc
     assert calls[0][1]["ledger_status"] == "ok"
 
 
-def test_persist_off_switch_and_step_errors_are_printed(persist_loop, monkeypatch, capsys):
-    monkeypatch.setenv("VNX_LEARN_PERSIST", "0")
+def test_step_errors_are_printed(persist_loop, monkeypatch, capsys):
     loop = persist_loop
     with patch.object(loop, "_heartbeat"), \
             patch.object(loop, "persist_to_intelligence_db") as persist, \
@@ -237,8 +235,7 @@ def test_persist_off_switch_and_step_errors_are_printed(persist_loop, monkeypatc
             patch("injection_effectiveness_probe.run_reason_evaluator_and_propose",
                   side_effect=RuntimeError("bang")):
         report, out = _run(loop, capsys)
-    persist.assert_not_called()
-    assert "VNX_LEARN_PERSIST=0 — pattern persist skipped" in out
+    persist.assert_called_once()
     assert "❌ Error reconciling confidence: boom" in out
     assert "❌ Error running reason evaluator: bang" in out
     assert report["statistics"]["injection_tuning_proposals"] == 0

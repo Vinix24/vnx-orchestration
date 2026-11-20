@@ -839,7 +839,7 @@ def test_close_with_injected_set_derives_done_and_closes(tmp_path):
     ROADMAP entry, no coordination event. The only merge evidence is the
     injected set (the gh numbers run_reconcile gathered). Pre-fix this track
     derived 'queued' and could not be closed. OI-1155: source 4 (gh) is now
-    default-ON, so the module autouse fixture opts out (VNX_RECONCILE_GIT=0);
+    always on, so the suite's autouse fixture stubs it empty;
     the injected set short-circuits _load_merged_pr_numbers, so no live gh
     call and no local source contribute.
     """
