@@ -16,6 +16,7 @@ Delegated from `bin/vnx`:
   vnx deliverable promote <dispatch_id>
   vnx deliverable close <dispatch_id> --evidence <pr>
   vnx deliverable set <dispatch_id> [--task-class <class>] [--routing-floor <floor>]
+  vnx deliverable depend|undepend <dlv> --on <dlv> [--kind soft | --reason "..."]; deps <dlv> [--json]
                        [--dispatch-paths <p1,p2>]
 
 NO-NODE model: a deliverable is a proposed dispatch row with output_kind.
@@ -72,6 +73,7 @@ import track_reconciler  # noqa: E402
 import objective_reconcile  # noqa: E402
 import plan_gate_enforcement  # noqa: E402
 import actor_class  # noqa: E402
+import deliverable_dependencies as dlv_deps
 from delivery_identity import delivery_identity_fields
 import plan_scope
 import provider_switch
@@ -2924,6 +2926,8 @@ def cmd_deliverable_add(args: argparse.Namespace) -> int:
 
     conn = _db_conn(state_dir)
     try:
+        # The insert and every dependency edge share one write lock: a refused edge rolls back the deliverable.
+        conn.execute("BEGIN IMMEDIATE")
         has_oaa = _has_col(conn, "dispatches", "operator_approved_at")
         has_ok = _has_col(conn, "dispatches", "output_kind")
         has_or = _has_col(conn, "dispatches", "output_ref")
@@ -2955,7 +2959,14 @@ def cmd_deliverable_add(args: argparse.Namespace) -> int:
             project_id=project_id,
             **_derived_actor("operator", metadata=delivery_identity_fields(dispatch_id, project_id)),
         )
+        for on_id in _split_dispatch_paths(getattr(args, "depends_on", None)):
+            dlv_deps.depend(conn, project_id, dispatch_id, on_id, kind="hard",
+                            created_by=actor_class.derive(), now=now)
         conn.commit()
+    except dlv_deps.DependencyRefused as exc:
+        conn.rollback()
+        print(f"deliverable add: {exc}. No change made.", file=sys.stderr)
+        return 2
     finally:
         conn.close()
 
@@ -2965,6 +2976,66 @@ def cmd_deliverable_add(args: argparse.Namespace) -> int:
     # never a non-zero exit that misstates the store. No caller relies on a
     # distinct code here, so the add returns 0.
     _apply_deliverable_scope_rule(state_dir, project_id, track_id)
+    return 0
+
+
+def _dependency_change(args: argparse.Namespace, verb: str, change: Callable[..., str]) -> int:
+    """Run one ``depend``/``undepend`` under ``BEGIN IMMEDIATE``; a refusal prints the DAO's reason, exit 2."""
+    project_id = (args.project_id or "").strip()
+    conn = _db_conn(_resolve_state_dir(args.state_dir))
+    try:
+        conn.execute("BEGIN IMMEDIATE")  # the DAO's checks and its write under one lock
+        line = change(conn, project_id, actor_class.derive(), _now_utc())
+        conn.commit()
+    except dlv_deps.DependencyRefused as exc:
+        conn.rollback()
+        print(f"deliverable {verb}: {exc}. No change made.", file=sys.stderr)
+        return 2
+    finally:
+        conn.close()
+    print(line)
+    return 0
+
+
+def cmd_deliverable_depend(args: argparse.Namespace) -> int:
+    """``deliverable depend <dlv> --on <dlv> [--kind soft]`` (ADR-096 §1): an unknown id or a cycle is refused."""
+    def change(conn: sqlite3.Connection, pid: str, actor: str, now: str) -> str:
+        outcome = dlv_deps.depend(conn, pid, args.dispatch_id, args.on, kind=args.kind, created_by=actor, now=now)
+        return f"{outcome}: {args.dispatch_id} depends on {args.on} ({args.kind})"
+    return _dependency_change(args, "depend", change)
+
+
+def cmd_deliverable_undepend(args: argparse.Namespace) -> int:
+    """``deliverable undepend <dlv> --on <dlv> --reason "..."`` (ADR-096 §2): the row stays, marked removed."""
+    def change(conn: sqlite3.Connection, pid: str, actor: str, now: str) -> str:
+        dlv_deps.undepend(conn, pid, args.dispatch_id, args.on, reason=args.reason, removed_by=actor, now=now)
+        return f"removed: {args.dispatch_id} no longer depends on {args.on} (reason: {args.reason.strip()})"
+    return _dependency_change(args, "undepend", change)
+
+
+def cmd_deliverable_deps(args: argparse.Namespace) -> int:
+    """``deliverable deps <dlv> [--json]``: active and removed dependencies, both directions."""
+    project_id = (args.project_id or "").strip()
+    conn = _db_conn(_resolve_state_dir(args.state_dir))
+    try:
+        if not project_id:
+            raise dlv_deps.DependencyRefused("--project-id is required (ADR-007)")
+        deps = dlv_deps.dependencies(conn, project_id, args.dispatch_id)
+    except dlv_deps.DependencyRefused as exc:
+        print(f"deliverable deps: {exc}.", file=sys.stderr)
+        return 2
+    finally:
+        conn.close()
+    if args.json:
+        print(json.dumps(deps, indent=2))
+        return 0
+    print(f"{deps['deliverable']} (project {deps['project_id']})")
+    for title, rows, other in (("depends on", deps["depends_on"], "depends_on_id"),
+                               ("depended on by", deps["depended_on_by"], "deliverable_id")):
+        print(f"  {title}:" + ("" if rows else " none"))
+        for r in rows:
+            state = "active" if r["active"] else f"removed {r['removed_at']} ({r['removed_reason']})"
+            print(f"    {r[other]:<18} {r['kind']:<5} {state}")
     return 0
 
 
@@ -6556,6 +6627,9 @@ def _add_deliverable_add_parser(dlv_sub: Any, common: Any) -> None:
              "A plan-gate run without --dispatch-paths reads them: a schema or "
              "security path brings the second seat in from the start.",
     )
+    p_dadd.add_argument("--depends-on", dest="depends_on", default=None, metavar="DLV1,DLV2",
+                        help="comma-separated deliverables this one depends on (hard); an unknown id "
+                             "or a cycle refuses the whole add (ADR-096)")
     p_dadd.set_defaults(func=cmd_deliverable_add)
 
 
@@ -6622,6 +6696,27 @@ def _add_deliverable_parsers(sub: Any, common: Any) -> None:
     )
     p_dset.set_defaults(func=cmd_deliverable_set)
     _add_deliverable_retarget_parser(dlv_sub, common)
+    _add_deliverable_dependency_parsers(dlv_sub, common)
+
+
+def _add_deliverable_dependency_parsers(dlv_sub: Any, common: Any) -> None:
+    """``deliverable depend``, ``undepend`` and ``deps``: order between deliverables (ADR-096)."""
+    p = dlv_sub.add_parser("depend", help="record that a deliverable depends on another (a cycle is refused)")
+    common(p)
+    p.add_argument("dispatch_id")
+    p.add_argument("--on", required=True, metavar="DLV", help="the deliverable it depends on")
+    p.add_argument("--kind", choices=dlv_deps.KINDS, default="hard", help="hard (default) or soft")
+    p.set_defaults(func=cmd_deliverable_depend)
+    p = dlv_sub.add_parser("undepend", help="remove a dependency; the row stays with the reason")
+    common(p)
+    p.add_argument("dispatch_id")
+    p.add_argument("--on", required=True, metavar="DLV", help="the deliverable it no longer depends on")
+    p.add_argument("--reason", required=True, help="why it is removed (REQUIRED, may not be empty)")
+    p.set_defaults(func=cmd_deliverable_undepend)
+    p = dlv_sub.add_parser("deps", help="dependencies of a deliverable, both directions, active and removed")
+    common(p)
+    p.add_argument("dispatch_id")
+    p.set_defaults(func=cmd_deliverable_deps)
 
 
 def _add_deliverable_retarget_parser(dlv_sub: Any, common: Any) -> None:

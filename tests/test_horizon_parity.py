@@ -337,6 +337,9 @@ _DELIVERABLE_ARGV = {
     "set": ["dlv-fake-id", "--task-class", "01_code_generation"],
     "retarget": ["dlv-fake-id", "--objective", "other-track", "--reason", "parity check"],
     "withdraw": ["dlv-fake-id", "--reason", "parity check"],
+    "depend": ["dlv-fake-id", "--on", "dlv-other"],
+    "undepend": ["dlv-fake-id", "--on", "dlv-other", "--reason", "parity check"],
+    "deps": ["dlv-fake-id"],
 }
 _PLAN_GATE_ARGV = {
     "seed": ["delegate-track"],
