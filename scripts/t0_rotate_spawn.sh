@@ -66,21 +66,17 @@
 # line typed in pieces), VNX_T0_ROTATE_TURN_TIMEOUT (1800),
 # VNX_T0_ROTATE_GOAL_CONFIRM_TIMEOUT (20), VNX_T0_ROTATE_DELIVERY_TIMEOUT (120),
 # VNX_T0_ROTATE_DELIVERY_POLL (1).
-# Screen patterns (env, grep -E): VNX_T0_ROTATE_FOOTER_PATTERN ("auto mode"),
-# VNX_T0_ROTATE_BUSY_PATTERN ("esc to interrupt|… \([0-9]+[hms]", a second opinion only: the
-# successor's transcript decides when a turn is over), VNX_T0_ROTATE_GOAL_ACTIVE_PATTERN
-# ("/goal active", only booked with the outcome: the transcript decides whether /goal ran).
-#
-# Switch: VNX_T0_ROTATE_START_DIR = t0 (default) | root. The tmux global environment is read first
-# (`tmux show-environment -g VNX_T0_ROTATE_START_DIR`), the process environment second; `root`
-# forces the project-root start. Set it with `tmux set-environment -g VNX_T0_ROTATE_START_DIR root`,
-# remove it with `tmux set-environment -gu VNX_T0_ROTATE_START_DIR`.
+# Screen patterns (constants below, grep -E): the footer ("auto mode"), the busy spinner
+# ("esc to interrupt|… \([0-9]+[hms]", a second opinion only: the successor's transcript decides
+# when a turn is over) and the goal marker ("/goal active", only booked with the outcome: the
+# transcript decides whether /goal ran). The successor starts in the T0 folder when the project
+# has a valid one, else in the project root.
 #
 # Last stdout line: new_window=@N old_window=@N goal_followup=0|1 run_dir=PATH close=on_delivery_confirmed
 # start_dir=PATH (start_dir is shell-quoted with %q and is the last field). `close=` says the old
 # window is closed by the delivery job, on a confirmed delivery only.
 #
-# Exit codes: 0 spawned, 2 usage / invalid VNX_T0_ROTATE_START_DIR / empty --skip-wrap-reason,
+# Exit codes: 0 spawned, 2 usage / empty --skip-wrap-reason,
 # 3 not in tmux / handoff missing or stale, 4 handoff without a first step, 5 successor did not
 # come up or started in another folder than the start folder (the old window is left untouched),
 # 6 no valid wrap proof ("run /build-log wrap"), or a skip run without a readable JSONL
@@ -104,13 +100,13 @@ TURN_TIMEOUT="${VNX_T0_ROTATE_TURN_TIMEOUT:-1800}"
 GOAL_CONFIRM_TIMEOUT="${VNX_T0_ROTATE_GOAL_CONFIRM_TIMEOUT:-20}"
 DELIVERY_TIMEOUT="${VNX_T0_ROTATE_DELIVERY_TIMEOUT:-120}"
 DELIVERY_POLL="${VNX_T0_ROTATE_DELIVERY_POLL:-1}"
-FOLDER_TIMEOUT="${VNX_T0_ROTATE_FOLDER_TIMEOUT:-5}"
-FOOTER_PATTERN="${VNX_T0_ROTATE_FOOTER_PATTERN:-auto mode}"
+FOLDER_TIMEOUT=5
+FOOTER_PATTERN="auto mode"
 # The spinner of a running turn. claude 2.1.308 prints `✳ Tempering… (52s · ↓ 4.5k tokens ·
 # thought for 13s)`: glyph and verb change every turn, `esc to interrupt` is gone, and what stays
 # is the ellipsis followed by the elapsed time. Older CLIs still print `esc to interrupt`.
-BUSY_PATTERN="${VNX_T0_ROTATE_BUSY_PATTERN:-esc to interrupt|… \([0-9]+[hms]}"
-GOAL_ACTIVE_PATTERN="${VNX_T0_ROTATE_GOAL_ACTIVE_PATTERN:-/goal active}"
+BUSY_PATTERN="esc to interrupt|… \([0-9]+[hms]"
+GOAL_ACTIVE_PATTERN="/goal active"
 
 log() { printf '[t0-rotate %s] %s\n' "$(date +%H:%M:%S)" "$*" >&2; }
 die() { local code="$1"; shift; log "REFUSED: $*"; exit "$code"; }
@@ -353,20 +349,6 @@ fi
 
 [ -n "${TMUX:-}" ] && [ -n "${TMUX_PANE:-}" ] || die 3 "not running inside tmux (TMUX/TMUX_PANE unset); rotation needs a tmux window to hand over"
 
-# The switch is validated before any window is opened. A set tmux global wins over the process
-# value; an unset or removed global (`unknown variable`, or `-NAME`) falls through to it.
-START_MODE="${VNX_T0_ROTATE_START_DIR:-}"
-if tmux_global="$(tmux show-environment -g VNX_T0_ROTATE_START_DIR 2>/dev/null)"; then
-  case "$tmux_global" in
-    VNX_T0_ROTATE_START_DIR=?*) START_MODE="${tmux_global#VNX_T0_ROTATE_START_DIR=}" ;;
-  esac
-fi
-START_MODE="${START_MODE:-t0}"
-case "$START_MODE" in
-  t0|root) ;;
-  *) die 2 "VNX_T0_ROTATE_START_DIR='$START_MODE' is invalid; valid values are 't0' (default) and 'root'" ;;
-esac
-
 if [ -n "$PROJECT_ROOT_ARG" ]; then
   PROJECT_ROOT="$(cd "$PROJECT_ROOT_ARG" && pwd -P)"
 else
@@ -462,9 +444,7 @@ phys() { [ -n "$1" ] || return 0; (cd -- "$1" 2>/dev/null && pwd -P) || printf '
 T0_DIR="$PROJECT_ROOT/.claude/terminals/T0"
 START_DIR="$PROJECT_ROOT"
 START_IN_T0=0
-if [ "$START_MODE" = "root" ]; then
-  log "start folder: project root $PROJECT_ROOT (VNX_T0_ROTATE_START_DIR=root)"
-elif [ ! -f "$T0_DIR/CLAUDE.md" ]; then
+if [ ! -f "$T0_DIR/CLAUDE.md" ]; then
   log "start folder: project root $PROJECT_ROOT (no $T0_DIR/CLAUDE.md: this project has no T0 folder)"
 else
   t0_link="$T0_DIR/.claude"
@@ -521,7 +501,7 @@ if [ "$START_IN_T0" -eq 1 ]; then
   done
   if [ "$new_path" != "$(phys "$START_DIR")" ]; then
     tmux kill-window -t "$NEW_WIN" || log "could not close $NEW_WIN; close it by hand"
-    die 5 "successor window is in $new_path instead of the T0 folder $START_DIR; window $NEW_WIN closed, nothing was started in it, old window $OLD_WIN left running (VNX_T0_ROTATE_START_DIR=root starts in the project root)"
+    die 5 "successor window is in $new_path instead of the T0 folder $START_DIR; window $NEW_WIN closed, nothing was started in it, old window $OLD_WIN left running"
   fi
 fi
 
@@ -555,8 +535,7 @@ start_delivery_job() {
     for var in VNX_T0_ROTATE_POLL_SECONDS="$POLL" VNX_T0_ROTATE_SETTLE_SECONDS="$SETTLE" \
                VNX_T0_ROTATE_FOOTER_TIMEOUT="$FOOTER_TIMEOUT" VNX_T0_ROTATE_TURN_TIMEOUT="$TURN_TIMEOUT" \
                VNX_T0_ROTATE_GOAL_CONFIRM_TIMEOUT="$GOAL_CONFIRM_TIMEOUT" \
-               VNX_T0_ROTATE_FOOTER_PATTERN="$FOOTER_PATTERN" VNX_T0_ROTATE_BUSY_PATTERN="$BUSY_PATTERN" \
-               VNX_T0_ROTATE_GOAL_ACTIVE_PATTERN="$GOAL_ACTIVE_PATTERN" VNX_PYTHON="$PYTHON" \
+               VNX_PYTHON="$PYTHON" \
                VNX_T0_ROTATE_DELIVERY_TIMEOUT="$DELIVERY_TIMEOUT" VNX_T0_ROTATE_DELIVERY_POLL="$DELIVERY_POLL"; do
       printf 'export %s=%q\n' "${var%%=*}" "${var#*=}"
     done
