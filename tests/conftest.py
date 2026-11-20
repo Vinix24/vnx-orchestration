@@ -451,9 +451,10 @@ def _no_ambient_vnx_project_id(monkeypatch: pytest.MonkeyPatch) -> None:
 def _besluiten_register_isolation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # No test reads the checkout's real daily-log/besluiten.ndjson: build_t0_state resolves the folder from here.
     import besluiten_adapter
+    import build_t0_state
 
     real_state_block = besluiten_adapter.state_block
-    checkout_logdir = (_ROOT_DIR / "daily-log").resolve()
+    checkout_logdir = build_t0_state._besluiten_logdir().resolve()  # the folder the code resolves, also in a worktree
 
     def _isolated_state_block(project_id, logdir, **kwargs):
         # Only the checkout's own folder is redirected; a test that names another folder keeps it.
