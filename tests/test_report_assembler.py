@@ -568,5 +568,18 @@ class TestEndToEnd(unittest.TestCase):
             self.assertEqual(errors, [], f"Validation errors: {errors}")
 
 
+def test_schema_violation_follows_the_enforcement_profile(monkeypatch):
+    """Profile shadow logs a schema violation; profile enforced raises it (ADR-087)."""
+    import pytest
+    from report_assembler import _validate_assembler_output
+    from unified_report_schema import SchemaViolation
+    content = "---\nschema_version: 1\n---\n\n# Missing fields\n"
+    monkeypatch.setenv("VNX_OVERRIDE_ENFORCEMENT_PROFILE", "shadow")
+    _validate_assembler_output(content, "d-shadow")
+    monkeypatch.setenv("VNX_OVERRIDE_ENFORCEMENT_PROFILE", "enforced")
+    with pytest.raises(SchemaViolation):
+        _validate_assembler_output(content, "d-enforced")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
