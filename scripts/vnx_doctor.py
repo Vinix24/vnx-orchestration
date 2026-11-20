@@ -996,6 +996,21 @@ def check_cost_ledger_files(paths: Dict[str, str]) -> List[CheckResult]:
 
 
 # ---------------------------------------------------------------------------
+# Check: refusals for an unresolved project id (AG-1o)
+# ---------------------------------------------------------------------------
+
+def check_project_id_refusals(paths: Dict[str, str]) -> List[CheckResult]:
+    """Per context the refusals of the last 24 hours, plus the unattributed cost ledger."""
+    from project_id_refusals import format_section, project_id_refusal_section
+
+    try:
+        status, detail = format_section(project_id_refusal_section(Path(paths["VNX_DATA_DIR"])))
+    except Exception as exc:
+        return [CheckResult("project_id_refusals", WARN, f"could not read the counter: {exc}")]
+    return [CheckResult("project_id_refusals", WARN if status == "warn" else PASS, detail)]
+
+
+# ---------------------------------------------------------------------------
 # Check: t0_state.json freshness + SessionStart refresh hook (OI-1058)
 # ---------------------------------------------------------------------------
 
@@ -1201,6 +1216,7 @@ def run_doctor(paths: Dict[str, str], *,
     results.extend(check_steering_report(paths))
     results.extend(check_learning_loop_beacon(paths))
     results.extend(check_cost_ledger_files(paths))
+    results.extend(check_project_id_refusals(paths))
     results.extend(check_t0_state_freshness(paths))
     results.extend(check_branch_protection_drift(paths))
 
