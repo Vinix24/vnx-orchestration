@@ -356,8 +356,6 @@ EXECUTION_FAILURE_REASONS: frozenset = frozenset({
     "empty_review_content", "validation_failed",
     # Network / auth
     "network_error", "auth_error",
-    # Vertex REST path (gemini_review) API failures (OI-1178)
-    "vertex_api_error",
     # codex refused the requested model (http 400: not supported for the ChatGPT
     # login, or the CLI is too old for it; OI-2062). The gate never ran, so it
     # books `unavailable` like any execution failure, but under its own name so
