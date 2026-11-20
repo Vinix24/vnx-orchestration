@@ -448,6 +448,8 @@ Process commands (visibility and control):
   inbox [--json] [--present]  Operator queue: open points to answer; also ask, answer, push-due
                      (exit 0 done, 2 refused, 78 ledger unreadable)
   morning-round agenda --project-id <id> [--json]  Morning agenda: open decisions and proposals to discuss (read-only)
+  morning-round tick [--project-id <id>] [--dry-run]  Start the morning round per project (idempotent per day)
+  morning-round stop [--project-id <id>] --reason decided|deadline  End the round once per project and day
 
 Dispatch commands (one-liner delivery):
   dispatch <file.md>              Auto-detect terminal and deliver dispatch

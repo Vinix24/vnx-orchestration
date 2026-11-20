@@ -87,6 +87,12 @@ def window_from_config(get: Callable[[str], object]) -> PauseWindow:
     return PauseWindow(enabled, start, deadline, tz)  # type: ignore[arg-type]
 
 
+def in_window(window: PauseWindow, now: datetime) -> bool:
+    """True from the start time up to, not including, the deadline in the window's zone."""
+    local = now.astimezone(_zone(window.tz)).time().replace(tzinfo=None)
+    return _parse_hhmm(KEY_START, window.start) <= local < _parse_hhmm(KEY_DEADLINE, window.deadline)
+
+
 def is_paused(window: PauseWindow, now: datetime, *, decided: Optional[bool]) -> PauseVerdict:
     """Is the fabric paused at ``now``? ``decided`` is True/False, or None when unknown."""
     if now.tzinfo is None or now.utcoffset() is None:
