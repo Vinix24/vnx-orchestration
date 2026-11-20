@@ -727,6 +727,22 @@ def _tables_v38(v37_tables: Tuple[TableInvariant, ...]) -> Tuple[TableInvariant,
     )
 
 
+# v39 (0039, ADR-096, B1): order between deliverables, keyed per ADR-007 by
+# (project_id, deliverable_id, depends_on_id); 0039 creates it, so it is required at v39.
+def _deliverable_dependencies() -> TableInvariant:
+    return TableInvariant(
+        name="deliverable_dependencies",
+        columns=_cols(
+            ("project_id", "TEXT", True), ("deliverable_id", "TEXT", True),
+            ("depends_on_id", "TEXT", True), ("kind", "TEXT", True),
+            ("created_at", "TEXT", True), ("created_by", "TEXT", True),
+            ("removed_at", "TEXT", False), ("removed_reason", "TEXT", False),
+        ),
+        pk=("project_id", "deliverable_id", "depends_on_id"),
+        indexes=(IndexInvariant("idx_deliverable_dependencies_on", ("project_id", "depends_on_id")),),
+    )
+
+
 def _build_manifest() -> Dict[int, VersionManifest]:
     base_children_v24 = (_tph_v24(), _td_v24())
     manifest = {
@@ -793,6 +809,8 @@ def _build_manifest() -> Dict[int, VersionManifest]:
     manifest[37] = VersionManifest(37, manifest[36].tables, (_DELIVERABLES_VIEW_V37,))
     # v38 (0038): intelligence_injections carries the arm and the window it was served in.
     manifest[38] = VersionManifest(38, _tables_v38(manifest[37].tables), manifest[37].views)
+    # v39 (0039): deliverable_dependencies, order between deliverables (ADR-096).
+    manifest[39] = VersionManifest(39, (*manifest[38].tables, _deliverable_dependencies()), manifest[38].views)
     return manifest
 
 

@@ -99,8 +99,8 @@ def db(tmp_path: Path) -> Path:
 
 def test_auto_apply_takes_a_store_from_37_to_38_and_adds_both_columns(db):
     assert "ab_arm" not in _columns(db) and "ab_window" not in _columns(db)
-    assert auto_apply(db) == [38]
-    assert _version(db) == 38
+    assert auto_apply(db) == list(range(38, schema_manifest.TERMINAL_VERSION + 1))
+    assert _version(db) == schema_manifest.TERMINAL_VERSION
     assert {"ab_arm", "ab_window"} <= set(_columns(db))
     assert _q(db, "SELECT ab_arm, ab_window FROM intelligence_injections") == [(None, None)] * 3
     names = {r[1] for r in _q(db, "PRAGMA index_list(intelligence_injections)")}
@@ -113,14 +113,14 @@ def test_auto_apply_takes_a_store_from_37_to_38_and_adds_both_columns(db):
 def test_a_second_run_is_a_skip(db):
     assert apply_0038.apply_migration(db, SQL) is True
     assert apply_0038.apply_migration(db, SQL) is False
-    assert auto_apply(db) == []
+    assert auto_apply(db) == list(range(39, schema_manifest.TERMINAL_VERSION + 1))
 
 
 def test_a_store_that_already_has_ab_arm_reaches_38_without_error(db):
     _q(db, "ALTER TABLE intelligence_injections ADD COLUMN ab_arm TEXT DEFAULT 'treatment'")
     _q(db, "CREATE INDEX idx_injection_ab_arm ON intelligence_injections (ab_arm)")
-    assert auto_apply(db) == [38]
-    assert _version(db) == 38
+    assert auto_apply(db) == list(range(38, schema_manifest.TERMINAL_VERSION + 1))
+    assert _version(db) == schema_manifest.TERMINAL_VERSION
     assert {"ab_arm", "ab_window"} <= set(_columns(db))
     assert _q(db, "SELECT DISTINCT ab_arm FROM intelligence_injections") == [("treatment",)]
 
