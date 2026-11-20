@@ -63,11 +63,15 @@ RECEIPT_JSON=$(cat <<RECEIPT_EOF
 RECEIPT_EOF
 )
 
-APPEND_RECEIPT_SCRIPT="$SCRIPT_DIR/../scripts/append_receipt.py"
+# Testability override: lets unit tests inject a failing/mock append helper without
+# changing production scripts. Default behavior remains the canonical append helper.
+APPEND_RECEIPT_SCRIPT="${VNX_APPEND_RECEIPT_SCRIPT:-$SCRIPT_DIR/../scripts/append_receipt.py}"
 python3 "$APPEND_RECEIPT_SCRIPT" --receipt "$RECEIPT_JSON" 2>/dev/null || \
   vnx_log "WARN: Failed to append rotation receipt"
 
-ROTATE_SCRIPT="$SCRIPT_DIR/vnx_rotate.sh"
+# Testability override: lets tests simulate missing/immediate-exit rotator behavior.
+# Default behavior remains the local vnx_rotate.sh script.
+ROTATE_SCRIPT="${VNX_ROTATE_SCRIPT:-$SCRIPT_DIR/vnx_rotate.sh}"
 if [[ ! -x "$ROTATE_SCRIPT" ]]; then
   vnx_log "ERROR: vnx_rotate.sh not found or not executable"
   exit 0

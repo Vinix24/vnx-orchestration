@@ -40,6 +40,8 @@ def mgr(tmp_path):
     m.dispatch_dir = tmp_path / "dispatches"
     (m.dispatch_dir / "staging").mkdir(parents=True)
     m.vnx_state_dir = tmp_path / "state"
+    m.legacy_state_dir = tmp_path / "legacy"
+    m.dual_write_legacy = False
     m.project_root = tmp_path
     (m.dispatch_dir / "staging" / "d-1.md").write_text(DISPATCH)
     return m

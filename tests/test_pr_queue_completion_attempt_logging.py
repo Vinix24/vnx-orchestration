@@ -26,6 +26,9 @@ def _apply_env(tmp_path: Path, monkeypatch) -> Path:
     monkeypatch.setenv("PROJECT_ROOT", str(tmp_path))
     monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
     monkeypatch.setenv("VNX_STATE_DIR", str(state_dir))
+    monkeypatch.delenv("VNX_PR_QUEUE_DUAL_WRITE_LEGACY", raising=False)
+    monkeypatch.delenv("VNX_STATE_DUAL_WRITE_LEGACY", raising=False)
+    monkeypatch.delenv("VNX_STATE_SIMPLIFICATION_ROLLBACK", raising=False)
 
     return state_dir
 

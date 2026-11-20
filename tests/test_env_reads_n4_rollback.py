@@ -1,7 +1,8 @@
 """The state-simplification rollback cluster and the last script names are gone (config-een-oppervlak N4).
 
-The twelve names are read nowhere in the nine files that carried them, and no
-``_env_flag`` copy is left in the five Python files.
+The names are read nowhere in the six files that carried them (the three security
+files are covered by tests/test_env_reads_n4b_security.py), and no ``_env_flag``
+copy is left in the four Python files.
 """
 
 from __future__ import annotations
@@ -16,11 +17,7 @@ REPO = Path(__file__).resolve().parents[1]
 DELETED = (
     "VNX_STATE_DUAL_WRITE_LEGACY",
     "VNX_STATE_SIMPLIFICATION_ROLLBACK",
-    "VNX_PR_QUEUE_DUAL_WRITE_LEGACY",
-    "VNX_DOCTOR_PACKAGE_CHECK",
     "VNX_CENTRAL_ROOT",
-    "VNX_APPEND_RECEIPT_SCRIPT",
-    "VNX_ROTATE_SCRIPT",
     "VNX_T0_ROTATE_BUSY_PATTERN",
     "VNX_T0_ROTATE_FOLDER_TIMEOUT",
     "VNX_T0_ROTATE_FOOTER_PATTERN",
@@ -28,13 +25,10 @@ DELETED = (
     "VNX_T0_ROTATE_START_DIR",
 )
 FILES = (
-    "hooks/vnx_handover_detector.sh",
-    "scripts/commands/doctor.sh",
     "scripts/gather_intelligence.py",
     "scripts/generate_t0_recommendations.py",
     "scripts/intelligence_daemon.py",
     "scripts/open_items_manager.py",
-    "scripts/pr_queue_manager.py",
     "scripts/t0_rotate_spawn.sh",
     "scripts/vnx_contamination_check.sh",
 )
