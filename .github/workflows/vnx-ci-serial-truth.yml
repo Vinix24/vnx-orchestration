@@ -206,7 +206,7 @@ jobs:
     name: Shard shape (the four Profile A shards)
     runs-on: ubuntu-24.04
     if: ${{ github.ref == 'refs/heads/main' }}
-    timeout-minutes: 38
+    timeout-minutes: 26
     permissions: {contents: read, actions: read}
     strategy: {fail-fast: false, matrix: {k: [1, 2, 3, 4]}}
     env:

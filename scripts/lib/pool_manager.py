@@ -91,12 +91,9 @@ def _pool_worker_command(
     ``dispatch_flags.single_entry_enabled()`` is False (``VNX_SINGLE_ENTRY_DISPATCH=0`` or
     ``VNX_DISPATCH_LEGACY=1``).
 
-    ``VNX_POOL_TASK_CONSUMER=1`` keeps its old meaning — "run the single-claim task-consumer
-    runner" — and keeps that runner even under the rollback. Its ``=0``/unset value no longer
-    names a route by itself: the door predicate decides. The rollback is the single-entry
-    flag, not the consumer flag.
+    The door predicate alone decides the route; the rollback is the single-entry flag.
     """
-    if os.environ.get("VNX_POOL_TASK_CONSUMER") == "1" or single_entry_enabled():
+    if single_entry_enabled():
         # Each worker claims one queued dispatch and exits; pool re-spawns on next tick
         # (ADR-018 Rule 2 + FM-4).
         return [

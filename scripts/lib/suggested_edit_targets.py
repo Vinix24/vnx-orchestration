@@ -1,4 +1,4 @@
-"""Closed reading list for suggested edits (ochtendronde D3b): CLAUDE.md, agents/<role>/CLAUDE.md,
+"""Closed reading list for suggested edits (morning round D3b): CLAUDE.md, agents/<role>/CLAUDE.md,
 skills/<name>/SKILL.md, scripts/lib/prompts/base_worker.md. Generator and apply handler share it."""
 
 from __future__ import annotations

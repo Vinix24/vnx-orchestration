@@ -27,7 +27,6 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import os
 import sqlite3
 import subprocess
 import sys
@@ -40,8 +39,7 @@ from uuid import uuid4
 # proceed with consolidation. Below this threshold the cycle is skipped cleanly.
 _MIN_PATTERN_THRESHOLD: int = 1
 
-# Default timeout in seconds of one consolidation call, whichever provider runs it;
-# override via VNX_DREAM_TIMEOUT.
+# Timeout in seconds of one consolidation call, whichever provider runs it.
 _DEFAULT_TIMEOUT: int = 180
 
 # The provider that runs the consolidation is the config key VNX_DREAM_PROVIDER. An explicit
@@ -826,7 +824,7 @@ def run_dream_cycle(
         _data_root,
     )
 
-    timeout = float(os.environ.get("VNX_DREAM_TIMEOUT", str(_DEFAULT_TIMEOUT)))
+    timeout = float(_DEFAULT_TIMEOUT)
 
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row

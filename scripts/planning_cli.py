@@ -2863,9 +2863,11 @@ def _print_deliverable_created(
 
 def _apply_deliverable_scope_rule(
     state_dir: Path, project_id: str, track_id: str, *,
-    verb: str = "add", done: str = "created", stream: Optional[TextIO] = None,
+    task_class: Optional[str], verb: str = "add", done: str = "created",
+    stream: Optional[TextIO] = None,
 ) -> bool:
-    """The fourth deliverable makes a light track architecture (P1); one line says so.
+    """A deliverable with task_class 03_refactoring makes a light track architecture
+    (P6; the deliverable count no longer counts); one line says so.
 
     The deliverable row is already committed when this runs, so a rule that
     cannot be applied is printed as a warning naming ``vnx horizon
@@ -2874,8 +2876,7 @@ def _apply_deliverable_scope_rule(
     ``cmd_deliverable_add`` always returns 0 after this, because the store does
     hold the deliverable. ``retarget`` runs it on its target (``stream``: off a JSON stdout).
     """
-    count = len(_fetch_deliverable_records(state_dir, project_id, track_id))
-    rule = plan_scope.deliverable_rule(count)
+    rule = plan_scope.deliverable_task_class_rule(task_class)
     if rule is None:
         return True
     try:
@@ -2975,7 +2976,8 @@ def cmd_deliverable_add(args: argparse.Namespace) -> int:
     # did: a scope-raise that could not run is a warning (the way out is named),
     # never a non-zero exit that misstates the store. No caller relies on a
     # distinct code here, so the add returns 0.
-    _apply_deliverable_scope_rule(state_dir, project_id, track_id)
+    _apply_deliverable_scope_rule(state_dir, project_id, track_id,
+                                  task_class=metadata_dict.get("task_class"))
     return 0
 
 
@@ -3481,7 +3483,7 @@ def _promote_grant_view(
 def _sign_refusal(signers: Optional[Path], identity: str) -> Optional[str]:
     """Why ``plan-gate sign`` must not write, checked before any append; ``None`` when it may sign."""
     if signers is None:
-        return "no allowed_signers file found (VNX_ALLOWED_SIGNERS, .vnx-attest/ or .vnx/allowed_signers)"
+        return "no allowed_signers file found (.vnx-attest/allowed_signers or .vnx/allowed_signers)"
     try:
         lines = Path(signers).read_text(encoding="utf-8").splitlines()
     except OSError as exc:
@@ -4424,6 +4426,17 @@ def _retarget_write(
     return False
 
 
+def _deliverable_task_class(metadata_json: Optional[str]) -> Optional[str]:
+    """The task_class a deliverable row carries, or None. Unparseable metadata
+    yields None: ``_retarget_check`` has already read it as a deliverable row."""
+    try:
+        meta = json.loads(metadata_json or "{}")
+    except (TypeError, ValueError):
+        return None
+    value = meta.get("task_class") if isinstance(meta, dict) else None
+    return value if isinstance(value, str) else None
+
+
 def cmd_deliverable_retarget(args: argparse.Namespace) -> int:
     """Move a proposed/ready deliverable to another track with one event (``close`` would attest a PR).
 
@@ -4478,7 +4491,9 @@ def cmd_deliverable_retarget(args: argparse.Namespace) -> int:
             print(f"  ready -> proposed: the promote approval was for {from_track}; promote again "
                   f"with `vnx deliverable promote {args.dispatch_id}`.")
         print()
-    _apply_deliverable_scope_rule(state_dir, project_id, args.objective, verb="retarget", done="moved",
+    _apply_deliverable_scope_rule(state_dir, project_id, args.objective,
+                                  task_class=_deliverable_task_class(row["metadata_json"]),
+                                  verb="retarget", done="moved",
                                   stream=sys.stderr if args.json else None)
     return 0
 
@@ -6822,8 +6837,7 @@ def _add_plan_gate_run_parser(pg_sub: Any, common: Callable[[Any], None]) -> Non
         type=int,
         default=None,
         help="per-seat deadline in seconds before a panelist times out and books a "
-             "fabricated abstention (OI-1068). Defaults to VNX_PLAN_GATE_SEAT_TIMEOUT "
-             "(default 900) — the same env-var-knob style as VNX_PANEL_RETRY.",
+             "fabricated abstention (OI-1068). Defaults to 900.",
     )
     p_run.add_argument(
         "--dispatch-paths",
@@ -6973,7 +6987,7 @@ def _add_plan_gate_batch_parser(pg_sub: Any, common: Callable[[Any], None]) -> N
         type=int,
         default=None,
         help="per-seat deadline in seconds before a panelist times out and books a "
-             "fabricated abstention (OI-1068). Defaults to VNX_PLAN_GATE_SEAT_TIMEOUT.",
+             "fabricated abstention (OI-1068). Defaults to 900.",
     )
     p_pbatch.add_argument(
         "--dispatch-paths",

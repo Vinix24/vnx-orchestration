@@ -4173,7 +4173,7 @@
                 "const": null,
                 "default": null,
                 "dest": "seat_timeout",
-                "help": "per-seat deadline in seconds before a panelist times out and books a fabricated abstention (OI-1068). Defaults to VNX_PLAN_GATE_SEAT_TIMEOUT.",
+                "help": "per-seat deadline in seconds before a panelist times out and books a fabricated abstention (OI-1068). Defaults to 900.",
                 "metavar": null,
                 "nargs": null,
                 "option_strings": [
@@ -4541,7 +4541,7 @@
                 "const": null,
                 "default": null,
                 "dest": "seat_timeout",
-                "help": "per-seat deadline in seconds before a panelist times out and books a fabricated abstention (OI-1068). Defaults to VNX_PLAN_GATE_SEAT_TIMEOUT (default 900) \u2014 the same env-var-knob style as VNX_PANEL_RETRY.",
+                "help": "per-seat deadline in seconds before a panelist times out and books a fabricated abstention (OI-1068). Defaults to 900.",
                 "metavar": null,
                 "nargs": null,
                 "option_strings": [

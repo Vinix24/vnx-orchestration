@@ -1,4 +1,4 @@
-"""ochtendronde D2a: day snapshot, derived decision status, event ledger."""
+"""morning round D2a: day snapshot, derived decision status, event ledger."""
 import json
 import os
 import sys
@@ -9,7 +9,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts" / "lib"))
 
 import operator_queue as oq
-import ochtendronde_agenda as ag
+import morning_snapshot as ag
 
 P, DAY, NOW = "proj-a", "2026-11-19", "2026-11-19T05:00:00Z"
 
@@ -37,7 +37,7 @@ def test_snapshot_holds_open_points_only_and_is_written_once(tmp_path):
     _close(tmp_path, b)
     path = ag.write_snapshot(P, DAY, state_dir=tmp_path, now=NOW)
     data = json.loads(path.read_text())
-    assert data["schema"] == "ochtendronde_snapshot/1" and data["taken_at"] == NOW
+    assert data["schema"] == "morning_snapshot/1" and data["taken_at"] == NOW
     assert [p["point_id"] for p in data["points"]] == [a]
     assert data["points"][0]["advies"] == "" and data["points"][0]["klasse"] == ""
     before, mtime = path.read_bytes(), os.stat(path).st_mtime_ns
@@ -65,8 +65,8 @@ def test_missing_snapshot_is_unknown(tmp_path):
 
 @pytest.mark.parametrize("content", ["not json", "[]", '{"schema": "x"}'])
 def test_unreadable_snapshot_is_unknown(tmp_path, content):
-    (tmp_path / "ochtendronde").mkdir()
-    (tmp_path / "ochtendronde" / f"{DAY}.json").write_text(content)
+    (tmp_path / "morning_round").mkdir()
+    (tmp_path / "morning_round" / f"{DAY}.json").write_text(content)
     st = ag.decision_status(P, DAY, state_dir=tmp_path)
     assert st.all_decided is None and st.snapshot == "unreadable"
 
@@ -95,7 +95,7 @@ def test_snapshot_refuses_unreadable_ledger(tmp_path):
     _garbage(tmp_path)
     with pytest.raises(oq.QueueUnreadable):
         ag.write_snapshot(P, DAY, state_dir=tmp_path, now=NOW)
-    assert not (tmp_path / "ochtendronde" / f"{DAY}.json").exists()
+    assert not (tmp_path / "morning_round" / f"{DAY}.json").exists()
 
 
 def test_empty_snapshot_is_all_decided(tmp_path):
@@ -117,7 +117,7 @@ def test_event_seq_per_project_and_day(tmp_path):
     assert seqs == [1, 2, 1, 1, 3]
     ev = ag.append_event(P, DAY, "pause_end", {"reason": "decided"}, state_dir=tmp_path, now=NOW)
     assert ev["seq"] == 4 and ev["reason"] == "decided"
-    lines = (tmp_path / "ochtendronde.ndjson").read_text().splitlines()
+    lines = (tmp_path / "morning_round.ndjson").read_text().splitlines()
     assert len(lines) == 6 and json.loads(lines[-1])["kind"] == "pause_end"
 
 
@@ -126,12 +126,12 @@ def test_event_seq_per_project_and_day(tmp_path):
 def test_event_refusals_write_nothing(tmp_path, kind, fields):
     with pytest.raises(ValueError):
         ag.append_event(P, DAY, kind, fields, state_dir=tmp_path, now=NOW)
-    assert not (tmp_path / "ochtendronde.ndjson").exists()
+    assert not (tmp_path / "morning_round.ndjson").exists()
 
 
 def test_corrupt_event_ledger_raises_and_is_not_appended(tmp_path):
     ag.append_event(P, DAY, "pause_start", {}, state_dir=tmp_path, now=NOW)
-    path = tmp_path / "ochtendronde.ndjson"
+    path = tmp_path / "morning_round.ndjson"
     with open(path, "a") as handle:
         handle.write("garbage\n")
     size = path.stat().st_size
@@ -143,4 +143,4 @@ def test_corrupt_event_ledger_raises_and_is_not_appended(tmp_path):
 def test_event_refuses_non_finite(tmp_path):
     with pytest.raises(ValueError):
         ag.append_event(P, DAY, "refused", {"x": float("nan")}, state_dir=tmp_path, now=NOW)
-    assert not (tmp_path / "ochtendronde.ndjson").exists()
+    assert not (tmp_path / "morning_round.ndjson").exists()

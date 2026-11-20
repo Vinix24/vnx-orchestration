@@ -135,8 +135,8 @@ recording a deviation rather than hiding one. ISO/ISAE framing: zero *unrecorded
 recorded-and-signed one is acceptable.
 
 - Default budget: **5 overrides per rolling 30-day window**
-  (`scripts/lib/attest_override.py:55-56`), configurable via `VNX_ATTEST_OVERRIDE_BUDGET`
-  (`scripts/lib/attest_override.py:69-74`).
+  (`scripts/lib/attest_override.py:54-55`), a constant with no environment override
+  (`get_override_budget`).
 - `count_overrides_in_window` (`scripts/lib/attest_override.py:111-188`) derives the count from
   the append-only NDJSON trail — never a mutable counter:
   1. **Chain integrity first** — a tampered or spliced trail raises `ValueError` rather than being
@@ -154,7 +154,7 @@ recorded-and-signed one is acceptable.
   2. **Trail-membership** — a matching, validly-signed entry must exist in the append-only trail,
      not just the standalone override-record file, closing an audit-ledger-bypass path where the
      record survives but its trail row is deleted (`:289-312`).
-  3. **Budget exhaustion** — count vs. `VNX_ATTEST_OVERRIDE_BUDGET`, checked again at the gate
+  3. **Budget exhaustion** — count vs. the budget constant, checked again at the gate
      (`:313-327`).
   A verdict is never a silent PASS: it is either `"PASS: attestation valid"`, `"override: RECORDED
   deviation — signed by ..."`, `"override REJECTED: ..."`, or `"FAIL: ..."`

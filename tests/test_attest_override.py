@@ -233,17 +233,8 @@ class TestCountOverridesInWindow:
 # ---------------------------------------------------------------------------
 
 class TestGetOverrideBudget:
-    def test_default(self, monkeypatch):
-        monkeypatch.delenv("VNX_ATTEST_OVERRIDE_BUDGET", raising=False)
-        assert get_override_budget() == DEFAULT_OVERRIDE_BUDGET
-
-    def test_env_override(self, monkeypatch):
-        monkeypatch.setenv("VNX_ATTEST_OVERRIDE_BUDGET", "10")
-        assert get_override_budget() == 10
-
-    def test_invalid_env_falls_back(self, monkeypatch):
-        monkeypatch.setenv("VNX_ATTEST_OVERRIDE_BUDGET", "abc")
-        assert get_override_budget() == DEFAULT_OVERRIDE_BUDGET
+    def test_default(self):
+        assert get_override_budget() == DEFAULT_OVERRIDE_BUDGET == 5
 
 
 # ---------------------------------------------------------------------------
@@ -450,7 +441,7 @@ class TestBudgetEnforcement:
             trail = repo / ATTEST_DIR / OVERRIDE_TRAIL_FILE
 
             # Force budget to 2 for this test
-            monkeypatch.setenv("VNX_ATTEST_OVERRIDE_BUDGET", "2")
+            monkeypatch.setattr("attest_override.DEFAULT_OVERRIDE_BUDGET", 2)
 
             from content_key import compute_diff_hash
 
@@ -504,7 +495,7 @@ class TestBudgetEnforcement:
 
     def test_write_override_record_refuses_when_exhausted(self, ephemeral_key_dir, monkeypatch):
         """write_override_record enforces the budget itself (finding 4)."""
-        monkeypatch.setenv("VNX_ATTEST_OVERRIDE_BUDGET", "1")
+        monkeypatch.setattr("attest_override.DEFAULT_OVERRIDE_BUDGET", 1)
 
         # Timestamps relative to now — both stay inside the 30-day OVERRIDE_WINDOW
         # so the budget check in write_override_record actually sees them.
@@ -728,7 +719,7 @@ class TestVerifyPRWithOverride:
             )
             append_chained_entry(trail, sign_manifest(m2, ephemeral_key_dir["key_path"]))
             # Budget of 1 — the gate must reject even a validly-signed override.
-            monkeypatch.setenv("VNX_ATTEST_OVERRIDE_BUDGET", "1")
+            monkeypatch.setattr("attest_override.DEFAULT_OVERRIDE_BUDGET", 1)
             exit_code, message = verify_pr(
                 repo_root=repo, base_ref=base_sha, head_ref="HEAD",
                 allowed_signers_override=ephemeral_key_dir["allowed_signers"],

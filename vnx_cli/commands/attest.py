@@ -304,7 +304,7 @@ def vnx_attest_override(args) -> int:
             print(
                 f"  REFUSED: override budget exhausted "
                 f"({used}/{budget} used in last {_ao.OVERRIDE_WINDOW_DAYS} days). "
-                "Wait for the window to roll or raise VNX_ATTEST_OVERRIDE_BUDGET.",
+                "Wait for the oldest override to leave the window.",
                 file=sys.stderr,
             )
             return 1

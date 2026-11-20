@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Ochtendronde sweep: the nightly learning loop and the dream cycle for every registered project.
+"""Morning round sweep: the nightly learning loop and the dream cycle for every registered project.
 
 Per registered project (``~/.vnx/projects.json``): the learning-loop nightly phase in a child with
 that project's rebuilt environment, and the dream cycle with explicit arguments (ADR-026 store).

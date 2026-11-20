@@ -3,7 +3,7 @@
 name: VNX CI
 x-shard: &shard
   runs-on: ubuntu-24.04
-  timeout-minutes: 38
+  timeout-minutes: 26
 jobs:
   shard-1:
     <<: *shard

@@ -812,10 +812,6 @@ def _sub_result(success, session_id):
 
 
 class TestTheSubprocessCallSite:
-    @pytest.fixture(autouse=True)
-    def _shared_govern_off(self, monkeypatch):
-        monkeypatch.delenv("VNX_SHARED_GOVERN", raising=False)
-
     def test_every_attempt_writes_a_line_and_the_receipt_names_them(self, store):
         _two_message_transcript(store.projects, "sess-sub-1", model="claude-sonnet-5-5")
         _two_message_transcript(store.projects, "sess-sub-2", model="claude-sonnet-5-5")

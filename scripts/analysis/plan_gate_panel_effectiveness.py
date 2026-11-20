@@ -52,7 +52,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import re
 import subprocess
 import sys
@@ -562,7 +561,7 @@ def load_seat_ledger_rounds(ledger_path: Path, seats: List[str]) -> List[Dict[st
 def resolve_seat_ledger_path(explicit: Optional[str]) -> Optional[Path]:
     """Resolve the seat ledger path, or ``None`` when it cannot be found.
 
-    Order: explicit ``--seat-ledger``, then ``VNX_SEAT_LEDGER``, then the main
+    Order: explicit ``--seat-ledger``, then the main
     checkout's ``.vnx-attest/`` via ``git rev-parse --git-common-dir`` (the
     authoritative append-only ledger — ``.vnx-attest/`` is NOT tracked, so a
     worktree's own copy is a stale/partial snapshot), then the repo root's
@@ -571,9 +570,6 @@ def resolve_seat_ledger_path(explicit: Optional[str]) -> Optional[Path]:
     candidates: List[Path] = []
     if explicit:
         candidates.append(Path(explicit))
-    env = os.environ.get("VNX_SEAT_LEDGER")
-    if env:
-        candidates.append(Path(env))
     try:
         common = subprocess.run(
             ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],

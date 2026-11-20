@@ -135,7 +135,7 @@ class TestVerifyPr:
         _commit(repo, "scripts/x.py", "x = 1\n")
         _override(repo, base, key)
         _extra_trail_entry(repo, key)
-        monkeypatch.setenv("VNX_ATTEST_OVERRIDE_BUDGET", "1")
+        monkeypatch.setattr("attest_override.DEFAULT_OVERRIDE_BUDGET", 1)
         assert _vp(repo, base, key) == (1, "override REJECTED: override budget exhausted (2/1)")
 
     def test_override_trail_reset_against_base(self, repo, key):
@@ -205,11 +205,9 @@ def _run_delivery(tmp_path, *, returncode=0, timed_out=False, rotate_after=None,
     hb = threading.Event()
     p = "subprocess_dispatch_internals.delivery."
     with patch(p + "_prepare_dispatch", return_value=("INSTR", "handover.md", tmp_path, tmp_path / "m.json")), \
-         patch(p + "_load_resume_session", return_value="resume-1"), \
          patch(p + "_build_worker_identity_env", return_value={"VNX_ID": "x"}), \
          patch(p + "_start_heartbeat", return_value=(hb, _Thread(), "ss", "st")), \
          patch(p + "_stop_silence_heartbeat", side_effect=lambda a, b: calls.append(("silence", a, b))), \
-         patch(p + "_save_resume_session", side_effect=lambda *a: calls.append(("save",) + a)), \
          patch(p + "_mark_handover_processed", side_effect=lambda h: calls.append(("handover", h))), \
          patch("subprocess_dispatch._promote_manifest", side_effect=lambda d, **k: calls.append(("promote", d, k)) or tmp_path / "done.json"), \
          patch("subprocess_dispatch._write_rotation_handover", side_effect=lambda *a: calls.append(("rotate",))), \
@@ -232,8 +230,8 @@ def test_delivery_success_env_and_order(tmp_path, monkeypatch):
     assert seen["extra_env"] == {"VNX_ID": "x", "VNX_WORKER_STATE_DIR": str(tmp_path / "ws"),
                                  "VNX_WORKER_ROLE": "backend-developer",
                                  "VNX_DISPATCH_PATHS": json.dumps(["scripts/a.py:read_write"])}
-    assert (seen["prompt"], seen["resume_session"], seen["cwd"]) == ("INSTR", "resume-1", tmp_path)
-    assert calls == [("spawn",), ("promote", "d-r43", {"stage": "completed"}), ("save", "T1", "sess-1", "d-r43"),
+    assert (seen["prompt"], seen["resume_session"], seen["cwd"]) == ("INSTR", None, tmp_path)
+    assert calls == [("spawn",), ("promote", "d-r43", {"stage": "completed"}),
                      ("handover", "handover.md"), ("join", 5), ("silence", "ss", "st"),
                      ("clear", "T1", "d-r43"), ("trigger", "T1", "d-r43", str(tmp_path))]
     assert hb.is_set()

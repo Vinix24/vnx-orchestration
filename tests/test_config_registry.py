@@ -626,9 +626,9 @@ def test_pr_size_enforcement_keys_exist_with_their_defaults_and_require_approval
         assert cr.resolve_with_source(key) == (default, "default"), key
     for value in ("off", "warn", "refuse"):
         assert value in cr.CONFIG_REGISTRY["VNX_PR_SIZE_ENFORCE"].description
-    # No reader yet (PG-1 brings it), so none of the three new keys may be a canonical flag.
+    # The merge door's pr_size preflight reads all three since PG-1d.
     for key in ("VNX_PR_SIZE_ENFORCE", "VNX_PR_SIZE_HOLD_SECURITY", "VNX_SECURITY_PATHS"):
-        assert cr.CONFIG_REGISTRY[key].read_site_wired is False, key
+        assert cr.CONFIG_REGISTRY[key].read_site_wired is True, key
 
 
 def test_layers_floor_ignores_override_and_env_the_full_chain_does_not(monkeypatch):
