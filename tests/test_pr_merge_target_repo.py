@@ -587,15 +587,15 @@ class TestCiWorkflow:
 
         assert _workflow_asked(door.gh) == "CI"
 
-    def test_a_project_that_names_none_falls_to_the_environment(self, arrange, monkeypatch):
+    def test_a_project_that_names_none_falls_to_the_default_not_the_environment(self, arrange, monkeypatch):
         monkeypatch.setenv("VNX_CI_WORKFLOW_NAME", "Env Flow")
         door = arrange(main_yaml=consumer_yaml())
 
         door.run()
 
-        assert _workflow_asked(door.gh) == "Env Flow"
+        assert _workflow_asked(door.gh) == "VNX CI"
 
-    def test_a_project_without_a_file_falls_to_the_environment_then_the_default(self, arrange, monkeypatch):
+    def test_a_project_without_a_file_falls_to_the_default(self, arrange, monkeypatch):
         monkeypatch.delenv("VNX_CI_WORKFLOW_NAME", raising=False)
         door = arrange(main_yaml=None)
 

@@ -7,7 +7,8 @@ docstrings ("keep the two in sync"). Two functions that say so in a comment drif
 the first time one of them is touched; this holds them to it.
 
 Order, both: explicit argument > ``ci_workflow`` in the project's
-``branch_protection.yaml`` on main > ``VNX_CI_WORKFLOW_NAME`` > ``VNX CI``.
+``branch_protection.yaml`` on main > ``VNX CI``. The deleted ``VNX_CI_WORKFLOW_NAME``
+is set in some cases below to prove neither side reads it any more.
 
 And both read that declaration from the same place: main of the repo, over the
 contents API. Never the checkout, which at gate time is on the PR's own branch.
@@ -43,7 +44,7 @@ EXPLICIT, PROJECT, ENV = "Explicit Flow", "Project Flow", "Env Flow"
 
 
 def _expected(explicit, project, env):
-    return explicit or project or env or "VNX CI"
+    return explicit or project or "VNX CI"
 
 
 @pytest.mark.parametrize("explicit,project,env", list(itertools.product(
@@ -63,7 +64,7 @@ def test_both_resolvers_agree_on_every_combination(monkeypatch, explicit, projec
 
 def test_the_two_defaults_are_the_same_string():
     assert mpc.DEFAULT_CI_WORKFLOW_NAME == pmg.DEFAULT_CI_WORKFLOW_NAME == "VNX CI"
-    assert mpc.CI_WORKFLOW_NAME_ENV_VAR == pmg.CI_WORKFLOW_NAME_ENV_VAR == "VNX_CI_WORKFLOW_NAME"
+    assert not hasattr(mpc, "CI_WORKFLOW_NAME_ENV_VAR") and not hasattr(pmg, "CI_WORKFLOW_NAME_ENV_VAR")
 
 
 def _runs_rule():
@@ -150,13 +151,13 @@ class TestPreMergeGateReadsMainNotTheCheckout:
 
         assert _workflow_asked(stub) == "VNX CI"
 
-    def test_a_project_without_the_field_on_main_keeps_the_environment(self, tmp_path, monkeypatch):
+    def test_a_project_without_the_field_on_main_ignores_the_environment(self, tmp_path, monkeypatch):
         monkeypatch.setenv("VNX_CI_WORKFLOW_NAME", ENV)
         stub = install_gh_stub(tmp_path, monkeypatch, _main_rules(consumer_yaml()) + [_runs_rule()])
 
         self._check(_checkout(tmp_path, None))
 
-        assert _workflow_asked(stub) == ENV
+        assert _workflow_asked(stub) == "VNX CI"
 
     def test_no_file_on_main_keeps_the_environment_then_the_default(self, tmp_path, monkeypatch):
         monkeypatch.delenv("VNX_CI_WORKFLOW_NAME", raising=False)
@@ -226,7 +227,7 @@ class TestMergePreflightCliReadsMainNotTheCheckout:
         assert json.loads(out.out)["workflow_name"] == "CI"
         assert stub.repos_of("contents/") == {CONSUMER_REPO}
 
-    def test_a_project_without_a_declaration_on_main_keeps_the_environment(self, tmp_path, monkeypatch, capsys):
+    def test_a_project_without_a_declaration_on_main_ignores_the_environment(self, tmp_path, monkeypatch, capsys):
         monkeypatch.setenv("VNX_CI_WORKFLOW_NAME", ENV)
         monkeypatch.delenv("VNX_MERGE_OVERRIDE_REASON", raising=False)
         stub = install_gh_stub(tmp_path, monkeypatch, self._rules(*_main_rules(None)))
@@ -234,7 +235,7 @@ class TestMergePreflightCliReadsMainNotTheCheckout:
         rc, out = self._run(_checkout(tmp_path, consumer_yaml(ci_workflow="Always Green")), capsys)
 
         assert rc == 0, out
-        assert _workflow_asked(stub) == ENV
+        assert _workflow_asked(stub) == "VNX CI"
 
     def test_a_broken_file_on_main_stops_the_cli(self, tmp_path, monkeypatch, capsys):
         monkeypatch.delenv("VNX_MERGE_OVERRIDE_REASON", raising=False)

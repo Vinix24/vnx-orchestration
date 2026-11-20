@@ -621,7 +621,7 @@ def _project_ci_workflow(override_reason: Optional[str]) -> Tuple[Optional[str],
     gate that asks for the workflow shares: main's copy, never a local one (the checkout
     the door runs beside may be on any branch, including the PR's). ``(None, "")`` means
     "the project declares none", and the workflow name then falls to
-    ``VNX_CI_WORKFLOW_NAME`` and the fabric default. A file that exists but cannot be read
+    the fabric default. A file that exists but cannot be read
     or parsed is an error: guessing a workflow name would put the CI gate on a workflow the
     project never named.
 
@@ -645,7 +645,7 @@ def _run_ci_gate(
     workflow-conclusion check to
     ``merge_preflight_ci_check.check_ci_run_for_head``, run in the merge
     target's project root. The workflow it looks for is ``ci_workflow`` from the
-    project's YAML on main, else ``VNX_CI_WORKFLOW_NAME``, else ``VNX CI``.
+    project's YAML on main, else ``VNX CI``.
     Returns ``(gate, pr_data)``; the caller merges only when
     ``gate["verdict"] == "GO"``.
 
@@ -2738,8 +2738,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--dry-run", action="store_true", help="Skip merge and receipt write")
     parser.add_argument(
         "--override-reason", default=None,
-        help="Escape hatch: skip the CI gate with this required reason (empty is refused). "
-             "Also read from VNX_MERGE_OVERRIDE_REASON.",
+        help="Escape hatch: skip the CI gate with this required reason (empty is refused).",
     )
     parser.add_argument(
         "--override-contract-invalid", default=None,

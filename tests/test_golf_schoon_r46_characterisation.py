@@ -60,8 +60,6 @@ def _run(conclusion="success", status="completed", db=1, created="2026-01-01T00:
 
 @pytest.fixture
 def env(monkeypatch, tmp_path):
-    monkeypatch.delenv(mpci.OVERRIDE_ENV_VAR, raising=False)
-    monkeypatch.delenv(mpci.CI_WORKFLOW_NAME_ENV_VAR, raising=False)
     monkeypatch.setattr(mpci.shutil, "which", lambda name: "/usr/bin/" + name)
 
     def install(answers):
@@ -107,10 +105,9 @@ def test_override_with_reason_is_visible_go_and_runs_nothing(env):
     assert runner.calls == []
 
 
-def test_override_without_reason_from_env_is_refused(env):
+def test_override_with_a_blank_reason_is_refused(env):
     runner = env.install({})
-    env.monkeypatch.setenv(mpci.OVERRIDE_ENV_VAR, "   ")
-    result = mpci.check_ci_run_for_head(env.root, head_sha=SHA)
+    result = mpci.check_ci_run_for_head(env.root, head_sha=SHA, override_reason="   ")
     assert result == _no_go(
         "override_without_reason",
         "override zonder reden geweigerd: een override vereist een niet-lege reden (geen stille bypass)",
@@ -281,7 +278,7 @@ def test_order_undeterminable_tied_latest(env):
 
 def test_workflow_resolution_reaches_the_query(env):
     runner = env.install(_auth_ok(_runs(_run())))
-    env.monkeypatch.setenv(mpci.CI_WORKFLOW_NAME_ENV_VAR, "Env CI")
+    env.monkeypatch.setenv("VNX_CI_WORKFLOW_NAME", "Env CI")
     result = mpci.check_ci_run_for_head(env.root, head_sha=SHA, project_workflow="Project CI")
     assert result["workflow_name"] == "Project CI"
     assert runner.calls[1][0][6] == "Project CI"
