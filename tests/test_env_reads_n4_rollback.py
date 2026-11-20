@@ -1,9 +1,4 @@
-"""The state-simplification rollback cluster and the last script names are gone (config-een-oppervlak N4).
-
-The names are read nowhere in the six files that carried them (the three security
-files are covered by tests/test_env_reads_n4b_security.py), and no ``_env_flag``
-copy is left in the four Python files.
-"""
+"""The rollback cluster and script names are gone from the six non-security files (config-een-oppervlak N4)."""
 
 from __future__ import annotations
 
