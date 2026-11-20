@@ -37,13 +37,6 @@ When the coordination DB exists but its blocker table/column is missing — or t
 DB cannot be queried — the probe reports ``oi_plan_source: "unreadable"``, leaves
 the three blocker counters as ``None`` (never 0), says so in the signal, and
 classifies ``degraded`` (see ``health()`` for why ``degraded`` over ``unknown``).
-
-Scope-skip signal (OI-888): ``VNX_PLAN_GATE_COMPLEX_ONLY`` is still read by
-``plan_gate_enforcement.complex_only_active()``, but since P1 (track
-plan-gate-alleen-voor-architectuur) nothing consults that result to change a
-plan-gate run — the LIGHT/HEAVY scope-skip (``plan_gate_enforcement.plan_gate_scope``)
-and its reduced 2-seat panel were removed. The probe reports that explicitly
-(``scope_skip_read_site: "absent"``) instead of staying silent about the signal.
 """
 from __future__ import annotations
 
@@ -71,8 +64,6 @@ COORDINATION_DB_FILENAME = "runtime_coordination.db"
 STALE_DAYS = 7
 _PLAN_OI_PREFIX = "OI-PLAN-"
 # The signal fields that count as "activity" for the unknown-vs-anything split.
-# ``scope_skip_read_site`` is deliberately excluded: its value is a constant
-# string (truthy) and would otherwise make every state look active.
 _ACTIVITY_KEYS = (
     "ledger_total",
     "oi_plan_unresolved",
@@ -216,7 +207,6 @@ class PlanGateEffectivenessProbe(EffectivenessProbe):
             "seat_pass": seat_pass,
             "seat_revise": seat_revise,
             "seat_block": seat_block,
-            "scope_skip_read_site": "absent",
         }
 
     def signal(self, raw: Dict[str, Any]) -> str:
@@ -246,10 +236,6 @@ class PlanGateEffectivenessProbe(EffectivenessProbe):
                 f"({raw['seat_responded']} responded, {raw['seat_abstain']} abstained, "
                 f"{raw['seat_pass']} pass/{raw['seat_revise']} revise/{raw['seat_block']} block)"
             )
-        parts.append(
-            "VNX_PLAN_GATE_COMPLEX_ONLY has no effect (scope-skip read-site absent: "
-            "nothing that changes a plan-gate run reads it since P1)"
-        )
         return "; ".join(parts)
 
     def health(self, raw: Dict[str, Any]) -> str:
