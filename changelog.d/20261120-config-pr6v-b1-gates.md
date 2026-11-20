@@ -1,0 +1,1 @@
+- Config precedence (config-een-oppervlak PR-6v-b1): an exported env value no longer beats a stored row for `VNX_PLAN_GATE_ENFORCE`; for a per-session change use `VNX_OVERRIDE_PLAN_GATE_ENFORCE`. `VNX_EVIDENCE_BOUND_GATE` now reads a stored row too. An unknown value still reads `off` for both gates.

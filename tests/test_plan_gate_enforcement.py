@@ -107,13 +107,6 @@ class TestEnforceMode:
                             lambda k: "required" if k == "VNX_PLAN_GATE_ENFORCE" else None)
         assert pge.enforce_mode() == "required"
 
-    def test_env_overrides_config_plane(self, monkeypatch):
-        """The process env var wins over the persisted config value."""
-        monkeypatch.setenv("VNX_PLAN_GATE_ENFORCE", "off")
-        import config_runtime
-        monkeypatch.setattr(config_runtime, "get", lambda k: "required")
-        assert pge.enforce_mode() == "off"
-
     def test_config_lookup_failure_falls_back_to_advisory(self, monkeypatch):
         """A raising config layer must not break enforce_mode (fail-soft → advisory)."""
         monkeypatch.delenv("VNX_PLAN_GATE_ENFORCE", raising=False)

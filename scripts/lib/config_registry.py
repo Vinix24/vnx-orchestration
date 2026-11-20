@@ -474,7 +474,8 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         "VNX_PLAN_GATE_ENFORCE", "enum", "advisory", "gate",
         "Plan-first-gate enforcement mode: off | advisory | required (ADR-030). "
         "Advisory warns when a track-linked dispatch has an unresolved plan gate; required blocks it. "
-        "The process env var overrides this; operator override VNX_OVERRIDE_PLAN_GATE=1. Default advisory.",
+        "A stored value beats the env var; VNX_OVERRIDE_PLAN_GATE_ENFORCE beats both. "
+        "Operator override VNX_OVERRIDE_PLAN_GATE=1. Default advisory.",
         approval=True,
         subsystem="plan-gate-panel", status="SCOPE"),
     "VNX_USE_CENTRAL_DB": _e(
