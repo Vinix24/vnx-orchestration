@@ -93,7 +93,6 @@ def delivery_env(tmp_path):
             "_prepare_dispatch",
             return_value=("instruction", None, None, str(manifest)),
         ),
-        patch.object(_delivery, "_load_resume_session", return_value=None),
         patch.object(_delivery, "_start_heartbeat", side_effect=_capture_start_heartbeat),
         patch("provider_spawns.claude_spawn.spawn_claude", side_effect=_fake_spawn),
     ]

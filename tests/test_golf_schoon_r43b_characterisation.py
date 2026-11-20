@@ -54,11 +54,9 @@ def _run(tmp_path, *, spawn_exc=None, store="ok", adapter_exc=None, agent_cwd="t
     cwd = tmp_path if agent_cwd == "tmp" else agent_cwd
     p = "subprocess_dispatch_internals.delivery."
     with patch(p + "_prepare_dispatch", return_value=("INSTR", None, cwd, tmp_path / "m.json")), \
-         patch(p + "_load_resume_session", return_value=None), \
          patch(p + "_build_worker_identity_env", return_value={}), \
          patch(p + "_start_heartbeat", return_value=(None, None, "ss", "st")), \
          patch(p + "_stop_silence_heartbeat", side_effect=lambda a, b: calls.append(("silence", a, b))), \
-         patch(p + "_save_resume_session", side_effect=lambda *a: calls.append(("save",) + a)), \
          patch(p + "_mark_handover_processed", side_effect=lambda h: calls.append(("handover", h))), \
          patch("subprocess_dispatch._promote_manifest", side_effect=lambda d, **k: calls.append(("promote", d, k)) or None), \
          patch("subprocess_dispatch.SubprocessAdapter", side_effect=lambda: calls.append(("fresh",)) or fresh), \
@@ -86,7 +84,7 @@ def test_spawn_result_without_adapter_falls_back_to_fresh(tmp_path):
     result, exc, calls, _ = _run(tmp_path, spawn_adapter=False, agent_cwd=None)
     assert exc is None and result.success is True
     assert result.manifest_path == tmp_path / "m.json" and result.session_id is None
-    assert calls == [("spawn",), ("promote", "d-r43b", {"stage": "completed"}), ("save", "T2", "", "d-r43b"),
+    assert calls == [("spawn",), ("promote", "d-r43b", {"stage": "completed"}),
                      ("handover", None), ("silence", "ss", "st"), ("fresh",),
                      ("clear", "T2", "d-r43b"), ("trigger", "T2", "d-r43b", None)]
     assert "d-r43b" not in delivery._dispatch_token_usage
@@ -96,7 +94,7 @@ def test_spawn_result_without_adapter_falls_back_to_fresh(tmp_path):
 def test_no_event_store_skips_clear_but_triggers(tmp_path):
     _, exc, calls, _ = _run(tmp_path, store=None)
     assert exc is None
-    assert [c[0] for c in calls] == ["spawn", "promote", "save", "handover", "silence", "trigger"]
+    assert [c[0] for c in calls] == ["spawn", "promote", "handover", "silence", "trigger"]
 
 
 def test_clear_failure_is_logged_at_debug_and_trigger_still_runs(tmp_path, caplog):
