@@ -156,3 +156,24 @@ def test_the_door_runs_the_check_with_the_project_state_checks(sd, monkeypatch):
     spec = type("Spec", (), {"dispatch_id": f"{C}-r2", "project_id": PID})()
     [v] = dispatch_cli._project_state_verdicts(spec, state_dir=sd, dry_run=True)
     assert v.code == "deliverable-predecessor-unmerged" and v.severity == "blocking" and not _ledger(sd)
+
+
+@pytest.mark.parametrize("output_kind", [None, "pr", "doc", "post"])
+@pytest.mark.parametrize("state, reason", [
+    ("cancelled", dpg.REASON_RETIRED), ("superseded", dpg.REASON_RETIRED), ("retired", dpg.REASON_RETIRED),
+    ("withdrawn", dpg.REASON_RETIRED), ("no-such-state", dpg.REASON_UNKNOWN), (None, dpg.REASON_UNKNOWN),
+])
+def test_matching_proof_never_clears_a_retired_or_unknown_state(output_kind, state, reason):
+    edge = dpg.Edge("pred", "hard", state, output_kind)
+    findings = dpg.judge([edge], {"pred"}, {"pred"})  # a merge receipt and an accept both match
+    assert findings == (dpg.Finding("pred", True, reason),)
+
+
+@pytest.mark.parametrize("edge, merged, accepted, reason", [
+    (dpg.Edge("pred", "hard", "completed", "weird"), {"pred"}, {"pred"}, dpg.REASON_UNKNOWN),
+    (dpg.Edge("pred", "hard", "completed", "pr"), None, {"pred"}, dpg.REASON_UNKNOWN),
+    (dpg.Edge("pred", "hard", "completed", "doc"), {"pred"}, None, dpg.REASON_UNKNOWN),
+    (dpg.Edge("pred", "hard", "completed", "pr"), set(), set(), dpg.REASON_UNMERGED),
+])
+def test_unreadable_proof_or_unknown_kind_stays_blocking(edge, merged, accepted, reason):
+    assert dpg.judge([edge], merged, accepted) == (dpg.Finding("pred", True, reason),)

@@ -33,10 +33,14 @@ def judge(edges: Iterable[Edge], merged: Optional[Set[str]], accepted: Optional[
         by_decision = e.output_kind in DECISION_KINDS
         kind_known = by_decision or e.output_kind in (None, "pr")  # None is the repo default, pr
         proof = accepted if by_decision else merged
-        if kind_known and proof is not None and e.predecessor in proof:
-            continue
-        reason = REASON_RETIRED if e.state in RETIRED_STATES else REASON_UNKNOWN if (
-            not kind_known or proof is None or e.state not in coordination_db.DISPATCH_STATES) else REASON_UNMERGED
+        if e.state in RETIRED_STATES:
+            reason = REASON_RETIRED  # ADR-096 §4: whatever the proof says
+        elif e.state not in coordination_db.DISPATCH_STATES or not kind_known or proof is None:
+            reason = REASON_UNKNOWN  # no row (None), an unknown status or kind, an unreadable ledger
+        elif e.predecessor in proof:
+            continue  # only now does positive proof decide
+        else:
+            reason = REASON_UNMERGED
         out.append(Finding(e.predecessor, e.kind != "soft", reason))  # an unknown kind counts as hard
     return tuple(out)
 
