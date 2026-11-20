@@ -41,6 +41,9 @@ def _clean_env(monkeypatch):
     ({"CLAUDE_ROLE": "worker", "VNX_DISPATCH_ID": "d-1"}, False, "worker"),
     ({"VNX_CURRENT_DISPATCH_ID": "d-1"}, True, "worker"),
     ({"VNX_TERMINAL": "T1", "VNX_DISPATCH_ID": "d-1"}, False, "worker"),
+    ({"VNX_PROCESS_OWNER": "daemon"}, False, "automation"),
+    ({"VNX_PROCESS_OWNER": "reconciler"}, False, "automation"),
+    ({"VNX_PROCESS_OWNER": "scheduled"}, False, "automation"),
 ])
 def test_derive_positive_classes(env, tty, expected):
     assert actor_class.derive(env=env, isatty=tty) == expected
@@ -51,9 +54,8 @@ def test_derive_positive_classes(env, tty, expected):
     ({"CLAUDE_ROLE": "worker"}, False),                     # agent without dispatch marker
     ({"CLAUDE_ROLE": "worker"}, True),                      # never operator
     ({"VNX_TERMINAL": "T2"}, True),
-    ({"VNX_PROCESS_OWNER": "daemon"}, False),               # deleted marker (N5): no longer automation
-    ({"VNX_PROCESS_OWNER": "reconciler"}, False),
-    ({"VNX_PROCESS_OWNER": "scheduled"}, False),
+    ({"VNX_PROCESS_OWNER": ""}, False),
+    ({"VNX_PROCESS_OWNER": "cron-of-someone"}, False),      # unknown owner value
     ({"VNX_PROCESS_OWNER": "daemon", "CLAUDE_ROLE": "worker"}, False),
     ({"CLAUDE_ROLE": "  ", "VNX_DISPATCH_ID": " "}, False), # blank markers are not markers
 ])

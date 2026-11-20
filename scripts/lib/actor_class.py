@@ -11,9 +11,7 @@ Classes (exactly five):
                    or terminal T0). A delegated promote is ``t0`` plus
                    ``metadata.grant`` (PR-5b); it is not a sixth class.
 * ``worker``     - a dispatch marker with another role than orchestrator.
-* ``automation`` - no longer derived: the process-owner env marker that set
-                   it is gone (config-een-oppervlak N5). The value stays a
-                   valid class so records written before still read back.
+* ``automation`` - no TTY, no agent marker, a known process owner.
 * ``unknown``    - everything else, including an agent without a marker and
                    without a TTY. Never counted as autonomous, never as nil.
 """
@@ -36,6 +34,9 @@ ORCHESTRATOR_TERMINAL = "T0"
 DISPATCH_MARKERS = ("VNX_DISPATCH_ID", "VNX_CURRENT_DISPATCH_ID")
 ROLE_MARKER = "CLAUDE_ROLE"
 TERMINAL_MARKERS = ("VNX_TERMINAL", "VNX_TERMINAL_ID")
+#: Env var naming the owner of a non-interactive process; only these values count.
+PROCESS_OWNER_MARKER = "VNX_PROCESS_OWNER"
+KNOWN_PROCESS_OWNERS = frozenset({"daemon", "reconciler", "scheduled"})
 
 
 def _value(env: Mapping[str, str], key: str) -> str:
@@ -81,6 +82,8 @@ def derive(
         return WORKER if _has_dispatch_marker(env) else UNKNOWN
     if tty:
         return OPERATOR
+    if _value(env, PROCESS_OWNER_MARKER).lower() in KNOWN_PROCESS_OWNERS:
+        return AUTOMATION
     return UNKNOWN
 
 

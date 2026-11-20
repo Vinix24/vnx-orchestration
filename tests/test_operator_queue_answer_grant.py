@@ -16,7 +16,7 @@ import operator_queue_ask as qa
 import operator_queue_grant as qg
 
 PID, HEAD, QUOTE = "proj", "a" * 40, "uitzondering 12 akkoord, 500 regels"
-MARKERS = actor_class.DISPATCH_MARKERS + actor_class.TERMINAL_MARKERS + (actor_class.ROLE_MARKER, "VNX_PROCESS_OWNER")
+MARKERS = actor_class.DISPATCH_MARKERS + actor_class.TERMINAL_MARKERS + (actor_class.ROLE_MARKER, actor_class.PROCESS_OWNER_MARKER)
 
 
 @pytest.fixture()
@@ -88,7 +88,7 @@ def test_answer_without_grant_is_a_no_and_measures_nothing(env):
     assert oq.latest_grant(PID, 12, state_dir=env["q"]) is None
 
 
-@pytest.mark.parametrize("marker,tty,who", [({"VNX_PROCESS_OWNER": "daemon"}, False, "unknown"),
+@pytest.mark.parametrize("marker,tty,who", [({"VNX_PROCESS_OWNER": "daemon"}, False, "automation"),
                                             ({}, False, "unknown"), ({}, True, "operator")])
 def test_only_operator_or_t0_may_grant(env, marker, tty, who):
     pid = _point(env)

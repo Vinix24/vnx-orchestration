@@ -35,6 +35,11 @@ from vnx_ids import PROJECT_ID_RE as _PROJECT_ID_RE
 
 DEFAULT_PROJECT = "vnx-dev"
 ENV_VAR = "VNX_PROJECT_ID"
+FILTER_ENV_VAR = "VNX_PROJECT_FILTER"
+
+# Truthy/falsy parsing for VNX_PROJECT_FILTER. Default ON (filter applied)
+# so that selectors do not bleed cross-tenant data without explicit opt-out.
+_FALSY = frozenset({"0", "false", "no", "off"})
 
 
 def _validate(project_id: str) -> str:
@@ -130,11 +135,16 @@ def resolve_stamp_project_id(
 def project_filter_enabled() -> bool:
     """Return True when per-project filtering should be applied to reads.
 
-    Always True: selectors restrict reads to ``current_project_id()``. The
-    environment switch that turned the filter off is gone (config-een-oppervlak
-    N5); multi-tenant safety has no opt-out.
+    Phase 1 contract: the env var ``VNX_PROJECT_FILTER`` controls whether
+    selectors restrict reads to ``current_project_id()``. Default is ON
+    (filter applied) — multi-tenant safety is the priority. Set to ``0``,
+    ``false``, ``no`` or ``off`` to disable, e.g. for cross-tenant analytics
+    backfills.
     """
-    return True
+    raw = os.environ.get(FILTER_ENV_VAR)
+    if raw is None:
+        return True
+    return raw.strip().lower() not in _FALSY
 
 
 def scoped_query(base_sql: str, project_id: str | None = None) -> str:
