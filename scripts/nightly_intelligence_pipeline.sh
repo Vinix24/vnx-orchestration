@@ -247,6 +247,9 @@ run_phase "7-governance" python3 "$SCRIPT_DIR/governance_aggregator.py" --backfi
 # ── Phase 8: Suggested edits (human-in-the-loop) ─────────────────────────────
 run_phase "8-suggested-edits" python3 "$SCRIPT_DIR/generate_suggested_edits.py"
 
+# ── Phase 8b: 14-day effect re-measurement of applied edits (ochtendronde D3d) ─
+run_phase "8b-edit-remeasure" python3 "$SCRIPT_DIR/apply_suggested_edits.py" remeasure
+
 # ── Phase 9: Quality digest — 3-section NDJSON format ────────────────────────
 run_phase "9-quality-digest" python3 "$SCRIPT_DIR/build_t0_quality_digest.py"
 
