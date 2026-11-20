@@ -15,7 +15,7 @@ DELETED = (
 PENDING = {
     ("scripts/lib/vnx_start_runtime.py", "VNX_GEMINI_MODEL"),
     ("scripts/commands/start.sh", "VNX_GEMINI_MODEL"),
-    ("scripts/hooks/session_stop_rotation.py", "VNX_TMUX_SIGNAL_DIR"),
+    ("scripts/hooks/t0_context_guard.py", "VNX_TMUX_SIGNAL_DIR"),
 }
 
 
