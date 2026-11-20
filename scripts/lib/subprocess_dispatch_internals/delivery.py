@@ -164,35 +164,6 @@ def _resolve_agent_cwd_and_log_profile(role: str | None) -> "Path | None":
     return agent_cwd
 
 
-def _load_resume_session(terminal_id: str) -> "str | None":
-    """Load prior session ID for --resume when VNX_SESSION_RESUME=1."""
-    if os.environ.get("VNX_SESSION_RESUME", "0") != "1":
-        return None
-    try:
-        from session_store import SessionStore as _SessionStore
-        resume_session = _SessionStore().load(terminal_id)
-        if resume_session:
-            logger.info(
-                "deliver_via_subprocess: resuming %s with session_id=%s",
-                terminal_id, resume_session,
-            )
-        return resume_session
-    except Exception as _exc:
-        logger.debug("deliver_via_subprocess: session load failed: %s", _exc)
-        return None
-
-
-def _save_resume_session(terminal_id: str, session_id: str, dispatch_id: str) -> None:
-    """Persist session_id for next dispatch's --resume (success path only)."""
-    if not session_id or os.environ.get("VNX_SESSION_RESUME", "0") != "1":
-        return
-    try:
-        from session_store import SessionStore as _SessionStore
-        _SessionStore().save(terminal_id, session_id, dispatch_id=dispatch_id)
-    except Exception as _exc:
-        logger.debug("deliver_via_subprocess: session save failed: %s", _exc)
-
-
 def _start_heartbeat(
     terminal_id: str,
     dispatch_id: str,
@@ -356,7 +327,7 @@ def deliver_via_subprocess(
         dispatch_paths=dispatch_paths, pr_id=pr_id, skill=skill,
     )
 
-    resume_session = _load_resume_session(terminal_id)
+    resume_session = None  # a prior session is never resumed
     extra_env = _build_spawn_env(terminal_id, role, dispatch_paths)
 
     # Mutable cell so the silence heartbeat thread can access the adapter
@@ -504,7 +475,6 @@ def _classify_spawn_result(
         )
 
     completed = _sd._promote_manifest(dispatch_id, stage="completed")
-    _save_resume_session(terminal_id, session_id or "", dispatch_id)
     _mark_handover_processed(pending_handover)
     return _SubprocessResult(
         success=True, session_id=session_id, event_count=event_count,
