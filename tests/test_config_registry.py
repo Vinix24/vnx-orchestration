@@ -688,3 +688,10 @@ def test_layers_default_is_the_chain_constant_and_names_every_value_source():
     returned = set(re.findall(r'return [^\n]*?,\s*"([a-z_]+)"', source))
     value_sources = {s for s in returned if s != "unset" and not s.endswith("_error")}
     assert value_sources == set(cr.CHAIN_LAYERS)
+
+
+def test_tmux_max_concurrent_description_names_stored_over_env_precedence():
+    desc = cr.CONFIG_REGISTRY["VNX_TMUX_MAX_CONCURRENT"].description
+    assert "still wins over this" not in desc
+    assert "A stored value beats the env var" in desc
+    assert "VNX_OVERRIDE_TMUX_MAX_CONCURRENT beats both" in desc
