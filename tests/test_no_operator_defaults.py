@@ -236,7 +236,7 @@ def test_bare_vnx_dev_is_not_a_finding(tmp_path):
 
 def test_table_rows_for_the_fourth_name_are_complete_and_valid():
     rows = [r for r in on.load_table() if r["name"] == DEV]
-    assert len(rows) == 200 and sum(r["count"] for r in rows) == 224
+    assert len(rows) == 201 and sum(r["count"] for r in rows) == 225
     migrations = [r for r in rows if r["path"].startswith("schemas/migrations/")]
     assert len(migrations) == 61 and sum(r["count"] for r in migrations) == 71
     assert all(r["category"] != "te_repareren" or r["group"] for r in rows)
