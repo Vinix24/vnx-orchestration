@@ -4,8 +4,7 @@
 T1 coverage:
 - prepare() output ordering: permission preamble → skill context → footer sentinel →
   directive sections → trailer sentinel.
-- Sub-flag guard: VNX_REPORT_CONTRACT_DIRECTIVE=0 suppresses the directive block;
-  the worker-rules footer has no flag.
+- Footer and directive are always present: neither has a flag.
 - Subprocess golden: VNX_SHARED_PREPARE=0 keeps _assemble_instruction byte-identical
   to pre-T1 behavior (no footer/directive/trailer).
 - Subprocess VNX_SHARED_PREPARE=1: _assemble_instruction delegates to prepare().
@@ -203,23 +202,11 @@ class TestPrepareOrdering(unittest.TestCase):
 
 
 class TestPrepareSubFlags(unittest.TestCase):
-    """Sub-flag guard: VNX_REPORT_CONTRACT_DIRECTIVE (the worker-rules footer has no flag)."""
-
-    def test_directive_omitted_when_flag_off(self):
-        """VNX_REPORT_CONTRACT_DIRECTIVE=0 suppresses the report-contract directive."""
-        with patch.dict(os.environ, {"VNX_REPORT_CONTRACT_DIRECTIVE": "0"}):
-            result = _patched_prepare()
-        self.assertNotIn("<!-- VNX-REPORT-CONTRACT-DIRECTIVE -->", result, "directive must be absent when flag=0")
-        # Footer must still be present; trailer is not part of prepare()
-        self.assertIn(_WORKER_RULES_FOOTER_SENTINEL, result)
-        self.assertNotIn(_TRAILER_SENTINEL, result)
+    """The worker-rules footer and the report-contract directive carry no flag."""
 
     def test_both_on_by_default(self):
         """With no env overrides, both footer and directive are present."""
-        env_clean = {k: v for k, v in os.environ.items()
-                     if k != "VNX_REPORT_CONTRACT_DIRECTIVE"}
-        with patch.dict(os.environ, env_clean, clear=True):
-            result = _patched_prepare()
+        result = _patched_prepare()
         self.assertIn(_WORKER_RULES_FOOTER_SENTINEL, result)
         self.assertIn("<!-- VNX-REPORT-CONTRACT-DIRECTIVE -->", result)
 

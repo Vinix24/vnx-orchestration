@@ -25,7 +25,7 @@ from review_findings import id_for_finding, symbolic_context
 logger = logging.getLogger(__name__)
 
 SHADOW_DIR, SHADOW_NAME = "shadow", "delta.ndjson"
-MAX_CHAIN_KEY, MAX_CHAIN_DEFAULT, PAIR_LIMIT = "VNX_REVIEW_DELTA_MAX_CHAIN", 2, 20
+MAX_CHAIN_DEFAULT, PAIR_LIMIT = 2, 20
 REASON_ERROR = "shadow_error"
 Runner = Callable[[str, Path], Mapping[str, Any]]
 
@@ -54,10 +54,7 @@ def read_shadow(path: Path) -> List[Dict[str, Any]]:
 
 
 def max_chain() -> int:
-    try:
-        return int(os.environ.get(MAX_CHAIN_KEY, ""))
-    except ValueError:
-        return MAX_CHAIN_DEFAULT  # unreadable or non-integer
+    return MAX_CHAIN_DEFAULT
 
 
 def book(path: Path, record: Mapping[str, Any]) -> None:

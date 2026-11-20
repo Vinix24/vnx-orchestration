@@ -22,7 +22,7 @@ Classification:
   probe writes no beacon.
 - ``ok`` otherwise.
 
-N is ``VNX_EVENTS_ARCHIVE_COMPRESS_DAYS`` (default 14). Read-only: this probe
+N is ``DEFAULT_COMPRESS_DAYS`` (14). Read-only: this probe
 never compresses, moves or deletes anything.
 
 ADR-007: one store per call, no central DB.
@@ -39,7 +39,6 @@ from cost_ledger import ledger_files
 from effectiveness_probe import EffectivenessProbe, register_probe, resolve_probe_state_dir
 from provider_costs import costs_path_in
 
-COMPRESS_DAYS_ENV = "VNX_EVENTS_ARCHIVE_COMPRESS_DAYS"
 DEFAULT_COMPRESS_DAYS = 14
 GRACE_DAYS = 2
 
@@ -52,12 +51,7 @@ FREE_CRAP_FRACTION = 0.05
 
 
 def compress_days() -> int:
-    raw = os.environ.get(COMPRESS_DAYS_ENV, "")
-    try:
-        value = int(raw)
-    except ValueError:
-        return DEFAULT_COMPRESS_DAYS
-    return value if value >= 0 else DEFAULT_COMPRESS_DAYS
+    return DEFAULT_COMPRESS_DAYS
 
 
 def _disk_usage(path: Path) -> Tuple[int, int]:

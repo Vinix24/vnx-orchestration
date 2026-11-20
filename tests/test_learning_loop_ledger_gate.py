@@ -45,7 +45,7 @@ def data_dir(tmp_path: Path) -> Path:
 def env(state_dir, lifecycle_on, monkeypatch):
     """One ended dispatch and a fresh sweep: on its own this ledger is ``ok``."""
     monkeypatch.setenv("VNX_PROJECT_ID", PROJECT)
-    for name in (ll.QUEUE_ENV, ll.PERSIST_ENV, gate.ACTIVATION_ENV):
+    for name in (ll.QUEUE_ENV, ll.PERSIST_ENV):
         monkeypatch.delenv(name, raising=False)
     _finish(state_dir, _begin(state_dir, "d-ok"))
     _sweep_heartbeat(state_dir, datetime.now(timezone.utc) - timedelta(seconds=60))

@@ -24,7 +24,6 @@ Report Contract" section, which documents both.
 from __future__ import annotations
 
 import logging
-import os
 import re
 from dataclasses import dataclass, field
 
@@ -266,16 +265,6 @@ def build_directive(
     )
 
 
-_DIRECTIVE_FLAG = "VNX_REPORT_CONTRACT_DIRECTIVE"
-
-
-def directive_enabled() -> bool:
-    """False only when the operator switched the directive off (default: on)."""
-    return os.environ.get(_DIRECTIVE_FLAG, "1").strip().lower() not in (
-        "0", "false", "no", "off"
-    )
-
-
 def with_directive(
     body: str,
     dispatch_id: str,
@@ -291,7 +280,7 @@ def with_directive(
     that composes on top of another lane's output can never put the directive in
     one prompt twice.
     """
-    if not directive_enabled() or _DIRECTIVE_SENTINEL in body:
+    if _DIRECTIVE_SENTINEL in body:
         return body
     return (
         body
