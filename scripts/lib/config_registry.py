@@ -852,6 +852,13 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         "Morning pause (ADR-095): firing and merging stop from the start time until the morning "
         "points are decided, at the latest at the deadline. Off by default; D4 turns it on.",
         subsystem="morning-pause", status="PARK", cockpit_canonical=True),
+    # ADR-096 B2: the door reads it through config_runtime (dispatch_cli._check_predecessor_verdict).
+    "VNX_DELIVERABLE_PREDECESSOR_MODE": _e(
+        "VNX_DELIVERABLE_PREDECESSOR_MODE", "string", "refuse", "dispatch",
+        "Deliverable predecessors (ADR-096): the door refuses (refuse), reports (warn) or skips (off) a fire "
+        "whose hard predecessor has no pr_merged receipt.",
+        subsystem="deliverable-predecessor", status="LIVE", cockpit_canonical=True,
+        allowed_values=("off", "warn", "refuse")),
 
 }
 

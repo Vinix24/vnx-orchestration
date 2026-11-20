@@ -2742,6 +2742,39 @@ def _book_morning_pause(
         state_dir=state_dir, surface="door", ref=dispatch_id, reason=override_reason or verdict.reason))
 
 
+def _check_predecessor_verdict(
+    *, dispatch_id: str, project_id: str, state_dir: Path, override_reason: Optional[str] = None, dry_run: bool = False,
+) -> Optional[ConstraintVerdict]:
+    """ADR-096 B2: an unsatisfied hard predecessor refuses (``refuse``) or reports (``warn``) this one fire;
+    ``off`` reads nothing, an unknown mode reads as refuse, a dry run writes no ledger line."""
+    import config_runtime
+    import deliverable_predecessor_gate as dpg
+
+    raw = config_runtime.get(dpg.MODE_KEY)
+    mode = raw if raw in dpg.MODES else "refuse"
+    findings = dpg.assess(dispatch_id, project_id, state_dir) if mode != "off" else ()
+    soft, hard = ([f"{f.predecessor} ({f.reason})" for f in findings if f.hard is h] for h in (False, True))
+    if soft:
+        print(f"[dispatch_cli] [INFO] soft predecessor(s) of {dispatch_id}, reported only: {', '.join(soft)}", file=sys.stderr)
+    if not hard:
+        return None
+    reason = (override_reason or "").strip()
+    outcome = "override" if reason else ("warned" if mode == "warn" else "refused")
+    if not dry_run:
+        try:
+            dpg.record(state_dir, project_id, dispatch_id, findings, mode=mode, outcome=outcome, override_reason=reason)
+        except OSError as exc:
+            print(f"[dispatch_cli] [WARN] {dpg.LEDGER} line not written: {exc!r}", file=sys.stderr)
+            outcome = "refused" if outcome == "override" else outcome  # an override leaves a line (ADR-096 §14)
+    refused = outcome == "refused"
+    tail = ". Refusing to fire: merge it, `vnx deliverable undepend`, or --override-predecessor REASON." if refused else (
+        f". Override reason: {reason}" if reason else "")
+    return ConstraintVerdict(code="deliverable-predecessor-unmerged", severity="blocking" if refused else "warn",
+                             override_applied=not refused and bool(reason), message=(
+                                 f"hard predecessor(s) of {dispatch_id} not satisfied: {', '.join(hard)} "
+                                 f"(mode {mode}, stored {raw!r}){tail}"))
+
+
 def _check_stop_conditions_verdict(
     *,
     state_dir: Path,
@@ -2945,6 +2978,7 @@ def build_runtime_snapshot(
     spec_file: Path,
     stop_conditions_override_reason: Optional[str] = None,
     dry_run: bool = False,
+    predecessor_override_reason: Optional[str] = None,
 ) -> RuntimeSnapshot:
     """Perform all I/O required by compile_plan.
 
@@ -3064,6 +3098,11 @@ def build_runtime_snapshot(
     )
     if stop_verdict is not None:
         constraint_verdicts = constraint_verdicts + (stop_verdict,)
+    predecessor_verdict = _check_predecessor_verdict(
+        dispatch_id=spec.dispatch_id, project_id=spec.project_id, state_dir=data_dir / "state",
+        override_reason=predecessor_override_reason, dry_run=dry_run)
+    if predecessor_verdict is not None:
+        constraint_verdicts = constraint_verdicts + (predecessor_verdict,)
 
     if is_claude_lane:
         target_health: dict[str, str] = {HEADLESS_LANE_TERMINAL: "healthy"}
@@ -4411,6 +4450,7 @@ def run_dispatch(
     refire_reason: Optional[str] = None,
     stop_conditions_override_reason: Optional[str] = None,
     track_id_override: Optional[str] = None,
+    predecessor_override_reason: Optional[str] = None,
 ) -> int:
     """Turn a spec file into a governed dispatch for BOTH lanes.
 
@@ -4462,7 +4502,7 @@ def run_dispatch(
         snapshot = build_runtime_snapshot(
             vspec, data_dir=data_dir, spec_file=spec_file,
             stop_conditions_override_reason=stop_conditions_override_reason,
-            dry_run=dry_run,
+            dry_run=dry_run, predecessor_override_reason=predecessor_override_reason,
         )
 
         plan = _compile_plan_checked(vspec, snapshot)
@@ -4865,6 +4905,11 @@ def main(argv: Optional[list] = None) -> int:
              "overridden again if it is still triggered",
     )
     parser.add_argument(
+        "--override-predecessor", dest="predecessor_override_reason", metavar="REASON", default=None,
+        help="Fire although a hard predecessor deliverable is not merged (ADR-096); THIS fire only, "
+             "one line in state/deliverable_predecessor.ndjson",
+    )
+    parser.add_argument(
         "--track", dest="track_id_override", metavar="TRACK_ID", default=None,
         help="Stamp spec.track_id with TRACK_ID before validation (OI-1639). The "
              "existing TL-D1 door check (_check_track_link_verdict) still runs: a "
@@ -4874,6 +4919,8 @@ def main(argv: Optional[list] = None) -> int:
     _add_b3_override_arguments(parser)
     args = parser.parse_args(argv)
     _apply_b3_override(parser, args)
+    if args.predecessor_override_reason is not None and not args.predecessor_override_reason.strip():
+        parser.error('--override-predecessor needs a non-empty reason (no silent bypass)')
 
     if args.force_release_class is not None:
         force_release(args.force_release_class)
@@ -4893,6 +4940,7 @@ def main(argv: Optional[list] = None) -> int:
         args.spec_file, dry_run=args.dry_run, refire_reason=args.refire_reason,
         stop_conditions_override_reason=args.stop_conditions_override_reason,
         track_id_override=args.track_id_override,
+        predecessor_override_reason=args.predecessor_override_reason,
     )
 
 
