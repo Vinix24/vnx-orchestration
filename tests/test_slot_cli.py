@@ -227,3 +227,81 @@ def test_slotlog_write_failure_surfaces(env, monkeypatch):
     monkeypatch.setattr(slot_log.os, "write", lambda fd, data: 0)
     with pytest.raises(slot_cli.SlotError, match="wrote nothing"):
         slot_log.SlotLog(env.store_dir).write({"ts": 1_800_000_000, "event": "released", "project_id": "p"})
+
+
+def _queued_new(request_id, lease_id, requested_at):
+    """Another client's request already in the queue (same shape ``_new_request`` writes)."""
+    return {"request_id": request_id, "lease_id": lease_id, "requested_at": requested_at, "kind": "new",
+            "parent_lease": None, "profile": "runner", "project_id": "other", "uid": os.getuid(),
+            "owner": {"owner_kind": "acquire", "owner_pid": os.getpid(), "owner_start_time": None,
+                      "session_id": None, "supervisor_pid": None, "supervisor_start_time": None,
+                      "runner": None, "descendants": []},
+            "bypassed_n": 0, "reasons": [], "slots": 1, "max_slots": 2, "deadline_at": requested_at + 30}
+
+
+def test_a_refusal_in_a_round_that_admits_another_commits_that_admission(env):
+    profiles = copy.deepcopy(POLICY["profiles"])
+    profiles["runner"]["max_slots"] = 2
+    patch_policy(env, mode="enforce", total=6, profiles=profiles)
+    patch_state(env, mode="enforce")
+    _, out = cli(env, "acquire", "runner", "--project-id", "a", "--owner-pid", str(os.getpid()))
+    parent = out[0].split(":")[0]
+    before = state(env)["fencing_counter"]
+    patch_state(env, queue=[_queued_new("r-other", "L-other", 1.0)])
+    # a runner child under a runner parent is not allowed: refused in the same round that admits L-other
+    code, _ = cli(env, "acquire", "runner", "--project-id", "b", "--owner-pid", str(os.getpid()),
+                  env={"VNX_SLOT_LEASE": parent})
+    after = state(env)
+    assert code == 78
+    assert "L-other" in after["holders"] and after["fencing_counter"] == before + 1
+    assert after["queue"] == []   # neither the admitted nor the refused request stays queued
+    admitted = [e["lease_id"] for e in events(env, "admitted")]
+    assert admitted.count("L-other") == 1 and set(admitted) == set(after["holders"])
+    assert events(env, "refused")[-1]["reasons"] == ["profile_not_allowed_under_parent"]
+
+
+def test_release_of_a_live_lease_logs_the_request_before_releasing(env):
+    owner = subprocess.Popen(["sleep", "30"])
+    try:
+        _, out = cli(env, "acquire", "runner", "--project-id", "p", "--owner-pid", str(owner.pid))
+        lease_id, _ = out[0].split(":")
+        assert cli(env, "release", out[0]) == (0, ["releasing"])
+        assert cli(env, "release", out[0]) == (0, ["releasing"])   # a repeat changes nothing, logs nothing
+    finally:
+        owner.kill()
+        owner.wait()
+    (ev,) = events(env, "release_requested")
+    assert ev["lease_id"] == lease_id and ev["project_id"] == "p" and ev["reasons"] == [] and "token" not in ev
+    assert state(env)["holders"][lease_id]["state"] == "releasing"
+
+
+def test_release_requested_not_logged_means_releasing_not_committed(env, monkeypatch):
+    owner = subprocess.Popen(["sleep", "30"])
+    try:
+        _, out = cli(env, "acquire", "runner", "--project-id", "p", "--owner-pid", str(owner.pid))
+        lease_id = out[0].split(":")[0]
+        real = slot_cli.SlotLog.write
+
+        def failing(self, ev):
+            if ev["event"] == "release_requested":
+                raise slot_cli.SlotError("store_invalid", "slotlog write failed")
+            real(self, ev)
+        monkeypatch.setattr(slot_cli.SlotLog, "write", failing)
+        assert cli(env, "release", out[0])[0] == 78
+    finally:
+        owner.kill()
+        owner.wait()
+    assert state(env)["holders"][lease_id]["state"] == "active"
+
+
+@pytest.mark.parametrize("make", ["missing", "not_executable"])
+def test_off_mode_start_failure_is_structured_78(env, tmp_path, capsys, make):
+    patch_policy(env, mode="off")
+    target = tmp_path / "cmd"
+    if make == "not_executable":
+        target.write_text("#!/bin/sh\nexit 0\n")
+        target.chmod(0o644)
+    code, _ = cli(env, "run", "runner", "--project-id", "p", "--", str(target))
+    err = capsys.readouterr().err
+    assert code == 78 and "vnx slot run: command not started:" in err and "Traceback" not in err
+    assert state(env)["holders"] == {}

@@ -227,6 +227,7 @@ De host schrijft NDJSON naar `slotlog/YYYY-MM.ndjson`, zonder paden, commando's,
 | `topped_up` | Bijvraag toegekend: `slots` is toename, `slots_granted` het nieuwe totaal; `grandfathered` boolean. |
 | `nested` | Deellease binnen ouderbudget; `parent_lease` verplicht. |
 | `released`, `reaped` | Respectievelijk releaseverzoek afgerond en opruiming na levenscheck; werkelijke houdtijd. |
+| `release_requested` | `release` op levende werklast zet de lease op `releasing`; gelogd vóór die overgang vastligt, één keer per lease. |
 | `lease_held` | Nog levende werklast na verdwijnen toezichthouder, reden `owner_gone_tree_alive`. |
 | `mode_changed` | Beleidsuitvoering verandert: `from_mode`, `to_mode`, `transition_s` (null buiten overgang); timeout vermeldt `transition_timeout`. |
 
