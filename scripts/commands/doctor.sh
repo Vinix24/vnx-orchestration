@@ -215,7 +215,7 @@ cmd_doctor() {
 
   # Legacy fallback (pre-PR-1)
   local failed=0
-  local do_package_check="${VNX_DOCTOR_PACKAGE_CHECK:-0}"
+  local do_package_check=0
   local do_runtime_check=0
   local runtime_verbose=0
   local runtime_json=0

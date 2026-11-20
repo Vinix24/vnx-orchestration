@@ -161,6 +161,8 @@ _ROW_ORDER: List[str] = [
     "evidence-bound-gate",
     # morning round D1a: pure core built, nothing reads it until D1b
     "morning-pause",
+    # ADR-096 B2: the door enforces hard deliverable predecessors
+    "deliverable-predecessor",
     # ACTIVATE-and-measure
     "intelligence-self-learning-loop",
     "dream-consolidation",

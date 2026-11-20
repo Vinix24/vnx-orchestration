@@ -235,19 +235,6 @@ def _emit_injection_outcome_event(
             fcntl.flock(fh, fcntl.LOCK_UN)
 
 
-def _env_flag(name: str) -> Optional[bool]:
-    value = os.environ.get(name)
-    if value is None:
-        return None
-    return value.strip().lower() in {"1", "true", "yes", "on"}
-
-
-def _rollback_mode_enabled() -> bool:
-    rollback = _env_flag("VNX_STATE_SIMPLIFICATION_ROLLBACK")
-    if rollback is None:
-        rollback = _env_flag("VNX_STATE_DUAL_WRITE_LEGACY")
-    return bool(rollback)
-
 # Import tag intelligence engine
 try:
     from tag_intelligence import TagIntelligenceEngine
@@ -305,12 +292,7 @@ class T0IntelligenceGatherer:
 
         # Initialize quality intelligence database
         # Primary: VNX_STATE_DIR (canonical runtime state)
-        # Optional fallback to legacy only when rollback mode is enabled.
         self.quality_db_path = Path(paths["VNX_STATE_DIR"]) / "quality_intelligence.db"
-        if not self.quality_db_path.exists() and _rollback_mode_enabled():
-            legacy_db = Path(paths["VNX_HOME"]) / "state" / "quality_intelligence.db"
-            if legacy_db.exists():
-                self.quality_db_path = legacy_db
         self.quality_db = None
         if self.quality_db_path.exists():
             try:

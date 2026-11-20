@@ -293,6 +293,10 @@ The bypass is recorded, not just allowed: each applied override appends one NDJS
 
 The fail switch is `FAIL_ON_OPEN_SIDEDOOR` in `dispatch_sidedoor_audit.py`. It is **OFF in this PR** (bucket (b) reports loudly but exits 0). **Deel 2 (route `plan_gate_panel.py` through the door) flips it ON in the same PR** that closes the open side door, so main never goes red between the two. A green watcher while `plan_gate_panel.py` is still under `OPEN_SIDE_DOORS` is a dated choice, not a property of the gate.
 
+### 5.2 Hard predecessors (ADR-096 B2)
+
+The door reads the active `hard` dependencies of the fire's deliverable (the dispatch id without its `-rN`, `-b` or `-c-rN` suffix) and refuses the fire while one is unsatisfied: `deliverable_predecessor_unmerged`, `predecessor_retired` (withdrawn, cancelled, superseded or retired) or `predecessor_unknown` (a ledger or DB it cannot read, an unknown status or output kind). Satisfied is only a `pr_merged` receipt in `state/t0_receipts.ndjson` with `conclusion` merged, the project's `project_id`, `branch` `dispatch/P` and `dispatch_id` P or a round of P; a `doc`/`post` predecessor is satisfied only by a T0 `accept` in `t0_decision_log.jsonl`. A `soft` dependency is printed only. `VNX_DELIVERABLE_PREDECESSOR_MODE` (`refuse` default, `warn`, `off`) is a project key; an unknown stored value reads as `refuse`. `--override-predecessor "<reason>"` fires this one candidate; an empty reason is refused. Every refuse, warn and override on a real fire is a line in `state/deliverable_predecessor.ndjson`, key `(project_id, ts, dispatch_id, seq)`; `--dry-run` prints the verdict and writes nothing. Code: `scripts/lib/deliverable_predecessor_gate.py`, `dispatch_cli._check_predecessor_verdict`.
+
 ## 6. Concurrency — the subscription session cap (serialize, N-slot)
 
 Every `claude` dispatch runs on `claude_headless` (`resolve_claude_lane` in `scripts/lib/dispatch_plan.py` returns it unconditionally) and holds one account-level serialization slot. The session cap is a property of the subscription, so it applies to headless runs exactly as it did to the tmux lane that was removed on 2026-09-18 (`docs/operations/TMUX_SPAWN_LANE.md`). Claude runs on **subscription** sessions, which have a concurrent-session cap **shared with every other Claude agent on the account** (production agents, other terminals). Exceeding it = the dispatch immediate-exits in ~0.1s (`rc=1`), NOT a code error.
@@ -383,7 +387,6 @@ The single-entry-door rollout ships behind transition flags. They are retired in
 | `VNX_DISPATCH_LEGACY` | REMOVE — the legacy lane is deleted after one stable release on the door |
 | `VNX_AUTO_ROUTE` | REMOVE — legacy-only smart-route; the door's compile_plan owns routing. `dispatch-agent.sh`'s `--auto-route` path is inert under the door and is removed with it |
 | `VNX_USE_CENTRAL_DB` | CUTOVER VERIFIED 2026-07-10 — every consumer resolves state to central; the dual-write mirror is a proven no-op (`primary == central`). `vnx fabric-audit` GREEN. Flag + `dual_writer.py` scaffolding retained as the Phase-6-P6 rollback net; delete after Phase-0 burn-in |
-| `VNX_STATE_DUAL_WRITE_LEGACY` | ROLLBACK NET — the `VNX_DISPATCH_LEGACY=1` + dual-write-back lever for Phase-0 (ADR-028); remove with P6, not before |
 | `VNX_OVERRIDE_CLAUDE_HEADLESS` | KEEP — a real account-safety override, not transition scaffolding |
 | `VNX_OVERRIDE_WORKER_PUSH_MAIN` | KEEP — a real governance override |
 | `VNX_OVERRIDE_GLM_VIA_HARNESS_ONLY` | KEEP — the benchmark baseline escape for `glm-via-harness-only` |

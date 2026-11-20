@@ -35,65 +35,22 @@ _PATHS = ensure_env()
 VNX_ROOT = Path(_PATHS["VNX_HOME"]).expanduser().resolve()
 STATE_DIR = Path(_PATHS["VNX_STATE_DIR"]).expanduser().resolve()
 DISPATCHES_DIR = Path(_PATHS["VNX_DISPATCH_DIR"]).expanduser().resolve()
-LEGACY_STATE_DIR = (VNX_ROOT / "state").resolve()
-LEGACY_DISPATCHES_DIR = (VNX_ROOT / "dispatches").resolve()
 RECEIPTS_FILE = STATE_DIR / "t0_receipts.ndjson"
 RECOMMENDATIONS_FILE = STATE_DIR / "t0_recommendations.json"
 ACTIVE_CONFLICTS_FILE = STATE_DIR / "active_conflicts.json"
 PR_QUEUE_STATE_FILE = STATE_DIR / "pr_queue_state.yaml"
 OPEN_ITEMS_DIGEST_FILE = STATE_DIR / "open_items_digest.json"
 STAGING_SEEN_FILE = STATE_DIR / "staging_seen.json"
-LEGACY_RECEIPTS_FILE = LEGACY_STATE_DIR / "t0_receipts.ndjson"
-LEGACY_RECOMMENDATIONS_FILE = LEGACY_STATE_DIR / "t0_recommendations.json"
-LEGACY_PR_QUEUE_STATE_FILE = LEGACY_STATE_DIR / "pr_queue_state.yaml"
-LEGACY_OPEN_ITEMS_DIGEST_FILE = LEGACY_STATE_DIR / "open_items_digest.json"
-LEGACY_STAGING_SEEN_FILE = LEGACY_STATE_DIR / "staging_seen.json"
-ROLLBACK_ENV_FLAG = "VNX_STATE_SIMPLIFICATION_ROLLBACK"
-
-
-def _env_flag(name: str) -> Optional[bool]:
-    value = os.environ.get(name)
-    if value is None:
-        return None
-    return value.strip().lower() in {"1", "true", "yes", "on"}
-
-
-def _rollback_mode_enabled() -> bool:
-    rollback = _env_flag(ROLLBACK_ENV_FLAG)
-    if rollback is None:
-        rollback = _env_flag("VNX_STATE_DUAL_WRITE_LEGACY")
-    return bool(rollback)
-
 
 def _first_existing(paths: List[Path]) -> Optional[Path]:
     if not paths:
         return None
 
-    ordered_paths = [paths[0]]
-    if _rollback_mode_enabled():
-        ordered_paths.extend(paths[1:])
-
-    seen = set()
-    for path in ordered_paths:
-        key = str(path.resolve()) if path.exists() else str(path)
-        if key in seen:
-            continue
-        seen.add(key)
-        if path.exists():
-            return path
-    return None
+    return paths[0] if paths[0].exists() else None
 
 
 def _dispatch_roots() -> List[Path]:
-    roots: List[Path] = [DISPATCHES_DIR]
-    if _rollback_mode_enabled():
-        roots.append(LEGACY_DISPATCHES_DIR)
-
-    deduped: List[Path] = []
-    for root in roots:
-        if root not in deduped:
-            deduped.append(root)
-    return deduped
+    return [DISPATCHES_DIR]
 
 def witnessed_receipts(receipts: List[Dict]) -> List[Dict]:
     """The receipts in order, with every dispatch attempt's completion read once.
@@ -133,20 +90,10 @@ class RecommendationEngine:
         self.pr_queue = None  # NEW: PR queue state integration
         self.open_items_digest = None  # NEW: Open items tracking
         self.staging_seen = set()  # NEW: Track seen staging files
-        self.rollback_mode = _rollback_mode_enabled()
-        self._rollback_warning_emitted = False  # Avoid warning spam in --watch mode.
-
-    def _emit_rollback_warning(self):
-        if self.rollback_mode and not self._rollback_warning_emitted:
-            print(
-                "[CUTOVER] WARNING: rollback mode enabled "
-                f"({ROLLBACK_ENV_FLAG}=1). Legacy fallback reads are active."
-            )
-            self._rollback_warning_emitted = True
 
     def load_recent_receipts(self) -> List[Dict]:
         """Load receipts from the last N minutes"""
-        receipts_source = _first_existing([RECEIPTS_FILE, LEGACY_RECEIPTS_FILE])
+        receipts_source = _first_existing([RECEIPTS_FILE])
         if not receipts_source:
             return []
 
@@ -525,7 +472,7 @@ class RecommendationEngine:
 
     def load_pr_queue_state(self):
         """Load PR queue state if available (NEW)"""
-        source = _first_existing([PR_QUEUE_STATE_FILE, LEGACY_PR_QUEUE_STATE_FILE])
+        source = _first_existing([PR_QUEUE_STATE_FILE])
         if not source:
             return
 
@@ -538,7 +485,7 @@ class RecommendationEngine:
 
     def load_open_items_digest(self):
         """Load open items digest if available"""
-        source = _first_existing([OPEN_ITEMS_DIGEST_FILE, LEGACY_OPEN_ITEMS_DIGEST_FILE])
+        source = _first_existing([OPEN_ITEMS_DIGEST_FILE])
         if not source:
             return
 
@@ -551,7 +498,7 @@ class RecommendationEngine:
 
     def load_staging_seen(self):
         """Load previously seen staging files"""
-        source = _first_existing([STAGING_SEEN_FILE, LEGACY_STAGING_SEEN_FILE])
+        source = _first_existing([STAGING_SEEN_FILE])
         if not source:
             return
 
@@ -719,7 +666,7 @@ class RecommendationEngine:
         """Save recommendations to JSON file"""
         existing_keys = set()
         existing_conflicts = {}
-        existing_source = _first_existing([RECOMMENDATIONS_FILE, LEGACY_RECOMMENDATIONS_FILE])
+        existing_source = _first_existing([RECOMMENDATIONS_FILE])
         if existing_source:
             try:
                 with open(existing_source, 'r') as f:
@@ -764,8 +711,6 @@ class RecommendationEngine:
 
     def run(self):
         """Main execution flow"""
-        self.rollback_mode = _rollback_mode_enabled()
-        self._emit_rollback_warning()
         print(f"🚀 VNX Recommendation Engine v1.2.0")
         print(f"📊 Analyzing receipts from last {self.lookback_minutes} minutes...")
 

@@ -506,13 +506,7 @@ curation step itself is not proven.
    log line, not a reason to start elsewhere. When the old session runs in another folder than
    the start folder, one log line names both.
 
-   **Switch.** `VNX_T0_ROTATE_START_DIR` is `t0` (default) or `root`. The tmux global environment
-   is read first, the process environment second; `root` forces the project-root start.
-   ```
-   tmux set-environment -g VNX_T0_ROTATE_START_DIR root     # project root
-   tmux set-environment -gu VNX_T0_ROTATE_START_DIR         # back to the default
-   ```
-   Any other value is refused with exit 2 before a window is opened.
+   **Start folder.** The successor starts in the T0 folder when it holds a valid one, else in the project root; there is no switch.
 2. The footer (`auto mode`) is the launch check. Nothing is typed after it by the spawner. The full instruction
    (first step, the catch-up head of a skip run, the goal sentence) is `prompt.txt` in the run
    dir, which the kickoff skill reads via `t0_rotation_state.py run-dir <run_id>`; it carries no
@@ -612,10 +606,10 @@ The sequence:
    itself is in `delivery_job.log`.
 
 The screen is a second opinion. A pane that still shows the spinner holds the typing back even when
-the transcript says idle (`VNX_T0_ROTATE_BUSY_PATTERN`, default `esc to interrupt|… \([0-9]+[hms]`:
+the transcript says idle (the busy pattern `esc to interrupt|… \([0-9]+[hms]`, a constant in `scripts/t0_rotate_spawn.sh`:
 glyph and verb of the 2.1.308 spinner change every turn, the ellipsis followed by the elapsed time
 stays, and older CLIs still print `esc to interrupt`). `/goal active` on screen
-(`VNX_T0_ROTATE_GOAL_ACTIVE_PATTERN`) is booked with the outcome and never confirms on its own.
+(the constant `GOAL_ACTIVE_PATTERN`) is booked with the outcome and never confirms on its own.
 
 The `/goal` follow-up is not exposed to the startup race: it types after the first turn, when the
 TUI has finished starting and Remote Control is connected.
@@ -634,7 +628,7 @@ Every run leaves `prompt.txt`, `first_step.txt`, `continuation.json` (`run_id`, 
 | Code | Meaning |
 |---|---|
 | 0 | successor started (and the goal follow-up handed to the tmux server, if any) |
-| 2 | usage error, an invalid `VNX_T0_ROTATE_START_DIR` (valid: `t0`, `root`), an empty `--skip-wrap-reason`, or `--transcript` without it |
+| 2 | usage error, an empty `--skip-wrap-reason`, or `--transcript` without it |
 | 3 | not in tmux, project root unresolvable, handoff missing or stale |
 | 4 | handoff has no numbered next step |
 | 5 | the successor never showed its footer, or its window is in another folder than the T0 folder (checked before claude starts: nothing ran in it); the old window keeps running |

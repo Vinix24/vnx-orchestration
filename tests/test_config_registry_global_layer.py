@@ -121,7 +121,7 @@ def test_unreadable_global_file_not_strict_falls_through_with_one_warning(gfile,
 
 # config-een-oppervlak PR-1 gave these keys a scope and allowed_values (tests/test_config_registry_pr1_rows.py).
 _PR1_ROWS = {k for k, e in cr.CONFIG_REGISTRY.items() if e.read_site_wired is False and e.scope == "global"} | {
-    "VNX_ENFORCEMENT_PROFILE"}
+    "VNX_ENFORCEMENT_PROFILE", "VNX_DELIVERABLE_PREDECESSOR_MODE"}  # the latter: ADR-096 §12 off|warn|refuse
 
 
 def test_every_existing_key_has_scope_project_and_no_allowed_values():
