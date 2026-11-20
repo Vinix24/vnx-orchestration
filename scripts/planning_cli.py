@@ -3246,7 +3246,6 @@ def _deliverable_records_from_dispatches(conn, project_id: str, objective: Optio
             rec["metadata"] = meta
         records.append(rec)
     return records
-    return records
 
 
 def cmd_deliverable_list(args: argparse.Namespace) -> int:

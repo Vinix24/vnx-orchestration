@@ -228,3 +228,93 @@ def test_confirm_proposal_on_an_unknown_track_is_skipped(store):
     result = plan_scope.confirm_proposal(store, "t-nope", PID, row.proposal, reason="r", resolution_reason="x",
                                          deliverables_in=lambda c, t: [])
     assert result.change is None and "no longer exists" in result.skipped
+
+
+# scripts/lib/providers/ is in smart_router._GOVERNANCE_CORE_PREFIXES: derive_variant gives
+# coding-strict, while plan_scope_path_category names no category for it.
+CODING_STRICT_PATH = "scripts/lib/providers/x.py"
+
+
+def test_propose_follows_dispatch_rule_for_a_coding_strict_path():
+    import smart_router
+    assert smart_router.derive_variant([CODING_STRICT_PATH]).variant == "coding-strict"
+    assert smart_router.plan_scope_path_category(CODING_STRICT_PATH) is None
+    got = plan_scope.propose([{"ref": "d", "task_class": "01_code_generation", "dispatch_paths": [CODING_STRICT_PATH]}])
+    assert got.scope == "architecture" and "coding-strict" in got.reason
+
+
+def test_confirm_does_not_close_the_oi_plan_of_a_coding_strict_deliverable(store):
+    _add_deliverable(store, "t-light", "core", "--task-class", "01_code_generation",
+                     "--dispatch-paths", CODING_STRICT_PATH)
+    _, payload, _ = _review(store)
+    assert _by_track(payload)["t-light"]["proposal"] == "architecture"
+    _review(store, "--confirm", "t-light", "--approval-id", "APR-3")
+    assert _open_plan_blocker(store, "t-light") and _meta(store, "t-light")["plan_scope"] == "architecture"
+
+
+@pytest.mark.parametrize("paths,task_class", [
+    (["schemas/migrations/0099_x.sql"], "01_code_generation"),      # schema
+    (["/etc/outside.conf"], "01_code_generation"),                  # outside-repo
+    (["scripts/lib/a.py"], "03_refactoring"),                       # refactor rule
+    ([CODING_STRICT_PATH], "01_code_generation"),                   # coding-strict
+    (["agents/a.md"], None),                                        # fleet default
+    (["scripts/lib/plain.py"], "01_code_generation"),               # plain light
+    (["scripts/lib/plain.py", CODING_STRICT_PATH], None),           # one strict path among plain ones
+    ([], "01_code_generation"),                                     # no paths
+])
+def test_propose_and_dispatch_rule_agree(paths, task_class):
+    rule = plan_scope.dispatch_rule(paths, task_class=task_class)
+    got = plan_scope.propose([{"ref": "d", "task_class": task_class, "dispatch_paths": paths}])
+    assert got.scope == ("light" if rule is None else "architecture")
+    if rule is not None:
+        assert got.reason == f"deliverable d: {rule}"
+
+
+def _scope_events(sd):
+    path = sd.parent / "events" / "track_events.ndjson"
+    if not path.exists():
+        return []
+    return [json.loads(l) for l in path.read_text().splitlines() if l.strip()]
+
+
+def test_confirm_writes_no_scope_event_when_the_close_fails(store, monkeypatch):
+    import tracks as tracks_lib
+
+    def boom(*_a, **_k):
+        raise RuntimeError("close failed")
+
+    monkeypatch.setattr(tracks_lib, "unlink_open_item", boom)
+    row = _light_row(store)
+    before = len(_scope_events(store))
+    with pytest.raises(RuntimeError, match="close failed"):
+        _confirm(store, row)
+    assert len(_scope_events(store)) == before
+
+
+def test_confirm_writes_no_scope_event_when_the_commit_fails(store, monkeypatch):
+    import sqlite3
+    row = _light_row(store)
+    real_connect = plan_scope._connect
+
+    class FailingCommit:
+        def __init__(self, conn):
+            self._conn = conn
+
+        def commit(self):
+            raise sqlite3.OperationalError("commit failed")
+
+        def __getattr__(self, name):
+            return getattr(self._conn, name)
+
+    monkeypatch.setattr(plan_scope, "_connect", lambda sd: FailingCommit(real_connect(sd)))
+    with pytest.raises(sqlite3.OperationalError):
+        _confirm(store, row)
+    assert [e["details"]["new"] for e in _scope_events(store)
+            if e.get("event_type") == "track_plan_scope_set" and e.get("track_id") == "t-light"] == ["architecture"]
+
+
+def test_confirm_emits_the_scope_event_after_a_successful_commit(store):
+    _confirm(store, _light_row(store))
+    sets = [e for e in _scope_events(store) if e.get("event_type") == "track_plan_scope_set"
+            and e.get("track_id") == "t-light"]
+    assert [e["details"]["new"] for e in sets].count("light") == 1

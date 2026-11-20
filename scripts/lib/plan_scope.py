@@ -480,36 +480,21 @@ class Proposal:
 def propose(deliverables: Sequence[Any]) -> Proposal:
     """The clean-up proposal for one track from its deliverables (``plan-scope review``).
 
-    The existing rules, in order: a ``03_refactoring`` deliverable; paths in a
-    plan-scope category (``smart_router``, as the door reads them); a
-    deliverable without readable ``dispatch_paths``; otherwise light. No
-    deliverable, or an unreadable entry, is architecture (closed on doubt).
+    Each deliverable goes through ``dispatch_rule``, the rule the door applies
+    to a build dispatch, so the proposal can never call light what the door
+    calls architecture. No deliverable, or an unreadable entry or
+    ``dispatch_paths``, is architecture (closed on doubt).
     """
-    import smart_router
-
     if not deliverables:
         return Proposal(ARCHITECTURE, "no deliverables: cannot be judged (closed on doubt)")
-    items = [d if isinstance(d, dict) else {} for d in deliverables]
-    for d in items:
-        rule = deliverable_task_class_rule(d.get("task_class"))
-        if rule:
-            return Proposal(ARCHITECTURE, f"deliverable {d.get('ref') or '?'}: {rule}")
-    unjudged: Optional[str] = None
-    for d in items:
+    for d in (d if isinstance(d, dict) else {} for d in deliverables):
         ref, raw = d.get("ref") or "?", d.get("dispatch_paths")
         if not isinstance(raw, list) or not all(isinstance(p, str) for p in raw):
-            unjudged = unjudged or f"deliverable {ref}: dispatch_paths missing or unreadable"
-            continue
-        paths = [n for n in (smart_router.normalize_dispatch_path(p) for p in raw if p) if n]
-        if not paths:
-            unjudged = unjudged or f"deliverable {ref}: no dispatch_paths, cannot be judged"
-        for path in paths:
-            category = smart_router.plan_scope_path_category(path)
-            if category:
-                return Proposal(ARCHITECTURE, f"deliverable {ref}: {category} path {path}")
-    if unjudged:
-        return Proposal(ARCHITECTURE, unjudged)
-    return Proposal(LIGHT, f"{len(items)} deliverable(s), none refactor, none in a schema or security path")
+            return Proposal(ARCHITECTURE, f"deliverable {ref}: dispatch_paths missing or unreadable")
+        rule = dispatch_rule(raw, task_class=d.get("task_class"))
+        if rule:
+            return Proposal(ARCHITECTURE, f"deliverable {ref}: {rule}")
+    return Proposal(LIGHT, f"{len(deliverables)} deliverable(s), none refactor, none in a schema, security or coding-strict path")
 
 
 @dataclass(frozen=True)
@@ -600,7 +585,7 @@ def confirm_proposal(
         gate = _seed_in(conn, track_id, project_id, rows) if expected.scope == ARCHITECTURE else None
         tracks_lib.set_plan_scope(
             state_dir, track_id, project_id, expected.scope,
-            old_scope=reading.scope, reason=reason, rule=None, actor="operator", conn=conn,
+            old_scope=reading.scope, reason=reason, rule=None, actor="operator", conn=conn, event_sink=events,
         )
         if expected.scope == LIGHT:
             tracks_lib.unlink_open_item(
