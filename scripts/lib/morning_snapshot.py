@@ -121,7 +121,8 @@ def decision_status(project_id: str, day: str, *, state_dir: Path) -> DayStatus:
                      None if ledger_ok else state["reason"])
 
 
-def _next_seq(path: Path, project_id: str, day: str) -> int:
+def _next_seq(path: Path, project_id: str, day: str, kinds: Optional[set] = None) -> int:
+    """Next seq for (project, day); the kinds already written for it are added to ``kinds`` when given."""
     try:
         text = path.read_text(encoding="utf-8")
     except FileNotFoundError:
@@ -138,12 +139,15 @@ def _next_seq(path: Path, project_id: str, day: str) -> int:
             raise ValueError(f"{path}:{number}: event ledger line invalid ({exc!r})") from exc
         if line.get("project_id") == project_id and line.get("day") == day:
             seq = max(seq, line["seq"])
+            if kinds is not None:
+                kinds.add(line.get("kind"))
     return seq + 1
 
 
 def append_event(project_id: str, day: str, kind: str, fields: Mapping[str, Any], *, state_dir: Path,
-                 now: str) -> Dict[str, Any]:
-    """Append one event line keyed (project_id, day, seq). Raises ValueError on an unknown kind or reason."""
+                 now: str, once: bool = False) -> Optional[Dict[str, Any]]:
+    """Append one event line keyed (project_id, day, seq). Raises ValueError on an unknown kind or reason.
+    ``once``: under the same lock, write nothing and return None when (project, day) already has this kind."""
     _check_day(day)
     if kind not in EVENT_KINDS:
         raise ValueError(f"unknown event kind {kind!r}")
@@ -154,8 +158,11 @@ def append_event(project_id: str, day: str, kind: str, fields: Mapping[str, Any]
         raise ValueError("project_id, day, seq, kind and ts are set by append_event")
     path = Path(state_dir) / EVENTS_FILENAME
     with _locked(state_dir):
-        line = {**fields, "project_id": project_id, "day": day, "seq": _next_seq(path, project_id, day),
-                "kind": kind, "ts": now}
+        seen: set = set()
+        seq = _next_seq(path, project_id, day, seen)
+        if once and kind in seen:
+            return None
+        line = {**fields, "project_id": project_id, "day": day, "seq": seq, "kind": kind, "ts": now}
         payload = (json.dumps(line, sort_keys=True, ensure_ascii=False, allow_nan=False) + "\n").encode("utf-8")
         with open(path, "ab+") as handle:  # vnx-atomic-write: append-only line, fsynced
             end = os.fstat(handle.fileno()).st_size
