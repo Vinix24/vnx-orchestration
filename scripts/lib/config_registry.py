@@ -857,7 +857,7 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         "VNX_DELIVERABLE_PREDECESSOR_MODE", "string", "refuse", "dispatch",
         "Deliverable predecessors (ADR-096): the door refuses (refuse), reports (warn) or skips (off) a fire "
         "whose hard predecessor has no pr_merged receipt.",
-        subsystem="deliverable-predecessor", status="LIVE", cockpit_canonical=True,
+        subsystem="deliverable-predecessor", status="ACTIVATE", cockpit_canonical=True,
         allowed_values=("off", "warn", "refuse")),
 
 }
