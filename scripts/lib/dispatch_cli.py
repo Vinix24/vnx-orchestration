@@ -2666,11 +2666,16 @@ def _check_b3_cap_verdict(spec: DispatchSpec, *, state_dir: Path) -> Optional[Co
     )
 
 
-def _project_state_verdicts(spec: DispatchSpec, *, state_dir: Path) -> "tuple[ConstraintVerdict, ...]":
-    """The door's checks against this project's own state: the track link (TL-D1) and the B3 cap (R1)."""
+def _project_state_verdicts(
+    spec: DispatchSpec, *, state_dir: Path, predecessor_override_reason: Optional[str] = None, dry_run: bool = False,
+) -> "tuple[ConstraintVerdict, ...]":
+    """The door's checks against this project's own state: the track link (TL-D1), the B3 cap (R1) and the
+    hard predecessors of the fire's deliverable (ADR-096 B2, per candidate: not a stop condition)."""
     verdicts = (
         _check_track_link_verdict(spec, state_dir=state_dir),
         _check_b3_cap_verdict(spec, state_dir=state_dir),
+        _check_predecessor_verdict(dispatch_id=spec.dispatch_id, project_id=spec.project_id, state_dir=state_dir,
+                                   override_reason=predecessor_override_reason, dry_run=dry_run),
     )
     return tuple(verdict for verdict in verdicts if verdict is not None)
 
@@ -2977,8 +2982,7 @@ def build_runtime_snapshot(
     data_dir: Path,
     spec_file: Path,
     stop_conditions_override_reason: Optional[str] = None,
-    dry_run: bool = False,
-    predecessor_override_reason: Optional[str] = None,
+    dry_run: bool = False, predecessor_override_reason: Optional[str] = None,
 ) -> RuntimeSnapshot:
     """Perform all I/O required by compile_plan.
 
@@ -3083,7 +3087,7 @@ def build_runtime_snapshot(
     # branch of a PR at the B3 cap is refused early (_check_b3_cap_verdict). The
     # B3 override DECISION rides the ``b3-cap-override-applied`` verdict and is
     # booked only at the commit-to-fire point (R1d), never here.
-    constraint_verdicts = constraint_verdicts + _project_state_verdicts(spec, state_dir=data_dir / "state")
+    constraint_verdicts = constraint_verdicts + _project_state_verdicts(spec, state_dir=data_dir / "state", predecessor_override_reason=predecessor_override_reason, dry_run=dry_run)
 
     # golf 2A: T0 autonomous-chain stop-conditions, measured live on every fire.
     # OI-1694: scoped to THIS dispatch's own provider/gate — see
@@ -3098,11 +3102,6 @@ def build_runtime_snapshot(
     )
     if stop_verdict is not None:
         constraint_verdicts = constraint_verdicts + (stop_verdict,)
-    predecessor_verdict = _check_predecessor_verdict(
-        dispatch_id=spec.dispatch_id, project_id=spec.project_id, state_dir=data_dir / "state",
-        override_reason=predecessor_override_reason, dry_run=dry_run)
-    if predecessor_verdict is not None:
-        constraint_verdicts = constraint_verdicts + (predecessor_verdict,)
 
     if is_claude_lane:
         target_health: dict[str, str] = {HEADLESS_LANE_TERMINAL: "healthy"}
@@ -4449,8 +4448,7 @@ def run_dispatch(
     dry_run: bool = False,
     refire_reason: Optional[str] = None,
     stop_conditions_override_reason: Optional[str] = None,
-    track_id_override: Optional[str] = None,
-    predecessor_override_reason: Optional[str] = None,
+    track_id_override: Optional[str] = None, predecessor_override_reason: Optional[str] = None,
 ) -> int:
     """Turn a spec file into a governed dispatch for BOTH lanes.
 
@@ -4840,7 +4838,7 @@ def reopen_lane(provider_val: str, reason: str, *, state_dir: Path) -> int:
 
 
 def _add_b3_override_arguments(parser) -> None:
-    """``--override-b3 --reason "..."``: build on the branch of a PR at the B3 cap anyway (R1)."""
+    """``--override-b3 --reason "..."`` (R1) and ``--override-predecessor "..."`` (ADR-096 B2)."""
     parser.add_argument(
         "--override-b3", dest="override_b3", action="store_true",
         help="Fire a build dispatch on the branch of a PR at the B3 cap anyway; requires --reason. "
@@ -4848,10 +4846,15 @@ def _add_b3_override_arguments(parser) -> None:
     )
     parser.add_argument("--reason", dest="b3_reason", metavar="REASON", default=None,
                         help="The reason for --override-b3 (required with it)")
+    parser.add_argument(
+        "--override-predecessor", dest="predecessor_override_reason", metavar="REASON", default=None,
+        help="Fire although a hard predecessor deliverable is not merged (ADR-096); THIS fire only, "
+             "one line in state/deliverable_predecessor.ndjson",
+    )
 
 
 def _apply_b3_override(parser, args) -> None:
-    """Refuse ``--override-b3`` without a reason (and ``--reason`` alone); carry the reason in the env."""
+    """Refuse ``--override-b3`` without a reason (and ``--reason`` alone), and an empty ``--override-predecessor``."""
     reason = (args.b3_reason or "").strip()
     if args.override_b3 and not reason:
         parser.error('--override-b3 needs a non-empty --reason "..." (no silent bypass)')
@@ -4859,6 +4862,8 @@ def _apply_b3_override(parser, args) -> None:
         parser.error("--reason only applies to --override-b3")
     if reason:
         os.environ[B3_OVERRIDE_REASON_ENV] = reason
+    if args.predecessor_override_reason is not None and not args.predecessor_override_reason.strip():
+        parser.error('--override-predecessor needs a non-empty reason (no silent bypass)')
 
 
 def main(argv: Optional[list] = None) -> int:
@@ -4905,11 +4910,6 @@ def main(argv: Optional[list] = None) -> int:
              "overridden again if it is still triggered",
     )
     parser.add_argument(
-        "--override-predecessor", dest="predecessor_override_reason", metavar="REASON", default=None,
-        help="Fire although a hard predecessor deliverable is not merged (ADR-096); THIS fire only, "
-             "one line in state/deliverable_predecessor.ndjson",
-    )
-    parser.add_argument(
         "--track", dest="track_id_override", metavar="TRACK_ID", default=None,
         help="Stamp spec.track_id with TRACK_ID before validation (OI-1639). The "
              "existing TL-D1 door check (_check_track_link_verdict) still runs: a "
@@ -4919,8 +4919,6 @@ def main(argv: Optional[list] = None) -> int:
     _add_b3_override_arguments(parser)
     args = parser.parse_args(argv)
     _apply_b3_override(parser, args)
-    if args.predecessor_override_reason is not None and not args.predecessor_override_reason.strip():
-        parser.error('--override-predecessor needs a non-empty reason (no silent bypass)')
 
     if args.force_release_class is not None:
         force_release(args.force_release_class)
