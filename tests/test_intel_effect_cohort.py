@@ -19,6 +19,7 @@ import pytest
 
 import config_store_db
 import coordination_db
+import schema_manifest
 import intel_effect_cohort as co
 import intelligence_selector as sel
 from fixtures.live_store_fixture import drop_state_check
@@ -52,7 +53,7 @@ def rc(tmp_path, monkeypatch) -> Path:
     monkeypatch.setenv("VNX_PROJECT_ID", "p1")  # the migration chain refuses a store without a tenant
     coordination_db.init_schema(tmp_path)
     path = tmp_path / "runtime_coordination.db"
-    assert auto_apply(path)[-1] == 38
+    assert auto_apply(path)[-1] == schema_manifest.TERMINAL_VERSION
     drop_state_check(path)
     sqlite3.connect(str(tmp_path / "quality_intelligence.db")).close()
     with closing(sqlite3.connect(str(path))) as conn, conn:

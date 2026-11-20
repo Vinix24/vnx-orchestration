@@ -20,7 +20,6 @@ failure mode; see tests/test_dispatch_envelope_annotations_resolve.py).
 
 from __future__ import annotations
 
-import os
 import re
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
@@ -460,7 +459,7 @@ class ProviderAdapter:
         model = (
             plan.model
             if plan.model not in ("default", "sonnet", "")
-            else os.environ.get("VNX_GEMINI_MODEL", "gemini-2.5-pro")
+            else "gemini-2.5-pro"
         )
         try:
             result = spawn_gemini(

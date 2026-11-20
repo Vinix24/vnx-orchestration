@@ -178,11 +178,11 @@ def test_broken_pipe_is_a_structured_failure(provider, spawn_path, label):
     assert (out.status, out.returncode, out.error) == ("failure", 1, f"{label} spawn BrokenPipeError: gone")
 
 
-def test_gemini_default_model_from_env(monkeypatch):
+def test_gemini_model_ignores_the_deleted_variable(monkeypatch):
     monkeypatch.setenv("VNX_GEMINI_MODEL", "gemini-x")
     with patch("provider_spawns.gemini_spawn.spawn_gemini", return_value=_Spawn()) as spawn:
         out = ProviderAdapter().run(_plan("gemini", model="sonnet"), "x")
-    assert spawn.call_args.kwargs["model"] == "gemini-x" and out.model == "gemini-x"
+    assert spawn.call_args.kwargs["model"] == "gemini-2.5-pro" and out.model == "gemini-2.5-pro"
 
 
 @pytest.mark.parametrize("attrs,expected", [

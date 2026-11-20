@@ -44,12 +44,6 @@ class TestTierAdmissionAllow:
         assert result.adapter_tier == 2
         assert result.required_tier == 2
 
-    def test_gemini_streaming_allowed_under_coding_strict(self, monkeypatch):
-        monkeypatch.setenv("VNX_GEMINI_STREAM", "1")
-        result = check_tier_admission("gemini", "coding-strict")
-        assert result.decision == "allow"
-        assert result.adapter_tier == 1
-
     def test_litellm_streaming_allowed_under_coding_strict(self):
         result = check_tier_admission("litellm", "coding-strict", streaming_enabled=True)
         assert result.decision == "allow"
@@ -105,15 +99,13 @@ class TestTierAdmissionReject:
         assert result.adapter_tier == 2
         assert result.required_tier == 1
 
-    def test_gemini_legacy_rejected_under_coding_strict(self, monkeypatch):
-        monkeypatch.setenv("VNX_GEMINI_STREAM", "0")
+    def test_gemini_legacy_rejected_under_coding_strict(self):
         result = check_tier_admission("gemini", "coding-strict")
         assert result.decision == "reject"
         assert result.adapter_tier == 3
         assert result.required_tier == 1
 
-    def test_gemini_legacy_rejected_under_business_light(self, monkeypatch):
-        monkeypatch.setenv("VNX_GEMINI_STREAM", "0")
+    def test_gemini_legacy_rejected_under_business_light(self):
         result = check_tier_admission("gemini", "business-light")
         assert result.decision == "reject"
         assert result.adapter_tier == 3

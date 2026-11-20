@@ -2,8 +2,10 @@
 """branch_gc.py — remove local ``dispatch/*`` branches that hold no work.
 
 Measured 27-10-2026: 497 local ``dispatch/*`` branches against 41 worktrees,
-and nothing removes them. ``gate_runner._capture_branch_heads`` ignores the
-prefix, so a delete can never trip a running gate seat. A branch goes only
+and nothing removes them. A running gate seat watches only the main
+checkout's HEAD branch and the gated PR's branch
+(``gate_runner._capture_branch_heads``, OI-2711/OI-2756); rule (2) keeps the
+first and rule (4) the second, so a delete never trips it. A branch goes only
 when (1) it starts with ``dispatch/``; (2) no worktree checks it out, from
 ``worktree_inventory.inventory``, main checkout included; (3) its head is an
 ancestor of ``origin/main`` (3a) or its PR is ``MERGED`` with ``headRefOid``

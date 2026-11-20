@@ -88,7 +88,7 @@ class TestBinaryMissingReturnsStructuredResult:
     def test_streaming_path_returns_structured_result_on_fnfe(self):
         """spawn_gemini returns GeminiSpawnResult(returncode=127) when gemini binary absent (streaming)."""
         with patch("subprocess.Popen", side_effect=FileNotFoundError("No such file: gemini")), \
-             patch.dict(os.environ, {"VNX_GEMINI_STREAM": "1"}):
+             patch("provider_spawns.gemini_spawn.gemini_stream_enabled", return_value=True):
             result = spawn_gemini("prompt", "gemini-2.5-pro", "d1", "T3")
         assert isinstance(result, GeminiSpawnResult)
         assert result.returncode == 127
@@ -97,7 +97,7 @@ class TestBinaryMissingReturnsStructuredResult:
     def test_legacy_path_returns_structured_result_on_fnfe(self):
         """spawn_gemini returns GeminiSpawnResult(returncode=127) when gemini binary absent (legacy)."""
         with patch("subprocess.Popen", side_effect=FileNotFoundError("No such file: gemini")), \
-             patch.dict(os.environ, {"VNX_GEMINI_STREAM": "0"}):
+             patch("provider_spawns.gemini_spawn.gemini_stream_enabled", return_value=False):
             result = spawn_gemini("prompt", "gemini-2.5-pro", "d1", "T3")
         assert isinstance(result, GeminiSpawnResult)
         assert result.returncode == 127
@@ -106,7 +106,7 @@ class TestBinaryMissingReturnsStructuredResult:
     def test_generic_oserror_returns_structured_failure(self):
         """Non-FileNotFoundError OSError returns GeminiSpawnResult with error, not raised."""
         with patch("subprocess.Popen", side_effect=OSError("permission denied")), \
-             patch.dict(os.environ, {"VNX_GEMINI_STREAM": "1"}):
+             patch("provider_spawns.gemini_spawn.gemini_stream_enabled", return_value=True):
             result = spawn_gemini("prompt", "gemini-2.5-pro", "d1", "T3")
         assert result.returncode != 0
         assert result.error is not None
@@ -140,7 +140,7 @@ class TestChunkTimeoutReturnsTrueFlag:
         )
 
         with patch("subprocess.Popen", return_value=_FakeProc()), \
-             patch.dict(os.environ, {"VNX_GEMINI_STREAM": "1"}), \
+             patch("provider_spawns.gemini_spawn.gemini_stream_enabled", return_value=True), \
              patch(
                  "provider_spawns.gemini_spawn._GeminiNormalizerHost.drain_stream",
                  return_value=iter([timeout_event]),
@@ -157,7 +157,7 @@ class TestChunkTimeoutReturnsTrueFlag:
         )
 
         with patch("subprocess.Popen", return_value=_FakeProc()), \
-             patch.dict(os.environ, {"VNX_GEMINI_STREAM": "1"}), \
+             patch("provider_spawns.gemini_spawn.gemini_stream_enabled", return_value=True), \
              patch(
                  "provider_spawns.gemini_spawn._GeminiNormalizerHost.drain_stream",
                  return_value=iter([deadline_event]),
@@ -169,7 +169,7 @@ class TestChunkTimeoutReturnsTrueFlag:
     def test_legacy_timeout_returns_timed_out(self):
         """Legacy path: _drain_buffered returning 'timeout' status sets timed_out=True."""
         with patch("subprocess.Popen", return_value=_FakeProc()), \
-             patch.dict(os.environ, {"VNX_GEMINI_STREAM": "0"}), \
+             patch("provider_spawns.gemini_spawn.gemini_stream_enabled", return_value=False), \
              patch(
                  "provider_spawns.gemini_spawn._drain_buffered",
                  return_value=("", "", "timeout"),
@@ -199,7 +199,7 @@ class TestOnEventFalseStopsStreamEarly:
             return False  # stop after first event
 
         with patch("subprocess.Popen", return_value=_FakeProc()), \
-             patch.dict(os.environ, {"VNX_GEMINI_STREAM": "1"}), \
+             patch("provider_spawns.gemini_spawn.gemini_stream_enabled", return_value=True), \
              patch(
                  "provider_spawns.gemini_spawn._GeminiNormalizerHost.drain_stream",
                  return_value=iter(events),
@@ -226,7 +226,7 @@ class TestOnEventFalseStopsStreamEarly:
             return True  # continue
 
         with patch("subprocess.Popen", return_value=_FakeProc()), \
-             patch.dict(os.environ, {"VNX_GEMINI_STREAM": "1"}), \
+             patch("provider_spawns.gemini_spawn.gemini_stream_enabled", return_value=True), \
              patch(
                  "provider_spawns.gemini_spawn._GeminiNormalizerHost.drain_stream",
                  return_value=iter(events),
@@ -258,7 +258,7 @@ class TestEventWriterFailureLoggedAndCounted:
             raise RuntimeError("simulated audit write failure")
 
         with patch("subprocess.Popen", return_value=_FakeProc()), \
-             patch.dict(os.environ, {"VNX_GEMINI_STREAM": "1"}), \
+             patch("provider_spawns.gemini_spawn.gemini_stream_enabled", return_value=True), \
              patch(
                  "provider_spawns.gemini_spawn._GeminiNormalizerHost.drain_stream",
                  return_value=iter(events),
@@ -283,7 +283,7 @@ class TestBrokenPipeReturnsStructuredFailure:
     def test_streaming_broken_pipe_returns_error_result(self):
         """BrokenPipeError on stdin.write returns GeminiSpawnResult with error."""
         with patch("subprocess.Popen", return_value=_FakeProc(raise_broken_pipe=True)), \
-             patch.dict(os.environ, {"VNX_GEMINI_STREAM": "1"}):
+             patch("provider_spawns.gemini_spawn.gemini_stream_enabled", return_value=True):
             result = spawn_gemini("prompt", "gemini-2.5-pro", "d1", "T3")
 
         assert result.returncode != 0
@@ -292,7 +292,7 @@ class TestBrokenPipeReturnsStructuredFailure:
     def test_legacy_broken_pipe_returns_error_result(self):
         """BrokenPipeError on stdin.write (legacy path) returns GeminiSpawnResult."""
         with patch("subprocess.Popen", return_value=_FakeProc(raise_broken_pipe=True)), \
-             patch.dict(os.environ, {"VNX_GEMINI_STREAM": "0"}):
+             patch("provider_spawns.gemini_spawn.gemini_stream_enabled", return_value=False):
             result = spawn_gemini("prompt", "gemini-2.5-pro", "d1", "T3")
 
         assert result.returncode != 0

@@ -53,12 +53,9 @@ PLACEBO_ARM = "placebo"
 def _placebo_arm_enabled() -> bool:
     """VNX_INTEL_PLACEBO_ARM — off by default; resolved via config_runtime so an
     operator's dashboard toggle is honoured the same way as every other
-    VNX_INTEL_* runtime flag. Direct env read as a fail-soft fallback only."""
-    try:
-        import config_runtime
-        return config_runtime.get_bool("VNX_INTEL_PLACEBO_ARM")
-    except Exception:
-        return os.environ.get("VNX_INTEL_PLACEBO_ARM", "0") in {"1", "true", "yes", "on"}
+    VNX_INTEL_* runtime flag. The env layer is inside config_runtime; no second read here."""
+    import config_runtime
+    return config_runtime.get_bool("VNX_INTEL_PLACEBO_ARM")
 
 
 _WINDOW_FIELDS = frozenset({"window_id", "salt", "control_fraction", "opened_utc", "hash_version"})

@@ -19,7 +19,7 @@ import logging
 import os
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import NamedTuple, Optional
 
 _LIB = str(Path(__file__).resolve().parent)
 if _LIB not in sys.path:
@@ -34,7 +34,29 @@ logger = logging.getLogger(__name__)
 _wired_for: "dict[tuple[str, str], bool]" = {}
 
 
-def _resolve_state_dir(state_dir: "str | Path | None") -> Optional[Path]:
+class WireStatus(NamedTuple):
+    """Last :func:`autowire`: ``cause`` None (wired), ``no_project``, ``store_missing`` (project
+    known, no runtime_coordination.db) or ``resolver_failed`` (config-een-oppervlak V3.1)."""
+    cause: Optional[str]
+    project_id: Optional[str]
+    state_dir: Optional[str]
+
+
+_wire_status: Optional[WireStatus] = None
+
+
+def wire_status() -> Optional[WireStatus]:
+    """Why the last :func:`autowire` did or did not wire a store; None before the first call."""
+    return _wire_status
+
+
+def _failed(cause: str, project_id: Optional[str], state_dir: "Path | None") -> bool:
+    global _wire_status
+    _wire_status = WireStatus(cause, project_id, str(state_dir) if state_dir else None)
+    return False
+
+
+def _resolve_state_dir(state_dir: "str | Path | None") -> "tuple[Optional[Path], Optional[str]]":
     """Resolve the runtime state dir. Order: explicit arg > ``$VNX_STATE_DIR`` > the fabric's
     canonical resolver (``vnx_paths.resolve_paths()["VNX_STATE_DIR"]``) — the same resolver
     ``orphan_sweep.py`` and ``glm_gate.py``'s ``_resolve_data_dir`` chain fall back to.
@@ -43,12 +65,13 @@ def _resolve_state_dir(state_dir: "str | Path | None") -> Optional[Path]:
     ``VNX_STATE_DIR`` export unable to see an operator-set ``project_config`` value even though
     ``vnx_paths.resolve_paths()`` finds the exact same store two lines later — a genuine
     review-gate chain stall on a flag that was correctly set in the DB the whole time.
+    Returns ``(state_dir, cause)``: cause ``resolver_failed`` when the resolver raised, else None.
     """
     if state_dir:
-        return Path(state_dir)
+        return Path(state_dir), None
     env_sd = os.environ.get("VNX_STATE_DIR")
     if env_sd:
-        return Path(env_sd)
+        return Path(env_sd), None
     try:
         from vnx_paths import resolve_paths  # type: ignore[import]
         resolved = resolve_paths().get("VNX_STATE_DIR")
@@ -59,15 +82,15 @@ def _resolve_state_dir(state_dir: "str | Path | None") -> Optional[Path]:
             "env vars / registry defaults only",
             exc,
         )
-        return None
+        return None, "resolver_failed"
     if not resolved:
         logger.warning(
             "config_runtime: canonical state-dir resolver returned no VNX_STATE_DIR; operator "
             "config in project_config will NOT be read this process — reads fall back to env vars "
             "/ registry defaults only"
         )
-        return None
-    return Path(resolved)
+        return None, None
+    return Path(resolved), None
 
 
 def _resolve_project_id(state_dir: Path, project_id: Optional[str]) -> Optional[str]:
@@ -89,12 +112,13 @@ def autowire(state_dir: "str | Path | None" = None, project_id: Optional[str] = 
     Keyed by (state_dir, project_id): if the same pair is requested again it is a fast no-op
     (idempotent); a DIFFERENT project_id re-wires to that project's store. Fail-soft — any missing
     state dir / project_id / DB leaves the registry env-only and returns False."""
-    global _wired_for
+    global _wired_for, _wire_status
     try:
-        sd = _resolve_state_dir(state_dir)
+        sd, cause = _resolve_state_dir(state_dir)
         if sd is None:
             # _resolve_state_dir already logged the reason (env-only miss vs. resolver failure).
-            return False
+            pid = project_id or os.environ.get("VNX_PROJECT_ID") or None
+            return _failed(cause or ("store_missing" if pid else "no_project"), pid, None)
         pid = _resolve_project_id(sd, project_id)
         if not pid:
             logger.warning(
@@ -103,7 +127,7 @@ def autowire(state_dir: "str | Path | None" = None, project_id: Optional[str] = 
                 "registry defaults only",
                 sd,
             )
-            return False
+            return _failed("no_project", None, sd)
         wire_key = (str(sd), pid)
         if not _wired_for.get(wire_key):
             # First time for this pair: confirm the DB exists before wiring.
@@ -114,7 +138,7 @@ def autowire(state_dir: "str | Path | None" = None, project_id: Optional[str] = 
                     "back to env vars / registry defaults only",
                     sd, pid,
                 )
-                return False
+                return _failed("store_missing", pid, sd)
         # Always (re)apply the global registry state for the requested pair, so a switch
         # back to a previously-wired project restores ITS resolver + default — a bare cache
         # hit would otherwise leave the registry pointed at the last-wired project.
@@ -123,9 +147,12 @@ def autowire(state_dir: "str | Path | None" = None, project_id: Optional[str] = 
         config_registry.set_db_resolver(config_store_db.make_db_resolver(lambda _pid: resolved))
         config_registry.set_default_project_id(pid)
         _wired_for[wire_key] = True
+        _wire_status = WireStatus(None, pid, str(sd))
         return True
-    except Exception:
-        return False
+    except Exception as exc:
+        logger.warning("config_runtime: autowire failed (%s: %s); reads fall back to env vars / "
+                       "registry defaults only", type(exc).__name__, exc)
+        return _failed("resolver_failed", project_id, None)
 
 
 def strict_resolver() -> "Optional[tuple[config_registry.DbResolver, str]]":
@@ -157,3 +184,10 @@ def get_bool(key: str) -> bool:
     """Bool view of get() — true for any truthy spelling (1/true/yes/on), via config_registry.get_bool."""
     autowire()
     return config_registry.get_bool(key)
+
+
+def central_db_flag() -> str:
+    """``VNX_USE_CENTRAL_DB`` for this process: ``''`` (per-project), ``'1'`` (central) or
+    ``'shadow'``. An unrecognised value is returned as is; each caller decides how to read it.
+    The one read of the key (config-een-oppervlak PR-7): 11 env reads in 8 files became this."""
+    return (get("VNX_USE_CENTRAL_DB") or "").strip()

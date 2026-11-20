@@ -24,6 +24,8 @@ _ARCHIVE_REASON_MAP: dict[str, str] = {
     "archived": "merged_into_other",
 }
 
+_SAFE_TABLE_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
 # Only alphanumerics, hyphens, underscores, and dots — no slashes or dot-dot segments.
 _SAFE_CYCLE_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 
@@ -47,6 +49,39 @@ def _atomic_write_json(path: Path, obj: dict) -> None:
         except OSError:
             pass
         raise
+
+
+def _invalidate_source_row(
+    conn: sqlite3.Connection, table: str, pattern_id: Any, project_id: str,
+    now_iso: str, reason: str,
+) -> None:
+    """Set ``valid_until`` (and ``invalidation_reason`` where present) on the source row.
+
+    Runs in the caller's transaction. An unsafe table name, a table without ``valid_until``
+    and a missing source row each raise ``ValueError``: the whole approval aborts. A row
+    already invalidated keeps its first ``valid_until`` and reason.
+    """
+    if not _SAFE_TABLE_RE.match(table or ""):
+        raise ValueError(f"Invalid original_table for pattern {pattern_id!r}: {table!r}")
+    columns = {row[1] for row in conn.execute(f'PRAGMA table_info("{table}")')}
+    if "valid_until" not in columns:
+        raise ValueError(
+            f"Cannot invalidate {table}#{pattern_id}: table has no valid_until column"
+        )
+    sets = ["valid_until = COALESCE(valid_until, ?)"]
+    params: list[Any] = [now_iso]
+    if "invalidation_reason" in columns:
+        sets.append("invalidation_reason = COALESCE(invalidation_reason, ?)")
+        params.append(reason)
+    cur = conn.execute(
+        f'UPDATE "{table}" SET {", ".join(sets)} WHERE id = ? AND project_id = ?',
+        (*params, pattern_id, project_id),
+    )
+    if cur.rowcount != 1:
+        raise ValueError(
+            f"Source row {table}#{pattern_id} not found for project {project_id!r}"
+            f" (matched {cur.rowcount})"
+        )
 
 
 def _emit_review_event(event: dict[str, Any], data_root: Path) -> None:
@@ -146,7 +181,7 @@ def approve_cycle(
 ) -> None:
     """Apply consolidation to DB; emit NDJSON event first (ADR-005).
 
-    Archive inserts and the status UPDATE are one atomic unit: if any insert
+    Archive inserts, the source-row invalidation and the status UPDATE are one atomic unit: if any insert
     fails the exception propagates, conn.commit() is never called, and the
     pending-review.json is not modified — cycle stays awaiting review.
     """
@@ -168,6 +203,7 @@ def approve_cycle(
         dr,
     )
 
+    now_iso = datetime.now(timezone.utc).isoformat()
     conn = sqlite3.connect(str(db_path))
     try:
         for action_key, archive_reason in _ARCHIVE_REASON_MAP.items():
@@ -184,10 +220,13 @@ def approve_cycle(
                     " VALUES (?, ?, ?, ?, ?)",
                     (cycle_id, project_id, pattern_id, table, archive_reason),
                 )
+                # Same transaction: the next cycle no longer reads the source row.
+                _invalidate_source_row(
+                    conn, table, pattern_id, project_id, now_iso, archive_reason)
         conn.execute(
             "UPDATE dream_cycles SET status='reviewed', operator_reviewed=1, completed_at=?"
             " WHERE cycle_id=? AND project_id=?",
-            (datetime.now(timezone.utc).isoformat(), cycle_id, project_id),
+            (now_iso, cycle_id, project_id),
         )
         conn.commit()
     finally:

@@ -667,7 +667,7 @@ if __name__ == "__main__":
             sys.exit(1)
         _ctx = _dm.DispatchContext(
             project_id=_project_id,
-            session_id=getattr(args, "session_id", None) or os.environ.get("VNX_SESSION_ID"),
+            session_id=getattr(args, "session_id", None),
             task_class=getattr(args, "task_class", None) or None,
             dispatch_id=args.dispatch_id,
         )

@@ -43,6 +43,10 @@ OUTCOMES, CHANNELS = ("beantwoord", "vervallen"), ("kickoff", "rotatie", "status
 REFUSED_PATTERNS = frozenset({"sk_key", "github_token", "aws_key_id", "slack_token", "bearer",
                               "secret_assignment", "authorization_header", "pem_block", "jwt"})
 _LIMITS = {"vraag": 200, "kopieerblok": 10**6, "citaat": 300}  # the free-text fields and their length limit; all three are scanned for secrets
+# ADR-088 decision 5: the PR-size exception is a ``grant`` on an ``answer`` line; no other field and no other reason.
+GRANT_FIELDS = frozenset({"ceiling", "reason", "head_sha", "base_ref", "lines", "measured_at"})
+GRANT_REASONS = frozenset({"splitting_removes_tests", "one_working_unit", "generated", "mechanical_rename"})
+_HEX40 = frozenset("0123456789abcdef")
 
 
 class QueueRefused(ValueError):
@@ -98,7 +102,51 @@ def check_line(project_id: str, line: Any) -> Dict[str, Any]:
         if name not in line:
             raise ValueError(f"{kind} misses {name}")
     _check_values(project_id, kind, line)
+    if "grant" in line:
+        if kind != "answer":
+            raise ValueError(f"{kind}: grant is only on an answer line")
+        _check_grant(line["grant"])
     return line
+
+
+def _utc_ok(value: Any) -> bool:
+    if not _ts_ok(value):
+        return False
+    return datetime.fromisoformat(value.strip().replace("Z", "+00:00")).utcoffset() == timedelta(0)
+
+
+def _check_grant(grant: Any) -> None:
+    """ADR-088 decision 5: every field present and valid, or the whole line is invalid (raises ValueError)."""
+    if not isinstance(grant, dict):
+        raise ValueError("grant: not an object")
+    if set(grant) != GRANT_FIELDS:
+        raise ValueError("grant: fields are exactly " + ", ".join(sorted(GRANT_FIELDS)))
+    if grant["reason"] not in GRANT_REASONS:
+        raise ValueError("grant: reason is not in the closed set")
+    if not _int(grant["lines"], 0):
+        raise ValueError("grant: lines is not a non-negative integer")
+    if not _int(grant["ceiling"], max(1, grant["lines"])):
+        raise ValueError("grant: ceiling is not a positive integer of at least lines")
+    sha = grant["head_sha"]
+    if not (isinstance(sha, str) and len(sha) == 40 and set(sha) <= _HEX40):
+        raise ValueError("grant: head_sha is not a 40-hex sha")
+    if not _text(grant["base_ref"]) or len(grant["base_ref"]) > 255:
+        raise ValueError("grant: base_ref is empty, not text or too long")
+    if not _utc_ok(grant["measured_at"]):
+        raise ValueError("grant: measured_at is not an ISO UTC timestamp")
+
+
+def _check_pr_opened(line: Mapping[str, Any]) -> None:
+    """ADR-088 decision 6, on write only (an older ``pr:`` line without them replays with ceiling None): a ``pr:``
+    point opens with bron 2, a ceiling above 0 and a reason from the closed set; no other point carries either."""
+    if not str(line["ref"]).startswith("pr:"):
+        if "ceiling" in line or "reason" in line:
+            raise ValueError("opened: ceiling and reason are only on a pr: point")
+        return
+    if line["bron"] != 2:
+        raise ValueError("opened: a pr: point opens only with bron 2 (besluit)")
+    if not _int(line.get("ceiling"), 1) or line.get("reason") not in GRANT_REASONS:
+        raise ValueError("opened: a pr: point needs a ceiling above 0 and a reason from the closed set")
 
 
 def _check_values(project_id: str, kind: str, line: Mapping[str, Any]) -> None:
@@ -161,7 +209,9 @@ def _fold(lines: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
             points.setdefault(line["point_id"], {
                 "point_id": line["point_id"], "state": "open", "bron": line["bron"], "ref": line["ref"],
                 "revisie": line["revisie"], "vraag": line["vraag"], "sluit_bij": line["sluit_bij"],
-                "asked_at": line["asked_at"], "presented": None, "bewijs": None, "unknown_reden": None})
+                "asked_at": line["asked_at"], "presented": None, "bewijs": None, "unknown_reden": None,
+                "ceiling": line.get("ceiling") if _int(line.get("ceiling"), 1) else None,
+                "reason": line.get("reason") if line.get("reason") in GRANT_REASONS else None})
             continue
         point = points.get(line.get("point_id"))  # push_reserved has no point_id: None
         if point is None:
@@ -234,19 +284,49 @@ def read_state(project_id: str, *, state_dir: Optional[Path] = None) -> Dict[str
     return _read_state(sdir, project_id)
 
 
+def read_lines(project_id: str, *, state_dir: Optional[Path] = None) -> List[Dict[str, Any]]:
+    """Every ledger line in file order. Raises QueueUnreadable on a bad line (never a shorter list)."""
+    return _ledger_lines(Path(state_dir) if state_dir is not None else state_dir_for(project_id), project_id)
+
+
 def answers(project_id: str, *, state_dir: Optional[Path] = None) -> List[Dict[str, Any]]:
     """The ``answer`` lines of the ledger in file order. Raises QueueUnreadable on a bad ledger line."""
     sdir = Path(state_dir) if state_dir is not None else state_dir_for(project_id)
     return [line for line in _ledger_lines(sdir, project_id) if line["kind"] == "answer"]
 
 
+def latest_grant(project_id: str, pr: int, *, state_dir: Optional[Path] = None) -> Optional[Dict[str, Any]]:
+    """ADR-088 decision 5: the grant of the ``pr:<pr>`` point with the highest revision that carries one, as
+    ``{grant, point_id, revision}``; None when no answer of such a point carries a grant (no ledger is no grant).
+    A bad ledger line raises QueueUnreadable, never None: "cannot read" is not "no grant" (the door refuses on it).
+    Only an answer line with a citation counts; a ``check_line`` without one already makes the ledger unreadable."""
+    if not _int(pr, 1):
+        raise ValueError("pr is not a positive integer")
+    sdir = Path(state_dir) if state_dir is not None else state_dir_for(project_id)
+    lines = _ledger_lines(sdir, project_id)
+    ref = f"pr:{pr}"
+    revisions = {ln["point_id"]: ln["revisie"] for ln in lines if ln["kind"] == "opened" and ln["ref"] == ref}
+    best: Optional[Dict[str, Any]] = None
+    for line in lines:
+        pid = line.get("point_id")
+        if line["kind"] != "answer" or "grant" not in line or pid not in revisions or not _text(line["citaat"]):
+            continue
+        if best is None or revisions[pid] > best["revision"]:  # same revision: the first answer stands
+            best = {"grant": dict(line["grant"]), "point_id": pid, "revision": revisions[pid]}
+    return best
+
+
 def append_line(project_id: str, kind: str, fields: Mapping[str, Any], *, now: Optional[str] = None,
-                state_dir: Optional[Path] = None) -> Optional[Dict[str, Any]]:
+                state_dir: Optional[Path] = None, guard: Optional[Callable[..., Optional[str]]] = None,
+                ) -> Optional[Dict[str, Any]]:
     """Validate and append one line, then rebuild the state. Returns the line, or None for an ``opened``
-    whose point_id exists. Raises QueueRefused (nothing written) or QueueUnreadable (ledger broken)."""
+    whose point_id exists. ``guard(points, lines)`` runs under the lock, right before the append: a reason it
+    returns is a refusal. Raises QueueRefused (nothing written) or QueueUnreadable (ledger broken)."""
     line = {**fields, "kind": kind, "project_id": project_id, "ts": now or _now()}
     try:
         check_line(project_id, line)
+        if kind == "opened":
+            _check_pr_opened(line)
     except ValueError as exc:
         raise QueueRefused(str(exc)) from exc
     hits = _secret_names(line)
@@ -254,7 +334,8 @@ def append_line(project_id: str, kind: str, fields: Mapping[str, Any], *, now: O
         raise QueueRefused("refused, secret pattern: " + ", ".join(hits))
     sdir = Path(state_dir) if state_dir is not None else state_dir_for(project_id)
     with _locked(sdir):
-        points = _fold(_ledger_lines(sdir, project_id))
+        lines = _ledger_lines(sdir, project_id)
+        points = _fold(lines)
         ids = line["point_ids"] if kind == "push_reserved" else [line["point_id"]]
         known = [i in points for i in ids]
         if kind == "opened" and known[0]:
@@ -263,6 +344,9 @@ def append_line(project_id: str, kind: str, fields: Mapping[str, Any], *, now: O
             raise QueueRefused(f"{kind}: point_id is not in the ledger")
         if kind == "closed" and points[line["point_id"]]["state"] != "open":
             raise QueueRefused("closed: the point is already closed")
+        why = guard(points, lines) if guard is not None else None
+        if why:
+            raise QueueRefused(why)
         _append(sdir, line)
         _write_state(sdir, _read_state(sdir, project_id))
     return line
@@ -270,13 +354,14 @@ def append_line(project_id: str, kind: str, fields: Mapping[str, Any], *, now: O
 
 def open_point(project_id: str, *, bron: int, ref: str, revisie: int = 1, vraag: str, sluit_bij: str,
                opened_by: str, kopieerblok: str = "", asked_at: Optional[str] = None, now: Optional[str] = None,
-               state_dir: Optional[Path] = None) -> Optional[Dict[str, Any]]:
-    """Open a point; ``ref`` is taken as given. None when it exists. Other kinds: ``append_line``."""
+               state_dir: Optional[Path] = None, extra: Optional[Mapping[str, Any]] = None) -> Optional[Dict[str, Any]]:
+    """Open a point; ``ref`` is taken as given. None when it exists. ``extra`` adds fields ``check_line`` validates
+    (``ceiling`` and ``reason`` of a ``pr:`` point). Other kinds: ``append_line``."""
     stamp = now or _now()
     return append_line(project_id, "opened", {
-        "point_id": point_id(project_id, bron, ref, revisie), "bron": bron, "ref": ref, "revisie": revisie,
-        "vraag": vraag, "sluit_bij": sluit_bij, "kopieerblok": kopieerblok, "asked_at": asked_at or stamp,
-        "opened_by": opened_by}, now=stamp, state_dir=state_dir)
+        **(extra or {}), "point_id": point_id(project_id, bron, ref, revisie), "bron": bron, "ref": ref,
+        "revisie": revisie, "vraag": vraag, "sluit_bij": sluit_bij, "kopieerblok": kopieerblok,
+        "asked_at": asked_at or stamp, "opened_by": opened_by}, now=stamp, state_dir=state_dir)
 
 
 def close_point(project_id: str, pid: str, *, uitkomst: str, bewijs: str, beantwoord_door: str = "onbekend",

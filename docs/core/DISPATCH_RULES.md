@@ -113,6 +113,8 @@ The lock is one flock per project, the file `main_admission.lock` in the state d
 
 `--override-main "<reason>"` covers only this gate, never the CI gate (`--override-reason`). An empty reason is refused. The reason lands on the receipt. The way back on a red main is a revert PR or a fix-forward PR merged with `--override-main revert_or_fix_forward`.
 
+`--override-morning-pause "<reason>"` covers only the `morning_pause` preflight (it runs between `main` and `door`, ADR-095): inside the morning pause a merge is refused without it, an empty reason is refused, and every refusal and override is one line in the morning-round ledger, and an override whose ledger line cannot be written is refused too (`morning_pause_override_unrecorded: <exception type>`).
+
 Who sets the key: Vincent, or the T0 with his approval-id, through `config_store_db.set_config` (it writes an audit row). A builder never does.
 
 The probe `vnx main-window status [--json]` (`scripts/main_window_cli.py`) is read-only. It prints `verdict`, `mode`, `reason`, `base` (sha and run), `running` and `first red`, plus `config:` lines for an invalid config; `--json` gives the full admission record. Exit 0 is GO (also mode off), 1 NO-GO, 2 the probe could not run. A merge chain asks the probe and starts a merge only on GO. The door stays the guardrail, so a running window gives no string of `pr_merge_refused` receipts.
@@ -148,9 +150,9 @@ cap, the takeover chain and the plan-gate seats.
   because its registry entry is marked `approval=True` (`scripts/lib/config_registry.py:205-215`).
   The `vnx` CLI has no config subcommand: write the row through that surface.
 - **Precedence, per value.** `VNX_OVERRIDE_<BARE>` > the `project_config` row > the enforcement layer
-  (the two stacks only) > the profile > `VNX_<BARE>` > the registry default
-  (`config_registry.resolve_with_source`, `scripts/lib/config_registry.py:685`). The profile
-  deliberately outranks a bare env var; an operator value on a field's own key, `override` or row,
+  (the two stacks only) > the profile > the global file `~/.vnx/config.json` (ADR-087) > `VNX_<BARE>`
+  > the registry default (`config_registry.resolve_with_source`, `scripts/lib/config_registry.py`).
+  The profile deliberately outranks a bare env var and a global value; an operator value on a field's own key, `override` or row,
   outranks the profile (`scripts/lib/gate_profile.py:173`).
 - **What each profile does.** `standard` contributes nothing: every reader keeps its own chain, so an
   unset key and `standard` are today's behaviour (`gate_profile.PROFILE_TABLE`,

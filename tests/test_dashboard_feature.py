@@ -592,6 +592,23 @@ class TestComputeTerminalAttention(unittest.TestCase):
         scripts_lib = str(SCRIPTS_LIB)
         scripts_dir = str(PROJECT_ROOT / "scripts")
 
+        # Restore sys.path and the purged modules when the class is done, so
+        # later test files that import from scripts/ do not depend on order.
+        saved_path = list(sys.path)
+        saved_mods = {
+            name: sys.modules[name]
+            for name in ("terminal_state_core", "terminal_state_reconciler", "canonical_state_views")
+            if name in sys.modules
+        }
+
+        def _restore():
+            sys.path[:] = saved_path
+            for name in ("terminal_state_core", "terminal_state_reconciler", "canonical_state_views"):
+                sys.modules.pop(name, None)
+            sys.modules.update(saved_mods)
+
+        cls.addClassCleanup(_restore)
+
         # Remove scripts/ so the lib modules resolve from scripts/lib/ only.
         # test_vnx_process_ux.py adds scripts/ at module load time, which can re-introduce
         # the shadowing after the module-level cleanup at the top of this file.

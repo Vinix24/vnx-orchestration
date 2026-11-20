@@ -263,7 +263,7 @@ record of live, persist-time tagging once `VNX_TAGGER_ENABLED=1`.
 
 ## Off-Switches and Opt-In Flags
 
-All intelligence flags default OFF (feature-dark until explicitly enabled). Precedence: `VNX_OVERRIDE_<BARE>` env → `project_config` DB → `VNX_<BARE>` env → registry default. Registry source: `scripts/lib/config_registry.py`.
+All intelligence flags default OFF (feature-dark until explicitly enabled). Precedence: `VNX_OVERRIDE_<BARE>` env → `project_config` DB → global file `~/.vnx/config.json` (ADR-087) → `VNX_<BARE>` env → registry default. Registry source: `scripts/lib/config_registry.py`.
 
 | Flag | Default | What it controls | Code location |
 |------|---------|-----------------|---------------|

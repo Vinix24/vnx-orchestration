@@ -30,10 +30,18 @@ from typing import Any, Dict, List, Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
 
-from pattern_reattribution import (  # noqa: E402
-    STATUS_ABSENT, STATUS_AMBIGUOUS, STATUS_MOVES, STATUS_POSITIVE_OWN,
-    STATUS_STORE_ONLY, STATUS_UNATTRIBUTED, TABLES, build_attribution_index,
-)
+from lib_module import load_lib_module  # noqa: E402
+
+# scripts/pattern_reattribution.py has the same name: bind the scripts/lib module whatever sys.path order.
+_pattern_reattribution = load_lib_module("pattern_reattribution")
+STATUS_ABSENT = _pattern_reattribution.STATUS_ABSENT
+STATUS_AMBIGUOUS = _pattern_reattribution.STATUS_AMBIGUOUS
+STATUS_MOVES = _pattern_reattribution.STATUS_MOVES
+STATUS_POSITIVE_OWN = _pattern_reattribution.STATUS_POSITIVE_OWN
+STATUS_STORE_ONLY = _pattern_reattribution.STATUS_STORE_ONLY
+STATUS_UNATTRIBUTED = _pattern_reattribution.STATUS_UNATTRIBUTED
+TABLES = _pattern_reattribution.TABLES
+build_attribution_index = _pattern_reattribution.build_attribution_index
 from qi_transfer_plan import (  # noqa: E402
     IDENTITY_EXCLUDED, MUTABLE_COLUMNS, _scan_rows, content_key, open_readonly, plan_database, stable_key,
 )

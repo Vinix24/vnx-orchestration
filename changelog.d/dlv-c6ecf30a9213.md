@@ -1,0 +1,1 @@
+- fix(forge): the repo slug in the TEST MODE GUARD message and the marketplace owner of export_toolkit_plugin.sh come from the repo (origin, or --owner), not from a fixed operator name (agnostisch-standaard AG-4)

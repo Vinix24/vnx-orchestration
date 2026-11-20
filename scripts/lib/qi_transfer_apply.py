@@ -36,7 +36,15 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from atomic_io import atomic_write_text, slot_lock
-from pattern_reattribution import STATUS_MOVES, TABLES, _same_file, build_attribution_index, decide_row
+from lib_module import load_lib_module
+
+# scripts/pattern_reattribution.py has the same name: bind the scripts/lib module whatever sys.path order.
+_pattern_reattribution = load_lib_module("pattern_reattribution")
+STATUS_MOVES = _pattern_reattribution.STATUS_MOVES
+TABLES = _pattern_reattribution.TABLES
+_same_file = _pattern_reattribution._same_file
+build_attribution_index = _pattern_reattribution.build_attribution_index
+decide_row = _pattern_reattribution.decide_row
 from qi_transfer_plan import (
     JOURNAL_STATES, JUNCTION_TABLES, PLAN_VERSION, _columns, _fetch_rows, _json_default, _user_version,
     canonical_json, content_key, journal_path, pattern_id_for, read_pre_image, schema_gaps,

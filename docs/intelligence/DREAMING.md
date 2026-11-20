@@ -16,7 +16,7 @@ The model is the provider `VNX_DREAM_PROVIDER` names (`_PROVIDER_KEY`, `scripts/
 
 A cycle never changes a pattern. It writes `<data root>/state/dream/<cycle_id>-pending-review.json` with `requires_operator_review: true` and a `dream_cycles` row with `operator_reviewed=0` (`_write_pending_review`, `run_dream_cycle`).
 
-Patterns are archived only when an operator approves the review (`review_gate.approve_cycle`). Even then the original rows stay: the approval writes `dream_pattern_archives` records. Dreaming proposes. A human decides.
+Patterns are archived only when an operator approves the review (`review_gate.approve_cycle`). The approval writes `dream_pattern_archives` records and sets `valid_until` on the source rows, so the next cycle no longer reads them; an unchanged input is skipped (`unchanged_input`). Dreaming proposes. A human decides.
 
 There is no auto-apply. [ADR-019](../governance/decisions/ADR-019-auto-dream-memory-consolidation.md) describes a post-burn-in auto-apply for exact deduplication. The code on main does not implement it, and ADR-066 states that this track introduces none.
 

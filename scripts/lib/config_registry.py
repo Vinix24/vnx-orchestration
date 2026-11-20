@@ -19,12 +19,15 @@ activation like this one, not an accident to guard against.
 
 Precedence (highest first), implemented by `get()`:
   1. ``VNX_OVERRIDE_<BARE>`` env var — the operator emergency brake (e.g. VNX_OVERRIDE_SCOUT_PREPASS).
-  2. ``project_config`` DB value — the UI-set value (wired in a later PR; injected via ``db_resolver``).
-  3. ``VNX_<BARE>`` env var — the process-start value (today's behaviour; never broken).
-  4. the registry default.
+  2. ``project_config`` DB value — the UI-set value (injected via ``db_resolver``); skipped for a
+     key with scope ``global``.
+  3. ``global_config`` — the machine-wide value in ``~/.vnx/config.json`` (``config_global``,
+     ADR-087; ``VNX_GLOBAL_CONFIG_FILE`` moves it). Needs no store.
+  4. ``VNX_<BARE>`` env var — the process-start value.
+  5. the registry default.
 
-Until the DB layer lands, ``db_resolver`` is None and step 2 is skipped — so this module is a
-behaviour-preserving overlay on the env-only world.
+A stored value (project or global) beats an exported env value; ``VNX_OVERRIDE_<BARE>`` overrules
+one process. Without a wired store step 2 is skipped; without a global file step 3 is.
 
 SUBSYSTEM COCKPIT METADATA. ``subsystem`` and ``status`` are pure display metadata for the
 framework-status cockpit (`docs/core/SUBSYSTEMS.md`): which subsystem a flag belongs to, and that
@@ -38,10 +41,11 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Tuple
 
 # The only status values a cockpit row may declare (dispatch: framework-status-audit-and-cockpit PR-1).
 ALLOWED_STATUSES = frozenset(("LIVE", "PARK", "CUT", "ACTIVATE", "SCOPE", "COCKPIT"))
+ALLOWED_SCOPES = frozenset(("project", "global"))
 
 
 @dataclass(frozen=True)
@@ -66,12 +70,26 @@ class ConfigEntry:
     # or canonical_flags() raises rather than silently picking by dict order.
     read_site_wired: bool = True
     cockpit_canonical: bool = False
+    # ADR-087 decision 2. "project" (every key today): a project_config row beats the global
+    # value. "global": only the global file counts; the resolver ignores a project row.
+    scope: str = "project"
+    # Enum keys only; None means no check. The write-side check is G3 (config_store_db._coerce).
+    allowed_values: Optional[Tuple[str, ...]] = None
+
+    def __post_init__(self) -> None:
+        if self.scope not in ALLOWED_SCOPES:
+            raise ValueError(f"{self.key}: scope {self.scope!r} is not one of {sorted(ALLOWED_SCOPES)}")
+        if self.allowed_values is not None and (
+                not isinstance(self.allowed_values, tuple) or not self.allowed_values
+                or not all(isinstance(v, str) for v in self.allowed_values)):
+            raise ValueError(f"{self.key}: allowed_values must be a non-empty tuple of strings")
 
 
 def _e(key, type_, default, category, description, *, writable=True, approval=False, planned=False,
-       subsystem=None, status=None, read_site_wired=True, cockpit_canonical=False):
+       subsystem=None, status=None, read_site_wired=True, cockpit_canonical=False, scope="project",
+       allowed_values=None):
     return ConfigEntry(key, type_, default, category, description, writable, approval, planned,
-                        subsystem, status, read_site_wired, cockpit_canonical)
+                        subsystem, status, read_site_wired, cockpit_canonical, scope, allowed_values)
 
 
 # The inventory. Defaults verified against the read-sites (codex review finding: defaults must
@@ -82,6 +100,78 @@ def _e(key, type_, default, category, description, *, writable=True, approval=Fa
 # flag-BACKED subsystems; the flag-LESS kernel subsystems (dispatch-plan, phantom_guard, etc.) live
 # in CONFIG_REGISTRY_SUBSYSTEMS below so the two sets never collide on the same subsystem name.
 CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
+    # config-een-oppervlak PR-1 (ADR-087): rows for the keys the reader PRs move onto config_runtime.
+    # Placed first on purpose: _canonical_flags lets the last-inserted key per subsystem win, so these
+    # rows must stay before the existing master flags to leave the cockpit ledger unchanged.
+    # Behaviour-neutral: every default equals what the reader uses today and every reader still
+    # reads os.environ, so read_site_wired=False until its own PR. The scope of a key follows plan V2.1.
+    "VNX_ANALYZER_LLM": _e(
+        "VNX_ANALYZER_LLM", "string", "ollama-only", "intelligence",
+        "Conversation-analyzer LLM strategy: auto | ollama-only | claude-only | deepseek-harness. "
+        "Governs unrestricted sessions only.", scope="global", subsystem="intelligence-self-learning-loop", status="ACTIVATE", read_site_wired=False,
+        allowed_values=("auto", "ollama-only", "claude-only", "deepseek-harness")),
+    "VNX_ANALYZER_RESTRICTED_CLAUDE_CAP": _e(
+        "VNX_ANALYZER_RESTRICTED_CLAUDE_CAP", "integer", "", "intelligence",
+        "Nightly cap on restricted sessions sent to Claude. Empty means the reader's own default (20).",
+        scope="global", subsystem="intelligence-self-learning-loop", status="ACTIVATE", read_site_wired=False),
+    "VNX_OLLAMA_HOST": _e(
+        "VNX_OLLAMA_HOST", "string", "http://localhost:11434", "intelligence",
+        "Ollama base URL.", scope="global", subsystem="intelligence-self-learning-loop", status="ACTIVATE", read_site_wired=False),
+    "VNX_OLLAMA_MODEL": _e(
+        "VNX_OLLAMA_MODEL", "string", "qwen2.5-coder:14b", "intelligence",
+        "Ollama model of the conversation analyzer. The ollama adapter and the classifier provider "
+        "still carry other defaults of their own (PR-4a unifies them).",
+        scope="global", subsystem="intelligence-self-learning-loop", status="ACTIVATE", read_site_wired=False),
+    "VNX_DIGEST_EMAIL": _e(
+        "VNX_DIGEST_EMAIL", "string", "", "intelligence",
+        "Recipient of the nightly digest email; empty skips the email phase.",
+        scope="global", subsystem="intelligence-self-learning-loop", status="ACTIVATE", read_site_wired=False),
+    "VNX_SMTP_HOST": _e(
+        "VNX_SMTP_HOST", "string", "smtp.gmail.com", "intelligence",
+        "SMTP server of the digest email.", scope="global", subsystem="intelligence-self-learning-loop", status="ACTIVATE", read_site_wired=False),
+    "VNX_RECEIPT_CLASSIFIER_ENABLED": _e(
+        "VNX_RECEIPT_CLASSIFIER_ENABLED", "bool", "0", "intelligence",
+        "Receipt classifier opt-in.", subsystem="intelligence-self-learning-loop", status="ACTIVATE", read_site_wired=False),
+    "VNX_AUTO_REPORT": _e(
+        "VNX_AUTO_REPORT", "bool", "1", "dispatch",
+        "Auto-report Stop hook gate. Default on: the value every fabric process saw while "
+        "vnx_paths.sh exported it.", subsystem="headless-dispatch-routing", status="ACTIVATE"),
+    "VNX_ENFORCE_WORKER_PERMISSIONS": _e(
+        "VNX_ENFORCE_WORKER_PERMISSIONS", "bool", "0", "gate",
+        "Worker permission enforcement (off by default).", subsystem="governance-enforcement-stack", status="ACTIVATE", read_site_wired=False),
+    "VNX_PROVENANCE_ENFORCEMENT": _e(
+        "VNX_PROVENANCE_ENFORCEMENT", "bool", "0", "gate",
+        "Provenance (trace token) check: 0 warns, 1 blocks.", subsystem="governance-enforcement-stack", status="ACTIVATE", read_site_wired=False),
+    "VNX_PROVENANCE_LEGACY_ACCEPTED": _e(
+        "VNX_PROVENANCE_LEGACY_ACCEPTED", "bool", "1", "gate",
+        "1 accepts legacy trace-token formats, 0 only the preferred one.", subsystem="governance-enforcement-stack", status="ACTIVATE", read_site_wired=False),
+    "VNX_SLUG_ENFORCEMENT": _e(
+        "VNX_SLUG_ENFORCEMENT", "bool", "0", "gate",
+        "CI slug match: 0 warns, 1 blocks.", subsystem="governance-enforcement-stack", status="ACTIVATE", read_site_wired=False),
+    "VNX_QUEUE_POPUP_ENABLED": _e(
+        "VNX_QUEUE_POPUP_ENABLED", "bool", "1", "dispatch",
+        "Queue popup of the start and resume commands; 0 turns it off.", subsystem="headless-dispatch-routing", status="ACTIVATE", read_site_wired=False),
+    "VNX_T1_PROVIDER": _e(
+        "VNX_T1_PROVIDER", "string", "", "dispatch",
+        "Provider of terminal T1 (layer 2 of the worker pair, ADR-091). Empty: this layer delivers "
+        "nothing and the worker registry decides.", subsystem="headless-dispatch-routing", status="ACTIVATE", read_site_wired=False),
+    "VNX_T2_PROVIDER": _e(
+        "VNX_T2_PROVIDER", "string", "", "dispatch",
+        "Provider of terminal T2 (layer 2 of the worker pair, ADR-091). Empty: this layer delivers "
+        "nothing and the worker registry decides.", subsystem="headless-dispatch-routing", status="ACTIVATE", read_site_wired=False),
+    "VNX_T3_PROVIDER": _e(
+        "VNX_T3_PROVIDER", "string", "", "dispatch",
+        "Provider of terminal T3 (layer 2 of the worker pair, ADR-091). Empty: this layer delivers "
+        "nothing and the worker registry decides.", subsystem="headless-dispatch-routing", status="ACTIVATE", read_site_wired=False),
+    "VNX_ENFORCEMENT_PROFILE": _e(
+        "VNX_ENFORCEMENT_PROFILE", "string", "shadow", "gate",
+        "Enforcement profile: shadow (default) | enforced.", approval=True, subsystem="governance-enforcement-stack", status="ACTIVATE", read_site_wired=True,
+        allowed_values=("shadow", "enforced")),
+    "VNX_ACCOUNT_DIRS": _e(
+        "VNX_ACCOUNT_DIRS", "string", "[]", "dispatch",
+        "Claude account directories as a JSON list (ADR-090). The reader validates the content.",
+        scope="global", approval=True, subsystem="headless-dispatch-routing", status="ACTIVATE", read_site_wired=False),
+
     "VNX_SCOUT_PREPASS": _e(
         "VNX_SCOUT_PREPASS", "bool", "0", "intelligence",
         "Cheap-model scout recon pre-pass in the door (fail-open).",
@@ -113,7 +203,7 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
     "VNX_HEADLESS_ROUTING": _e(
         "VNX_HEADLESS_ROUTING", "string", "0", "dispatch",
         "Headless dispatch routing mode.",
-        subsystem="headless-dispatch-routing", status="ACTIVATE"),
+        subsystem="headless-dispatch-routing", status="ACTIVATE", cockpit_canonical=True),
     "VNX_BUILDER_SETTING_SOURCES": _e(
         "VNX_BUILDER_SETTING_SOURCES", "string", "project,local", "dispatch",
         "Comma list passed as --setting-sources to headless claude builders (the claude_headless "
@@ -751,6 +841,28 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         ".vnx-agent-skills/) or on (the skills at the provider's native, discovered destination, "
         "set per project by the operator). An unknown value reads as off.",
         subsystem="agent-layout", status="SCOPE"),
+    # ochtendronde (ADR-095): morning_pause.py reads these through a getter; since D1b the door
+    # (stop_conditions.check_morning_pause) and pr_merge read them (morning_pause_gate.py), so all
+    # four are wired. VNX_MORNING_PAUSE_ENABLED is the subsystem's canonical flag, inserted last
+    # so the CLI's last-inserted rule agrees.
+    "VNX_MORNING_PAUSE_START": _e(
+        "VNX_MORNING_PAUSE_START", "string", "07:00", "dispatch",
+        "Morning pause start, HH:MM in VNX_MORNING_PAUSE_TZ.",
+        subsystem="morning-pause", status="PARK"),
+    "VNX_MORNING_PAUSE_DEADLINE": _e(
+        "VNX_MORNING_PAUSE_DEADLINE", "string", "09:00", "dispatch",
+        "Morning pause deadline, HH:MM in VNX_MORNING_PAUSE_TZ; after it the pause never holds.",
+        subsystem="morning-pause", status="PARK"),
+    "VNX_MORNING_PAUSE_TZ": _e(
+        "VNX_MORNING_PAUSE_TZ", "string", "Europe/Amsterdam", "dispatch",
+        "IANA timezone of the morning pause window.",
+        subsystem="morning-pause", status="PARK"),
+    "VNX_MORNING_PAUSE_ENABLED": _e(
+        "VNX_MORNING_PAUSE_ENABLED", "bool", "false", "dispatch",
+        "Morning pause (ADR-095): firing and merging stop from the start time until the morning "
+        "points are decided, at the latest at the deadline. Off by default; D4 turns it on.",
+        subsystem="morning-pause", status="PARK", cockpit_canonical=True),
+
 }
 
 # Flag-LESS subsystems from the cockpit ledger (docs/core/SUBSYSTEMS.md) — kernel/meta subsystems
@@ -832,7 +944,14 @@ def set_default_project_id(project_id: Optional[str]) -> None:
 # The layers of the precedence chain, highest first, by the source name resolve_with_source
 # returns for each. One constant, so a new layer (config-een-oppervlak G2 adds a global one)
 # lands in the chain walk and in every ``layers=`` subset a reader names at the same time.
-CHAIN_LAYERS: "tuple[str, ...]" = ("override", "project_config", "env", "default")
+CHAIN_LAYERS: "tuple[str, ...]" = ("override", "project_config", "global_config", "env", "default")
+
+# The sources a strict read returns for a layer it could not read: never a value, never "off".
+ERROR_SOURCES = frozenset(("project_config_error", "global_config_error"))
+
+# One WARNING per unreadable global file (path, reason) and per ignored project row (project, key).
+_WARNED_GLOBAL_UNREADABLE: set = set()
+_WARNED_IGNORED_PROJECT_ROW: set = set()
 
 
 def _checked_layers(layers) -> frozenset:
@@ -859,7 +978,8 @@ def resolve_with_source(
     """``(value, source)`` through the one precedence chain :func:`_resolve` is built on.
 
     ``source`` is ``override`` (``VNX_OVERRIDE_<BARE>``), ``project_config`` (the DB layer),
-    ``env`` (``VNX_<BARE>`` as the process started), ``default`` (the registry default) or
+    ``global_config`` (``~/.vnx/config.json`` via ``config_global``, ADR-087), ``env``
+    (``VNX_<BARE>`` as the process started), ``default`` (the registry default) or
     ``unset`` (no value in any layer walked). With no ``resolver`` and
     ``use_default_resolver`` the process's wired store and default project are used, as
     :func:`get` does.
@@ -868,7 +988,10 @@ def resolve_with_source(
     treated as "no row" and the chain falls through to env/default, as :func:`get` always did.
     On, the chain stops there and returns ``(None, "project_config_error")``: the DB state is
     unknown, so a caller whose safe answer is "off" can tell that apart from "no row". The
-    override is still read first, before the DB is consulted.
+    override is still read first, before the DB is consulted. An unreadable global file is
+    handled the same way: strict stops on ``(None, "global_config_error")``; not strict falls
+    through to env with one WARNING per process. A missing global file is no value. A key with
+    scope ``global`` skips the project layer; a project row for it is ignored with a WARNING.
 
     ``layers`` (default :data:`CHAIN_LAYERS`, the full chain) names the layers walked, always
     in chain order whatever order they are given in. A reader that must tell the approved
@@ -885,7 +1008,9 @@ def resolve_with_source(
         if resolver is None and use_default_resolver:
             resolver = _db_resolver
             project_id = project_id if project_id is not None else _default_project_id
-        if resolver is not None:
+        if resolver is not None and entry is not None and entry.scope == "global":
+            _warn_ignored_project_row(key, project_id, resolver)
+        elif resolver is not None:
             try:
                 db_val = resolver(project_id, key)
             except Exception as exc:
@@ -897,6 +1022,21 @@ def resolve_with_source(
                 db_val = None
             if db_val is not None:
                 return db_val, "project_config"
+    if "global_config" in walked and entry is not None:
+        import config_global
+        try:
+            global_val = config_global.get(key)
+        except config_global.GlobalConfigUnreadable as exc:
+            if strict_resolver:
+                logging.getLogger(__name__).warning("config_registry: %s", exc)
+                return None, "global_config_error"
+            if (str(exc.path), exc.reason) not in _WARNED_GLOBAL_UNREADABLE:
+                _WARNED_GLOBAL_UNREADABLE.add((str(exc.path), exc.reason))
+                logging.getLogger(__name__).warning(
+                    "config_registry: %s; falling through to env and the default", exc)
+            global_val = None
+        if global_val is not None:
+            return global_val, "global_config"
     env_val = os.environ.get(key)
     if "env" in walked and env_val is not None:
         return env_val, "env"
@@ -905,13 +1045,31 @@ def resolve_with_source(
     return None, "unset"
 
 
+def _warn_ignored_project_row(key: str, project_id: Optional[str], resolver: DbResolver) -> None:
+    """One WARNING per (project, key) when a scope-global key has a project row; never raises."""
+    if (project_id, key) in _WARNED_IGNORED_PROJECT_ROW:
+        return
+    try:
+        row = resolver(project_id, key)
+    except Exception as exc:
+        # Only a diagnostic: the project layer does not apply to a global key either way.
+        logging.getLogger(__name__).debug("config_registry: no project-row check for global key %s "
+                                          "(%s: %s)", key, type(exc).__name__, exc)
+        return
+    if row is not None:
+        _WARNED_IGNORED_PROJECT_ROW.add((project_id, key))
+        logging.getLogger(__name__).warning(
+            "config_registry: project %s has a project_config row for %s, which has scope "
+            "global; the row is ignored (only the global file counts)", project_id, key)
+
+
 def _resolve(key: str, project_id: Optional[str], resolver: Optional[DbResolver]) -> Optional[str]:
-    """The precedence chain: override > ``resolver``'s DB value > env > registry default.
+    """The precedence chain: override > ``resolver``'s DB value > global file > env > default.
 
     ``resolver`` is the step-2 DB layer in play, or ``None`` for the env-only
     world. Shared by :func:`get` (the process's wired store) and
     :func:`get_for_project` (a store the caller names), so the order of the
-    four sources cannot drift between them. The order lives in
+    five sources cannot drift between them. The order lives in
     :func:`resolve_with_source`; this returns its value.
     """
     return resolve_with_source(key, project_id, resolver, use_default_resolver=False)[0]

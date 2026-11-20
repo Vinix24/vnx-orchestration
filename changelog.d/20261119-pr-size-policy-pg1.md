@@ -1,0 +1,1 @@
+- `scripts/lib/pr_size_policy.py` (pr-grootte-afgedwongen PG-1): the PR-size measurement over `merge_base..head`, the floor rule (an override or env value only tightens under a `refuse` floor), an unreadable key refuses, and the verdict GO/NO-GO/WARN with its record fields. No caller yet; the merge door wires it in PG-1d.

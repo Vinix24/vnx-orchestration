@@ -517,7 +517,45 @@ class TestCallSiteCountDoesNotGrow:
         finally:
             marker.unlink(missing_ok=True)
             if not pre_existing:
-                build_dir.rmdir()
+                _rmdir_naming_foreign_entries(build_dir)
+
+
+def _rmdir_naming_foreign_entries(directory: Path) -> None:
+    """``rmdir`` that names whatever else wrote into the directory when it is not empty.
+
+    CI Profile A failed with ``[Errno 39] Directory not empty: .../build``: a
+    writer other than this test put an entry into ``build/`` between its ``mkdir``
+    and its ``rmdir``. Nothing is deleted here (the entry is not ours); the
+    failure lists the entries so the writer can be traced.
+    """
+    try:
+        directory.rmdir()
+    except OSError as exc:
+        foreign = sorted(entry.name for entry in directory.iterdir()) if directory.is_dir() else []
+        raise AssertionError(
+            f"could not remove {directory} ({exc}); entries written by something other "
+            f"than this test: {foreign}"
+        ) from exc
+
+
+class TestRmdirNamingForeignEntries:
+    def test_an_empty_directory_is_removed(self, tmp_path):
+        target = tmp_path / "build"
+        target.mkdir()
+        _rmdir_naming_foreign_entries(target)
+        assert not target.exists()
+
+    def test_a_foreign_entry_is_named_and_kept(self, tmp_path):
+        target = tmp_path / "build"
+        target.mkdir()
+        (target / "bdist.linux-x86_64").mkdir()
+        with pytest.raises(AssertionError, match=r"bdist\.linux-x86_64"):
+            _rmdir_naming_foreign_entries(target)
+        assert (target / "bdist.linux-x86_64").is_dir()
+
+    def test_a_missing_directory_stays_a_failure(self, tmp_path):
+        with pytest.raises(AssertionError, match=r"could not remove"):
+            _rmdir_naming_foreign_entries(tmp_path / "absent")
 
 
 def _git_init(root: Path) -> None:

@@ -84,6 +84,9 @@ def _build_monitor():
     """
     # Import the class — its module-level `from append_receipt import ...`
     # runs at import time, so we stub it in sys.modules before importing.
+    # Another test file may have removed scripts/ from sys.path; do not depend on order.
+    if str(SCRIPTS_DIR) not in sys.path:
+        sys.path.insert(0, str(SCRIPTS_DIR))
     with _stubbed_heartbeat_ack_monitor_deps():
         from heartbeat_ack_monitor import HeartbeatACKMonitor
 
