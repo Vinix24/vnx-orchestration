@@ -91,6 +91,7 @@ def clean_state(tmp_path, monkeypatch):
     monkeypatch.setenv("VNX_DISPATCH_DIR", str(tmp_path / "data" / "dispatches"))
     monkeypatch.setenv("VNX_HOME", str(vnx_home))
     monkeypatch.setenv("VNX_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setenv("VNX_STATE_SIMPLIFICATION_ROLLBACK", "0")
 
     import generate_t0_recommendations as recs
     # OI-953: scope the module-global reassignments to this test via monkeypatch.
@@ -103,12 +104,19 @@ def clean_state(tmp_path, monkeypatch):
     monkeypatch.setattr(recs, "VNX_ROOT", Path(os.environ.get("VNX_HOME", tmp_path)))
     monkeypatch.setattr(recs, "STATE_DIR", state_dir)
     monkeypatch.setattr(recs, "DISPATCHES_DIR", tmp_path / "dispatches")
+    monkeypatch.setattr(recs, "LEGACY_STATE_DIR", recs.VNX_ROOT / "state")
+    monkeypatch.setattr(recs, "LEGACY_DISPATCHES_DIR", recs.VNX_ROOT / "dispatches")
     monkeypatch.setattr(recs, "RECEIPTS_FILE", state_dir / "t0_receipts.ndjson")
     monkeypatch.setattr(recs, "RECOMMENDATIONS_FILE", state_dir / "t0_recommendations.json")
     monkeypatch.setattr(recs, "ACTIVE_CONFLICTS_FILE", state_dir / "active_conflicts.json")
     monkeypatch.setattr(recs, "PR_QUEUE_STATE_FILE", state_dir / "pr_queue_state.yaml")
     monkeypatch.setattr(recs, "OPEN_ITEMS_DIGEST_FILE", state_dir / "open_items_digest.json")
     monkeypatch.setattr(recs, "STAGING_SEEN_FILE", state_dir / "staging_seen.json")
+    monkeypatch.setattr(recs, "LEGACY_RECEIPTS_FILE", recs.LEGACY_STATE_DIR / "t0_receipts.ndjson")
+    monkeypatch.setattr(recs, "LEGACY_RECOMMENDATIONS_FILE", recs.LEGACY_STATE_DIR / "t0_recommendations.json")
+    monkeypatch.setattr(recs, "LEGACY_PR_QUEUE_STATE_FILE", recs.LEGACY_STATE_DIR / "pr_queue_state.yaml")
+    monkeypatch.setattr(recs, "LEGACY_OPEN_ITEMS_DIGEST_FILE", recs.LEGACY_STATE_DIR / "open_items_digest.json")
+    monkeypatch.setattr(recs, "LEGACY_STAGING_SEEN_FILE", recs.LEGACY_STATE_DIR / "staging_seen.json")
 
     # Clean up test files
     test_files = [
@@ -360,7 +368,8 @@ class TestRecommendationEngineIntegration:
         """Canonical cutover: legacy-only sources should be ignored unless rollback is enabled."""
         import generate_t0_recommendations as recs
 
-        legacy_state = Path(recs.VNX_ROOT) / "state"
+        monkeypatch.setenv("VNX_STATE_SIMPLIFICATION_ROLLBACK", "0")
+        legacy_state = Path(recs.LEGACY_STATE_DIR)
         legacy_state.mkdir(parents=True, exist_ok=True)
         dispatches_dir = Path(recs.DISPATCHES_DIR)
         (dispatches_dir / "completed").mkdir(parents=True, exist_ok=True)
@@ -415,6 +424,67 @@ class TestRecommendationEngineIntegration:
         assert "task_success" not in triggers
         assert "pr_ready" not in triggers
         assert "open_item_blocker" not in triggers
+
+    def test_recommendation_inputs_preserved_with_legacy_fallback_in_rollback_mode(self, clean_state, monkeypatch):
+        """Rollback mode keeps legacy source coverage available during cutover."""
+        import generate_t0_recommendations as recs
+
+        monkeypatch.setenv("VNX_STATE_SIMPLIFICATION_ROLLBACK", "1")
+        legacy_state = Path(recs.LEGACY_STATE_DIR)
+        legacy_state.mkdir(parents=True, exist_ok=True)
+        dispatches_dir = Path(recs.DISPATCHES_DIR)
+        (dispatches_dir / "completed").mkdir(parents=True, exist_ok=True)
+
+        dispatch_id = "DISP-PR-999"
+        (dispatches_dir / "completed" / f"{dispatch_id}.md").write_text(
+            "Gate: implementation\nOn-Success: review\nProgram: system\n",
+            encoding="utf-8",
+        )
+        (legacy_state / "t0_receipts.ndjson").write_text(
+            json.dumps(
+                {
+                    "event_type": "task_complete",
+                    "status": "success",
+                    "dispatch_id": dispatch_id,
+                    "timestamp": datetime.now().isoformat(),
+                    "gate": "implementation",
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        (legacy_state / "pr_queue_state.yaml").write_text(
+            yaml.safe_dump(
+                {
+                    "active_feature": {"name": "Rollback Feature"},
+                    "completed_prs": [],
+                    "in_progress": None,
+                    "blocked": [],
+                    "next_available": ["PR-9"],
+                    "execution_order": ["PR-9"],
+                    "updated_at": datetime.now().isoformat(),
+                }
+            ),
+            encoding="utf-8",
+        )
+        (legacy_state / "open_items_digest.json").write_text(
+            json.dumps(
+                {
+                    "summary": {"open_count": 1, "blocker_count": 1, "warn_count": 0, "info_count": 0},
+                    "top_blockers": [{"id": "OI-009", "title": "Rollback blocker", "pr_id": "PR-9"}],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        engine = RecommendationEngine(lookback_minutes=60)
+        engine.run()
+
+        triggers = {rec.get("trigger") for rec in engine.recommendations}
+        assert "task_success" in triggers
+        assert "pr_ready" in triggers
+        assert "open_item_blocker" in triggers
+
 
 class TestWorkflowIntegration:
     """Test complete workflow integration"""
