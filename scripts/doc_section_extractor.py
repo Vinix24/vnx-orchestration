@@ -5,13 +5,10 @@ Version: 1.0.0
 Purpose: Extract high-quality documentation sections from markdown files
          and populate FTS5 search database alongside code snippets.
 
-Configurable via VNX_DOCS_DIRS environment variable (comma-separated paths,
-relative to PROJECT_ROOT or absolute). When unset, defaults to the project's
-own docs/ directory; set VNX_DOCS_DIRS="" to disable doc indexing.
+Indexes the project's own docs/ directory.
 """
 
 import hashlib
-import os
 import re
 import sqlite3
 import subprocess
@@ -99,29 +96,13 @@ def log(level: str, message: str):
 
 
 def _resolve_docs_dirs() -> List[Path]:
-    """Resolve documentation directories from VNX_DOCS_DIRS env var.
+    """Resolve documentation directories: the project's own ``docs/`` directory.
 
-    When VNX_DOCS_DIRS is UNSET, defaults to the project's own ``docs/`` directory
-    so the project's functional/technical docs are indexed for the doc_relevant
-    intelligence source without operator config. An EXPLICIT empty value
-    (VNX_DOCS_DIRS="") disables doc indexing.
+    The project's functional/technical docs are indexed for the doc_relevant
+    intelligence source without operator config.
     """
-    raw = os.environ.get("VNX_DOCS_DIRS")
-    if raw is None:
-        default_docs = PROJECT_ROOT / "docs"
-        return [default_docs] if default_docs.is_dir() else []
-    if not raw.strip():
-        return []  # explicit empty → doc indexing disabled
-    dirs = []
-    for entry in raw.split(","):
-        p = Path(entry.strip())
-        if not p.is_absolute():
-            p = PROJECT_ROOT / p
-        if p.is_dir():
-            dirs.append(p)
-        else:
-            log("WARN", f"VNX_DOCS_DIRS entry not found: {p}")
-    return dirs
+    default_docs = PROJECT_ROOT / "docs"
+    return [default_docs] if default_docs.is_dir() else []
 
 
 @dataclass
@@ -554,7 +535,7 @@ class DocSectionExtractor:
     def run_extraction(self) -> bool:
         """Orchestrate full extraction pipeline."""
         if not self.docs_dirs:
-            log("INFO", "No docs directories configured (VNX_DOCS_DIRS not set)")
+            log("INFO", "No docs directory found under the project root")
             return True
 
         log("INFO", f"Starting doc section extraction from {len(self.docs_dirs)} directory(ies)...")
@@ -604,7 +585,7 @@ def main():
 
     docs_dirs = _resolve_docs_dirs()
     if not docs_dirs:
-        log("INFO", "VNX_DOCS_DIRS not set — doc extraction disabled")
+        log("INFO", "no docs/ directory — doc extraction disabled")
         return 0
 
     log("INFO", f"Docs directories: {[str(d) for d in docs_dirs]}")

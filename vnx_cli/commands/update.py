@@ -28,6 +28,8 @@ _VNX_VERSION_RO_MODULE = "vnx_version_ro"
 VNX_GIT_REMOTE = "https://github.com/Vinix24/vnx-orchestration.git"
 DEFAULT_KEEP_LAST = 3
 DEFAULT_REGISTRY_PATH = Path.home() / ".vnx" / "projects.json"
+# Root the disk scan for stray ``.vnx-version`` pins starts from (source 4).
+DEFAULT_PIN_SCAN_ROOT = Path.home()
 PROTECTED_VERSIONS_FILE = "protected-versions"
 
 # OI-1718: every cutover measures how far its target lags main and names that
@@ -48,7 +50,7 @@ _BEHIND_CLONE_TIMEOUT_SECONDS = 60
 # OI-1379: the fleet registry (source 1) only protects REGISTERED consumer
 # projects. A project that pins a version via ``.vnx-version`` but was never
 # registered in ~/.vnx/projects.json is invisible to _load_fleet_pins — its
-# pin would otherwise be silently eligible for prune. VNX_PIN_SCAN_ROOTS bounds
+# pin would otherwise be silently eligible for prune. The roots argument of _resolve_pin_scan_roots bounds
 # where the disk-scan protection source (4) looks for stray pins; default is
 # the user's home directory, the one place every consumer project on this
 # machine is expected to live under.
@@ -797,10 +799,7 @@ def _load_fleet_pins(registry_path: "Path | None" = None) -> dict:
     keystone fails open), so every pin found here protects its version dir.
     """
     if registry_path is None:
-        env_registry = os.environ.get("VNX_PROJECT_REGISTRY")
-        registry_path = (
-            Path(env_registry).expanduser() if env_registry else DEFAULT_REGISTRY_PATH
-        )
+        registry_path = DEFAULT_REGISTRY_PATH
     protected: dict = {}
     try:
         text = registry_path.read_text(encoding="utf-8")
@@ -843,15 +842,14 @@ def _load_fleet_pins(registry_path: "Path | None" = None) -> dict:
 def _resolve_pin_scan_roots(scan_roots: "str | list | None" = None) -> list:
     """Resolve the configured disk-scan roots for stray ``.vnx-version`` pins.
 
-    ``VNX_PIN_SCAN_ROOTS`` is a ``:``-separated list of directories (mirrors
-    ``PATH`` convention). Defaults to the user's home directory when unset.
+    ``scan_roots`` is a ``:``-separated list of directories (mirrors
+    ``PATH`` convention). Defaults to the user's home directory when None.
     Blank entries are skipped; each surviving entry is ``~``-expanded but not
     required to exist (a missing root legitimately means "no pins from this
     source", handled by the caller).
     """
     if scan_roots is None:
-        env_val = os.environ.get("VNX_PIN_SCAN_ROOTS")
-        scan_roots = env_val if env_val is not None else str(Path.home())
+        scan_roots = str(DEFAULT_PIN_SCAN_ROOT)
     raw_parts = scan_roots.split(":") if isinstance(scan_roots, str) else list(scan_roots)
     out = []
     for part in raw_parts:
@@ -975,7 +973,7 @@ def _collect_protected_versions(
     1. Fleet registry: every registered consumer project's ``.vnx-version``.
     2. ``<root>/protected-versions``: operator-curated newline file.
     3. ``--protect-pins``: explicit comma-separated CLI argument.
-    4. Disk scan (``VNX_PIN_SCAN_ROOTS``): ``.vnx-version`` pins belonging to
+    4. Disk scan (``_resolve_pin_scan_roots``): ``.vnx-version`` pins belonging to
        consumer projects that were never registered in source 1 (OI-1379).
 
     Normalization matches ``vnx_cli._reexec._normalize_version`` so a pin of

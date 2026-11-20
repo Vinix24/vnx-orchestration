@@ -1001,7 +1001,7 @@ Each skill has a `SKILL.md` with YAML frontmatter (required for Codex CLI discov
 ### Path Resolution
 
 `scripts/lib/vnx_paths.sh` provides dynamic path resolution:
-- `_resolve_node_path()` -- finds node via VNX_NODE_PATH > nvm > system PATH
+- `_resolve_node_path()` -- finds node via nvm > system PATH
 - `_resolve_venv_path()` -- finds Python venv in project or main worktree
 - `_resolve_project_root()` -- git-based resolution with worktree awareness
 - Cross-project contamination guard: validates inherited VNX_HOME matches computed default

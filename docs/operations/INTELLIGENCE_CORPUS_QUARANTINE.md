@@ -89,7 +89,7 @@ Een niet-lege doeltabel weigert zonder `--allow-existing`; met die vlag weigert 
 
 - **Het artefact wordt nooit door code verwijderd.** Geen codepad en geen glob ruimt `$ART` op (besluit 22). De nachtelijke rotatie ruimt de vier grote `copy2`-back-ups binnen drie nachten op; het artefact blijft. Bewaar het tot je zeker weet dat je het niet meer nodig hebt.
 - **`scripts/check_intelligence_health.py` blijft op exit 11.** Dat is verwacht en wordt niet gerepareerd (besluit 10): bij 0 patronen is `unhealthy` de waarheid (`scripts/check_intelligence_health.py:289`) en de code is `EXIT_HEALTH = 11` (`scripts/check_intelligence_health.py:26`). De check aan een quarantainemanifest koppelen zou een tweede bron van waarheid geven, en er is geen scheduler die hem draait.
-- **Het corpus kan opnieuw groeien.** `VNX_DAILY_INTEL_REFRESH` staat default op `1` (`scripts/intelligence_daemon.py:314`); `_refresh_quality_intelligence` (`scripts/lib/intelligence_hygiene.py:70`) kan de quality-scanner en de snippet-extractor opnieuw laten lopen. Er is vandaag geen geplande run (besluit 11). Een handmatige daemon-run vult het corpus weer; dat is geen fout, en een tweede quarantaine is een nieuwe map.
+- **Het corpus kan opnieuw groeien.** De dagelijkse refresh staat altijd aan (`refresh_daily = True` in `scripts/intelligence_daemon.py`); `_refresh_quality_intelligence` (`scripts/lib/intelligence_hygiene.py:70`) kan de quality-scanner en de snippet-extractor opnieuw laten lopen. Er is vandaag geen geplande run (besluit 11). Een handmatige daemon-run vult het corpus weer; dat is geen fout, en een tweede quarantaine is een nieuwe map.
 
 ## Done measurement
 

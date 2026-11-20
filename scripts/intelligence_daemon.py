@@ -92,7 +92,7 @@ def _rollback_mode_enabled() -> bool:
 
 class GovernanceDigestRunner:
     """Periodic governance digest builder — writes governance_digest.json every ``interval`` seconds.
-    Reads F18 extractors. Interval from VNX_DIGEST_INTERVAL env var (default 300 s).
+    Reads F18 extractors. Interval is 300 s.
     """
 
     OUTPUT_FILENAME = "governance_digest.json"
@@ -106,12 +106,8 @@ class GovernanceDigestRunner:
 
     @classmethod
     def from_env(cls, state_dir: Path) -> "GovernanceDigestRunner":
-        """Construct runner reading interval from VNX_DIGEST_INTERVAL (default 300)."""
-        try:
-            interval = int(os.environ.get("VNX_DIGEST_INTERVAL", "300"))
-        except (ValueError, TypeError):
-            interval = 300
-        return cls(state_dir, interval)
+        """Construct runner with the fixed 300 s interval."""
+        return cls(state_dir, 300)
 
     def should_run(self) -> bool:
         """Return True if the interval has elapsed since the last run."""
@@ -310,8 +306,8 @@ class IntelligenceDaemon:
         self.state_dir = Path(paths["VNX_STATE_DIR"]).expanduser().resolve()
         self.legacy_state_dir = (self.vnx_dir / "state").resolve()
         self.rollback_mode = _rollback_mode_enabled()
-        self.dashboard_write_enabled = os.getenv("VNX_INTELLIGENCE_DASHBOARD_WRITE", "0") == "1"
-        self.refresh_daily = os.getenv("VNX_DAILY_INTEL_REFRESH", "1") == "1"
+        self.dashboard_write_enabled = False
+        self.refresh_daily = True
 
         self.compat_state_dirs: List[Path] = [self.state_dir]
         if self.rollback_mode:
@@ -513,7 +509,7 @@ class IntelligenceDaemon:
                 if self.should_run_daily_hygiene():
                     self.daily_hygiene()
 
-                # Governance digest (every VNX_DIGEST_INTERVAL seconds, default 5 min)
+                # Governance digest (every 300 seconds)
                 if self.digest_runner.should_run():
                     self.digest_runner.run_once()
 

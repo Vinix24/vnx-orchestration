@@ -51,10 +51,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
 
-# 4 hours, per the track goal. Configurable so a tick can tighten/loosen it.
-IDLE_THRESHOLD_SECONDS = int(os.environ.get("VNX_PROC_IDLE_SECONDS", "14400"))
+# 4 hours, per the track goal.
+IDLE_THRESHOLD_SECONDS = 14400
 # A process using more than this %cpu is doing work, not idle.
-CPU_IDLE_MAX = float(os.environ.get("VNX_PROC_CPU_IDLE_MAX", "1.0"))
+CPU_IDLE_MAX = 1.0
 PROPOSALS_FILE = "process_cleanup_proposals.ndjson"
 
 VIOLATION = "violation"

@@ -29,7 +29,6 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import os
 import re
 import sqlite3
 import sys
@@ -514,11 +513,11 @@ def _materialize_table(
 
 
 def _default_view_db_path() -> Path:
-    return Path(os.environ.get("VNX_AGGREGATOR_DIR", DEFAULT_AGGREGATOR_DIR)).expanduser() / DEFAULT_AGGREGATOR_DB
+    return Path(DEFAULT_AGGREGATOR_DIR).expanduser() / DEFAULT_AGGREGATOR_DB
 
 
 def _default_registry_path() -> Path:
-    return Path(os.environ.get("VNX_REGISTRY_PATH", DEFAULT_REGISTRY_PATH)).expanduser()
+    return Path(DEFAULT_REGISTRY_PATH).expanduser()
 
 
 def main(argv: Iterable[str] | None = None) -> int:

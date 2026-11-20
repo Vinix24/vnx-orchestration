@@ -18,7 +18,6 @@ Usage:
     python3 scripts/vnx_db_maintenance.py --apply --retention-days 90
 
 Environment variables:
-    VNX_DB_RETENTION_DAYS   Retention window in days (default: 180)
     VNX_STATE_DIR           State directory (resolved via vnx_paths if unset)
 """
 
@@ -280,8 +279,8 @@ def main(argv=None) -> int:
     parser.add_argument(
         "--retention-days",
         type=int,
-        default=int(os.environ.get("VNX_DB_RETENTION_DAYS", DEFAULT_RETENTION_DAYS)),
-        help=f"Rows older than N days are pruned (env: VNX_DB_RETENTION_DAYS, default: {DEFAULT_RETENTION_DAYS})",
+        default=DEFAULT_RETENTION_DAYS,
+        help=f"Rows older than N days are pruned (default: {DEFAULT_RETENTION_DAYS})",
     )
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--dry-run", action="store_true", help="Show what would be pruned without deleting")

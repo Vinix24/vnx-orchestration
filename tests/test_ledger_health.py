@@ -1005,7 +1005,6 @@ class TestReceiptCoverageAcknowledged:
 
 class TestAcknowledgeCli:
     def test_writes_one_line_with_the_documented_fields(self, state_dir, monkeypatch):
-        monkeypatch.delenv("VNX_ACTOR", raising=False)
 
         exit_code = lh.main([
             "acknowledge", "--state-dir", str(state_dir),
@@ -1024,8 +1023,7 @@ class TestAcknowledgeCli:
         assert parsed.tzinfo is not None
         assert abs((datetime.datetime.now(datetime.timezone.utc) - parsed).total_seconds()) < 60
 
-    def test_actor_comes_from_env_and_the_flag_beats_the_env(self, state_dir, monkeypatch):
-        monkeypatch.setenv("VNX_ACTOR", "t0")
+    def test_actor_defaults_and_the_flag_beats_the_default(self, state_dir):
         lh.main(["acknowledge", "--state-dir", str(state_dir), "--dispatch-id", "d-a", "--reason", "r"])
         lh.main([
             "acknowledge", "--state-dir", str(state_dir),
@@ -1033,7 +1031,7 @@ class TestAcknowledgeCli:
         ])
 
         actors = {rec["dispatch_id"]: rec["actor"] for rec in _read_ack_lines(state_dir)}
-        assert actors == {"d-a": "t0", "d-b": "vincent"}
+        assert actors == {"d-a": "operator", "d-b": "vincent"}
 
     @pytest.mark.parametrize("blank_reason", ["", "   ", "\t\n "])
     def test_empty_or_whitespace_reason_is_refused_and_writes_nothing(self, state_dir, blank_reason, capsys):
