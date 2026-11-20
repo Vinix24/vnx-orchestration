@@ -8,6 +8,7 @@ Unknown is a value of its own: an incomplete scope never reads as "no overlap".
 from __future__ import annotations
 
 import posixpath
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, List, Optional, Sequence, Tuple
@@ -54,10 +55,12 @@ def _branch_of(deliverable_id: str) -> str:
     return f"dispatch/{deliverable_id}"
 
 
+_ROUND_SUFFIX = re.compile(r"^(?P<base>.*?)(?:-[a-z])?(?:-r\d+)?$")
+
+
 def _round_base(branch: str) -> str:
-    """``dispatch/<id>-r2`` is a follow-up round of ``dispatch/<id>``."""
-    head, sep, tail = branch.rpartition("-r")
-    return head if sep and tail.isdigit() else branch
+    """``<id>-r2``, ``<id>-b`` and ``<id>-c-r2`` are follow-up rounds of ``<id>`` (branch or dispatch id)."""
+    return _ROUND_SUFFIX.match(branch).group("base")
 
 
 def normalise(paths: Iterable[str], repo_root: "str | Path") -> Tuple[str, ...]:
