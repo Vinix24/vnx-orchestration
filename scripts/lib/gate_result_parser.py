@@ -348,8 +348,17 @@ class GateResultParserMixin:
         }
         if gate == "ci_gate":
             import config_runtime
+            from gate_profile import ci_requirement
 
             env_var = "VNX_CI_GATE_REQUIRED"
+            required, sources = ci_requirement()
+            # The CI check itself runs through gh whatever the registry's binary name says.
+            if required and shutil.which("gh") is None:
+                return (
+                    "provider_not_installed",
+                    f"gh binary not found in PATH, but the CI gate is required by "
+                    f"{', '.join(sources)} ({env_var}); install gh or turn the requirement off",
+                )
             disabled = not config_runtime.get_bool(env_var)
             disabled_detail = f"{env_var} resolves to false (config_runtime)"
         else:

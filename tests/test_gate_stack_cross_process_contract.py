@@ -115,8 +115,11 @@ print(json.dumps({
 # scripts copy (see module docstring) so its vnx_paths resolution can never
 # land next to a real, already-populated checkout.
 _PROC_B_CODE = """
-import json, sys
+import json, os, sys
 sys.path.insert(0, sys.argv[1]); sys.path.insert(0, sys.argv[2])
+# OF-4: availability resolves the requirement through gate_profile.ci_requirement,
+# which needs a project root (branch protection); the isolated copy has no git root.
+os.environ.setdefault("PROJECT_ROOT", os.getcwd())
 import config_runtime
 autowired = config_runtime.autowire()
 import gate_request_handler as grh
