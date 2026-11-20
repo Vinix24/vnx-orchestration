@@ -120,7 +120,7 @@ def test_get_config_includes_pr2_subsystem_flags(db):
     keys = {row["key"] for row in out["config"]}
     for key in (
         "VNX_GOVERNANCE_ENFORCED", "VNX_LEARNING_LOOP_ENABLED", "VNX_DREAM_SCHEDULER_ENABLED",
-        "VNX_INJECTION_FEEDBACK_ENABLED", "VNX_HASH_CHAIN_REQUIRED",
+        "VNX_INJECTION_FEEDBACK_ENABLED", "VNX_PLAN_GATE_COMPLEX_ONLY", "VNX_HASH_CHAIN_REQUIRED",
         "VNX_ATTESTATION_REQUIRED", "VNX_MIGRATION_SYSTEM",
     ):
         assert key in keys, f"{key} missing from /api/operator/config"

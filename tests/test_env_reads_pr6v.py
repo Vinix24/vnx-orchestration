@@ -1,8 +1,7 @@
-"""config-een-oppervlak PR-6v: precedence through config_runtime, and four deleted names.
+"""config-een-oppervlak PR-6v-a: the claude slot reads through config_runtime, three names deleted.
 
-A stored project_config row beats an exported env value for VNX_PLAN_GATE_ENFORCE and
-VNX_TMUX_MAX_CONCURRENT; VNX_OVERRIDE_<NAME> still beats the row. VNX_EVIDENCE_BOUND_GATE
-reads a stored row. Unknown gate values read ``off``. The four deleted names have zero
+A stored project_config row beats an exported env value for VNX_TMUX_MAX_CONCURRENT;
+VNX_OVERRIDE_<NAME> still beats the row. The three deleted lock names have zero
 string-literal reads left in scripts/, vnx_cli/ and dashboard/.
 """
 from __future__ import annotations
@@ -22,11 +21,8 @@ import config_registry  # noqa: E402
 import config_runtime  # noqa: E402
 import config_store_db  # noqa: E402
 import dispatch_serialization  # noqa: E402
-import evidence_bound_gate  # noqa: E402
-import plan_gate_enforcement  # noqa: E402
 
 DELETED = (
-    "VNX_PLAN_GATE_COMPLEX_ONLY",
     "VNX_CLAUDE_LOCK_TIMEOUT_SECONDS",
     "VNX_CLAUDE_LOCK_WAIT_WARN_SECONDS",
     "VNX_LOCK_DIR",
@@ -38,7 +34,7 @@ def store(tmp_path, monkeypatch):
     """A real store wired for project pr6v; returns a function that writes one row."""
     sd = tmp_path / "state"
     sd.mkdir()
-    for key in ("VNX_PLAN_GATE_ENFORCE", "VNX_TMUX_MAX_CONCURRENT", "VNX_EVIDENCE_BOUND_GATE"):
+    for key in ("VNX_TMUX_MAX_CONCURRENT",):
         monkeypatch.delenv(key, raising=False)
         monkeypatch.delenv("VNX_OVERRIDE_" + key[4:], raising=False)
     monkeypatch.setenv("VNX_STATE_DIR", str(sd))
@@ -56,18 +52,6 @@ def store(tmp_path, monkeypatch):
     config_runtime._wired_for.clear()
 
 
-def test_plan_gate_stored_row_beats_env(store, monkeypatch):
-    store("VNX_PLAN_GATE_ENFORCE", "required")
-    monkeypatch.setenv("VNX_PLAN_GATE_ENFORCE", "advisory")
-    assert plan_gate_enforcement.enforce_mode() == "required"
-
-
-def test_plan_gate_override_beats_stored_row(store, monkeypatch):
-    store("VNX_PLAN_GATE_ENFORCE", "required")
-    monkeypatch.setenv("VNX_OVERRIDE_PLAN_GATE_ENFORCE", "advisory")
-    assert plan_gate_enforcement.enforce_mode() == "advisory"
-
-
 def test_claude_slot_stored_row_beats_env(store, monkeypatch):
     store("VNX_TMUX_MAX_CONCURRENT", "7")
     monkeypatch.setenv("VNX_TMUX_MAX_CONCURRENT", "4")
@@ -78,22 +62,6 @@ def test_claude_slot_override_beats_stored_row(store, monkeypatch):
     store("VNX_TMUX_MAX_CONCURRENT", "7")
     monkeypatch.setenv("VNX_OVERRIDE_TMUX_MAX_CONCURRENT", "2")
     assert dispatch_serialization._max_concurrent() == 2
-
-
-def test_evidence_gate_reads_stored_row_without_env(store):
-    store("VNX_EVIDENCE_BOUND_GATE", "required")
-    assert evidence_bound_gate.gate_state() == "required"
-
-
-@pytest.mark.parametrize("source", ["env", "row"])
-def test_unknown_value_reads_off_for_both_gates(store, monkeypatch, source):
-    for key in ("VNX_PLAN_GATE_ENFORCE", "VNX_EVIDENCE_BOUND_GATE"):
-        if source == "env":
-            monkeypatch.setenv(key, "enforce-maybe")
-        else:
-            store(key, "enforce-maybe")
-    assert plan_gate_enforcement.enforce_mode() == "off"
-    assert evidence_bound_gate.gate_state() == "off"
 
 
 @functools.lru_cache(maxsize=1)

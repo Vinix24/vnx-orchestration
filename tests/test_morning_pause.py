@@ -140,13 +140,10 @@ def test_canonical_flags_unchanged_for_every_main_subsystem():
         exec(compile(base, "config_registry_main", "exec"), snap.__dict__)  # origin/main's real text
     finally:
         del sys.modules[spec.name]
-    # config-een-oppervlak PR-6v deletes this subsystem with VNX_PLAN_GATE_COMPLEX_ONLY on purpose
-    removed = {"plan-gate-task-class-scope"}
-    old = {e.subsystem: k for k, e in snap.CONFIG_REGISTRY.items() if e.subsystem and e.subsystem not in removed}
+    old = {e.subsystem: k for k, e in snap.CONFIG_REGISTRY.items() if e.subsystem}
     now = _canonical_flags(cr)
     # every subsystem origin/main knows keeps its flag; a missing one shows as None
     assert {k: now.get(k) for k in old} == old
     assert now["morning-pause"] == "VNX_MORNING_PAUSE_ENABLED"
-    assert {k: v for k, v in cr.canonical_flags().items() if k in old} == {
-        k: v for k, v in snap.canonical_flags().items() if k not in removed}
+    assert {k: v for k, v in cr.canonical_flags().items() if k in old} == snap.canonical_flags()
     assert cr.canonical_flags()["morning-pause"] == "VNX_MORNING_PAUSE_ENABLED"

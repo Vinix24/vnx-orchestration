@@ -85,6 +85,11 @@ SUBSYSTEM_DESCRIPTIONS: Dict[str, str] = {
         "Instrument WHY patterns are ignored before tuning generation."
     ),
     "plan-gate-panel": "5-model deliberation panel for plan-first enforcement.",
+    "plan-gate-task-class-scope": (
+        "Flag with no effect since P1: VNX_PLAN_GATE_COMPLEX_ONLY is read by "
+        "complex_only_active() but changes no plan-gate run; kept until P4 "
+        "reworks the effectiveness probe."
+    ),
     "cheap-recon-scout": "Cheap-model scout recon pre-pass in the dispatch door (fail-open).",
     "horizon-planning": "Autonomous roadmap auto-next loading (starts work unattended).",
     "headless-dispatch-routing": "Headless dispatch routing mode selector.",
@@ -204,6 +209,7 @@ _ROW_ORDER: List[str] = [
     "docs-style-file",
     # SCOPE
     "plan-gate-panel",
+    "plan-gate-task-class-scope",
     "agent-layout",
     # COCKPIT
     "subsystem-cockpit",
