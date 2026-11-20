@@ -27,9 +27,7 @@ from runtime_coordination import claim_next_queued_dispatch, get_connection, get
 
 logger = logging.getLogger(__name__)
 
-# Renewal cadence for the lease this worker owns. The env override exists so tests and
-# slow hosts can shorten it; a malformed value falls back to the normal cadence (loudly).
-LEASE_HEARTBEAT_ENV = "VNX_POOL_LEASE_HEARTBEAT_SECONDS"
+# Renewal cadence for the lease this worker owns.
 LEASE_HEARTBEAT_DEFAULT_S = 15.0
 
 # Public exit codes — contract for pool manager (ADR-018 pool tick)
@@ -102,21 +100,8 @@ def _resolve_dispatch_dir() -> Path:
 
 
 def _lease_heartbeat_interval() -> float:
-    """Renewal interval in seconds (``VNX_POOL_LEASE_HEARTBEAT_SECONDS`` overrides 15s)."""
-    raw = os.environ.get(LEASE_HEARTBEAT_ENV)
-    if not raw:
-        return LEASE_HEARTBEAT_DEFAULT_S
-    try:
-        interval = float(raw)
-    except ValueError:
-        logger.warning("Ignoring non-numeric %s=%r; renewing every %ss",
-                       LEASE_HEARTBEAT_ENV, raw, LEASE_HEARTBEAT_DEFAULT_S)
-        return LEASE_HEARTBEAT_DEFAULT_S
-    if interval <= 0:
-        logger.warning("Ignoring non-positive %s=%r; renewing every %ss",
-                       LEASE_HEARTBEAT_ENV, raw, LEASE_HEARTBEAT_DEFAULT_S)
-        return LEASE_HEARTBEAT_DEFAULT_S
-    return interval
+    """Renewal interval in seconds."""
+    return LEASE_HEARTBEAT_DEFAULT_S
 
 
 class _PoolLease:

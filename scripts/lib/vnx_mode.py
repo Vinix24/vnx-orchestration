@@ -396,33 +396,6 @@ def get_mode_description(mode: VNXMode) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Feature flags for rollback control
-# ---------------------------------------------------------------------------
-
-FEATURE_FLAGS = {
-    "VNX_STARTER_MODE_ENABLED": ("1", "Enable starter mode (set '0' to disable)"),
-    "VNX_MODE_GATING_ENABLED": ("1", "Enable command gating by mode (set '0' for backward compat)"),
-}
-
-
-def is_feature_enabled(flag_name: str) -> bool:
-    """Check if a feature flag is enabled. Defaults from FEATURE_FLAGS."""
-    default, _ = FEATURE_FLAGS.get(flag_name, ("0", ""))
-    return os.environ.get(flag_name, default) == "1"
-
-
-def check_mode_feature_enabled(mode: VNXMode) -> bool:
-    """Check if the given mode is enabled via feature flags."""
-    flag_map = {
-        VNXMode.STARTER: "VNX_STARTER_MODE_ENABLED",
-    }
-    flag = flag_map.get(mode)
-    if flag is None:
-        return True  # Operator mode always enabled
-    return is_feature_enabled(flag)
-
-
-# ---------------------------------------------------------------------------
 # CLI entrypoint (for direct testing)
 # ---------------------------------------------------------------------------
 
