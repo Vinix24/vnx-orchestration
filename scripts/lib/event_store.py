@@ -33,10 +33,9 @@ logger = logging.getLogger(__name__)
 # Size-rotation threshold (10 MB). Once the live stream exceeds this it is
 # archived to the per-dispatch archive dir and truncated to 0 — a size-based
 # rotation, not a log-only warning. Configurable per instance via the
-# ``rotation_threshold_bytes`` ctor arg or the VNX_EVENT_STREAM_MAX_BYTES env
-# var; this module constant is the default and stays patchable for tests.
+# ``rotation_threshold_bytes`` ctor arg; this module constant is the default and
+# stays patchable for tests.
 _SIZE_ROTATION_BYTES = 10 * 1024 * 1024
-_SIZE_ROTATION_ENV = "VNX_EVENT_STREAM_MAX_BYTES"
 # Hard upper bound (50 MB): auto-truncate with emergency archive to prevent
 # lane blockage when the size rotation keeps failing. Deliberately higher than
 # the rotation threshold so rotation handles the normal case first.
@@ -428,24 +427,12 @@ class EventStore:
     def _rotation_threshold(self) -> int:
         """Resolve the size-rotation threshold.
 
-        Precedence: explicit ctor arg > VNX_EVENT_STREAM_MAX_BYTES env var >
-        module default (_SIZE_ROTATION_BYTES). The module default stays
-        patchable so tests can construct a store without an explicit value and
-        still lower the threshold.
+        Precedence: explicit ctor arg > module default (_SIZE_ROTATION_BYTES).
+        The module default stays patchable so tests can construct a store
+        without an explicit value and still lower the threshold.
         """
         if self._rotation_threshold_bytes is not None:
             return int(self._rotation_threshold_bytes)
-        env = os.environ.get(_SIZE_ROTATION_ENV)
-        if env:
-            try:
-                return int(env)
-            except ValueError:
-                logger.warning(
-                    "event_store: invalid %s=%r — using default %d bytes",
-                    _SIZE_ROTATION_ENV,
-                    env,
-                    _SIZE_ROTATION_BYTES,
-                )
         return _SIZE_ROTATION_BYTES
 
     def _oversize_flag_path(self, terminal: str, run_id: Optional[str] = None) -> Path:

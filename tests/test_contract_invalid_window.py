@@ -38,7 +38,6 @@ if str(_LIB) not in sys.path:
 
 from contract_invalid_window import (  # noqa: E402
     DEFAULT_WINDOW_DAYS,
-    ENV_WINDOW_DAYS,
     contract_invalid_effective_timestamp,
     contract_invalid_window_days,
     is_stale_contract_invalid,
@@ -102,18 +101,7 @@ class TestIsStaleContractInvalid:
         # ...but stale under an explicit 1-day window.
         assert is_stale_contract_invalid(record, window_days=1, now=_NOW) is True
 
-    def test_env_var_override(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv(ENV_WINDOW_DAYS, "1")
-        record = {"ingested_at": _OLD_10D}
-        assert is_stale_contract_invalid(record, now=_NOW) is True
-        assert contract_invalid_window_days() == 1
-
-    def test_env_var_invalid_falls_back_to_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv(ENV_WINDOW_DAYS, "not-a-number")
-        assert contract_invalid_window_days() == DEFAULT_WINDOW_DAYS
-
-    def test_default_window_days_is_14(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.delenv(ENV_WINDOW_DAYS, raising=False)
+    def test_default_window_days_is_14(self) -> None:
         assert contract_invalid_window_days() == 14
 
     def test_effective_timestamp_prefers_ingested_at(self) -> None:

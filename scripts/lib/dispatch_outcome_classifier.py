@@ -125,7 +125,6 @@ CLOSED_OUTCOMES: FrozenSet[str] = frozenset({
 } | {f"{_FAILED_PREFIX}{_OPEN_BRACKET}{r}{_CLOSE_BRACKET}" for r in FAILURE_REASONS})
 
 DEFAULT_ABANDONED_WINDOW_HOURS = 24.0
-ENV_ABANDONED_WINDOW_HOURS = "VNX_ABANDONED_WINDOW_HOURS"
 
 # A receipt with no project_id field predates project-id stamping and is
 # treated as this legacy default project — mirrors the same "vnx-dev"
@@ -141,15 +140,8 @@ _DEAD_LETTER_STATE = "dead_letter"
 
 
 def abandoned_window_hours() -> float:
-    """Resolve the abandoned-sweep age window (hours) from env, default 24h."""
-    raw = os.environ.get(ENV_ABANDONED_WINDOW_HOURS)
-    if not raw:
-        return DEFAULT_ABANDONED_WINDOW_HOURS
-    try:
-        parsed = float(raw)
-    except (TypeError, ValueError):
-        return DEFAULT_ABANDONED_WINDOW_HOURS
-    return parsed if parsed >= 0 else DEFAULT_ABANDONED_WINDOW_HOURS
+    """The abandoned-sweep age window (hours): ``DEFAULT_ABANDONED_WINDOW_HOURS``."""
+    return DEFAULT_ABANDONED_WINDOW_HOURS
 
 
 # ---------------------------------------------------------------------------

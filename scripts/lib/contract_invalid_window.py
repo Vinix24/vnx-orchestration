@@ -5,8 +5,8 @@ signal, but a frozen historical batch (many receipts bulk-emitted with one
 old timestamp — a one-time event, not organic churn) reads as "live" in any
 counter that has no time bound, or whose bound is wider than the batch's age.
 
-``is_stale_contract_invalid`` gives every counter a shared, configurable
-cutoff (default 14 days, ``VNX_CONTRACT_INVALID_WINDOW_DAYS``) so a
+``is_stale_contract_invalid`` gives every counter a shared
+cutoff (14 days, ``DEFAULT_WINDOW_DAYS``) so a
 contract_invalid receipt older than the window never counts as an active
 failure signal, independent of whatever overall lookback window the caller
 itself uses.
@@ -26,11 +26,9 @@ separate, unrelated concern that belongs to a future receipt-v2 redesign.
 
 from __future__ import annotations
 
-import os
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
 
-ENV_WINDOW_DAYS = "VNX_CONTRACT_INVALID_WINDOW_DAYS"
 DEFAULT_WINDOW_DAYS = 14
 
 CONTRACT_INVALID_STATUS = "contract_invalid"
@@ -47,14 +45,8 @@ def is_contract_invalid(record: Dict[str, Any]) -> bool:
 
 
 def contract_invalid_window_days() -> int:
-    """Configurable staleness threshold (days). Env override, default 14."""
-    raw = os.environ.get(ENV_WINDOW_DAYS)
-    if not raw:
-        return DEFAULT_WINDOW_DAYS
-    try:
-        return max(0, int(raw))
-    except (TypeError, ValueError):
-        return DEFAULT_WINDOW_DAYS
+    """Staleness threshold (days): ``DEFAULT_WINDOW_DAYS``."""
+    return DEFAULT_WINDOW_DAYS
 
 
 def _parse_timestamp(value: Optional[Any]) -> Optional[datetime]:

@@ -10,7 +10,7 @@ Output order (top to bottom):
   [skill body + instruction]  _inject_skill_context       (+ repo-map prepended)
   [scope guard]               dispatch_paths, when non-empty
   [worker rules footer]       always appended             (gap #3a)
-  [report contract directive] VNX_REPORT_CONTRACT_DIRECTIVE=1 (gap #3b, default on)
+  [report contract directive] always appended         (gap #3b)
 
 The trailer sentinel (<!-- VNX-END-OF-INSTRUCTION -->) is NOT appended by
 prepare() — each lane appends it as the absolute last step after any
@@ -106,8 +106,7 @@ def prepare(
     if _WORKER_RULES_FOOTER_SENTINEL not in body:
         body = body + "\n\n" + _wrf.build(role, dispatch_id)
 
-    # 5. Report contract directive — gated by VNX_REPORT_CONTRACT_DIRECTIVE (default on,
-    # gap #3b). with_directive is the one door every lane appends it through (OI-1850).
+    # 5. Report contract directive (gap #3b). with_directive is the one door every lane appends it through (OI-1850).
     body = _rbc.with_directive(
         body, dispatch_id, pr_id=pr_id, model=model, provider="claude"
     )
