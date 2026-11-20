@@ -1,4 +1,4 @@
-"""accept stages a dispatch with the exact diff; apply writes nothing (ochtendronde D3c part A)."""
+"""accept stages a dispatch with the exact diff; apply writes nothing (morning round D3c part A)."""
 
 import json
 import sys

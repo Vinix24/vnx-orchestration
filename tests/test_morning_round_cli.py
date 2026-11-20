@@ -1,4 +1,4 @@
-"""ochtendronde D2c: vnx morning-round agenda and the pinned schema morning_agenda/1."""
+"""morning round D2c: vnx morning-round agenda and the pinned schema morning_agenda/1."""
 import json
 import subprocess
 import sys
@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts" / "lib"))
 
 import morning_agenda as ma
-import ochtendronde_agenda as ag
+import morning_snapshot as ag
 import operator_queue as oq
 
 P, DAY = "proj-a", "2026-11-19"
@@ -28,7 +28,7 @@ def env(tmp_path):
                       asked_at="2026-11-19T06:00:00Z", state_dir=sd)
         pids[name] = oq.point_id(P, bron, ref, 1)
     ag.write_snapshot(P, DAY, state_dir=sd, now="2026-11-19T06:30:00Z")
-    snap = sd / "ochtendronde" / f"{DAY}.json"
+    snap = sd / "morning_round" / f"{DAY}.json"
     data = json.loads(snap.read_text())
     for point in data["points"]:
         point["klasse"] = "project" if point["point_id"] == pids["proj"] else "fleet"

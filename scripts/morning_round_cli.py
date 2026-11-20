@@ -20,8 +20,8 @@ for _path in (SCRIPT_DIR, SCRIPT_DIR / "lib"):
 
 import operator_queue as oq
 from morning_agenda import AgendaUnreadable, build_agenda, render_text
-from ochtendronde_agenda import _check_day
-from ochtendronde_routing import RoutingRefused, load_register
+from morning_snapshot import _check_day
+from morning_round_routing import RoutingRefused, load_register
 
 
 def main(argv: Optional[List[str]] = None) -> int:

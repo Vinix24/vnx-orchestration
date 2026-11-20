@@ -1,4 +1,4 @@
-"""Ochtendronde D2b: classify a morning point as project or fleet, and name the ref a fleet point carries.
+"""Morning round D2b: classify a morning point as project or fleet, and name the ref a fleet point carries.
 
 ADR-095 decision 5. **Fleet** when the target lies in the fabric or the same fingerprint stands in two or more
 projects of the register; otherwise **project**; **unknown** with a reason when another store cannot be read while

@@ -1,4 +1,4 @@
-"""Suggested edits only target a file an agent reads, from fresh rows (ochtendronde D3b)."""
+"""Suggested edits only target a file an agent reads, from fresh rows (morning round D3b)."""
 
 import json
 import os

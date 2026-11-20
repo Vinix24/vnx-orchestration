@@ -1,4 +1,4 @@
-"""Ochtendronde D3a: an approved cycle invalidates its source rows; unchanged input is skipped."""
+"""Morning round D3a: an approved cycle invalidates its source rows; unchanged input is skipped."""
 from __future__ import annotations
 
 import json

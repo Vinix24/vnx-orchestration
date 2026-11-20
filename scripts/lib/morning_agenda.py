@@ -13,7 +13,7 @@ from typing import Any, Dict, List, Optional
 
 import operator_queue as oq
 from operator_queue_dream_analyzer import REVIEW_SUFFIX
-from ochtendronde_agenda import _load_snapshot, _snapshot_path, decision_status
+from morning_snapshot import _load_snapshot, _snapshot_path, decision_status
 
 SCHEMA = "morning_agenda/1"
 TOP_KEYS = ("schema", "project_id", "day", "snapshot_written_at", "points")

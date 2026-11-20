@@ -1,4 +1,4 @@
-"""ochtendronde D1a: the pure morning-pause core and its four registry keys (ADR-095)."""
+"""morning round D1a: the pure morning-pause core and its four registry keys (ADR-095)."""
 import importlib.util
 import subprocess
 import sys

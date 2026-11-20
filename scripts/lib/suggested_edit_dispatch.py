@@ -1,4 +1,4 @@
-"""Suggested edits go through a dispatch (ochtendronde D3c, ADR-095 decisions 10 and 13).
+"""Suggested edits go through a dispatch (morning round D3c, ADR-095 decisions 10 and 13).
 
 ``accept`` computes the exact diff on a temp copy and stages one dispatch; ``reconcile`` marks an edit
 applied only on a ``pr_merged`` receipt of that dispatch. Counting for the baseline lives in
