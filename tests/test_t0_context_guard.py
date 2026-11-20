@@ -672,3 +672,28 @@ def test_guard_not_registered_in_init_templates(variant):
     rendered = Environment(loader=FileSystemLoader(str(path))).get_template("settings.json.j2").render(
         project_name="p", project_id="p", vnx_version="0", engine_root=str(REPO_ROOT))
     assert _guard_events(json.loads(rendered)) == set()
+
+
+# ---------------------------------------------------------------------------
+# _is_t0_session: the T0 identity check, moved here from the deleted Stop hook
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("cwd,env,expected", [
+    ("/p", {"VNX_TERMINAL": "T0"}, True),
+    ("/p", {"VNX_TERMINAL": "t0"}, True),
+    ("/p", {"VNX_TERMINAL_ID": "T2"}, False),
+    ("/p", {"VNX_TERMINAL": "T1", "VNX_TERMINAL_ID": "T0"}, False),
+    ("/p", {"VNX_DISPATCH_ID": "d-1"}, False),
+    ("/p", {"VNX_TMUX_SIGNAL_DIR": "/x"}, False),
+    ("/p", {"VNX_TERMINAL": "T0", "VNX_DISPATCH_ID": "d-1"}, True),
+    ("/p/.claude/terminals/T3", {}, False),
+    ("/p/.claude/terminals/T1/sub", {}, False),
+    ("/p/.claude/terminals/T0", {}, True),
+    ("/p", {}, True),
+    ("", {}, True),
+])
+def test_is_t0_session_identity(cwd, env, expected):
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts" / "hooks"))
+    import t0_context_guard
+
+    assert t0_context_guard._is_t0_session(cwd, env) is expected

@@ -698,7 +698,7 @@ def _run_acknowledge(args: argparse.Namespace) -> int:
         print(f"ledger_health acknowledge: state dir not found: {state_dir}", file=sys.stderr)
         return EXIT_ACK_REFUSED
 
-    actor = args.actor or os.environ.get("VNX_ACTOR", "").strip() or DEFAULT_ACKNOWLEDGE_ACTOR
+    actor = args.actor or DEFAULT_ACKNOWLEDGE_ACTOR
     try:
         record = acknowledge_gap(state_dir, args.dispatch_id, args.reason, actor)
     except ValueError as exc:
@@ -747,7 +747,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     ack.add_argument("--reason", required=True, help="why the gap is understood (must not be blank)")
     ack.add_argument(
         "--actor", default=None,
-        help=f"who acknowledges (default: $VNX_ACTOR, else '{DEFAULT_ACKNOWLEDGE_ACTOR}')",
+        help=f"who acknowledges (default: '{DEFAULT_ACKNOWLEDGE_ACTOR}')",
     )
     # SUPPRESS: a --state-dir given BEFORE the subcommand must survive the subparser's own default.
     ack.add_argument(

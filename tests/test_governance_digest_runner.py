@@ -155,19 +155,6 @@ class TestGovernanceDigestRunnerUnit:
     # ── from_env ─────────────────────────────────────────────────────────
 
     def test_from_env_uses_default_interval(self, tmp_path, monkeypatch):
-        monkeypatch.delenv("VNX_DIGEST_INTERVAL", raising=False)
-        cls = self._get_runner_class()
-        runner = cls.from_env(tmp_path)
-        assert runner.interval == 300
-
-    def test_from_env_reads_env_var(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("VNX_DIGEST_INTERVAL", "120")
-        cls = self._get_runner_class()
-        runner = cls.from_env(tmp_path)
-        assert runner.interval == 120
-
-    def test_from_env_falls_back_on_invalid_value(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("VNX_DIGEST_INTERVAL", "not_a_number")
         cls = self._get_runner_class()
         runner = cls.from_env(tmp_path)
         assert runner.interval == 300
@@ -332,9 +319,8 @@ class TestGovernanceDigestRunnerInDaemon:
         daemon = mod.IntelligenceDaemon()
         assert daemon.digest_runner.state_dir == daemon.state_dir
 
-    def test_digest_runner_interval_from_env(self, tmp_path, monkeypatch):
+    def test_digest_runner_interval_is_300(self, tmp_path, monkeypatch):
         _, state_dir = _make_daemon(tmp_path, monkeypatch)
-        monkeypatch.setenv("VNX_DIGEST_INTERVAL", "60")
         mod = _load_daemon_module()
         daemon = mod.IntelligenceDaemon()
-        assert daemon.digest_runner.interval == 60
+        assert daemon.digest_runner.interval == 300

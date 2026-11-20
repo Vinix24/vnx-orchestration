@@ -146,7 +146,7 @@ def check_path_resolution(paths: Dict[str, str]) -> List[CheckResult]:
     else:
         results.append(CheckResult("path", WARN,
                                    "Node path not resolved. MCP servers may fail in tmux.",
-                                   "Set VNX_NODE_PATH or install nvm"))
+                                   "Install node or nvm"))
 
     # Python venv
     venv_path = _resolve_venv_path(paths)
@@ -161,8 +161,6 @@ def check_path_resolution(paths: Dict[str, str]) -> List[CheckResult]:
 
 def _resolve_node_path() -> Optional[str]:
     """Find node binary directory."""
-    if os.environ.get("VNX_NODE_PATH"):
-        return os.environ["VNX_NODE_PATH"]
     node = shutil.which("node")
     if node:
         return str(Path(node).parent)

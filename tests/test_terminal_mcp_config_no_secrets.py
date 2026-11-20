@@ -13,7 +13,7 @@ server, ``env`` and all, to ``claude --mcp-config <json>``. That JSON is an argv
 the value shows up in the process list.
 
 Every credential below is a made-up literal. The real ``~/.claude.json`` is never read: the
-generators are pointed at a tmp HOME, or at ``VNX_GLOBAL_MCP_CONFIG_PATH``.
+generators are pointed at a tmp HOME.
 """
 
 from __future__ import annotations
@@ -88,7 +88,6 @@ def sandbox(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict:
     home.mkdir()
     project = tmp_path / "project"
     project.mkdir()
-    monkeypatch.delenv("VNX_GLOBAL_MCP_CONFIG_PATH", raising=False)
     _write_global(home / ".claude.json", _global_table())
     return {"home": home, "project": project, "global": home / ".claude.json"}
 
@@ -100,14 +99,11 @@ def _generate(
     *,
     force: bool = False,
     terminals: tuple[str, ...] = ("T0", "T1"),
-    override: Path | None = None,
 ) -> Path:
     """Run one generator against the sandbox. Returns the terminals dir."""
     terminals_dir = sandbox["project"] / ".claude" / "terminals"
     if kind == "vnx_init":
         monkeypatch.setenv("HOME", str(sandbox["home"]))
-        if override is not None:
-            monkeypatch.setenv("VNX_GLOBAL_MCP_CONFIG_PATH", str(override))
         _generate_mcp_configs(terminals_dir, list(terminals), force)
         return terminals_dir
 
@@ -118,8 +114,6 @@ def _generate(
         "PROJECT_ROOT": str(sandbox["project"]),
         "VNX_PROJECT_ROOT": str(sandbox["project"]),
     }
-    if override is not None:
-        env["VNX_GLOBAL_MCP_CONFIG_PATH"] = str(override)
     cmd = [str(BIN_VNX), "bootstrap-terminals", "--terminals", " ".join(terminals)]
     if force:
         cmd.append("--force")
@@ -166,19 +160,6 @@ def test_no_global_config_writes_an_empty_server_table(kind, sandbox, monkeypatc
     terminals_dir = _generate(kind, sandbox, monkeypatch)
 
     assert _servers(terminals_dir) == {}
-
-
-@pytest.mark.parametrize("kind", GENERATORS)
-def test_global_config_path_override_is_honoured(kind, sandbox, monkeypatch, tmp_path):
-    sandbox["global"].unlink()
-    override = tmp_path / "elsewhere.json"
-    _write_global(override, {"only-here": {"command": "npx", "env": {"K": LITERAL_ENV}}})
-
-    terminals_dir = _generate(kind, sandbox, monkeypatch, override=override)
-
-    servers = _servers(terminals_dir)
-    assert set(servers) == {"only-here"}
-    assert LITERAL_ENV not in (terminals_dir / "T0" / ".mcp.json").read_text()
 
 
 # ---------------------------------------------------------------------------

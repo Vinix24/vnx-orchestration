@@ -96,8 +96,8 @@ def central_root(tmp_path, monkeypatch):
     root = tmp_path / "vnx-system"
     monkeypatch.setenv("VNX_HOME_ROOT", str(root))
     monkeypatch.setenv("VNX_DATA_DIR", str(tmp_path / "vnx-data"))
-    monkeypatch.setenv("VNX_PIN_SCAN_ROOTS", str(tmp_path / "empty-pin-scan-root"))
-    monkeypatch.setenv("VNX_PROJECT_REGISTRY", str(tmp_path / "no-projects.json"))
+    monkeypatch.setattr(update_module, "DEFAULT_PIN_SCAN_ROOT", tmp_path / "empty-pin-scan-root")
+    monkeypatch.setattr(update_module, "DEFAULT_REGISTRY_PATH", tmp_path / "no-projects.json")
     return root
 
 
@@ -105,7 +105,7 @@ def central_root(tmp_path, monkeypatch):
 def real_install_central(monkeypatch):
     """Use the repo's real install-central.sh (the temp-checkout clone is
     exactly where defect 1 lives — a stub would hide it)."""
-    monkeypatch.delenv("VNX_INSTALL_CENTRAL_SCRIPT", raising=False)
+    pass
 
 
 @pytest.fixture

@@ -5,9 +5,8 @@ This module carries the HANDOFF side of T0 context rotation:
 
   - write_t0_handoff(): writes the repo handoff.md contract (frontmatter +
     "Waar we middenin zitten" / "State" / "Next steps"), fail-soft per
-    source (git, horizon, open items each independently guarded). Called by
-    the Stop-hook safety net (scripts/hooks/session_stop_rotation.py, gated
-    on VNX_T0_ROTATION=1).
+    source (git, horizon, open items each independently guarded). No script
+    calls it since the Stop-hook safety net was deleted.
   - write_ready_signal(): writes the rotation_id-stamped `.ready` ack a
     resumed session drops via `vnx handoff mark-ready` /
     `vnx handoff show --mark-ready` (vnx_cli/commands/handoff.py).

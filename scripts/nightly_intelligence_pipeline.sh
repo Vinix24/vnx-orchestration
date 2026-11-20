@@ -34,7 +34,6 @@
 # Activate:   launchctl load ~/Library/LaunchAgents/com.vnx.nightly-intelligence-pipeline.plist
 # Deactivate old schedules:
 #   launchctl unload ~/Library/LaunchAgents/com.vnx.conversation-analyzer.plist
-#   Set VNX_DAILY_INTEL_REFRESH=0 env var to prevent daemon from duplicating hygiene
 
 set -uo pipefail
 

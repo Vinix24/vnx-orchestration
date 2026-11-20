@@ -332,6 +332,24 @@ def _cmd_deliverable_withdraw(args: Any) -> int:
     return pc.cmd_deliverable_withdraw(args)
 
 
+def _cmd_deliverable_depend(args: Any) -> int:
+    pc = _require_planning_cli()
+    _prep(args)
+    return pc.cmd_deliverable_depend(args)
+
+
+def _cmd_deliverable_undepend(args: Any) -> int:
+    pc = _require_planning_cli()
+    _prep(args)
+    return pc.cmd_deliverable_undepend(args)
+
+
+def _cmd_deliverable_deps(args: Any) -> int:
+    pc = _require_planning_cli()
+    _prep(args)
+    return pc.cmd_deliverable_deps(args)
+
+
 _DELIVERABLE_DISPATCH: dict[str, Callable[[Any], int]] = {
     "add": _cmd_deliverable_add,
     "list": _cmd_deliverable_list,
@@ -340,6 +358,9 @@ _DELIVERABLE_DISPATCH: dict[str, Callable[[Any], int]] = {
     "set": _cmd_deliverable_set,
     "retarget": _cmd_deliverable_retarget,
     "withdraw": _cmd_deliverable_withdraw,
+    "depend": _cmd_deliverable_depend,
+    "undepend": _cmd_deliverable_undepend,
+    "deps": _cmd_deliverable_deps,
 }
 
 

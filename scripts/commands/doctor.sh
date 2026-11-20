@@ -267,7 +267,7 @@ cmd_doctor() {
   if [ -n "$resolved_node_path" ] && [ -x "$resolved_node_path/node" ]; then
     log "[doctor] OK node path: $resolved_node_path"
   else
-    log "[doctor] WARN: Node path not resolved. MCP servers may fail in tmux. Set VNX_NODE_PATH or install nvm."
+    log "[doctor] WARN: Node path not resolved. MCP servers may fail in tmux. Install node or nvm."
   fi
 
   local resolved_venv=""

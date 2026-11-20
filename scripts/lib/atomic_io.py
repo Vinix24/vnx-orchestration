@@ -219,7 +219,7 @@ def audit_event_append(events_dir: Path, event_type: str, payload: dict) -> None
         "event_type": event_type,
         "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "pid": os.getpid(),
-        "actor": os.environ.get("VNX_ACTOR", "system"),
+        "actor": "system",
     }
 
     with open(target, "a", encoding="utf-8") as fh:

@@ -5,7 +5,7 @@ zero occurrences of each name. Code, comments and docstrings count: a name that 
 down is a name someone can still believe in.
 
 ``VNX_TERMINAL_ID`` has two more occurrences that inventory section 2 does not list for PR-7
-(``scripts/lib/actor_class.py`` marker tuple, ``scripts/hooks/session_stop_rotation.py``): they are
+(``scripts/lib/actor_class.py`` marker tuple, ``scripts/hooks/t0_context_guard.py``): they are
 the identity markers the fabric sets for a child process, not a lease-heartbeat setting. They are
 the only exemption, and the test names them.
 """
@@ -24,7 +24,7 @@ DELETED_NAMES = (
     "VNX_INTELLIGENCE_INJECTION", "VNX_ACK_DIRECT_NOTIFY", "VNX_DISPATCH_LEASE_SECONDS",
     "VNX_LEASE_GENERATION", "VNX_TERMINAL_ID", "VNX_OPERATOR", "VNX_REQUESTED_BY",
 )
-EXEMPT = {"VNX_TERMINAL_ID": {"scripts/lib/actor_class.py", "scripts/hooks/session_stop_rotation.py"}}
+EXEMPT = {"VNX_TERMINAL_ID": {"scripts/lib/actor_class.py", "scripts/hooks/t0_context_guard.py"}}
 
 
 def _files():

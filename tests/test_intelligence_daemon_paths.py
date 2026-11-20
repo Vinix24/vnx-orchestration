@@ -166,10 +166,7 @@ def test_dashboard_sync_write_is_opt_in_for_single_writer(tmp_path, monkeypatch)
     daemon.write_health_status()
     assert not dashboard.exists()
 
-    monkeypatch.setenv("VNX_INTELLIGENCE_DASHBOARD_WRITE", "1")
-    daemon_mod = _load_daemon_module()
-    daemon = daemon_mod.IntelligenceDaemon()
-    daemon.health_status["status"] = "healthy"
+    daemon.dashboard_builder.dashboard_write_enabled = True
     daemon.write_health_status()
 
     assert dashboard.exists()
@@ -190,7 +187,6 @@ def test_dashboard_reads_legacy_brief_only_in_rollback_mode(tmp_path, monkeypatc
     monkeypatch.setenv("VNX_DATA_DIR", str(tmp_path / "data"))
     monkeypatch.setenv("VNX_STATE_DIR", str(canonical_state))
     monkeypatch.setenv("PROJECT_ROOT", str(tmp_path))
-    monkeypatch.setenv("VNX_INTELLIGENCE_DASHBOARD_WRITE", "1")
     monkeypatch.setenv("VNX_STATE_SIMPLIFICATION_ROLLBACK", "1")
 
     brief = {
@@ -203,6 +199,7 @@ def test_dashboard_reads_legacy_brief_only_in_rollback_mode(tmp_path, monkeypatc
 
     daemon_mod = _load_daemon_module()
     daemon = daemon_mod.IntelligenceDaemon()
+    daemon.dashboard_builder.dashboard_write_enabled = True
     daemon.health_status["status"] = "healthy"
     daemon.write_health_status()
 

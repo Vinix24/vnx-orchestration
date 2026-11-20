@@ -260,7 +260,7 @@ not this doc).
 
 **Hooks actually wired in this repo's `.claude/settings.json`** (see the
 generated *Hooks Wired* table further down, which is the checkable source):
-`session_stop_rotation.py` (Stop). `t0_context_guard.py` runs at user level via
+none. `t0_context_guard.py` runs at user level via
 `vnx guard install`, not in this file (G3, dispatch dlv-2f23d1dbf443). T0's own rotation flow, the mechanism
 that actually ships, is `docs/operations/T0_CONTEXT_ROTATION.md`
 (`scripts/hooks/t0_context_guard.py`, `scripts/t0_rotate_spawn.sh`). `vnx guard install|check`
@@ -626,7 +626,7 @@ liveness with `bash scripts/vnx_supervisor_simple.sh status` or
 - **PreToolUse**: `pretooluse_block_raw_claude_spawn.sh`, `pretooluse_worker_scope_enforce.sh`, `pretooluse_block_subagent.sh`
 - **SessionEnd**: `session_reconcile_cleanup.sh`, `build_current_state.py`, `build_doc_indexes.py`
 - **SessionStart**: `session_reconcile_autoclose.sh`, `build_t0_state_hook.sh`, `path_parity_check.sh`, `monitor_tripwire.sh`, `sessionstart.sh`, `hookpin_check.sh`
-- **Stop**: `stop_report_hook.sh`, `session_stop_rotation.py`
+- **Stop**: `stop_report_hook.sh`
 <!-- END GENERATED: hooks -->
 
 `scripts/userpromptsubmit_worker_intelligence_inject.sh` is not in the list above:
@@ -1001,7 +1001,7 @@ Each skill has a `SKILL.md` with YAML frontmatter (required for Codex CLI discov
 ### Path Resolution
 
 `scripts/lib/vnx_paths.sh` provides dynamic path resolution:
-- `_resolve_node_path()` -- finds node via VNX_NODE_PATH > nvm > system PATH
+- `_resolve_node_path()` -- finds node via nvm > system PATH
 - `_resolve_venv_path()` -- finds Python venv in project or main worktree
 - `_resolve_project_root()` -- git-based resolution with worktree awareness
 - Cross-project contamination guard: validates inherited VNX_HOME matches computed default

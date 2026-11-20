@@ -38,7 +38,7 @@ The VNX Intelligence System provides automated intelligence gathering for the VN
 - **Engine**: SQLite with FTS5 full-text search
 - **Content**: Code snippets (`language="python"`) + doc sections (`language="markdown"`)
 - **Schema Version**: 3.0
-- **Configuration**: `VNX_DOCS_DIRS` env var for markdown ingestion directories
+- **Configuration**: none; the project's own `docs/` directory is indexed
 
 ---
 
@@ -88,7 +88,7 @@ The VNX Intelligence System provides automated intelligence gathering for the VN
           │                     │
 ┌─────────────────┐  ┌─────────────────────────────────┐
 │ code_snippet_   │  │ doc_section_extractor.py         │
-│ extractor.py    │  │ (VNX_DOCS_DIRS → markdown)      │
+│ extractor.py    │  │ (docs/ → markdown)             │
 │ (*.py → python) │  │ Splits on ## headings, scores,  │
 │                 │  │ categorizes, stores as FTS5      │
 └─────────────────┘  └─────────────────────────────────┘
@@ -289,17 +289,17 @@ MAX_CODE_LENGTH = 1000  # Increased from 500
 ## Documentation Ingestion
 
 ### Purpose
-Indexes project markdown documentation into the same FTS5 `code_snippets` table, making architectural decisions, API specs, deployment procedures, and business logic searchable alongside code patterns. Configured via `VNX_DOCS_DIRS` environment variable — feature is inactive when not set.
+Indexes project markdown documentation into the same FTS5 `code_snippets` table, making architectural decisions, API specs, deployment procedures, and business logic searchable alongside code patterns. It indexes the project's own `docs/` directory and is inactive when that directory is absent.
 
 ### Implementation
 
 **Version**: 1.0.0 (2026-03-02)
 **File**: `scripts/doc_section_extractor.py`
-**Configuration**: `VNX_DOCS_DIRS` env var (comma-separated paths, relative or absolute)
+**Configuration**: none (the directory is `<PROJECT_ROOT>/docs`)
 
 ### How It Works
 
-1. **Directory Resolution**: Reads `VNX_DOCS_DIRS` env var, resolves relative paths against `PROJECT_ROOT`
+1. **Directory Resolution**: Uses `<PROJECT_ROOT>/docs` when it exists
 2. **File Discovery**: Globs `*.md` recursively, skips `archive/` directories
 3. **Frontmatter Parsing**: Extracts YAML frontmatter (title, status, summary, owner) via `yaml.safe_load()`
 4. **Section Splitting**: Splits on `## ` headings — each heading becomes a separate FTS5 record
@@ -310,18 +310,7 @@ Indexes project markdown documentation into the same FTS5 `code_snippets` table,
 
 ### Configuration
 
-```bash
-# Enable doc ingestion (relative to PROJECT_ROOT):
-export VNX_DOCS_DIRS=SEOCRAWLER_DOCS
-
-# Multiple directories:
-export VNX_DOCS_DIRS=SEOCRAWLER_DOCS,docs/extra
-
-# Absolute path:
-export VNX_DOCS_DIRS=/path/to/docs
-
-# Feature disabled when empty/unset (default)
-```
+The extractor indexes `<PROJECT_ROOT>/docs`; there is no setting for other directories. It does nothing when that directory is absent.
 
 ### Document Categories
 
@@ -378,7 +367,7 @@ Minimum score to store: 40 (lower than code's 60, docs are inherently useful).
 
 ```bash
 # Run extraction:
-VNX_DOCS_DIRS=SEOCRAWLER_DOCS python3 scripts/doc_section_extractor.py
+python3 scripts/doc_section_extractor.py
 
 # Verify FTS5 entries:
 sqlite3 "$VNX_STATE_DIR/quality_intelligence.db" \

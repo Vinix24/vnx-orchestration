@@ -9,7 +9,6 @@ BILLING SAFETY: No Anthropic SDK imports. Local filesystem only.
 from __future__ import annotations
 
 import json
-import os
 import sys
 import time
 from http import HTTPStatus
@@ -27,7 +26,7 @@ if _SCRIPTS_LIB not in sys.path:
 from project_root import resolve_state_dir
 
 _POLL_INTERVAL = 0.5  # seconds between polls
-_HEARTBEAT_INTERVAL = float(os.environ.get("VNX_REGISTER_STREAM_HEARTBEAT", "30"))
+_HEARTBEAT_INTERVAL = 30.0
 
 
 def _register_file() -> Path:
