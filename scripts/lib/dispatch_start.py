@@ -336,8 +336,7 @@ def _append_start_line(handover: Handover, *, role: str, base_sha: str, spec_fil
         "attempt": handover.attempt, "role": role, "base_sha": str(base_sha or "").strip(),
         "spec_sha256": spec_sha, "lifecycle_mode": handover.lifecycle_mode,
         "door_pid": handover.door_pid, "door_started_at": handover.door_started_at,
-        "requested_by": (os.environ.get("VNX_REQUESTED_BY") or "").strip() or (
-            f"terminal:{slot}" if slot else f"door:{handover.door_pid}"),
+        "requested_by": f"terminal:{slot}" if slot else f"door:{handover.door_pid}",
     }
     if (deadline_seconds := _spec_deadline_seconds(spec_bytes)) is not None:
         receipt["deadline_seconds"] = deadline_seconds
