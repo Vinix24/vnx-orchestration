@@ -1,0 +1,1 @@
+- `vnx horizon plan-scope review` (and the `vnx objective` alias) now exists next to the engine verb: same flags, same `planning_cli` handler. The parser snapshot and the invocation list know it.
