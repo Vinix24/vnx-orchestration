@@ -374,12 +374,13 @@ jobs:
   # Shard k of 4: its share of the parallel phase under 4 xdist workers, shard
   # 1 also the serial list. One anchored step list; k is the job id's suffix.
   # Light: only the prelude, `success` with outputs.profile == light. Timeout:
-  # D4's xdist bound (2 x 1134 s, run 41827919472), until C5 recalibrates it.
+  # C5: 2 x the longest shard (763.6 s, 12.7 min) over the last 30 heavy runs
+  # since the shard form landed (to run 44713236371), rounded up: 26 min.
   profile-a-shard-1:
     name: Profile A shard (1/4)
     if: ${{ !((vars.VNX_CI_XDIST || '1') == '0' || inputs.xdist_off) }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 38
+    timeout-minutes: 26
     permissions: {contents: read, actions: read}
     outputs:
       profile: ${{ steps.prelude.outputs.profile }}
@@ -471,7 +472,7 @@ jobs:
     name: Profile A shard (2/4)
     if: ${{ !((vars.VNX_CI_XDIST || '1') == '0' || inputs.xdist_off) }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 38
+    timeout-minutes: 26
     permissions: {contents: read, actions: read}
     outputs:
       profile: ${{ steps.prelude.outputs.profile }}
@@ -481,7 +482,7 @@ jobs:
     name: Profile A shard (3/4)
     if: ${{ !((vars.VNX_CI_XDIST || '1') == '0' || inputs.xdist_off) }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 38
+    timeout-minutes: 26
     permissions: {contents: read, actions: read}
     outputs:
       profile: ${{ steps.prelude.outputs.profile }}
@@ -491,7 +492,7 @@ jobs:
     name: Profile A shard (4/4)
     if: ${{ !((vars.VNX_CI_XDIST || '1') == '0' || inputs.xdist_off) }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 38
+    timeout-minutes: 26
     permissions: {contents: read, actions: read}
     outputs:
       profile: ${{ steps.prelude.outputs.profile }}

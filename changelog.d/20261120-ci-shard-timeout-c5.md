@@ -1,0 +1,1 @@
+- ci: the per-shard timeout of Profile A is 26 minutes, twice the longest shard (12.7 min) over the last 30 heavy runs (pr-ci-onder-zes-minuten C5)
