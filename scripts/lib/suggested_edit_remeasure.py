@@ -8,9 +8,8 @@ Two quantities are measured over the window after ``applied_at``, each against t
 better): the distinct dispatches that showed the pattern (the baseline's own quantity, ``count_dispatches_in_window``)
 and the codex FAIL rounds of ``review_gates/rounds.ndjson``. Both better or equal -> ``kept``; both worse ->
 ``revert_proposed``; one each, or either unreadable -> ``unmeasurable`` with both values in the entry.
-Each outcome opens one inbox point before the outcome is written: source 8 (vraag), ref ``antwoord:<12 hex of
-sha256 of "effect:<dispatch id>">``. No inbox module sweeps an ``antwoord:`` point (the analyzer sweeps sources 3 and 4
-only, the steering reader 5 to 7); ``operator_queue_ask`` closes it only on the operator's answer line.
+Each outcome opens one inbox point before the outcome is written: source 8 (vraag), ref ``antwoord:<hash of
+"effect:<dispatch id>">``. No inbox module sweeps it; only the operator's answer line closes it.
 """
 
 from __future__ import annotations

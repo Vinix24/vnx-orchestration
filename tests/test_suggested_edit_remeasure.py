@@ -195,7 +195,6 @@ def test_effect_point_survives_a_full_inbox_refresh(env):
     """Red run on 6669d2ef with the analyzer at main: the sweep closed a bron 4 effect point; bron 8 is left open."""
     _data(env, after_dispatches=0, rounds=[])
     _run(env, _entry())
-    (env / "pending_edits.json").write_text(json.dumps({"edits": []}))
     oqi.refresh(PID, data_root=env.parent, now=NOW, state_dir=oq.state_dir_for(PID))
     (point,) = _points()
     assert point["state"] == "open" and not point["unknown_reden"]
@@ -226,8 +225,7 @@ def test_remeasure_waits_for_the_lock_and_then_lands(env):
     time.sleep(0.5)
     assert worker.is_alive() and "outcome" not in json.loads((env / "edit_history.json").read_text())[0]
     release.set()
-    worker.join(10)
-    thread.join(5)
+    worker.join(10), thread.join(5)
     assert codes == [0] and json.loads((env / "edit_history.json").read_text())[0]["outcome"] == "kept"
 
 
@@ -248,8 +246,8 @@ def test_reconcile_waits_for_the_lock_and_both_updates_land(env, monkeypatch):
     time.sleep(0.5)
     assert one.is_alive() and two.is_alive()
     release.set()
-    one.join(10); two.join(10); thread.join(5)
+    for t in (one, two, thread):
+        t.join(10)
     hist = json.loads((env / "edit_history.json").read_text())
-    assert sorted(codes) == [0, 0]
-    assert {h["id"] for h in hist} == {1, 2} and all(h["status"] == "applied" for h in hist)
+    assert sorted(codes) == [0, 0] and {h["id"] for h in hist} == {1, 2} and all(h["status"] == "applied" for h in hist)
     assert next(h for h in hist if h["id"] == 1)["outcome"] == "kept"
