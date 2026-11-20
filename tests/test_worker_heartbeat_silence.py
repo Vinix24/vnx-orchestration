@@ -7,7 +7,7 @@ Covers:
   - Permission prompt detection in events
   - build_heartbeat_failure_report: terminal failure report generation
   - False-positive guard: progressing worker NOT killed
-  - Configurable silence threshold via VNX_WORKER_HEARTBEAT_SILENCE_SECONDS
+  - Silence threshold: the module default, or the per-instance argument
   - Threshold resolution: negative/zero/unparseable values
 
 Gate: 20260804-124501-worker-heartbeat
@@ -282,42 +282,20 @@ class TestBuildFailureReport(unittest.TestCase):
 
 
 class TestThresholdResolution(unittest.TestCase):
-    """VNX_WORKER_HEARTBEAT_SILENCE_SECONDS env var resolution."""
+    """The silence threshold is the module constant."""
 
-    def test_default_unset(self):
+    def test_default(self):
         # OI-1130: default raised 600 -> 1800.  The 600s tail was measured on
         # the chatty subprocess event stream; deep-thinking tmux workers are
         # legitimately silent past 600s (4 of 5 killed on 2026-08-10 with
         # real work in their worktrees).
-        with patch.dict(os.environ, {}, clear=True):
-            from worker_heartbeat import _resolve_silence_threshold
-            self.assertEqual(_resolve_silence_threshold(), 1800)
+        from worker_heartbeat import _resolve_silence_threshold
+        self.assertEqual(_resolve_silence_threshold(), 1800)
 
-    def test_valid_env_value(self):
-        with patch.dict(os.environ, {"VNX_WORKER_HEARTBEAT_SILENCE_SECONDS": "300"}):
-            from worker_heartbeat import _resolve_silence_threshold
+    def test_the_constant_is_read_at_call_time(self):
+        from worker_heartbeat import _resolve_silence_threshold
+        with patch("worker_heartbeat._DEFAULT_SILENCE_THRESHOLD_SECONDS", 300):
             self.assertEqual(_resolve_silence_threshold(), 300)
-
-    def test_env_override_above_default_wins(self):
-        # The override must win in BOTH directions — 3600 > default 1800.
-        with patch.dict(os.environ, {"VNX_WORKER_HEARTBEAT_SILENCE_SECONDS": "3600"}):
-            from worker_heartbeat import _resolve_silence_threshold
-            self.assertEqual(_resolve_silence_threshold(), 3600)
-
-    def test_negative_clamps(self):
-        with patch.dict(os.environ, {"VNX_WORKER_HEARTBEAT_SILENCE_SECONDS": "-100"}):
-            from worker_heartbeat import _resolve_silence_threshold
-            self.assertEqual(_resolve_silence_threshold(), 1800)
-
-    def test_unparseable_clamps(self):
-        with patch.dict(os.environ, {"VNX_WORKER_HEARTBEAT_SILENCE_SECONDS": "abc"}):
-            from worker_heartbeat import _resolve_silence_threshold
-            self.assertEqual(_resolve_silence_threshold(), 1800)
-
-    def test_zero_disables(self):
-        with patch.dict(os.environ, {"VNX_WORKER_HEARTBEAT_SILENCE_SECONDS": "0"}):
-            from worker_heartbeat import _resolve_silence_threshold
-            self.assertEqual(_resolve_silence_threshold(), 0)
 
 
 class TestFalsePositiveGuard(unittest.TestCase):
