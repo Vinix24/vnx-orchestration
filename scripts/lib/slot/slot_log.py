@@ -10,7 +10,7 @@ import json
 import os
 import time
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Iterator
 
 from .slot_admission import _FIELDS
 from .slot_store import SlotError
@@ -64,3 +64,24 @@ class SlotLog:
         finally:
             os.close(fd)
 
+
+def read_events(store_dir: Path) -> Iterator[Dict[str, Any]]:
+    """Every slotlog line, oldest month first; an unreadable or corrupt line raises ``SlotError``."""
+    folder = Path(store_dir) / "slotlog"
+    if not folder.is_dir():
+        return
+    for path in sorted(folder.glob("*.ndjson")):
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except OSError as exc:
+            raise SlotError("store_invalid", f"slotlog unreadable: {exc}") from exc
+        for line in lines:
+            if not line.strip():
+                continue
+            try:
+                record = json.loads(line)
+            except ValueError as exc:
+                raise SlotError("store_invalid", f"slotlog line not JSON in {path.name}") from exc
+            if not isinstance(record, dict):
+                raise SlotError("store_invalid", f"slotlog line not an object in {path.name}")
+            yield record
