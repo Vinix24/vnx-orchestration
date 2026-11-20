@@ -25,7 +25,6 @@ record. Nothing here reads the clock: ``now`` is injected.
 from __future__ import annotations
 
 import json
-import os
 import subprocess
 import sys
 from collections import deque
@@ -35,7 +34,6 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 DEFAULT_CI_WORKFLOW_NAME = "VNX CI"
-CI_WORKFLOW_NAME_ENV_VAR = "VNX_CI_WORKFLOW_NAME"
 DEFAULT_MAIN_BRANCH = "main"
 GH_TIMEOUT = 15
 DEFAULT_LIMIT = 30
@@ -82,8 +80,8 @@ Runner = Callable[..., "subprocess.CompletedProcess"]
 
 
 def resolve_ci_workflow_name(explicit: Optional[str] = None) -> str:
-    """Explicit name, else ``VNX_CI_WORKFLOW_NAME``, else ``VNX CI``."""
-    return explicit or os.environ.get(CI_WORKFLOW_NAME_ENV_VAR) or DEFAULT_CI_WORKFLOW_NAME
+    """Explicit name, else ``VNX CI``."""
+    return explicit or DEFAULT_CI_WORKFLOW_NAME
 
 
 @dataclass(frozen=True)

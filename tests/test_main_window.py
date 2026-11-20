@@ -265,12 +265,12 @@ def test_adapter_reads_commits_runs_and_receipts(tmp_path):
     assert runs_argv[runs_argv.index("--limit") + 1] == "50"
 
 
-def test_adapter_workflow_name_follows_the_environment(tmp_path, monkeypatch):
-    monkeypatch.setenv(mw.CI_WORKFLOW_NAME_ENV_VAR, "Other CI")
+def test_adapter_workflow_name_ignores_the_deleted_environment_name(tmp_path, monkeypatch):
+    monkeypatch.setenv("VNX_CI_WORKFLOW_NAME", "Other CI")
     runner = FakeRunner()
     mw.read_window(tmp_path, runner=runner, now=NOW)
     runs_argv = next(c[0] for c in runner.calls if c[0][1] == "run")
-    assert runs_argv[runs_argv.index("--workflow") + 1] == "Other CI"
+    assert runs_argv[runs_argv.index("--workflow") + 1] == "VNX CI"
 
 
 def test_missing_or_unreadable_receipt_file_gives_no_receipt_not_unmeasurable(tmp_path):

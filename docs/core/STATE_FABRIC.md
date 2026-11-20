@@ -81,7 +81,7 @@ A row holds `number`, `title`, `branch`, `state` (`active` or `draft`), `head_sh
 | `running` | a run on the head is queued or in progress | none |
 | `no_run` | no run of the workflow exists for the head | none |
 | `undetermined` | two or more completed runs and their order cannot be established | none |
-| `overridden` | `VNX_MERGE_OVERRIDE_REASON` is set in the builder's environment; never shown as `success` | none |
+| `overridden` | the judge returned an override verdict; never shown as `success`. The builder passes the judge no override reason, so it does not produce this state itself | none |
 | `unmeasured` | CI was not judged for this row | the judge's code (`gh_run_list_failed`, `gh_unauthenticated`, `short_sha`, and so on), or the builder's own: `workflow_unreadable` (the workflow-name read failed, every measured row gets it), `cap`, `budget`, `judge_failed` |
 
 CI is measured for at most 8 rows (`PR_ROW_MEASURE_CAP`): PRs on a `dispatch/<id>` branch first, non-draft before draft, lowest PR number first. The other rows carry `unmeasured` with `reason: cap`. The CI step runs the workflow-name read and the judge calls in daemon threads, at most 4 at a time, and stops waiting 12 seconds after it started (`CI_STEP_DEADLINE_SECONDS`, the name read included). A row whose call has not returned by then carries `unmeasured` with `reason: budget`.

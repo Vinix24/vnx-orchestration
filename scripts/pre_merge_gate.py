@@ -26,7 +26,6 @@ import argparse
 import datetime as dt
 import json
 import logging
-import os
 import subprocess
 import sys
 import uuid
@@ -75,11 +74,10 @@ NET_LINE_DELETION_HOLD = 500
 PYTEST_TIMEOUT = 120
 
 # CI workflow name queried via `gh run list --workflow`. Overridable per-repo
-# via `ci_workflow` in the project's branch_protection.yaml on main, the
-# VNX_CI_WORKFLOW_NAME env var or the --ci-workflow-name CLI flag,
-# see _resolve_ci_workflow_name() for why this isn't auto-detected instead.
+# via `ci_workflow` in the project's branch_protection.yaml on main or the
+# --ci-workflow-name CLI flag, see _resolve_ci_workflow_name() for why this
+# isn't auto-detected instead.
 DEFAULT_CI_WORKFLOW_NAME = "VNX CI"
-CI_WORKFLOW_NAME_ENV_VAR = "VNX_CI_WORKFLOW_NAME"
 
 # Status for a check that could not establish an answer at all — distinct
 # from GO (verified passing) and HOLD (verified failing/missing). A gate
@@ -939,9 +937,8 @@ def _resolve_ci_workflow_name(workflow_name: Optional[str], project_workflow: Op
 
     Resolution order: explicit ``workflow_name`` argument (CLI
     ``--ci-workflow-name`` or a programmatic caller) > ``ci_workflow`` from the
-    project's ``branch_protection.yaml`` on main (OI-1849) > ``VNX_CI_WORKFLOW_NAME``
-    env var (per-repo operator override) > this fabric's own default,
-    "VNX CI".
+    project's ``branch_protection.yaml`` on main (OI-1849) > this fabric's own
+    default, "VNX CI".
 
     Mirrors ``merge_preflight_ci_check._resolve_workflow_name``. Keep the two
     in sync (tests/test_ci_workflow_resolution_parity.py holds them to it).
@@ -959,9 +956,6 @@ def _resolve_ci_workflow_name(workflow_name: Optional[str], project_workflow: Op
         return workflow_name
     if project_workflow:
         return project_workflow
-    env_name = os.environ.get(CI_WORKFLOW_NAME_ENV_VAR)
-    if env_name:
-        return env_name
     return DEFAULT_CI_WORKFLOW_NAME
 
 
@@ -1913,7 +1907,7 @@ def main() -> int:
         default=None,
         help=(
             "Name of the CI workflow to query via `gh run list --workflow`. "
-            f"Default: {CI_WORKFLOW_NAME_ENV_VAR} env var, else "
+            "Default: ci_workflow in the project's branch_protection.yaml on main, else "
             f"'{DEFAULT_CI_WORKFLOW_NAME}'. Set this for consumer repos whose "
             "CI workflow has a different name."
         ),
