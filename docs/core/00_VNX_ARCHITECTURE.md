@@ -234,11 +234,10 @@ not this doc).
 - Uses `report_parser.py` to generate a compact JSON receipt
 - Attaches evidence to tracked open items via PR-ID (does NOT close items or complete PRs)
 - Appends receipts to `state/t0_receipts.ndjson` (production receipt log)
-- Delivery to T0 is not a push: `VNX_RECEIPT_T0_PUSH=0` is the default
-  (ADR-035 §5.3). T0 reads the dispatches it still has to decide on from
-  `open_outcomes` (`t0_index.json`, or `scripts/receipt_query.py open-outcomes`)
-  and closes each with `receipt_query.py decide` (DISPATCH_RULES §13). Setting
-  the flag restores the tmux buffer-paste push.
+- Delivery to T0 is not a push: there is no pane paste. T0 reads the
+  dispatches it still has to decide on from `open_outcomes` (`t0_index.json`,
+  or `scripts/receipt_query.py open-outcomes`) and closes each with
+  `receipt_query.py decide` (DISPATCH_RULES §13).
 - Includes flood protection + singleton enforcement
 
 **Governance**: Receipt processor is evidence-only. T0 reviews evidence, closes satisfied open items, and completes PRs when all blockers/warnings are resolved.
