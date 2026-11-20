@@ -664,8 +664,8 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         "N-slot concurrency cap for the claude-tmux serial lock "
         "(scripts/lib/dispatch_serialization.py). ACCOUNT-wide: shared with every "
         "other project and worktree running on the same Claude subscription, not "
-        "scoped to this project. A stored value beats the env var; "
-        "VNX_OVERRIDE_TMUX_MAX_CONCURRENT beats both.",
+        "scoped to this project. The process env var still wins over this "
+        "config-store value as an explicit per-session override.",
         approval=True,
         subsystem="claude-tmux-serialization", status="ACTIVATE"),
 
