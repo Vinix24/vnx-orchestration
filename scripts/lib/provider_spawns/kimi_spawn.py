@@ -1037,7 +1037,7 @@ def _heartbeat_monitor_loop(
     """Poll the per-dispatch tee file for silence; kill + report if stuck.
 
     Same module (``worker_heartbeat.FileProgressHeartbeat``), same threshold
-    (``VNX_WORKER_HEARTBEAT_SILENCE_SECONDS``, default 1800s since OI-1130),
+    (``worker_heartbeat._DEFAULT_SILENCE_THRESHOLD_SECONDS``, 1800s since OI-1130),
     same failure-report
     shape (``build_heartbeat_failure_report``) as the tmux-spawn and subprocess
     lanes, so the audit trail is uniform regardless of which lane ran the

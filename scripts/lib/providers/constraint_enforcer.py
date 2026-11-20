@@ -475,9 +475,7 @@ def _scan_anthropic_sdk_references(
         # No SSOT patterns configured -> tokenize pass + built-in defaults still run.
         patterns = None
     env_fragments = [
-        env.get("VNX_WORKER_ENV", ""),
         env.get("WORKER_ENV", ""),
-        env.get("VNX_PROVIDER_ENV", ""),
         env.get("VNX_INSTRUCTION", ""),
     ]
     haystack = "\n".join([instruction_text or "", *env_fragments])

@@ -74,7 +74,6 @@ def test_gather_cli_reports_zero_patterns(empty_corpus):
         "VNX_HOME": str(ROOT),
         "VNX_PROJECT_ROOT": str(ROOT),
         "VNX_CANONICAL_ROOT": str(ROOT),
-        "VNX_STATE_SIMPLIFICATION_ROLLBACK": "0",
     })
     result = subprocess.run(
         [sys.executable, str(ROOT / "scripts/gather_intelligence.py"),

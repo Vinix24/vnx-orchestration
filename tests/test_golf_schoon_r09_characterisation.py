@@ -214,8 +214,6 @@ def oi_env(tmp_path, monkeypatch):
     monkeypatch.setattr(oim, "DIGEST_FILE", state / "open_items_digest.json")
     monkeypatch.setattr(oim, "MARKDOWN_FILE", state / "open_items.md")
     monkeypatch.setattr(oim, "AUDIT_LOG", state / "open_items_audit.jsonl")
-    monkeypatch.setattr(oim, "LEGACY_OPEN_ITEMS_FILE", tmp_path / "legacy.json")
-    monkeypatch.delenv(oim.ROLLBACK_ENV_FLAG, raising=False)
     # The central decision-log fan-out is an external store.
     monkeypatch.setattr(oim, "_log_oi_close_decision", lambda **kw: None)
     return state
@@ -244,16 +242,6 @@ def test_no_command_prints_help_and_returns_one(oi_env, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert out.startswith("usage: ")
     assert "Open Items Manager" in out
-
-
-def test_rollback_warning_is_first_line(oi_env, monkeypatch, capsys):
-    monkeypatch.setenv(oim.ROLLBACK_ENV_FLAG, "1")
-    assert _main(monkeypatch, "list") == 0
-    first = capsys.readouterr().out.splitlines()[0]
-    assert first == (
-        "[CUTOVER] WARNING: rollback mode enabled "
-        f"({oim.ROLLBACK_ENV_FLAG}=1). Legacy open-items fallback reads are active."
-    )
 
 
 def test_add_writes_item_audit_and_digest(oi_env, monkeypatch, capsys):
