@@ -3412,7 +3412,7 @@ def _promote_grant_view(
 def _sign_refusal(signers: Optional[Path], identity: str) -> Optional[str]:
     """Why ``plan-gate sign`` must not write, checked before any append; ``None`` when it may sign."""
     if signers is None:
-        return "no allowed_signers file found (VNX_ALLOWED_SIGNERS, .vnx-attest/ or .vnx/allowed_signers)"
+        return "no allowed_signers file found (.vnx-attest/allowed_signers or .vnx/allowed_signers)"
     try:
         lines = Path(signers).read_text(encoding="utf-8").splitlines()
     except OSError as exc:
