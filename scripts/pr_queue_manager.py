@@ -41,7 +41,6 @@ def _get_project_id() -> str:
     return _current_project_id()
 
 
-ROLLBACK_ENV_FLAG = "VNX_STATE_SIMPLIFICATION_ROLLBACK"
 PR_QUEUE_RESULT_EXIT_CODE_MAP = {
     "missing_argument": 10,
     "invalid_argument": 10,
@@ -51,19 +50,6 @@ PR_QUEUE_RESULT_EXIT_CODE_MAP = {
     "operation_failed": EXIT_DEPENDENCY,
 }
 
-
-def _env_flag(name: str) -> Optional[bool]:
-    value = os.environ.get(name)
-    if value is None:
-        return None
-    return value.strip().lower() in {"1", "true", "yes", "on"}
-
-
-def _rollback_mode_flag() -> Optional[bool]:
-    value = _env_flag(ROLLBACK_ENV_FLAG)
-    if value is None:
-        value = _env_flag("VNX_STATE_DUAL_WRITE_LEGACY")
-    return value
 
 try:
     from state_integrity import write_checksum
@@ -166,11 +152,9 @@ class PRQueueManager:
 
         # Resolve dispatch paths via vnx_paths (Phase P packaging)
         vnx_paths = _resolve_vnx_paths()
-        vnx_root = Path(vnx_paths["VNX_HOME"]).expanduser().resolve()
         project_root = Path(vnx_paths["PROJECT_ROOT"]).expanduser().resolve()
         self.dispatch_dir = Path(vnx_paths["VNX_DISPATCH_DIR"])
         self.vnx_state_dir = Path(vnx_paths["VNX_STATE_DIR"]).expanduser().resolve()
-        self.legacy_state_dir = (vnx_root / "state").resolve()
 
         # w19c/OI-934: PRQueueManager exists to write PR queue state and
         # dispatch-staging files — construction is the earliest point that
@@ -179,20 +163,6 @@ class PRQueueManager:
         # test isolation (see tests/test_pr_dispatch_integration.py history).
         _refuse_real_store_write(self.vnx_state_dir)
         _refuse_real_store_write(self.dispatch_dir)
-        rollback_flag = _rollback_mode_flag()
-        self.rollback_mode = bool(rollback_flag)
-        dual_write_flag = _env_flag("VNX_PR_QUEUE_DUAL_WRITE_LEGACY")
-        if dual_write_flag is None:
-            dual_write_flag = _env_flag("VNX_STATE_DUAL_WRITE_LEGACY")
-        if dual_write_flag is None:
-            dual_write_flag = self.rollback_mode
-        self.dual_write_legacy = bool(dual_write_flag)
-        if self.dual_write_legacy:
-            print(
-                "[CUTOVER] WARNING: legacy PR queue mirror writes enabled "
-                "(rollback mode). Canonical state remains primary.",
-                file=sys.stderr,
-            )
 
         # Store state in project's VNX_STATE_DIR (not script-relative) to prevent
         # cross-project contamination when multiple projects share the same vnx-system.
@@ -281,11 +251,6 @@ class PRQueueManager:
         event_log.parent.mkdir(parents=True, exist_ok=True)
         with open(event_log, 'a') as f:
             f.write(json.dumps(event_record, separators=(',', ':')) + '\n')
-        if self.dual_write_legacy:
-            legacy_log = self.legacy_state_dir / "queue_event_log.jsonl"
-            legacy_log.parent.mkdir(parents=True, exist_ok=True)
-            with open(legacy_log, 'a') as f:
-                f.write(json.dumps(event_record, separators=(',', ':')) + '\n')
 
 
     def save_vnx_state(self):
@@ -306,20 +271,6 @@ class PRQueueManager:
                 write_checksum(self.vnx_queue_json)
             except Exception as exc:
                 print(f"Warning: failed to write checksum for pr_queue.json: {exc}")
-
-        if self.dual_write_legacy:
-            self.legacy_state_dir.mkdir(parents=True, exist_ok=True)
-            legacy_yaml = self.legacy_state_dir / "pr_queue_state.yaml"
-            legacy_json = self.legacy_state_dir / "pr_queue.json"
-            with open(legacy_yaml, 'w') as f:
-                yaml.dump(vnx_state, f, default_flow_style=False, sort_keys=False)
-            with open(legacy_json, 'w') as f:
-                json.dump(vnx_state, f, indent=2)
-            if write_checksum:
-                try:
-                    write_checksum(legacy_json)
-                except Exception as exc:
-                    print(f"Warning: failed to write checksum for legacy pr_queue.json: {exc}")
 
     def add_pr(self, pr_data: Dict):
         """
@@ -582,13 +533,6 @@ class PRQueueManager:
         with open(audit_log, 'a') as f:
             json.dump(entry, f)
             f.write('\n')
-
-        if self.dual_write_legacy:
-            legacy_log = self.legacy_state_dir / "dispatch_audit.jsonl"
-            legacy_log.parent.mkdir(parents=True, exist_ok=True)
-            with open(legacy_log, 'a') as f:
-                json.dump(entry, f)
-                f.write('\n')
 
     def extract_v2_metadata(self, dispatch_file: Path) -> Dict[str, str]:
         """
