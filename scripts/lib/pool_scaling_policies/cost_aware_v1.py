@@ -59,8 +59,9 @@ def _estimate_hourly_cost(members: list, provider_mix: list, target_size: int) -
     """
     conservative = target_size * 0.5
     try:
-        from cost_tracker import recent_cost_per_hour  # type: ignore[import]
-        result = recent_cost_per_hour(target_size, provider_mix or [])
+        # Bound to scripts/lib/cost_tracker whatever sys.path order: scripts/cost_tracker.py has the same name.
+        from lib_module import load_lib_module
+        result = load_lib_module("cost_tracker").recent_cost_per_hour(target_size, provider_mix or [])
         return result if result > 0.0 else conservative
     except (ImportError, Exception):
         return conservative
