@@ -15,6 +15,7 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "scripts" / "lib"))
 
 import content_class as cc  # noqa: E402
+from content_boundary_pin import pin_boundary
 
 
 @pytest.fixture
@@ -77,7 +78,7 @@ def test_unreadable_and_unsupported_files_are_unconfigured_not_exceptions(tmp_pa
 
 
 def test_env_var_points_the_default_path_at_a_test_file(world, monkeypatch):
-    monkeypatch.setenv(cc.BOUNDARY_ENV, str(world["boundary_file"]))
+    pin_boundary(monkeypatch, str(world["boundary_file"]))
     assert cc.load_boundary().configured is True
 
 
@@ -245,7 +246,7 @@ def test_allowed_exception_providers(world):
 
 
 def test_allowed_exception_providers_reads_the_env_boundary_by_default(world, monkeypatch):
-    monkeypatch.setenv(cc.BOUNDARY_ENV, str(world["boundary_file"]))
+    pin_boundary(monkeypatch, str(world["boundary_file"]))
     assert cc.allowed_exception_providers("pacompany-engine") == frozenset({"deepseek"})
 
 

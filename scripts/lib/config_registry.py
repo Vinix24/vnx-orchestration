@@ -824,7 +824,7 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         "types). Purely deterministic: no model call sits in the write path.",
         subsystem="ledger-lifecycle", status="LIVE"),
     # agent layout: `off` (default), `shadow` and `on`; any unknown value reads as `off` with one
-    # WARNING (scripts/lib/agent_layout.py). Independent of VNX_AGENT_FOLDERS (agent_resolver).
+    # WARNING (scripts/lib/agent_layout.py). Independent of agent-folder resolution (agent_resolver).
     "VNX_AGENT_LAYOUT": _e(
         "VNX_AGENT_LAYOUT", "string", "off", "dispatch",
         "Agent-as-folder skill layout: off (default), shadow (a non-discovered copy under "

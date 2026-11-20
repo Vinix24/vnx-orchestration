@@ -140,8 +140,7 @@ isolation:
   - `bash_allow_patterns` / `bash_deny_patterns` — regex patterns for Bash
     command filtering.
 
-The extended resolver is gated by `VNX_AGENT_FOLDERS` and defaults to **on**.
-Rollback to legacy behavior: `VNX_AGENT_FOLDERS=0`.
+The extended resolver is always on; it has no switch.
 
 ## Governance Profiles
 

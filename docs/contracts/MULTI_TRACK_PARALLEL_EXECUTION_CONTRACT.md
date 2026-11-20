@@ -62,7 +62,7 @@ Invariant C-3 is relaxed: multiple tracks MAY be `active` simultaneously **if an
 
 ### 2.2 Condition B — Own Worktree per Active Track (Physical Isolation)
 
-- Each active track runs its dispatches in a dedicated git worktree (`VNX_ISOLATED_WORKTREE=1`), implemented by `scripts/lib/dispatch_worktree_isolation.py`, branched from current `origin/main`.
+- Each active track runs its dispatches in a dedicated git worktree, implemented by `scripts/lib/dispatch_worktree_isolation.py`, branched from current `origin/main`.
 - Physical guard: even if a file-scope declaration is wrong, tracks cannot corrupt each other's working trees or stage cross-track changes.
 - **Known substrate bug (must fix before relying on N concurrent activations)**: parallel `git worktree add` calls race on `<repo>/.git/config` lock; losers silently fall back to the shared root. The scheduler MUST serialize worktree creation (a lock around `worktree add`) before true concurrent activation is enabled.
 
@@ -80,7 +80,7 @@ Invariant C-3 is relaxed: multiple tracks MAY be `active` simultaneously **if an
 |-----------|---------------|-------|
 | Atomic dispatch claim | `claim_next_queued_dispatch` (BEGIN IMMEDIATE, project_id-scoped) | No two workers grab the same dispatch under concurrency |
 | N-worker lanes | subprocess (terminal-pinned), elastic pool (ADR-018), `claude_headless` (envelope) | Backend fan-out should use the elastic pool (role-scoped `backend-developer` members); the tmux-spawn lane was removed 2026-09-18 |
-| Per-dispatch worktree isolation | `scripts/lib/dispatch_worktree_isolation.py` | `VNX_ISOLATED_WORKTREE=1` flag |
+| Per-dispatch worktree isolation | `scripts/lib/dispatch_worktree_isolation.py` | always on, no flag |
 
 The elastic pool (ADR-018, `bin/vnx pool {status,scale,config,reap}`) is the preferred fan-out mechanism. Terminal-pinning (T1/T2/T3) blocks cross-role dispatch and is a legacy usage pattern.
 
@@ -119,7 +119,7 @@ These invariants replace the four chain-contract invariants (C-1..C-4) from `MUL
 
 - Track DAL and CLI (`scripts/lib/tracks.py`, `vnx track` commands)
 - ADR-007 composite PK/FK scoping over `project_id`
-- Worktree isolation (`scripts/lib/dispatch_worktree_isolation.py`, `VNX_ISOLATED_WORKTREE=1`)
+- Worktree isolation (`scripts/lib/dispatch_worktree_isolation.py`)
 - Atomic dispatch claim (`claim_next_queued_dispatch`)
 - N-worker lanes (elastic pool ADR-018, subprocess adapter, `claude_headless`)
 - Autopilot-tick (`RA-6`, ships dark, gated by `VNX_ROADMAP_AUTOPILOT=1`)

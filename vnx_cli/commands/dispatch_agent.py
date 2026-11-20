@@ -150,17 +150,14 @@ def _resolve_agent_config(
     agent_claude_md: Path,
     project_dir: Path,
 ) -> tuple[dict[str, object] | None, bool]:
-    """Load extended agent config when VNX_AGENT_FOLDERS is enabled.
+    """Load the extended agent config of an agent folder.
 
     Returns (agent_config, enabled). On import or parse errors, falls back to
     legacy behavior (config=None) so a broken resolver never blocks dispatch.
     """
     try:
-        from agent_resolver import agent_folders_enabled, resolve_agent
+        from agent_resolver import resolve_agent
     except ImportError:
-        return None, False
-
-    if not agent_folders_enabled():
         return None, False
 
     agent_config = resolve_agent(

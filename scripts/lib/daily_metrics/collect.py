@@ -36,7 +36,7 @@ from daily_metrics import days, metric
 from daily_metrics.store import DayStore
 from health_beacon import HealthBeacon
 
-SOURCES_DIR_ENV = "VNX_DAILY_METRICS_SOURCES_DIR"
+SOURCES_DIR = Path(__file__).resolve().parent / "sources"
 COLLECTOR_SOURCE = "daily_metrics.collect"
 BEACON_DETAILS_FINAL = "final_count"
 BEACON_DETAILS_DAYS = "counted_days"
@@ -70,11 +70,8 @@ class CollectContext:
 
 
 def sources_dir() -> Path:
-    """The sources directory: default under this package, or the env override (decision 18)."""
-    override = os.environ.get(SOURCES_DIR_ENV)
-    if override:
-        return Path(override)
-    return Path(__file__).resolve().parent / "sources"
+    """The sources directory: ``SOURCES_DIR``, read at call time."""
+    return SOURCES_DIR
 
 
 def load_module(qualified_name: str, path: Path) -> ModuleType:
