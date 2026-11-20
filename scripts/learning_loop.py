@@ -68,10 +68,9 @@ _FAILURE_STATUSES = frozenset(
 
 # Receipts older than this instant never feed the loop. It is the merge of #1965
 # (natural key on the pattern tables, after the pattern tables were cleaned): a
-# receipt from before it describes a store that no longer exists. Overridable
-# with VNX_LEARNING_LOOP_CUTOFF (ISO-8601), and it applies to --from-history too.
+# receipt from before it describes a store that no longer exists. It applies to
+# --from-history too.
 DEFAULT_RECEIPT_CUTOFF = "2026-09-28T16:41:11Z"
-CUTOFF_ENV = "VNX_LEARNING_LOOP_CUTOFF"
 
 # Persisting is opt-in. Anything but "1" leaves the loop in shadow mode: it
 # computes and reports, it changes no database row, no metric and no queue.
@@ -282,15 +281,10 @@ def _in_flight_dispatch_ids(state_dir: Path, project_id: str) -> frozenset:
 
 
 def resolve_receipt_cutoff() -> datetime:
-    """The instant before which receipts are ignored (env override, else default).
-
-    Raises ValueError on an unparseable override: a silent fallback would make
-    the loop read receipts the operator meant to exclude.
-    """
-    raw = os.environ.get(CUTOFF_ENV) or DEFAULT_RECEIPT_CUTOFF
-    cutoff = _parse_receipt_timestamp(raw)
+    """The instant before which receipts are ignored."""
+    cutoff = _parse_receipt_timestamp(DEFAULT_RECEIPT_CUTOFF)
     if cutoff is None:
-        raise ValueError(f"{CUTOFF_ENV}={raw!r} is not an ISO-8601 timestamp")
+        raise ValueError(f"DEFAULT_RECEIPT_CUTOFF={DEFAULT_RECEIPT_CUTOFF!r} is not an ISO-8601 timestamp")
     return cutoff
 
 

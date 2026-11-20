@@ -40,7 +40,6 @@ from pool_state_repo import PoolStateRepository  # noqa: E402
 
 _DOOR_FLAG = "VNX_SINGLE_ENTRY_DISPATCH"
 _LEGACY_FLAG = "VNX_DISPATCH_LEGACY"
-_HEARTBEAT_ENV = "VNX_POOL_LEASE_HEARTBEAT_SECONDS"
 
 
 def _env_without(*names: str) -> dict:
@@ -175,7 +174,7 @@ def test_running_pool_worker_renews_its_lease_and_releases_it_at_the_end(tmp_pat
     PoolStateRepository(db_path, "proj").add_or_refresh_pool_lease("T1", os.getpid(), time.time())
     before = _heartbeat(db_path, "T1")
 
-    monkeypatch.setenv(_HEARTBEAT_ENV, "0.02")
+    monkeypatch.setattr(pool_worker_runner, "LEASE_HEARTBEAT_DEFAULT_S", 0.02)
     monkeypatch.setattr(
         pool_worker_runner, "claim_next_queued_dispatch",
         lambda conn, terminal_id, project_id: "d-lease",
@@ -205,13 +204,3 @@ def test_running_pool_worker_renews_its_lease_and_releases_it_at_the_end(tmp_pat
     assert state == "released", f"worker must release its lease at the end, got state={state!r}"
     assert worker_pid is None
     assert lease_token == ""
-
-
-def test_non_numeric_heartbeat_interval_falls_back_to_the_default(monkeypatch):
-    """A malformed interval is not a crash and not a silent zero delay: the 15s default wins."""
-    monkeypatch.setenv(_HEARTBEAT_ENV, "not-a-number")
-    assert pool_worker_runner._lease_heartbeat_interval() == 15.0
-    monkeypatch.setenv(_HEARTBEAT_ENV, "0")
-    assert pool_worker_runner._lease_heartbeat_interval() == 15.0
-    monkeypatch.setenv(_HEARTBEAT_ENV, "2.5")
-    assert pool_worker_runner._lease_heartbeat_interval() == 2.5

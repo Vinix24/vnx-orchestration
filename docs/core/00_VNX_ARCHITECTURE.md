@@ -1132,7 +1132,7 @@ Commands: `vnx regen-settings --merge` (update VNX keys) | `--full` (first-time 
 
 **`config.env`** (project-level, sourced by `vnx start`):
 ```bash
-VNX_PROVIDER=claude_code       # T0 provider (claude_code/codex_cli/gemini_cli)
+VNX_T0_PROVIDER=claude_code    # T0 provider (claude_code/codex_cli/gemini_cli)
 VNX_MODEL=sonnet               # Default build-worker model: provider_constraints.yaml pins the actual floor/default
 VNX_T1_PROVIDER=codex_cli      # T1 role can use a different provider
 ```

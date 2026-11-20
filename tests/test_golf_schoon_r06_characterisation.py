@@ -37,7 +37,6 @@ _STEP_METHODS = (
 @pytest.fixture
 def env(tmp_path, monkeypatch):
     monkeypatch.delenv("VNX_LEARNING_LOOP_PERSIST", raising=False)
-    monkeypatch.delenv("VNX_LEARNING_LOOP_CUTOFF", raising=False)
     monkeypatch.setenv("VNX_PROJECT_ID", "vnx-dev")
     state_dir = tmp_path / "vnx-data" / "vnx-dev" / "state"
     state_dir.mkdir(parents=True)

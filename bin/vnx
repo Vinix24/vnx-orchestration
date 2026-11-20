@@ -917,14 +917,8 @@ print(f'[init] Mode set: $mode_flag')
 # ── Mode gating ──────────────────────────────────────────────────────────
 # PR-2: Check if a command is allowed in the current mode.
 # Uses Python vnx_mode.py for mode detection and command tier enforcement.
-# Disabled when VNX_MODE_GATING_ENABLED=0 (rollback control).
 _check_mode_gate() {
   local cmd="$1"
-
-  # Rollback control: disable gating entirely
-  if [ "${VNX_MODE_GATING_ENABLED:-1}" = "0" ]; then
-    return 0
-  fi
 
   # Skip gating for init, setup, help (always allowed)
   case "$cmd" in
