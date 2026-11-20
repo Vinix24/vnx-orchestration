@@ -704,27 +704,9 @@ def _govern(
                 # role — a spec-bound skill is proven, or its absence reasoned.
                 _skill_app = _verify_skill_application(spec.instruction, {"skill": spec.skill}, _role)
 
-                # receipt-quality PR-B2 fix-forward (Finding C): aggregate
-                # PreToolUse-hook tool-call signals for this dispatch
-                # (toolcall_signals.py), mirroring provider_dispatch._emit_
-                # governance's wiring so the claude/subprocess-adapter lane also
-                # populates these fields when VNX_TMUX_SIGNAL_DIR is set.
-                # FAIL-OPEN — an aggregation error or absent signal log must
-                # never break receipt emission; each field simply stays None
-                # (omitted by ReceiptV2).
+                # No signal dir exists any more (VNX_TMUX_SIGNAL_DIR deleted): the
+                # tool-call fields stay None and ReceiptV2 omits them.
                 _toolcall_signals: Dict[str, int] = {}
-                try:
-                    _signal_dir = os.environ.get("VNX_TMUX_SIGNAL_DIR")
-                    if _signal_dir:
-                        from toolcall_signals import aggregate_toolcall_signals  # noqa: PLC0415
-                        _toolcall_signals = aggregate_toolcall_signals(_signal_dir) or {}
-                except Exception:  # noqa: BLE001 — observability signal must never break receipt emission
-                    logger.debug(
-                        "envelope._govern: toolcall signal aggregation failed dispatch=%s (non-fatal)",
-                        spec.dispatch_id,
-                        exc_info=True,
-                    )
-                    _toolcall_signals = {}
 
                 # ADR-005: the receipt's cost — from this attempt's ledger line on
                 # a harness builder run, else from the old event, emitted here
