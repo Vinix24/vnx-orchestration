@@ -326,6 +326,7 @@ _OBJECTIVE_ARGV = {
     "set-lane-hint": ["delegate-track", "governed"],
     "set-horizon": ["delegate-track", "now"],
     "set-plan-scope": ["delegate-track", "light", "--reason", "parity check"],
+    "plan-scope": ["review"],
     "set-goal": ["delegate-track", "Delegate goal state"],
     "set-autonomous-promotion": ["delegate-track", "true"],
 }

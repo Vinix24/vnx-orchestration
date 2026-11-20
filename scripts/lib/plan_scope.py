@@ -33,11 +33,12 @@ has an open ``OI-PLAN`` and ``light`` when it has none; reading writes nothing.
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterator, Optional, Sequence
+from typing import Any, Callable, Iterator, Optional, Sequence
 
 import track_reconciler
 import tracks as tracks_lib
@@ -467,3 +468,137 @@ def dispatch_rule(
     if derived.variant == "coding-strict":
         return f"variant coding-strict ({derived.reason})"
     return None
+
+
+@dataclass(frozen=True)
+class Proposal:
+    """The scope the existing rules give a track, and the deliverable and path that decided it."""
+    scope: str
+    reason: str
+
+
+def propose(deliverables: Sequence[Any]) -> Proposal:
+    """The clean-up proposal for one track from its deliverables (``plan-scope review``).
+
+    Each deliverable goes through ``dispatch_rule``, the rule the door applies
+    to a build dispatch, so the proposal can never call light what the door
+    calls architecture. No deliverable, or an unreadable entry or
+    ``dispatch_paths``, is architecture (closed on doubt).
+    """
+    if not deliverables:
+        return Proposal(ARCHITECTURE, "no deliverables: cannot be judged (closed on doubt)")
+    for d in (d if isinstance(d, dict) else {} for d in deliverables):
+        ref, raw = d.get("ref") or "?", d.get("dispatch_paths")
+        if not isinstance(raw, list) or not all(isinstance(p, str) for p in raw):
+            return Proposal(ARCHITECTURE, f"deliverable {ref}: dispatch_paths missing or unreadable")
+        rule = dispatch_rule(raw, task_class=d.get("task_class"))
+        if rule:
+            return Proposal(ARCHITECTURE, f"deliverable {ref}: {rule}")
+    return Proposal(LIGHT, f"{len(deliverables)} deliverable(s), none refactor, none in a schema, security or coding-strict path")
+
+
+@dataclass(frozen=True)
+class ReviewRow:
+    """One track with an open OI-PLAN: how its scope reads now and what is proposed."""
+    track_id: str
+    horizon: Optional[str]
+    reading: ScopeReading
+    proposal: Proposal
+
+    def as_dict(self) -> dict:
+        return {
+            "track_id": self.track_id, "horizon": self.horizon,
+            "plan_scope": self.reading.scope, "source": self.reading.source,
+            "proposal": self.proposal.scope, "reason": self.proposal.reason,
+        }
+
+
+def review(
+    state_dir: Path, project_id: str, deliverables_of: Callable[[str], Sequence[Any]],
+) -> list[ReviewRow]:
+    """Every track of the project with an open OI-PLAN, with its proposal. Read-only.
+
+    ``deliverables_of(track_id)`` returns the track's deliverables as mappings
+    with ``ref``, ``task_class`` and ``dispatch_paths``. A store without the
+    plan-gate schema has no OI-PLAN to clear: no rows.
+    """
+    conn = _connect(state_dir)
+    try:
+        if not plan_gate_supported(conn):
+            return []
+        found = conn.execute(
+            "SELECT t.track_id, t.horizon, t.metadata_json FROM tracks t "
+            "WHERE t.project_id = ? AND EXISTS (SELECT 1 FROM track_open_items o "
+            "WHERE o.track_id = t.track_id AND o.project_id = t.project_id "
+            "AND o.oi_id = ? || t.track_id AND o.link_type = 'blocks' AND o.resolved_at IS NULL) "
+            "ORDER BY t.track_id",
+            (project_id, PLAN_OI_PREFIX),
+        ).fetchall()
+    finally:
+        conn.close()
+    return [
+        ReviewRow(
+            r["track_id"], r["horizon"], read_scope(r["metadata_json"], open_plan_blocker=True),
+            propose(deliverables_of(r["track_id"])),
+        )
+        for r in found
+    ]
+
+
+@dataclass(frozen=True)
+class ConfirmResult:
+    """``confirm_proposal``: the change it wrote, or why it wrote nothing."""
+    change: Optional[ScopeChange]
+    skipped: Optional[str]
+
+
+def confirm_proposal(
+    state_dir: Path, track_id: str, project_id: str, expected: Proposal, *,
+    reason: str, resolution_reason: str,
+    deliverables_in: Callable[[sqlite3.Connection, str], Sequence[Any]],
+) -> ConfirmResult:
+    """Store ``expected`` for one track, and close its OI-PLAN when it is light.
+
+    One IMMEDIATE transaction holds the whole decision: the scope and the
+    OI-PLAN rows are read under the lock, the track's deliverables are read on
+    the same connection (``deliverables_in(conn, track_id)``) and proposed
+    again, and nothing is written when the OI-PLAN is no longer open or the
+    fresh proposal differs from ``expected``. Otherwise the scope write and the
+    OI-PLAN close commit together or not at all, so a deliverable added after
+    the review cannot be missed between the check and the close.
+
+    Raises ValueError on an empty reason or resolution_reason; an error inside
+    the transaction (the deliverable read, the scope write, the close) rolls it
+    back and propagates.
+    """
+    if not (reason or "").strip() or not (resolution_reason or "").strip():
+        raise ValueError("confirming a plan scope requires a reason and a resolution_reason")
+    events: list = []
+    with _write_transaction(state_dir) as conn:
+        reading, rows = _locked_reading(conn, track_id, project_id)
+        if reading is None:
+            return ConfirmResult(None, "the track no longer exists")
+        if not _any_open(rows):
+            return ConfirmResult(None, "its OI-PLAN closed since the review")
+        if propose(deliverables_in(conn, track_id)) != expected:
+            return ConfirmResult(None, "its proposal changed since the review")
+        gate = _seed_in(conn, track_id, project_id, rows) if expected.scope == ARCHITECTURE else None
+        tracks_lib.set_plan_scope(
+            state_dir, track_id, project_id, expected.scope,
+            old_scope=reading.scope, reason=reason, rule=None, actor="operator", conn=conn, event_sink=events,
+        )
+        if expected.scope == LIGHT:
+            tracks_lib.unlink_open_item(
+                state_dir, track_id, project_id, plan_blocker_oi(track_id), "blocks",
+                reason=resolution_reason, actor="attest", conn=conn, event_sink=events,
+            )
+        change = ScopeChange(track_id, reading.scope, expected.scope, f"by hand: {reason.strip()}", gate)
+    for spec in events:
+        try:
+            tracks_lib._emit_track_event(state_dir, *spec)
+        except Exception as exc:  # post-commit: the rows are durable, the audit line is logged, not lost silently
+            logging.getLogger(__name__).warning("plan_scope: post-commit ledger emit failed: %s", exc)
+    if expected.scope == LIGHT:
+        track_reconciler.reconcile_track(state_dir, track_id, project_id)
+        return ConfirmResult(change, None)
+    return ConfirmResult(_reconciled(state_dir, project_id, track_id, change), None)

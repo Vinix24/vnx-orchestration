@@ -1329,6 +1329,7 @@ def _register_horizon_subparser(subparsers: argparse.Action) -> None:
     horizon_subs = horizon_parser.add_subparsers(dest="horizon_verb", metavar="VERB")
     _register_objective_verbs(horizon_subs)
     _register_objective_queue_verb(horizon_subs)
+    _register_objective_plan_scope_verb(horizon_subs)
 
     dlv_parser = horizon_subs.add_parser(
         "deliverable", help="deliverable plane (proposed dispatches)"
@@ -1346,6 +1347,20 @@ def _register_horizon_subparser(subparsers: argparse.Action) -> None:
     _register_plan_gate_sign_verb(pg_subs)
 
 
+def _register_objective_plan_scope_verb(subs: argparse.Action) -> None:
+    """`plan-scope review`: clean up open OI-PLAN; flags mirror planning_cli's parser."""
+    p_review = subs.add_parser(
+        "plan-scope",
+        help="clean up open OI-PLAN: review proposes a scope per track, confirm needs --approval-id",
+    ).add_subparsers(dest="scope_action", metavar="ACTION", required=True).add_parser(
+        "review", help="list tracks with an open OI-PLAN and the proposed scope (read-only)",
+    )
+    _common_horizon_args(p_review)
+    p_review.add_argument("--confirm", default="", help="comma-separated tracks whose proposal to store")
+    p_review.add_argument("--confirm-all", action="store_true", help="confirm every track the review prints")
+    p_review.add_argument("--approval-id", default="", help="REQUIRED with --confirm/--confirm-all")
+
+
 def _register_objective_subparser(subparsers: argparse.Action) -> None:
     """Backward-compat alias: `vnx objective <verb>` — same verbs/handlers as
     `vnx horizon <verb>` (bin/vnx parity)."""
@@ -1356,6 +1371,7 @@ def _register_objective_subparser(subparsers: argparse.Action) -> None:
     objective_subs = objective_parser.add_subparsers(dest="objective_verb", metavar="VERB")
     _register_objective_verbs(objective_subs)
     _register_objective_queue_verb(objective_subs)
+    _register_objective_plan_scope_verb(objective_subs)
 
 
 def _register_deliverable_subparser(subparsers: argparse.Action) -> None:
