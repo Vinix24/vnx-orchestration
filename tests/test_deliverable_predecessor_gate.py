@@ -147,3 +147,12 @@ def test_registry_default_and_stored_value_through_config_runtime(sd, monkeypatc
     with sqlite3.connect(sd / "runtime_coordination.db") as conn:
         cs.set_config(conn, PID, dpg.MODE_KEY, "warn", actor="op")
     assert crt.get(dpg.MODE_KEY) == "warn"
+
+
+def test_the_door_runs_the_check_with_the_project_state_checks(sd, monkeypatch):
+    _dep(sd)
+    for name in ("_check_track_link_verdict", "_check_b3_cap_verdict"):
+        monkeypatch.setattr(dispatch_cli, name, lambda spec, state_dir: None)
+    spec = type("Spec", (), {"dispatch_id": f"{C}-r2", "project_id": PID})()
+    [v] = dispatch_cli._project_state_verdicts(spec, state_dir=sd, dry_run=True)
+    assert v.code == "deliverable-predecessor-unmerged" and v.severity == "blocking" and not _ledger(sd)
