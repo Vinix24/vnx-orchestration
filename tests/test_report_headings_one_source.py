@@ -63,7 +63,6 @@ def _isolated_prompt_assembly(monkeypatch):
     for var in (
         "VNX_REPORT_CONTRACT_DIRECTIVE",
         "VNX_SHARED_PREPARE",
-        "VNX_WORKER_RULES_FOOTER",
         "VNX_BENCH_EQUAL_CONTEXT",
     ):
         monkeypatch.delenv(var, raising=False)

@@ -1540,12 +1540,7 @@ class LearningLoop:
           - prevention_rules  (confidence < 0.3, older than 30 days)
         Antipatterns have no numeric confidence column and are skipped.
 
-        Off-switch: set VNX_LEARN_SUPERSEDE=0 to skip this step entirely.
         """
-        if os.environ.get("VNX_LEARN_SUPERSEDE", "1") == "0":
-            print("  VNX_LEARN_SUPERSEDE=0 — supersede step skipped")
-            return 0
-
         total = 0
         try:
             paths = ensure_env()
@@ -1816,15 +1811,9 @@ class LearningLoop:
     def _cycle_bridge_and_supersede(self) -> None:
         """Steps 5.5 and 5.6: bridge to the intelligence DB, queue stale patterns."""
         # 5.5 Persist high-confidence patterns and failures to intelligence DB
-        # Off-switch: VNX_LEARN_PERSIST=0 skips the auto-persist of observations.
         print("\n🔗 Step 5.5: Bridging patterns to intelligence DB...")
-        if not self.persist:
-            # persist_to_intelligence_db runs against the in-memory copy here.
-            self.persist_to_intelligence_db()
-        elif os.environ.get("VNX_LEARN_PERSIST", "1") != "0":
-            self.persist_to_intelligence_db()
-        else:
-            print("  VNX_LEARN_PERSIST=0 — pattern persist skipped")
+        # With persist off, persist_to_intelligence_db runs against the in-memory copy.
+        self.persist_to_intelligence_db()
         self.ingest_approved_rules()
 
         # 5.6 Queue stale low-confidence patterns for operator-gated supersede (D3 G-L4).
