@@ -106,7 +106,7 @@ A session is guarded only when all three rules hold (`t0_context_guard.guarded_r
    the folder `git rev-parse --show-toplevel` names, found without starting git. The cwd is not
    under `.vnx-data/worktrees/`. A folder with only a project id, such as
    `~/Desktop/BUSINESS/clients`, is not guarded.
-2. **The T0 by convention.** `session_stop_rotation._is_t0_session` says T0: an explicit
+2. **The T0 by convention.** `t0_context_guard._is_t0_session` says T0: an explicit
    `VNX_TERMINAL` (or `VNX_TERMINAL_ID`) wins, else no `VNX_DISPATCH_ID`/`VNX_TMUX_SIGNAL_DIR`,
    else a cwd outside `.claude/terminals/T1-T3`. So an attended session at the project root or
    in the T0 folder is the orchestrator. **Opt-out:** start a side session there with
