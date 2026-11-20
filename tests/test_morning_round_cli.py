@@ -114,6 +114,48 @@ def test_decide_command_by_source():
     assert ma.decide_command("steering", "p", "x") is None
 
 
+def test_dream_ref_as_the_source_opens_it_gives_the_bare_cycle_id():
+    from operator_queue_dream_analyzer import REVIEW_SUFFIX
+    ref = f"dream:c1{REVIEW_SUFFIX}"
+    assert ma.decide_command("dream", "p", ref) == "vnx dream review c1 --approve"
+    assert ma.decide_command("dream", "p", "dream:c1") == "vnx dream review c1 --approve"
+    assert ma.decide_command("dream", "p", f"dream:{REVIEW_SUFFIX}") is None
+
+
+def test_analyzer_refs_by_form():
+    assert ma.decide_command("analyzer", "p", "edit:7") == "python3 scripts/apply_suggested_edits.py accept 7"
+    assert ma.decide_command("analyzer", "p", "archival:pat-9") == 'vnx learning approve pat-9 --approval-id "..." --reason "..."'
+    for ref in ("other:1", "edit:", "archival:", "7", "dream:c1"):
+        assert ma.decide_command("analyzer", "p", ref) is None, ref
+
+
+def test_routed_fleet_refs_have_no_command():
+    from operator_queue_dream_analyzer import REVIEW_SUFFIX
+    for source, ref in (("dream", f"project:owner/dream:c1{REVIEW_SUFFIX}"), ("analyzer", "project:owner/edit:7"),
+                        ("analyzer", "project:owner/archival:pat-9")):
+        assert ma.decide_command(source, "p", ref) is None, ref
+
+
+def test_archival_command_parses_in_the_real_cli(monkeypatch):
+    import argparse
+    import shlex
+    import vnx_cli.main as vm
+    argv = shlex.split(ma.decide_command("analyzer", "p", "archival:pat-9"))
+    captured = {}
+    real = argparse.ArgumentParser.parse_args
+
+    def grab(self, args=None, namespace=None):
+        captured["ns"] = real(self, args, namespace)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(argparse.ArgumentParser, "parse_args", grab)
+    monkeypatch.setattr(sys, "argv", argv)
+    with pytest.raises(KeyboardInterrupt):
+        vm.main()
+    ns = captured["ns"]
+    assert (ns.learning_subcommand, ns.pattern_id) == ("approve", "pat-9")
+
+
 @pytest.mark.parametrize("source,ref", [("promote", "dlv:abc"), ("analyzer", "edit:1"), ("dream", "dream:c1"),
                                          ("decision", "pr:3073"), ("question", "antwoord:0123456789ab")])
 def test_every_decide_command_parses_in_the_real_cli(source, ref, monkeypatch):

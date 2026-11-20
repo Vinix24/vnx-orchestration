@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import operator_queue as oq
+from operator_queue_dream_analyzer import REVIEW_SUFFIX
 from ochtendronde_agenda import _load_snapshot, _snapshot_path, decision_status
 
 SCHEMA = "morning_agenda/1"
@@ -33,13 +34,22 @@ def decide_command(source: str, point_id: str, ref: str) -> Optional[str]:
     """The command that carries out the decision, as the source dictates; None where the source has no command."""
     if source in ("decision", "question"):  # `inbox answer` refuses every other ref: the source decides those
         return f'vnx inbox answer {point_id} --quote "..."' if ref.startswith(ANSWERABLE_REF_PREFIXES) else None
-    bare = ref.split(":", 1)[-1]  # the snapshot ref is "<form>:<id>" (dlv:<id>, edit:<n>, dream:<id>); the CLIs take the id
+    if ref.startswith("project:"):  # a fleet point routed here as project:<owner>/<ref>: the owner's store decides it, not this one
+        return None
+    form, _, bare = ref.partition(":")  # the snapshot ref is "<form>:<id>" (dlv:<id>, edit:<n>, dream:<id>, archival:<id>)
+    if not bare:
+        return None
     if source == "promote":
         return f"vnx deliverable promote {bare}"
-    if source == "dream":
-        return f"vnx dream review {bare} --approve"  # without --approve/--reject the command waits on stdin
-    if source == "analyzer":
+    if source == "dream" and form == "dream":
+        # the ref carries the review file stem ("<cycle>-pending-review"); `vnx dream review` takes the bare cycle id
+        cycle = bare.removesuffix(REVIEW_SUFFIX)
+        # without --approve/--reject the command waits on stdin
+        return f"vnx dream review {cycle} --approve" if cycle else None
+    if source == "analyzer" and form == "edit":
         return f"python3 scripts/apply_suggested_edits.py accept {bare}"
+    if source == "analyzer" and form == "archival":  # `vnx learning approve` refuses to run without the gate token and a reason
+        return f'vnx learning approve {bare} --approval-id "..." --reason "..."'
     return None
 
 
