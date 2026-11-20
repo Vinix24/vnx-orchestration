@@ -2748,9 +2748,11 @@ def cmd_objective_set_plan_scope(args: argparse.Namespace) -> int:
     return 0
 
 
-def _plan_scope_deliverables(state_dir: Path, project_id: str, track_id: str) -> list[dict]:
-    """The track's deliverables as ``plan_scope.propose`` reads them."""
-    recs = _fetch_deliverable_records(state_dir, project_id, track_id, include_metadata=True)
+def _plan_scope_deliverables(
+    state_dir: Path, project_id: str, track_id: str, conn: Optional[sqlite3.Connection] = None,
+) -> list[dict]:
+    """The track's deliverables as ``plan_scope.propose`` reads them (on ``conn`` when given)."""
+    recs = _fetch_deliverable_records(state_dir, project_id, track_id, include_metadata=True, conn=conn)
     return [{**(r["metadata"] if isinstance(r.get("metadata"), dict) else {}), "ref": r.get("deliverable_ref")}
             for r in recs]
 
@@ -2758,19 +2760,21 @@ def _plan_scope_deliverables(state_dir: Path, project_id: str, track_id: str) ->
 def _confirm_plan_scope(
     state_dir: Path, project_id: str, printed: "plan_scope.ReviewRow", approval_id: str,
 ) -> dict:
-    """Store the proposal of one printed row; a light one also resolves its OI-PLAN."""
-    now = {r.track_id: r for r in plan_scope.review(state_dir, project_id, lambda t: _plan_scope_deliverables(state_dir, project_id, t))}
-    current = now.get(printed.track_id)
-    if current is None or current.proposal != printed.proposal:
-        return {"track_id": printed.track_id, "outcome": "skipped",
-                "detail": "its proposal changed or its OI-PLAN closed since the review"}
+    """Store the proposal of one printed row; a light one also resolves its OI-PLAN.
+
+    The proposal is re-read and both writes happen in one transaction
+    (``plan_scope.confirm_proposal``): a deliverable added after the review
+    makes the row skip, never close the gate of a track that is architecture again.
+    """
     reason = f"operator-decision: {approval_id}"
-    change = plan_scope.set_by_hand(
-        state_dir, printed.track_id, project_id, printed.proposal.scope, reason=reason)
-    if printed.proposal.scope == plan_scope.LIGHT:
-        _resolve_plan_blocker(state_dir, printed.track_id, project_id,
-                              reason=reason, resolver="attest", approval_id=approval_id)
-    return {"track_id": printed.track_id, "outcome": "confirmed", "detail": change.line()}
+    result = plan_scope.confirm_proposal(
+        state_dir, printed.track_id, project_id, printed.proposal, reason=reason,
+        resolution_reason=_compose_plan_resolution_reason("attest", reason, approval_id),
+        deliverables_in=lambda conn, t: _plan_scope_deliverables(state_dir, project_id, t, conn=conn),
+    )
+    if result.change is None:
+        return {"track_id": printed.track_id, "outcome": "skipped", "detail": result.skipped}
+    return {"track_id": printed.track_id, "outcome": "confirmed", "detail": result.change.line()}
 
 
 def cmd_objective_plan_scope_review(args: argparse.Namespace) -> int:
@@ -3108,7 +3112,8 @@ def cmd_deliverable_deps(args: argparse.Namespace) -> int:
 
 
 def _fetch_deliverable_records(state_dir, project_id: str, objective: Optional[str] = None, *,
-                               include_metadata: bool = False, include_withdrawn: bool = False) -> list[dict]:
+                               include_metadata: bool = False, include_withdrawn: bool = False,
+                               conn: Optional[sqlite3.Connection] = None) -> list[dict]:
     """The single read path over the deliverable plane — the view rollup when
     migration 0027 has been applied, the raw-dispatches fallback otherwise.
 
@@ -3126,8 +3131,15 @@ def _fetch_deliverable_records(state_dir, project_id: str, objective: Optional[s
     ``task_class``/``routing_floor`` that are not modeled as their own view
     columns yet). A ``withdrawn`` deliverable is no open or planned work (ADR-049):
     it is left out unless ``include_withdrawn``.
+
+    ``conn`` reads on the caller's connection (a row-factory ``sqlite3.Row``
+    connection to the same store), so a caller inside a write transaction sees
+    the deliverables as that transaction does; the caller keeps ownership and
+    this function does not close it.
     """
-    conn = _db_conn(state_dir)
+    owns = conn is None
+    if owns:
+        conn = _db_conn(state_dir)
     try:
         has_view = any(
             row[0] == "deliverables"
@@ -3216,7 +3228,8 @@ def _fetch_deliverable_records(state_dir, project_id: str, objective: Optional[s
                     rec["metadata"] = meta
                 records.append(rec)
     finally:
-        conn.close()
+        if owns:
+            conn.close()
     return records
 
 

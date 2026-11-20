@@ -91,12 +91,12 @@ def test_confirm_all_skips_a_track_whose_proposal_changed(store, monkeypatch):
     real = planning_cli._plan_scope_deliverables
     calls = {"n": 0}
 
-    def flaky(state_dir, project_id, track_id):
+    def flaky(state_dir, project_id, track_id, **kwargs):
         if track_id == "t-light":
             calls["n"] += 1
             if calls["n"] > 1:  # the re-read at confirm time sees a refactor deliverable
                 return [{"ref": "x", "task_class": "03_refactoring", "dispatch_paths": ["a.py"]}]
-        return real(state_dir, project_id, track_id)
+        return real(state_dir, project_id, track_id, **kwargs)
 
     monkeypatch.setattr(planning_cli, "_plan_scope_deliverables", flaky)
     rc, payload, _ = _review(store, "--confirm-all", "--approval-id", "APR-9")
@@ -127,3 +127,104 @@ def test_unreadable_metadata_json_stays_architecture(store):
     _, payload, _ = _review(store)
     row = _by_track(payload)["t-light"]
     assert row["source"] == "unreadable" and row["plan_scope"] == "architecture"
+
+
+def _deliverables_of(sd):
+    import planning_cli
+    return lambda t: planning_cli._plan_scope_deliverables(sd, PID, t)
+
+
+def _light_row(sd):
+    return next(r for r in plan_scope.review(sd, PID, _deliverables_of(sd)) if r.track_id == "t-light")
+
+
+def _confirm(sd, row):
+    import planning_cli
+    return planning_cli._confirm_plan_scope(sd, PID, row, "APR-3")
+
+
+def test_confirm_race_a_refactor_deliverable_after_the_check_never_closes_the_gate(store, monkeypatch):
+    """A refactoring deliverable lands after the proposal check: the gate must not close on an architecture track."""
+    real = plan_scope.set_by_hand
+
+    def set_then_add(*args, **kwargs):
+        change = real(*args, **kwargs)  # the old confirm wrote the scope here, outside any lock on the deliverables
+        _add_deliverable(store, "t-light", "late", "--task-class", "03_refactoring",
+                         "--dispatch-paths", "scripts/lib/late.py")
+        return change
+
+    monkeypatch.setattr(plan_scope, "set_by_hand", set_then_add)
+    row = _light_row(store)
+    _confirm(store, row)
+    scope, gate_open = _meta(store, "t-light")["plan_scope"], _open_plan_blocker(store, "t-light")
+    assert not (scope == "architecture" and not gate_open)
+
+
+def test_confirm_skips_when_a_refactor_deliverable_was_added_before_confirm(store):
+    row = _light_row(store)
+    _add_deliverable(store, "t-light", "late", "--task-class", "03_refactoring",
+                     "--dispatch-paths", "scripts/lib/late.py")
+    res = _confirm(store, row)
+    assert res["outcome"] == "skipped" and "proposal changed" in res["detail"]
+    assert _meta(store, "t-light")["plan_scope"] == "architecture" and _open_plan_blocker(store, "t-light")
+
+
+def test_confirm_skips_when_the_oi_closed_between_review_and_confirm(store):
+    import tracks as tracks_lib
+    row = _light_row(store)
+    tracks_lib.unlink_open_item(store, "t-light", PID, "OI-PLAN-t-light", "blocks", reason="[panel] PASS")
+    before = (_plan_rows(store, "t-light"), _meta(store, "t-light"))
+    res = _confirm(store, row)
+    assert res["outcome"] == "skipped" and "OI-PLAN closed" in res["detail"]
+    assert (_plan_rows(store, "t-light"), _meta(store, "t-light")) == before
+
+
+def test_confirm_rolls_the_scope_back_when_the_close_fails(store, monkeypatch):
+    import tracks as tracks_lib
+
+    def boom(*_a, **_k):
+        raise RuntimeError("close failed")
+
+    monkeypatch.setattr(tracks_lib, "unlink_open_item", boom)
+    row = _light_row(store)
+    with pytest.raises(RuntimeError, match="close failed"):
+        _confirm(store, row)
+    assert _meta(store, "t-light")["plan_scope"] == "architecture" and _open_plan_blocker(store, "t-light")
+
+
+def test_confirm_reads_the_deliverables_under_the_write_lock(store):
+    import sqlite3
+    row = _light_row(store)
+    seen = {}
+
+    def read(conn, track_id):
+        other = sqlite3.connect(str(store / "runtime_coordination.db"), timeout=0)
+        try:
+            other.execute("BEGIN IMMEDIATE")
+            seen["locked"] = False
+        except sqlite3.OperationalError:
+            seen["locked"] = True
+        finally:
+            other.close()
+        return [{"ref": "l", "task_class": "01_code_generation", "dispatch_paths": ["scripts/lib/plain.py"]}]
+
+    result = plan_scope.confirm_proposal(
+        store, "t-light", PID, row.proposal, reason="operator-decision: A", resolution_reason="[attest:A] x",
+        deliverables_in=read)
+    assert seen == {"locked": True} and result.change is not None and result.skipped is None
+
+
+@pytest.mark.parametrize("reason,resolution", [("", "[attest] x"), ("r", " "), (None, "x")])
+def test_confirm_proposal_refuses_an_empty_reason(store, reason, resolution):
+    row = _light_row(store)
+    with pytest.raises(ValueError):
+        plan_scope.confirm_proposal(store, "t-light", PID, row.proposal, reason=reason,
+                                    resolution_reason=resolution, deliverables_in=lambda c, t: [])
+    assert _open_plan_blocker(store, "t-light")
+
+
+def test_confirm_proposal_on_an_unknown_track_is_skipped(store):
+    row = _light_row(store)
+    result = plan_scope.confirm_proposal(store, "t-nope", PID, row.proposal, reason="r", resolution_reason="x",
+                                         deliverables_in=lambda c, t: [])
+    assert result.change is None and "no longer exists" in result.skipped
