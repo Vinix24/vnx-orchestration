@@ -1,0 +1,1 @@
+- New registry key `VNX_DELIVERABLE_PREDECESSOR_MODE` (scope project, `off|warn|refuse`, default `refuse`). The door reads it from B2 (#3123) on; this PR only registers the key and merges first.
