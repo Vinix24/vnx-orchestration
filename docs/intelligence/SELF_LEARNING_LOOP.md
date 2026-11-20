@@ -45,7 +45,7 @@ None of these files are consumed automatically. Ingestion into the live DB (`pre
 
 Persist mode adds two gates. `VNX_LEARNING_LOOP_ENABLED` (default `0`) makes the cycle a no-op; at `1` it needs `VNX_INJECTION_FEEDBACK_ENABLED=1` and an `ok` injection-effectiveness probe, else the cycle is degraded and updates no pattern. The pattern write itself needs an approval record bound to the exact rows (below). Queue and persist mode both read `ledger_verdict/1` first and stop with `ledger_source_check: <reason_code>` on `refused` ([ADR-065](../governance/decisions/ADR-065-leren-is-voorstellen.md)).
 
-Which failures become proposals: a class in `ELIGIBLE_CLASSES` (`scripts/lib/learning_failure_class.py`) seen in at least two dispatches, or an open-item class spanning three distinct origin dispatches. Receipts before `VNX_LEARNING_LOOP_CUTOFF` (default `2026-09-28T16:41:11Z`) never count, also with `--from-history`. A failure receipt with a sentinel `provider` is skipped only when its `model` is also a sentinel and it has no `report_path`.
+Which failures become proposals: a class in `ELIGIBLE_CLASSES` (`scripts/lib/learning_failure_class.py`) seen in at least two dispatches, or an open-item class spanning three distinct origin dispatches. Receipts before `DEFAULT_RECEIPT_CUTOFF` (`2026-09-28T16:41:11Z`, `scripts/learning_loop.py`; no setting moves it) never count, also with `--from-history`. A failure receipt with a sentinel `provider` is skipped only when its `model` is also a sentinel and it has no `report_path`.
 
 ---
 

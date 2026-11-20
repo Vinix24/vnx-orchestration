@@ -422,15 +422,9 @@ _resolve_node_path() {
 }
 
 # Resolve the path to the Python venv activation script.
-# Search order: VNX_VENV_PATH env override > PROJECT_ROOT/.venv > main worktree .venv.
+# Search order: PROJECT_ROOT/.venv > main worktree .venv.
 # Prints the activate script path to stdout. Returns 1 if not found.
 _resolve_venv_path() {
-  # Explicit override
-  if [ -n "${VNX_VENV_PATH:-}" ] && [ -f "${VNX_VENV_PATH}/bin/activate" ]; then
-    echo "${VNX_VENV_PATH}/bin/activate"
-    return 0
-  fi
-
   # Current project root (handles worktrees with symlinked .venv)
   if [ -f "${PROJECT_ROOT}/.venv/bin/activate" ]; then
     echo "${PROJECT_ROOT}/.venv/bin/activate"

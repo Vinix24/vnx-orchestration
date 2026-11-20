@@ -17,8 +17,7 @@ import build_t0_state as bts  # noqa: E402
 
 @pytest.fixture(autouse=True)
 def _clean_env(monkeypatch):
-    for name in ("VNX_STALE_STAGED_MINUTES", "VNX_USE_CENTRAL_DB"):
-        monkeypatch.delenv(name, raising=False)
+    monkeypatch.delenv("VNX_USE_CENTRAL_DB", raising=False)
 
 
 @pytest.fixture
@@ -77,16 +76,11 @@ def test_fresh_bundle_not_shown(env):
     _stage(env[1], "dlv-new", 5)
     assert _build(env)["count"] == 0
 
-def test_env_override_and_invalid_fallback(env, monkeypatch):
+def test_threshold_is_the_constant_with_no_note(env):
     _stage(env[1], "dlv-mid", 10)
-    monkeypatch.setenv("VNX_STALE_STAGED_MINUTES", "5")
     out = _build(env)
-    assert out["count"] == 1 and out["threshold_minutes"] == 5
-    for bad in ("abc", "0", "-3"):
-        monkeypatch.setenv("VNX_STALE_STAGED_MINUTES", bad)
-        out = _build(env)
-        assert out["threshold_minutes"] == 30 and "invalid" in out["threshold_note"]
-        assert out["count"] == 0
+    assert out["count"] == 0 and out["threshold_minutes"] == 30
+    assert not out.get("threshold_note")
 
 
 def test_unreadable_receipts_is_unavailable(env):

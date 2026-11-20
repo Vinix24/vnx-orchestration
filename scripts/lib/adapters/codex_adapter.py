@@ -95,14 +95,8 @@ class CodexAdapter(StreamingDrainerMixin, ProviderAdapter):
             or os.environ.get("VNX_CODEX_MODEL")
             or _DEFAULT_MODEL
         )
-        chunk_timeout = float(
-            os.environ.get("VNX_CODEX_STALL_THRESHOLD",
-                           context.get("chunk_timeout", _DEFAULT_STALL_THRESHOLD))
-        )
-        total_deadline = float(
-            os.environ.get("VNX_CODEX_TIMEOUT",
-                           context.get("total_deadline", _DEFAULT_TIMEOUT))
-        )
+        chunk_timeout = float(context.get("chunk_timeout", _DEFAULT_STALL_THRESHOLD))
+        total_deadline = float(context.get("total_deadline", _DEFAULT_TIMEOUT))
         terminal_id = context.get("terminal_id", self._terminal_id)
         dispatch_id = context.get("dispatch_id", "unknown")
         event_store = context.get("event_store")
@@ -170,14 +164,8 @@ class CodexAdapter(StreamingDrainerMixin, ProviderAdapter):
             or os.environ.get("VNX_CODEX_MODEL")
             or _DEFAULT_MODEL
         )
-        chunk_timeout = float(
-            os.environ.get("VNX_CODEX_STALL_THRESHOLD",
-                           context.get("chunk_timeout", _DEFAULT_STALL_THRESHOLD))
-        )
-        total_deadline = float(
-            os.environ.get("VNX_CODEX_TIMEOUT",
-                           context.get("total_deadline", _DEFAULT_TIMEOUT))
-        )
+        chunk_timeout = float(context.get("chunk_timeout", _DEFAULT_STALL_THRESHOLD))
+        total_deadline = float(context.get("total_deadline", _DEFAULT_TIMEOUT))
         terminal_id = context.get("terminal_id", self._terminal_id)
         dispatch_id = context.get("dispatch_id", "unknown")
         event_store = context.get("event_store")

@@ -29,8 +29,6 @@ from vnx_mode import (
     check_command_allowed,
     get_available_commands,
     get_mode_description,
-    is_feature_enabled,
-    check_mode_feature_enabled,
 )
 
 
@@ -326,31 +324,6 @@ class TestAvailableCommands:
         cmds = get_available_commands(None)
         assert TIER_UNIVERSAL <= cmds
         assert TIER_OPERATOR_ONLY <= cmds
-
-
-# ---------------------------------------------------------------------------
-# Feature flags
-# ---------------------------------------------------------------------------
-
-class TestFeatureFlags:
-    def test_starter_enabled_by_default(self):
-        os.environ.pop("VNX_STARTER_MODE_ENABLED", None)
-        assert check_mode_feature_enabled(VNXMode.STARTER) is True
-
-    def test_starter_disabled_by_flag(self):
-        os.environ["VNX_STARTER_MODE_ENABLED"] = "0"
-        assert check_mode_feature_enabled(VNXMode.STARTER) is False
-        os.environ.pop("VNX_STARTER_MODE_ENABLED")
-
-    def test_operator_always_enabled(self):
-        assert check_mode_feature_enabled(VNXMode.OPERATOR) is True
-
-    def test_mode_gating_flag(self):
-        os.environ.pop("VNX_MODE_GATING_ENABLED", None)
-        assert is_feature_enabled("VNX_MODE_GATING_ENABLED") is True
-        os.environ["VNX_MODE_GATING_ENABLED"] = "0"
-        assert is_feature_enabled("VNX_MODE_GATING_ENABLED") is False
-        os.environ.pop("VNX_MODE_GATING_ENABLED")
 
 
 # ---------------------------------------------------------------------------

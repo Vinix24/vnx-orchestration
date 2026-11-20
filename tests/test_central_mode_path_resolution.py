@@ -250,14 +250,12 @@ def test_load_merged_pr_numbers_never_crashes_on_missing_store(tmp_path, monkeyp
     # Every merge source is best-effort: a non-existent state dir must not raise.
     # OI-1155: opt out of the gh source (default-ON) so the assertion stays
     # deterministic and does not reach a live ``gh pr list``.
-    monkeypatch.setenv("VNX_RECONCILE_GIT", "0")
     result = track_reconciler._load_merged_pr_numbers(tmp_path / "nowhere" / "state")
     assert result == frozenset()
 
 
 def test_roadmap_file_at_repo_root_is_not_merge_evidence(tmp_path, monkeypatch):
     """ADR-047 / C2: the root ROADMAP.yaml is an import example, not evidence."""
-    monkeypatch.setenv("VNX_RECONCILE_GIT", "0")
     state = tmp_path / ".vnx-data" / "proj-x" / "state"
     state.mkdir(parents=True)
     repo = tmp_path / "project-repo"

@@ -105,7 +105,7 @@ def test_collect_day_missing_sources_is_incomplete_with_reason(tmp_path: Path, m
 
     src = tmp_path / "sources"
     src.mkdir()
-    monkeypatch.setenv(collect_mod.SOURCES_DIR_ENV, str(src))
+    monkeypatch.setattr(collect_mod, "SOURCES_DIR", src)
     ctx = collect_mod.CollectContext(
         "p", date(2026, 11, 6), datetime(2026, 11, 8, 3, 0, tzinfo=timezone.utc)
     )
@@ -133,7 +133,7 @@ def test_collect_day_drops_unexpected_ids(tmp_path: Path, monkeypatch):
         "'not_a_metric': ScalarMetric(value=2.0, source='s')}\n",
         encoding="utf-8",
     )
-    monkeypatch.setenv(collect_mod.SOURCES_DIR_ENV, str(src))
+    monkeypatch.setattr(collect_mod, "SOURCES_DIR", src)
     ctx = collect_mod.CollectContext(
         "p", date(2026, 11, 6), datetime(2026, 11, 8, 3, 0, tzinfo=timezone.utc)
     )
@@ -151,7 +151,7 @@ def test_source_whose_collect_raises_marks_its_ids(tmp_path: Path, monkeypatch):
     (src / "exploding.py").write_text(
         "def collect(ctx):\n    raise RuntimeError('boom')\n", encoding="utf-8"
     )
-    monkeypatch.setenv(collect_mod.SOURCES_DIR_ENV, str(src))
+    monkeypatch.setattr(collect_mod, "SOURCES_DIR", src)
     ctx = collect_mod.CollectContext(
         "p", date(2026, 11, 6), datetime(2026, 11, 8, 3, 0, tzinfo=timezone.utc)
     )
