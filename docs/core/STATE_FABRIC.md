@@ -124,7 +124,7 @@ carries `feature_id`, `status`, `milestone`, `pr_queue[]`, and `depends_on[]`.
    `blocks` item gates the track out of `done` until resolved.
 5. **Merge.** A PR merges. The reconciler detects it from three evidence
    sources, in order: `pr_merged.ndjson` events → `t0_receipts.ndjson` →
-   (default-ON since OI-1155, opt out `VNX_RECONCILE_GIT=0`) live
+   (always on since OI-1155; `VNX_RECONCILE_GIT` is deleted) live
    `gh pr list --state merged` (10-min cache). A ROADMAP file is never read as
    merge evidence. No local receipt is required — git reality suffices.
 6. **Reconcile (derived refresh).** `track_reconciler` computes `derived_status`
