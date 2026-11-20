@@ -63,8 +63,8 @@ ba5a05809e842665	scripts/lib/providers/wave7_models.yaml	kimi-k3	1	model_catalog
 745ecd51eda5700c	scripts/lib/subprocess_dispatch.py	kimi-k3	1	model_catalog	Comment on the fail-loud guard against `claude --model kimi-k3`; prose	
 6ac4ff1b2a2f1376	scripts/lib/vnx_paths.py	Vinix24	1	issue_link	Link to upstream issue #225 (project-root resolution) in a refusal message or docstring; a link, not a default	
 05835688f33a20f8	scripts/lib/vnx_resolve_root.sh	Vinix24	1	issue_link	Link to upstream issue #225 (project-root resolution) in a refusal message or docstring; a link, not a default	
-f260c8d082ec2405	scripts/lib/vnx_start_runtime.py	kimi-k3	1	te_repareren	T1/T2 start without VNX_T{n}_MODEL default to provider kimi and model kimi-k3 in code instead of the worker registry	AG-2
-f231162d721e9682	scripts/lib/vnx_start_runtime.py	kimi-k3	1	te_repareren	T1/T2 start without VNX_T{n}_MODEL default to provider kimi and model kimi-k3 in code instead of the worker registry	AG-2
+d1a96d68f101b552	scripts/lib/vnx_start_runtime.py	kimi-k3	1	te_repareren	T1/T2 start without VNX_T{n}_MODEL default to provider kimi and model kimi-k3 in code instead of the worker registry	AG-2
+a4a9d03cf2530126	scripts/lib/vnx_start_runtime.py	kimi-k3	1	te_repareren	T1/T2 start without VNX_T{n}_MODEL default to provider kimi and model kimi-k3 in code instead of the worker registry	AG-2
 697d82f91fbb570d	scripts/report_parser.py	kimi-k3	1	model_catalog	Comment/example of model-name shapes the report parser accepts	
 4ac9d261116567af	scripts/report_parser.py	kimi-k3	1	model_catalog	Comment/example of model-name shapes the report parser accepts	
 0c84f49590acbeb9	vnx_cli/commands/update.py	Vinix24	1	upstream_url	pip-side twin of bin/vnx VNX_ORIGIN_URL: the upstream remote `vnx update` pulls from	

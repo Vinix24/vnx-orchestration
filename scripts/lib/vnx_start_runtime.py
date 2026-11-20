@@ -27,10 +27,17 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
+
+_LIB = str(Path(__file__).resolve().parent)
+if _LIB not in sys.path:
+    sys.path.insert(0, _LIB)
+
+import config_runtime  # after the scripts/lib path guard above
 
 
 # ---------------------------------------------------------------------------
@@ -113,17 +120,21 @@ class StartConfig:
         vnx_home = os.environ.get("VNX_HOME", "")
         vnx_data_dir = os.environ.get("VNX_DATA_DIR", "")
 
-        gemini_model = os.environ.get("VNX_GEMINI_MODEL", "gemini-2.5-pro")
+        gemini_model = "gemini-2.5-pro"
         codex_model = os.environ.get("VNX_CODEX_MODEL", "gpt-5.1-codex-mini")
-        t0_flags = os.environ.get("VNX_T0_FLAGS", "")
-        queue_popup = os.environ.get("VNX_QUEUE_POPUP_ENABLED", "1") != "0"
+        t0_flags = ""
+        queue_popup = config_runtime.get_bool("VNX_QUEUE_POPUP_ENABLED")
+
+        def _provider(key: str, default: str) -> str:
+            # Stored value > env > registry default (empty: the terminal keeps its start default).
+            return config_runtime.get(key) or default
 
         terminals = {}
         for tid, default_provider, default_model, role, track in [
-            ("T0", PROVIDER_CLAUDE, os.environ.get("VNX_T0_MODEL", "default"), "orchestrator", ""),
-            ("T1", os.environ.get("VNX_T1_PROVIDER", PROVIDER_KIMI), os.environ.get("VNX_T1_MODEL", "kimi-k3"), "worker", "A"),
-            ("T2", os.environ.get("VNX_T2_PROVIDER", PROVIDER_KIMI), os.environ.get("VNX_T2_MODEL", "kimi-k3"), "worker", "B"),
-            ("T3", os.environ.get("VNX_T3_PROVIDER", PROVIDER_CLAUDE), os.environ.get("VNX_T3_MODEL", "default"), "worker", "C"),
+            ("T0", PROVIDER_CLAUDE, "default", "orchestrator", ""),
+            ("T1", _provider("VNX_T1_PROVIDER", PROVIDER_KIMI), "kimi-k3", "worker", "A"),
+            ("T2", _provider("VNX_T2_PROVIDER", PROVIDER_KIMI), "kimi-k3", "worker", "B"),
+            ("T3", _provider("VNX_T3_PROVIDER", PROVIDER_CLAUDE), "default", "worker", "C"),
         ]:
             raw_provider = default_provider
             provider = PROVIDER_ALIASES.get(raw_provider, PROVIDER_CLAUDE)

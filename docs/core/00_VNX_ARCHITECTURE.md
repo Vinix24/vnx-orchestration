@@ -609,15 +609,15 @@ liveness with `bash scripts/vnx_supervisor_simple.sh status` or
 `python3 -c "import sys; sys.path.insert(0,'scripts/lib'); import daemon_register as d; print(d.measure_daemon_liveness())"`.
 
 <!-- BEGIN GENERATED: supervised-components -->
-- Dispatcher (native skills, multi-provider dispatch). — `dispatcher_minimal.sh` — `scripts/vnx_supervisor_simple.sh:198`
-- Smart Tap (JSON/Markdown auto-translation). — `smart_tap_json_translator.sh` — `scripts/vnx_supervisor_simple.sh:204`
-- Receipt Processor (report -> receipt -> T0 delivery, adoption tracking). — `receipt_processor.sh` — `scripts/vnx_supervisor_simple.sh:205`
-- Heartbeat ACK Monitor (ACK processing + timeout tracking). — `heartbeat_ack_monitor.py` — `scripts/vnx_supervisor_simple.sh:210`
-- Queue Watcher (dispatch review popup; falls back to auto-accept when VNX_QUEUE_POPUP_ENABLED=0). — `queue_popup_watcher.sh` or `queue_auto_accept.sh` (conditional) — `scripts/vnx_supervisor_simple.sh:212`
-- Dashboard Generator (real-time metrics -> dashboard_status.json). — `generate_valid_dashboard.sh` — `scripts/vnx_supervisor_simple.sh:217`
-- Unified State Manager (state consolidation, 5s cycle). — `unified_state_manager.py` — `scripts/vnx_supervisor_simple.sh:218`
-- Intelligence Daemon (real-time intelligence updates). — `intelligence_daemon.py` — `scripts/vnx_supervisor_simple.sh:219`
-- Recommendations Engine (T0 dispatch suggestions, max 5 pending). — `recommendations_engine_daemon.sh` — `scripts/vnx_supervisor_simple.sh:220`
+- Dispatcher (native skills, multi-provider dispatch). — `dispatcher_minimal.sh` — `scripts/vnx_supervisor_simple.sh:216`
+- Smart Tap (JSON/Markdown auto-translation). — `smart_tap_json_translator.sh` — `scripts/vnx_supervisor_simple.sh:222`
+- Receipt Processor (report -> receipt -> T0 delivery, adoption tracking). — `receipt_processor.sh` — `scripts/vnx_supervisor_simple.sh:223`
+- Heartbeat ACK Monitor (ACK processing + timeout tracking). — `heartbeat_ack_monitor.py` — `scripts/vnx_supervisor_simple.sh:228`
+- Queue Watcher (dispatch review popup; falls back to auto-accept when VNX_QUEUE_POPUP_ENABLED=0). — `queue_popup_watcher.sh` or `queue_auto_accept.sh` (conditional) — `scripts/vnx_supervisor_simple.sh:230`
+- Dashboard Generator (real-time metrics -> dashboard_status.json). — `generate_valid_dashboard.sh` — `scripts/vnx_supervisor_simple.sh:235`
+- Unified State Manager (state consolidation, 5s cycle). — `unified_state_manager.py` — `scripts/vnx_supervisor_simple.sh:236`
+- Intelligence Daemon (real-time intelligence updates). — `intelligence_daemon.py` — `scripts/vnx_supervisor_simple.sh:237`
+- Recommendations Engine (T0 dispatch suggestions, max 5 pending). — `recommendations_engine_daemon.sh` — `scripts/vnx_supervisor_simple.sh:238`
 <!-- END GENERATED: supervised-components -->
 
 ### Hooks Wired in `.claude/settings.json` (generated — do not hand-edit; regenerate with `python3 scripts/generate_architecture_doc.py --write`)
