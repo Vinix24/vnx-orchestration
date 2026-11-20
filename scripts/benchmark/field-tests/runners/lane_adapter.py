@@ -99,7 +99,6 @@ def _claude_subprocess_headless(
         "VNX_WORKER_SCOPED": "0",
         "VNX_BENCH_EQUAL_CONTEXT": "1",
         "VNX_BENCH_SEED_MATERIALIZE": "1",
-        "VNX_ISOLATED_WORKTREE": "1",
         "VNX_BENCH_REQUIRE_ISOLATION": "1",   # fail-loud on isolation failure; never run a worker in the shared checkout
     }
     cmd = [
@@ -155,7 +154,6 @@ def _provider_dispatch(
         "VNX_DATA_DIR_EXPLICIT": "1",  # OI-1276: events follow the bench store too
         "VNX_DISPATCH_DIR": ".vnx-data/dispatches",
         "VNX_BENCH_EQUAL_CONTEXT": "1",
-        "VNX_ISOLATED_WORKTREE": "1",
         "VNX_BENCH_REQUIRE_ISOLATION": "1",
         "VNX_BENCH_SEED_MATERIALIZE": "1",
         "VNX_BENCH_PRESERVE_WORKTREE": "1",

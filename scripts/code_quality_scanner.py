@@ -43,9 +43,6 @@ EXCLUDE_GLOBS = [
     "backup*"
 ]
 
-ALLOWLIST_ENV = "VNX_QUALITY_SCAN_ALLOWLIST"
-ALLOWLIST_FILE_ENV = "VNX_QUALITY_SCAN_ALLOWLIST_FILE"
-
 # Quality thresholds
 COMPLEXITY_THRESHOLDS = {
     'low': 10,      # Simple functions
@@ -83,29 +80,6 @@ def log(level: str, message: str):
 
     color = color_map.get(level, Colors.RESET)
     print(f"[{timestamp}] {color}[{level}]{Colors.RESET} {message}")
-
-
-def _load_allowlist_globs() -> List[str]:
-    """Load allowlist globs from env or file (one glob per line)."""
-    allowlist: List[str] = []
-
-    env_value = os.environ.get(ALLOWLIST_ENV, "")
-    if env_value:
-        allowlist.extend([item.strip() for item in env_value.split(",") if item.strip()])
-
-    file_value = os.environ.get(ALLOWLIST_FILE_ENV, "")
-    if file_value:
-        allowlist_path = Path(file_value).expanduser().resolve()
-        if allowlist_path.exists():
-            allowlist.extend([
-                line.strip()
-                for line in allowlist_path.read_text(encoding="utf-8").splitlines()
-                if line.strip() and not line.strip().startswith("#")
-            ])
-        else:
-            log('WARNING', f'Allowlist file not found: {allowlist_path}')
-
-    return allowlist
 
 
 def _matches_exclude_globs(path: Path, exclude_globs: List[str]) -> bool:
@@ -552,7 +526,7 @@ class QualityScanner:
         self.scan_dirs = scan_dirs
         self.db_manager = QualityDatabaseManager(db_path)
         self.exclude_globs = exclude_globs if exclude_globs is not None else EXCLUDE_GLOBS
-        self.allowlist_globs = allowlist_globs if allowlist_globs is not None else _load_allowlist_globs()
+        self.allowlist_globs = allowlist_globs if allowlist_globs is not None else []
         self.stats = {
             'files_scanned': 0,
             'files_changed': 0,

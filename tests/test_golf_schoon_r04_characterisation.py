@@ -19,6 +19,7 @@ for sub in ("scripts", "scripts/lib", "scripts/dream"):
     sys.path.insert(0, str(REPO_ROOT / sub))
 
 import consolidator  # noqa: E402
+from content_boundary_pin import pin_boundary
 
 PROJECT = "vnx-dev"
 CONSOLIDATION = {
@@ -41,7 +42,7 @@ CREATE TABLE antipatterns (id INTEGER PRIMARY KEY AUTOINCREMENT, project_id TEXT
 def world(tmp_path, monkeypatch):
     boundary = tmp_path / "boundary.json"
     boundary.write_text(json.dumps({"version": 1}), encoding="utf-8")
-    monkeypatch.setenv("VNX_CONTENT_BOUNDARY_FILE", str(boundary))
+    pin_boundary(monkeypatch, str(boundary))
     monkeypatch.setenv("VNX_PROVIDER_SWITCH_FILE", str(tmp_path / "switch" / "providers.json"))
     monkeypatch.setenv("VNX_DREAM_SCHEDULER_ENABLED", "1")
     monkeypatch.delenv("VNX_DREAM_PROVIDER", raising=False)

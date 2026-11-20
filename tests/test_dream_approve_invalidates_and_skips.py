@@ -17,6 +17,7 @@ import consolidator  # noqa: E402
 import dream_liveness  # noqa: E402
 import review_gate  # noqa: E402
 from test_dream_consolidator import _FAKE_CONSOLIDATION, _make_fresh_receipts  # noqa: E402
+from content_boundary_pin import pin_boundary
 
 P = "vnx-dev"
 _SCHEMA = """
@@ -44,7 +45,7 @@ def _env(monkeypatch, tmp_path_factory):
     monkeypatch.setattr(consolidator, "_injection_probe_health", lambda state_dir: "ok")
     boundary = tmp_path_factory.mktemp("boundary") / "b.json"
     boundary.write_text(json.dumps({"version": 1}), encoding="utf-8")
-    monkeypatch.setenv("VNX_CONTENT_BOUNDARY_FILE", str(boundary))
+    pin_boundary(monkeypatch, str(boundary))
 
 
 @pytest.fixture
