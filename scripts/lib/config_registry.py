@@ -473,7 +473,8 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         "VNX_PLAN_GATE_ENFORCE", "enum", "advisory", "gate",
         "Plan-first-gate enforcement mode: off | advisory | required (ADR-030). "
         "Advisory warns when a track-linked dispatch has an unresolved plan gate; required blocks it. "
-        "The process env var overrides this; operator override VNX_OVERRIDE_PLAN_GATE=1. Default advisory.",
+        "A stored value beats the env var; VNX_OVERRIDE_PLAN_GATE_ENFORCE beats both. "
+        "Operator override VNX_OVERRIDE_PLAN_GATE=1. Default advisory.",
         approval=True,
         subsystem="plan-gate-panel", status="SCOPE"),
     "VNX_USE_CENTRAL_DB": _e(
@@ -557,17 +558,6 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         # Explicit canonical pick (OI-1385): preserves the pre-existing last-wins winner for
         # this subsystem's 5 entries. Not re-audited by this dispatch — out of scope.
         cockpit_canonical=True),
-    "VNX_PLAN_GATE_COMPLEX_ONLY": _e(
-        "VNX_PLAN_GATE_COMPLEX_ONLY", "bool", "0", "gate",
-        "Flag with no effect since P1: plan_gate_enforcement.complex_only_active() "
-        "still reads it, but nothing consults that result to change a plan-gate run "
-        "(the LIGHT/HEAVY scope-skip and its reduced 2-seat panel were removed). "
-        "Kept until P4 reworks the effectiveness probe.",
-        # subsystem matches the docs/core/SUBSYSTEMS.md seed row
-        # "plan-gate-task-class-scope" (framework-status-audit-and-cockpit PR-3
-        # fix) — distinct from "plan-gate-panel" (VNX_PLAN_GATE_ENFORCE), so the
-        # cockpit generator has exactly one canonical flag per ledger row.
-        subsystem="plan-gate-task-class-scope", status="SCOPE"),
     "VNX_HASH_CHAIN_REQUIRED": _e(
         "VNX_HASH_CHAIN_REQUIRED", "bool", "0", "gate",
         "Tamper-evident NDJSON hash-chain requirement (display metadata only; no read-site wired).",
@@ -664,8 +654,8 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         "N-slot concurrency cap for the claude-tmux serial lock "
         "(scripts/lib/dispatch_serialization.py). ACCOUNT-wide: shared with every "
         "other project and worktree running on the same Claude subscription, not "
-        "scoped to this project. The process env var still wins over this "
-        "config-store value as an explicit per-session override.",
+        "scoped to this project. A stored value beats the env var; "
+        "VNX_OVERRIDE_TMUX_MAX_CONCURRENT beats both.",
         approval=True,
         subsystem="claude-tmux-serialization", status="ACTIVATE"),
 
