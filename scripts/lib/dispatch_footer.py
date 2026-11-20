@@ -7,15 +7,13 @@ template by mode, strips YAML frontmatter, and appends it to dispatch instructio
 that don't already carry a footer.
 
 Mode selection (in priority order):
-1. ``VNX_DISPATCH_FOOTER_MODE`` env var (``normal`` | ``autonomous`` | ``enhanced``)
-2. Caller-supplied ``mode`` argument
-3. Default: ``"normal"``
+1. Caller-supplied ``mode`` argument (``normal`` | ``autonomous`` | ``enhanced``)
+2. Default: ``"normal"``
 """
 
 from __future__ import annotations
 
 import logging
-import os
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -60,13 +58,12 @@ def _strip_frontmatter(content: str) -> str:
 def load_footer_template(mode: str = _DEFAULT_MODE) -> str:
     """Load footer template content for the given mode.
 
-    Resolves mode from ``VNX_DISPATCH_FOOTER_MODE`` env var first, then the
-    caller-supplied ``mode`` argument.  Strips YAML frontmatter before returning.
+    Resolves the mode from the caller-supplied ``mode`` argument.  Strips YAML frontmatter before returning.
 
     Returns empty string when the template file is missing or unreadable
     (best-effort, non-fatal).
     """
-    effective_mode = os.environ.get("VNX_DISPATCH_FOOTER_MODE") or mode or _DEFAULT_MODE
+    effective_mode = mode or _DEFAULT_MODE
     filename = _FOOTER_FILES.get(effective_mode) or _FOOTER_FILES[_DEFAULT_MODE]
     template_path = _resolve_templates_dir() / filename
     try:

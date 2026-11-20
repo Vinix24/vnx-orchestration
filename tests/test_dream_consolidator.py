@@ -672,10 +672,10 @@ class TestKimiTimeout:
         timeout_events = [e for e in events if e.get("event_type") == "dream_cycle_timeout"]
         assert timeout_events, "dream_cycle_timeout event not emitted"
 
-    def test_timeout_env_override(self, tmp_path, monkeypatch):
-        """VNX_DREAM_TIMEOUT env var is passed to _dispatch_kimi_consolidation."""
+    def test_timeout_default_is_passed(self, tmp_path, monkeypatch):
+        """``_DEFAULT_TIMEOUT`` is the timeout passed to _dispatch_kimi_consolidation."""
         db_path, data_root = _make_db_with_receipts(tmp_path, with_patterns=True)
-        monkeypatch.setenv("VNX_DREAM_TIMEOUT", "42")
+        monkeypatch.setattr(consolidator, "_DEFAULT_TIMEOUT", 42)
         captured = {}
 
         def _capture_timeout(patterns, project_id, timeout=180.0, data_root=None):
