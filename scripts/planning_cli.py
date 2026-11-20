@@ -3137,99 +3137,115 @@ def _fetch_deliverable_records(state_dir, project_id: str, objective: Optional[s
     the deliverables as that transaction does; the caller keeps ownership and
     this function does not close it.
     """
-    owns = conn is None
-    if owns:
-        conn = _db_conn(state_dir)
+    if conn is not None:
+        return _deliverable_records_on(conn, project_id, objective, include_metadata, include_withdrawn)
+    conn = _db_conn(state_dir)
     try:
-        has_view = any(
-            row[0] == "deliverables"
-            for row in conn.execute("SELECT name FROM sqlite_master WHERE type='view'")
-        )
-        if has_view:
-            base_cols = (
-                "deliverable_ref, output_kind, track, dispatch_count, "
-                "derived_status, last_activity"
-            )
-            meta_col = (
-                ", (SELECT d2.metadata_json FROM dispatches d2 "
-                "WHERE d2.project_id = deliverables.project_id "
-                "AND d2.output_ref = deliverables.deliverable_ref "
-                "ORDER BY d2.updated_at DESC LIMIT 1) AS metadata_json"
-                if include_metadata else ""
-            )
-            if objective:
-                rows = conn.execute(
-                    f"""
-                    SELECT {base_cols}{meta_col}
-                    FROM deliverables
-                    WHERE project_id = ? AND track = ?
-                    ORDER BY last_activity DESC
-                    """,
-                    (project_id, objective),
-                ).fetchall()
-            else:
-                rows = conn.execute(
-                    f"""
-                    SELECT {base_cols}{meta_col}
-                    FROM deliverables
-                    WHERE project_id = ?
-                    ORDER BY track, last_activity DESC
-                    """,
-                    (project_id,),
-                ).fetchall()
-            records = [dict(r) for r in rows if include_withdrawn or r["derived_status"] != WITHDRAWN_STATE]
-            if include_metadata:
-                for r in records:
-                    meta = json.loads(r.pop("metadata_json", None) or "{}")
-                    r["title"] = meta.get("title", "")
-                    r["metadata"] = meta
-        else:
-            # Fallback: read raw dispatches when view hasn't been applied yet
-            filter_clause = "AND track = ?" if objective else ""
-            params: list[Any] = [project_id]
-            if objective:
-                params.append(objective)
-            raw = conn.execute(
-                f"""
-                SELECT dispatch_id, state, track, output_kind, output_ref, metadata_json, updated_at
-                FROM dispatches
-                WHERE project_id = ? AND state IN ('proposed', 'ready') {filter_clause}
-                ORDER BY track, updated_at DESC
-                """,
-                params,
-            ).fetchall()
-            records = []
-            for r in raw:
-                meta = json.loads(r["metadata_json"] or "{}")
-                # OI-1615: state IN ('proposed', 'ready') alone is NOT unique
-                # to deliverables — it is the door's ordinary rest state for
-                # ANY accepted dispatch (dispatch_cli.py's
-                # _persist_dispatch_row). Without this check this fallback
-                # lists every plain door dispatch as a "deliverable" the
-                # moment a store hits it (a store predating migration 0027,
-                # where the `deliverables` VIEW that normally shields this
-                # path via `output_ref IS NOT NULL` does not exist yet).
-                # Same discriminator as #1747/OI-1609's
-                # the human-gate queue fix (build_t0_state, since removed by D8): only a
-                # dispatch cmd_deliverable_add actually created carries
-                # metadata_json.deliverable == true.
-                if not (isinstance(meta, dict) and meta.get("deliverable") is True):
-                    continue
-                rec = {
-                    "deliverable_ref": r["output_ref"] or r["dispatch_id"],
-                    "output_kind": r["output_kind"] or "-",
-                    "track": r["track"] or "-",
-                    "dispatch_count": 1,
-                    "derived_status": r["state"],
-                    "last_activity": r["updated_at"],
-                    "title": meta.get("title", ""),
-                }
-                if include_metadata:
-                    rec["metadata"] = meta
-                records.append(rec)
+        return _deliverable_records_on(conn, project_id, objective, include_metadata, include_withdrawn)
     finally:
-        if owns:
-            conn.close()
+        conn.close()
+
+
+def _deliverable_records_on(conn, project_id: str, objective: Optional[str],
+                            include_metadata: bool, include_withdrawn: bool) -> list[dict]:
+    """Pick the view rollup or the raw-dispatches fallback on ``conn``."""
+    has_view = any(
+        row[0] == "deliverables"
+        for row in conn.execute("SELECT name FROM sqlite_master WHERE type='view'")
+    )
+    if has_view:
+        return _deliverable_records_from_view(conn, project_id, objective, include_metadata, include_withdrawn)
+    return _deliverable_records_from_dispatches(conn, project_id, objective, include_metadata)
+
+
+def _deliverable_records_from_view(conn, project_id: str, objective: Optional[str],
+                                   include_metadata: bool, include_withdrawn: bool) -> list[dict]:
+    base_cols = (
+        "deliverable_ref, output_kind, track, dispatch_count, "
+        "derived_status, last_activity"
+    )
+    meta_col = (
+        ", (SELECT d2.metadata_json FROM dispatches d2 "
+        "WHERE d2.project_id = deliverables.project_id "
+        "AND d2.output_ref = deliverables.deliverable_ref "
+        "ORDER BY d2.updated_at DESC LIMIT 1) AS metadata_json"
+        if include_metadata else ""
+    )
+    if objective:
+        rows = conn.execute(
+            f"""
+            SELECT {base_cols}{meta_col}
+            FROM deliverables
+            WHERE project_id = ? AND track = ?
+            ORDER BY last_activity DESC
+            """,
+            (project_id, objective),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            f"""
+            SELECT {base_cols}{meta_col}
+            FROM deliverables
+            WHERE project_id = ?
+            ORDER BY track, last_activity DESC
+            """,
+            (project_id,),
+        ).fetchall()
+    records = [dict(r) for r in rows if include_withdrawn or r["derived_status"] != WITHDRAWN_STATE]
+    if include_metadata:
+        for r in records:
+            meta = json.loads(r.pop("metadata_json", None) or "{}")
+            r["title"] = meta.get("title", "")
+            r["metadata"] = meta
+    return records
+
+
+def _deliverable_records_from_dispatches(conn, project_id: str, objective: Optional[str],
+                                         include_metadata: bool) -> list[dict]:
+    # Fallback: read raw dispatches when view hasn't been applied yet
+    filter_clause = "AND track = ?" if objective else ""
+    params: list[Any] = [project_id]
+    if objective:
+        params.append(objective)
+    raw = conn.execute(
+        f"""
+        SELECT dispatch_id, state, track, output_kind, output_ref, metadata_json, updated_at
+        FROM dispatches
+        WHERE project_id = ? AND state IN ('proposed', 'ready') {filter_clause}
+        ORDER BY track, updated_at DESC
+        """,
+        params,
+    ).fetchall()
+    records = []
+    for r in raw:
+        meta = json.loads(r["metadata_json"] or "{}")
+        # OI-1615: state IN ('proposed', 'ready') alone is NOT unique
+        # to deliverables — it is the door's ordinary rest state for
+        # ANY accepted dispatch (dispatch_cli.py's
+        # _persist_dispatch_row). Without this check this fallback
+        # lists every plain door dispatch as a "deliverable" the
+        # moment a store hits it (a store predating migration 0027,
+        # where the `deliverables` VIEW that normally shields this
+        # path via `output_ref IS NOT NULL` does not exist yet).
+        # Same discriminator as #1747/OI-1609's
+        # the human-gate queue fix (build_t0_state, since removed by D8): only a
+        # dispatch cmd_deliverable_add actually created carries
+        # metadata_json.deliverable == true.
+        if not (isinstance(meta, dict) and meta.get("deliverable") is True):
+            continue
+        rec = {
+            "deliverable_ref": r["output_ref"] or r["dispatch_id"],
+            "output_kind": r["output_kind"] or "-",
+            "track": r["track"] or "-",
+            "dispatch_count": 1,
+            "derived_status": r["state"],
+            "last_activity": r["updated_at"],
+            "title": meta.get("title", ""),
+        }
+        if include_metadata:
+            rec["metadata"] = meta
+        records.append(rec)
+    return records
     return records
 
 
