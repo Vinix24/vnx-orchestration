@@ -3,7 +3,7 @@
 Covers: intra-thread serialization, no-op for None, exception release,
 force_release escape, account-level lock directory resolution, pid liveness
 warnings, unexpected OSError re-raise, timezone-aware _iso_now, and the
-registry-backed VNX_TMUX_MAX_CONCURRENT precedence (env > config-store > default).
+VNX_TMUX_MAX_CONCURRENT precedence (override > config-store > env > default).
 """
 from __future__ import annotations
 
@@ -39,7 +39,7 @@ def test_parallel_claude_serializes(tmp_path, monkeypatch):
     test_max_concurrent_defaults_to_ten) — this test is about single-slot mutual
     exclusion, not the default concurrency level; test_three_slots_concurrent_fourth_blocks
     below covers N>1."""
-    monkeypatch.setenv("VNX_LOCK_DIR", str(tmp_path / "locks"))
+    monkeypatch.setattr(_ds_mod, "_lock_dir", lambda: tmp_path / "locks")
     monkeypatch.setenv("VNX_TMUX_MAX_CONCURRENT", "1")
 
     concurrent_count = 0
@@ -76,7 +76,7 @@ def test_parallel_claude_serializes(tmp_path, monkeypatch):
 def test_three_slots_concurrent_fourth_blocks(tmp_path, monkeypatch):
     """VNX_TMUX_MAX_CONCURRENT=3: three concurrent holders run simultaneously;
     a fourth waiter blocks until one of the three releases."""
-    monkeypatch.setenv("VNX_LOCK_DIR", str(tmp_path / "locks"))
+    monkeypatch.setattr(_ds_mod, "_lock_dir", lambda: tmp_path / "locks")
     monkeypatch.setenv("VNX_TMUX_MAX_CONCURRENT", "3")
 
     concurrent_count = 0
@@ -202,10 +202,9 @@ def test_max_concurrent_reads_config_store_value(tmp_path, monkeypatch):
     assert _ds_mod._max_concurrent() == 7
 
 
-def test_max_concurrent_env_wins_over_config_store(tmp_path, monkeypatch):
-    """The process env var is an explicit per-session override and must win over a
-    persisted config-store row for the same key, even when the store is wired and
-    has a value -- precedence is env > config-store > default."""
+def test_max_concurrent_stored_row_wins_over_env(tmp_path, monkeypatch):
+    """config-een-oppervlak PR-6v: a stored project_config row beats an exported env
+    value (ADR-087); the override direction is in test_env_reads_pr6v.py."""
     sd = tmp_path / "state"
     sd.mkdir()
     conn = sqlite3.connect(sd / "runtime_coordination.db")
@@ -218,8 +217,8 @@ def test_max_concurrent_env_wins_over_config_store(tmp_path, monkeypatch):
     monkeypatch.setenv("VNX_STATE_DIR", str(sd))
     monkeypatch.setenv("VNX_PROJECT_ID", "vnx-dev")
     monkeypatch.setenv("VNX_TMUX_MAX_CONCURRENT", "4")
-
-    assert _ds_mod._max_concurrent() == 4
+    monkeypatch.delenv("VNX_OVERRIDE_TMUX_MAX_CONCURRENT", raising=False)
+    assert _ds_mod._max_concurrent() == 7
 
 
 # ---------------------------------------------------------------------------
@@ -228,7 +227,7 @@ def test_max_concurrent_env_wins_over_config_store(tmp_path, monkeypatch):
 
 def test_provider_lanes_stay_parallel(tmp_path, monkeypatch):
     """Two concurrent serialize_lane(None) callers both enter body concurrently (no blocking)."""
-    monkeypatch.setenv("VNX_LOCK_DIR", str(tmp_path / "locks"))
+    monkeypatch.setattr(_ds_mod, "_lock_dir", lambda: tmp_path / "locks")
 
     barrier = threading.Barrier(2, timeout=5)
     both_entered = threading.Event()
@@ -267,7 +266,7 @@ def test_claude_tmux_and_headless_share_lock(tmp_path, monkeypatch):
     is no longer what a headless plan produces. With N=1, a tmux holder must
     block a concurrent headless caller until it releases; they must not run
     past each other."""
-    monkeypatch.setenv("VNX_LOCK_DIR", str(tmp_path / "locks"))
+    monkeypatch.setattr(_ds_mod, "_lock_dir", lambda: tmp_path / "locks")
     monkeypatch.setenv("VNX_TMUX_MAX_CONCURRENT", "1")
 
     tmux_holding = threading.Event()
@@ -316,7 +315,7 @@ def test_claude_tmux_and_headless_share_lock(tmp_path, monkeypatch):
 
 def test_lock_released_on_exception(tmp_path, monkeypatch):
     """Exception inside serialize_lane body releases the lock; a subsequent acquire succeeds."""
-    monkeypatch.setenv("VNX_LOCK_DIR", str(tmp_path / "locks"))
+    monkeypatch.setattr(_ds_mod, "_lock_dir", lambda: tmp_path / "locks")
 
     with pytest.raises(RuntimeError, match="intentional test error"):
         with serialize_lane("claude-tmux", dispatch_id="will-fail"):
@@ -342,7 +341,7 @@ def test_lock_released_on_exception(tmp_path, monkeypatch):
 
 def test_force_release(tmp_path, monkeypatch, capsys):
     """force_release prints prior holder and removes lock file; new acquire succeeds after."""
-    monkeypatch.setenv("VNX_LOCK_DIR", str(tmp_path / "locks"))
+    monkeypatch.setattr(_ds_mod, "_lock_dir", lambda: tmp_path / "locks")
 
     lock_dir = tmp_path / "locks"
     lock_dir.mkdir(parents=True, exist_ok=True)
@@ -383,29 +382,26 @@ def test_force_release(tmp_path, monkeypatch, capsys):
 # ---------------------------------------------------------------------------
 
 def test_lock_dir_is_account_level(tmp_path, monkeypatch):
-    """Lock resolves under VNX_LOCK_DIR, not the repo-local VNX_DATA_DIR."""
+    """Lock resolves under the account lock dir, not the repo-local VNX_DATA_DIR."""
     account_lock_dir = tmp_path / "account-locks"
     project_data_dir = tmp_path / "project-data"
     project_data_dir.mkdir(parents=True, exist_ok=True)
 
-    monkeypatch.setenv("VNX_LOCK_DIR", str(account_lock_dir))
+    real_lock_dir = _ds_mod._lock_dir
+    monkeypatch.setattr(_ds_mod, "_lock_dir", lambda: account_lock_dir)
     monkeypatch.setenv("VNX_DATA_DIR", str(project_data_dir))
     monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
 
     with serialize_lane("claude-tmux", dispatch_id="dir-scope-test"):
-        # Lock file must be in VNX_LOCK_DIR
         assert (account_lock_dir / "claude-tmux-slot-0.lock").exists(), (
-            "lock file not created in VNX_LOCK_DIR"
+            "lock file not created in the account lock dir"
         )
         # Lock file must NOT be in VNX_DATA_DIR
         assert not (project_data_dir / "claude-tmux-slot-0.lock").exists(), (
             "lock file incorrectly created in project VNX_DATA_DIR"
         )
 
-    # Default (no VNX_LOCK_DIR) resolves to ~/.vnx-data/locks — verify shape
-    monkeypatch.delenv("VNX_LOCK_DIR", raising=False)
-    from dispatch_serialization import _lock_dir
-    default_dir = _lock_dir()
+    default_dir = real_lock_dir()
     home = Path.home()
     assert default_dir == home / ".vnx-data" / "locks", (
         f"default lock dir {default_dir} is not ~/.vnx-data/locks"
@@ -418,7 +414,7 @@ def test_lock_dir_is_account_level(tmp_path, monkeypatch):
 
 def test_force_release_warns_on_live_holder(tmp_path, monkeypatch, capsys):
     """force_release prints LOUD double-run warning when holder pid is still alive."""
-    monkeypatch.setenv("VNX_LOCK_DIR", str(tmp_path / "locks"))
+    monkeypatch.setattr(_ds_mod, "_lock_dir", lambda: tmp_path / "locks")
 
     lock_dir = tmp_path / "locks"
     lock_dir.mkdir(parents=True, exist_ok=True)
@@ -448,7 +444,7 @@ def test_force_release_warns_on_live_holder(tmp_path, monkeypatch, capsys):
 
 def test_force_release_dead_holder_no_warning(tmp_path, monkeypatch, capsys):
     """force_release notes safe removal when holder pid is already dead; no live warning."""
-    monkeypatch.setenv("VNX_LOCK_DIR", str(tmp_path / "locks"))
+    monkeypatch.setattr(_ds_mod, "_lock_dir", lambda: tmp_path / "locks")
 
     lock_dir = tmp_path / "locks"
     lock_dir.mkdir(parents=True, exist_ok=True)
@@ -478,7 +474,7 @@ def test_force_release_dead_holder_no_warning(tmp_path, monkeypatch, capsys):
 
 def test_acquire_reraises_unexpected_oserror(tmp_path, monkeypatch):
     """_acquire_with_warn re-raises OSError(EBADF) immediately without spinning."""
-    monkeypatch.setenv("VNX_LOCK_DIR", str(tmp_path / "locks"))
+    monkeypatch.setattr(_ds_mod, "_lock_dir", lambda: tmp_path / "locks")
 
     call_count = 0
 
@@ -505,7 +501,7 @@ def test_holder_metadata_cleared_on_normal_release(tmp_path, monkeypatch):
     """After a normal (no-exception) release, the slot lock file no longer
     carries the released holder's pid/dispatch_id — it reads as unheld to
     force_release() and any diagnostic reader, not as still-OCCUPIED."""
-    monkeypatch.setenv("VNX_LOCK_DIR", str(tmp_path / "locks"))
+    monkeypatch.setattr(_ds_mod, "_lock_dir", lambda: tmp_path / "locks")
 
     with serialize_lane("claude-tmux", dispatch_id="metadata-clear-test"):
         pass  # acquire then release normally
@@ -518,7 +514,7 @@ def test_holder_metadata_cleared_on_normal_release(tmp_path, monkeypatch):
 
 def test_holder_metadata_cleared_on_exception_release(tmp_path, monkeypatch):
     """The error release path also clears holder metadata — not just the happy path."""
-    monkeypatch.setenv("VNX_LOCK_DIR", str(tmp_path / "locks"))
+    monkeypatch.setattr(_ds_mod, "_lock_dir", lambda: tmp_path / "locks")
 
     with pytest.raises(RuntimeError, match="intentional test error"):
         with serialize_lane("claude-tmux", dispatch_id="metadata-clear-exc-test"):
@@ -532,7 +528,7 @@ def test_holder_metadata_cleared_on_exception_release(tmp_path, monkeypatch):
 def test_force_release_after_clean_release_shows_no_prior_holder(tmp_path, monkeypatch, capsys):
     """A released (metadata-cleared) slot must not still report the prior
     holder's dispatch_id/pid to force_release — the measured bug this fix closes."""
-    monkeypatch.setenv("VNX_LOCK_DIR", str(tmp_path / "locks"))
+    monkeypatch.setattr(_ds_mod, "_lock_dir", lambda: tmp_path / "locks")
 
     with serialize_lane("claude-tmux", dispatch_id="should-not-leak"):
         pass
@@ -550,16 +546,15 @@ def test_force_release_after_clean_release_shows_no_prior_holder(tmp_path, monke
 
 def test_lock_wait_times_out_within_bounded_default(tmp_path, monkeypatch):
     """A waiter on a PERMANENTLY FULL lane must give up under the DEFAULT
-    config (no VNX_CLAUDE_LOCK_TIMEOUT_SECONDS set) -- forced via a
+    config (the _DEFAULT_TIMEOUT_SECONDS constant) -- forced via a
     monkeypatched "lane always full" acquire plus a fast-forwarded fake
     clock, executed on a background thread joined with a short real
-    wall-clock bound. Before the fix, VNX_CLAUDE_LOCK_TIMEOUT_SECONDS
+    wall-clock bound. Before the fix, the lock timeout
     defaulted to "0" and the wait-loop's `if timeout_secs > 0` guard (line
     214) made the TimeoutError branch structurally unreachable on default
     config -- the thread never finishes and this test fails on that
     behavior (not on a missing symbol)."""
-    monkeypatch.setenv("VNX_LOCK_DIR", str(tmp_path / "locks"))
-    monkeypatch.delenv("VNX_CLAUDE_LOCK_TIMEOUT_SECONDS", raising=False)
+    monkeypatch.setattr(_ds_mod, "_lock_dir", lambda: tmp_path / "locks")
     # Lane is permanently full: every acquire attempt reports "busy".
     monkeypatch.setattr(_ds_mod, "_try_acquire_any_slot", lambda fds: None)
 
@@ -600,7 +595,7 @@ def test_lock_wait_times_out_within_bounded_default(tmp_path, monkeypatch):
     assert outcome.get("done"), (
         "serialize_lane on a permanently-full lane did not return/raise "
         "within 2s under the DEFAULT config -- the default lock-wait "
-        "timeout is not finite (VNX_CLAUDE_LOCK_TIMEOUT_SECONDS default "
+        "timeout is not finite (_DEFAULT_TIMEOUT_SECONDS "
         "must be > 0, not \"0\")"
     )
     assert isinstance(outcome.get("exc"), TimeoutError), (
@@ -609,45 +604,18 @@ def test_lock_wait_times_out_within_bounded_default(tmp_path, monkeypatch):
     )
 
 
-def test_timeout_seconds_default_is_finite(monkeypatch):
-    """No VNX_CLAUDE_LOCK_TIMEOUT_SECONDS set -> a positive, finite default
-    (not the old "0" == wait-forever default)."""
-    monkeypatch.delenv("VNX_CLAUDE_LOCK_TIMEOUT_SECONDS", raising=False)
-    result = _ds_mod._timeout_seconds()
-    assert 0 < result < float("inf"), (
-        f"expected a positive finite default timeout, got {result!r}"
-    )
-
-
-@pytest.mark.parametrize("raw_value", ["x", "", "-5", "-0.001"])
-def test_timeout_seconds_bad_or_negative_values_fall_back_to_finite_default(
-    raw_value, monkeypatch,
-):
-    """Unparseable or negative VNX_CLAUDE_LOCK_TIMEOUT_SECONDS falls back to
-    the finite default -- same fail-soft-to-default posture as
-    _max_concurrent()'s clamp of bad input (test_max_concurrent_clamps_bad_values).
-    A negative wait has no sane meaning and is not the sanctioned opt-out
-    (that is exactly "0", covered by test_lock_timeout_zero_is_explicit_infinite_wait_opt_out)."""
-    monkeypatch.setenv("VNX_CLAUDE_LOCK_TIMEOUT_SECONDS", raw_value)
-    result = _ds_mod._timeout_seconds()
-    assert result == _ds_mod._DEFAULT_TIMEOUT_SECONDS
-
-
-def test_timeout_seconds_zero_is_preserved_as_explicit_value(monkeypatch):
-    """VNX_CLAUDE_LOCK_TIMEOUT_SECONDS=0 must still resolve to exactly 0.0 --
-    the sanctioned explicit opt-out for "wait forever", not silently clamped
-    to the finite default like a negative/garbage value is."""
-    monkeypatch.setenv("VNX_CLAUDE_LOCK_TIMEOUT_SECONDS", "0")
-    assert _ds_mod._timeout_seconds() == 0.0
+def test_timeout_seconds_default_is_finite():
+    """The lock-wait timeout is a positive, finite constant (not "0" == wait forever)."""
+    assert 0 < _ds_mod._DEFAULT_TIMEOUT_SECONDS < float("inf")
 
 
 def test_lock_timeout_zero_is_explicit_infinite_wait_opt_out(monkeypatch):
-    """VNX_CLAUDE_LOCK_TIMEOUT_SECONDS=0 remains a legal, explicit opt-out:
-    the waiter keeps retrying no matter how much (simulated) time has
+    """A timeout of 0 (the constant patched; no env setting since PR-6v) waits
+    forever: the waiter keeps retrying no matter how much (simulated) time has
     passed. Proven with a bounded, deterministic acquire-eventually-
     succeeds sequence (3rd attempt succeeds) rather than an actual
     unbounded wait."""
-    monkeypatch.setenv("VNX_CLAUDE_LOCK_TIMEOUT_SECONDS", "0")
+    monkeypatch.setattr(_ds_mod, "_DEFAULT_TIMEOUT_SECONDS", 0.0)
 
     calls = {"n": 0}
 

@@ -4598,7 +4598,7 @@ def run_dispatch(
         return _invariant_violation_exit(vspec, handover, exc, state_dir=state_dir)
     except LockWaitTimeout as exc:
         # Point 5 (golf 1A): serialize_lane's own lock-wait timeout — no free
-        # claude-lane slot within VNX_CLAUDE_LOCK_TIMEOUT_SECONDS (default
+        # claude-lane slot within _DEFAULT_TIMEOUT_SECONDS (a constant,
         # 4h, dispatch-20260904-lock-timeout-eindig). This is a caught-before
         # -spawn failure of the door's OWN serialization mechanism, not a
         # generic runtime error: route it to failed_delivery via the same
