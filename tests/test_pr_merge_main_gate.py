@@ -223,7 +223,7 @@ def test_the_door_evidence_carries_a_main_record(door: FakeGitHub, monkeypatch: 
     assert _run() == pr_merge.EXIT_OK
     (evidence,) = seen
     assert [g["gate"] for g in evidence["preflight_gates"]][-1] == "morning_pause"
-    assert pr_merge.PREFLIGHT_ORDER == ("ci", "review", "adr", "contract_invalid", "branch_protection", "main", "morning_pause", "door")
+    assert pr_merge.PREFLIGHT_ORDER == ("ci", "pr_size", "review", "adr", "contract_invalid", "branch_protection", "main", "morning_pause", "door")
 
 
 def test_a_direct_merge_pr_records_main_admission_not_evaluated(door: FakeGitHub) -> None:
