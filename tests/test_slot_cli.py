@@ -217,10 +217,16 @@ def test_mode_set_enforce_without_evidence_refuses_and_leaves_the_policy(env):
     assert events(env, "refused")[0]["reasons"] == ["activation_incomplete"]
 
 
-def _heavy_log(env, now, projects):
+_OBSERVE = object()
+
+
+def _heavy_log(env, now, projects, mode=_OBSERVE, at=None):
     log = slot_cli.SlotLog(env.store_dir)
     for i, project in enumerate(projects):
-        log.write({"ts": now - 5 * DAY + i, "event": "requested", "project_id": project, "profile": "seo-gate"})
+        line = {"ts": (now - 5 * DAY if at is None else at) + i, "event": "requested", "project_id": project,
+                "profile": "seo-gate"}
+        line["mode"] = "observe" if mode is _OBSERVE else mode
+        log.write(line)
 
 
 @pytest.mark.parametrize("break_it", [
@@ -259,6 +265,90 @@ def test_a_corrupt_slotlog_line_blocks_activation(env):
         fh.write("{not json\n")
     assert cli(env, "mode", "set", "enforce", "--project-id", "vnx-dev")[0] == 78
     assert json.loads(env.policy_path.read_text())["mode"] == "observe"
+
+
+@pytest.mark.parametrize("mode", ["off", "enforce", "enforce_pending", None, "OBSERVE", 1])
+def test_heavy_requests_not_recorded_in_observe_mode_do_not_prove_observe(env, mode):
+    now = time.time()
+    patch_policy(env, enforce_activation=evidence(now))
+    _heavy_log(env, now, ["vnx-dev", "seo"], mode=mode)   # the slotlog writes null for a line without a mode
+    code = cli(env, "mode", "set", "enforce", "--project-id", "vnx-dev")[0]
+    assert code == 78 and json.loads(env.policy_path.read_text())["mode"] == "observe"
+    assert events(env, "mode_changed") == []
+
+
+@pytest.mark.parametrize("offset", [-8 * DAY - 10, -DAY + 10, 3600])
+def test_observe_requests_outside_the_interval_do_not_prove_observe(env, offset):
+    now = time.time()   # the interval is [now - 8 days, now - 1 day]
+    patch_policy(env, enforce_activation=evidence(now))
+    _heavy_log(env, now, ["vnx-dev", "seo"], at=now + offset)
+    assert cli(env, "mode", "set", "enforce", "--project-id", "vnx-dev")[0] == 78
+    assert json.loads(env.policy_path.read_text())["mode"] == "observe"
+
+
+@pytest.mark.parametrize("change", [{"to_mode": "off"}, {"to_mode": "enforce"}, {"to_mode": None}, {"ts": None}])
+def test_leaving_observe_inside_the_interval_blocks(env, change):
+    now = time.time()
+    patch_policy(env, enforce_activation=evidence(now))
+    _heavy_log(env, now, ["vnx-dev", "seo"])
+    line = {"ts": now - 3 * DAY, "event": "mode_changed", "from_mode": "observe", "to_mode": "off", **change}
+    with open(next((env.store_dir / "slotlog").glob("*.ndjson")), "a") as fh:
+        fh.write(json.dumps(line) + "\n")
+    assert cli(env, "mode", "set", "enforce", "--project-id", "vnx-dev")[0] == 78
+    assert json.loads(env.policy_path.read_text())["mode"] == "observe"
+
+
+def test_observe_requests_inside_the_interval_prove_observe(env):
+    now = time.time()
+    patch_policy(env, enforce_activation=evidence(now))
+    _heavy_log(env, now, ["vnx-dev", "seo"], at=now - 8 * DAY)   # the interval start itself counts
+    assert cli(env, "mode", "set", "enforce", "--project-id", "vnx-dev")[0] == 0
+
+
+def test_mode_change_whose_transaction_fails_leaves_policy_and_slotlog_unchanged(env, monkeypatch):
+    now = time.time()
+    patch_policy(env, enforce_activation=evidence(now))
+    _heavy_log(env, now, ["vnx-dev", "seo"])
+    before = len(events(env))
+
+    def broken(state):
+        raise slot_cli.SlotError("state_corrupt", "injected")
+
+    monkeypatch.setattr(slot_cli, "validate_state", broken)
+    assert cli(env, "mode", "set", "enforce", "--project-id", "vnx-dev")[0] == 78
+    assert json.loads(env.policy_path.read_text())["mode"] == "observe"
+    assert len(events(env)) == before and state(env)["mode"] == "observe"
+
+
+def test_mode_changed_is_written_before_the_policy_is_rewritten(env, monkeypatch):
+    seen = []
+    real = slot_cli._write_policy_mode
+
+    def spy(store, policy, mode):
+        seen.append([e["to_mode"] for e in events(env, "mode_changed")])
+        real(store, policy, mode)
+
+    monkeypatch.setattr(slot_cli, "_write_policy_mode", spy)
+    assert cli(env, "mode", "set", "off", "--project-id", "vnx-dev")[0] == 0
+    assert seen == [["off"]] and json.loads(env.policy_path.read_text())["mode"] == "off"
+
+
+def test_a_failed_policy_rewrite_keeps_the_state(env, monkeypatch):
+    def fail(store, policy, mode):
+        raise slot_cli.SlotError("store_invalid", "injected")
+
+    monkeypatch.setattr(slot_cli, "_write_policy_mode", fail)
+    assert cli(env, "mode", "set", "off", "--project-id", "vnx-dev")[0] == 78
+    assert json.loads(env.policy_path.read_text())["mode"] == "observe" and state(env)["mode"] == "observe"
+    assert [e["event"] for e in events(env)] == ["mode_changed", "refused"]   # the record, then its undoing
+    assert events(env, "refused")[0]["mode"] == "observe" and events(env, "refused")[0]["reasons"] == ["store_invalid"]
+
+
+def test_a_policy_change_without_an_execution_change_is_still_recorded(env):
+    patch_policy(env, mode="enforce")   # a timed-out transition: policy enforce, execution observe
+    assert cli(env, "mode", "set", "observe", "--project-id", "vnx-dev")[0] == 0
+    (ev,) = events(env, "mode_changed")
+    assert (ev["from_mode"], ev["to_mode"], ev["reasons"]) == ("observe", "observe", ["policy_mode_set"])
 
 
 def test_mode_set_enforce_with_evidence_activates_an_empty_host(env):

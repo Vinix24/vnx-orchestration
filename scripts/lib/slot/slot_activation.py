@@ -52,11 +52,28 @@ def _doctor(rec: Any, now: float) -> List[str]:
 
 
 def _heavy_projects(policy: Dict[str, Any], events: Iterable[Dict[str, Any]], start: float, end: float) -> set:
+    """Projects with a heavy request recorded in ``observe`` mode inside ``[start, end]``.
+
+    Only a line whose ``mode`` is exactly ``observe`` counts: ``off``, ``enforce``, a pending
+    transition, an unknown value or a line without a mode is no observe proof (besluit 5)."""
     heavy = {name for name, prof in policy["profiles"].items() if prof.get("heavy") is True}
     return {e.get("project_id") for e in events
-            if e.get("event") == "requested" and e.get("profile") in heavy
+            if e.get("event") == "requested" and e.get("mode") == "observe" and e.get("profile") in heavy
             and isinstance(e.get("project_id"), str) and e["project_id"]
             and _time(e.get("ts"), end) and e["ts"] >= start}
+
+
+def _left_observe(events: Iterable[Dict[str, Any]], start: float, end: float) -> bool:
+    """True when a ``mode_changed`` inside ``[start, end]`` goes anywhere but ``observe``, or cannot be read."""
+    for e in events:
+        if e.get("event") != "mode_changed":
+            continue
+        ts = e.get("ts")
+        if not _time(ts, float("inf")):
+            return True   # a mode change without a usable time cannot be placed outside the interval
+        if start <= ts <= end and e.get("to_mode") != "observe":
+            return True
+    return False
 
 
 def _observe(policy: Dict[str, Any], rec: Any, events: Iterable[Dict[str, Any]], now: float) -> List[str]:
@@ -68,9 +85,13 @@ def _observe(policy: Dict[str, Any], rec: Any, events: Iterable[Dict[str, Any]],
     out = [] if _ref(rec.get("evidence_ref")) else ["observe: evidence_ref"]
     if not (isinstance(ids, list) and all(isinstance(i, str) and i for i in ids) and len(set(ids)) >= MIN_PROJECTS):
         return out + ["observe: project_ids names fewer than two projects"]
+    events = list(events)
+    if _left_observe(events, start, end):
+        out.append("observe: the slotlog leaves observe mode inside the interval")
     seen = _heavy_projects(policy, events, start, end)
     if len(seen & set(ids)) < MIN_PROJECTS:
-        out.append("observe: the slotlog holds heavy requests of fewer than two of project_ids in the window")
+        out.append("observe: the slotlog holds observe-mode heavy requests of fewer than two of project_ids"
+                   " in the interval")
     return out
 
 

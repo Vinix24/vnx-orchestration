@@ -17,7 +17,7 @@ import subprocess
 import sys
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
@@ -29,6 +29,7 @@ from slot.slot_admission import (AdmissionInvalid, StateCorrupt, _event, _grown,
                                  check_token, decide_round, free_slots, is_safe, nested_plan)
 from slot.slot_log import SlotLog, read_events
 from slot.slot_store import MODES, SlotError, SlotStore
+from slot.slot_store import _validate_state as validate_state
 from slot.slot_supervisor import PARENT_ENV, StartRefused, Supervisor, _children_of
 
 EXIT_TEMPFAIL, EXIT_INVALID, EXIT_USAGE = 75, 78, 2
@@ -551,25 +552,50 @@ def cmd_mode(ctx: Ctx, argv: List[str]) -> int:
     if ns is None:
         return EXIT_USAGE
     src = {"project_id": ns.project_id, "uid": os.getuid()}
-    policy = ctx.store.read_policy()
-    if os.stat(ctx.store.policy_path).st_uid != os.getuid():
-        _refuse_now(ctx, src, "owner_mismatch", detail="only the policy owner sets the mode")
-    if ns.target == "enforce":
-        if policy["mode"] == "off":
-            _refuse_now(ctx, src, "activation_incomplete", detail="off goes to observe first")
-        missing = slot_activation.missing(policy, read_events(ctx.store.store_dir), ctx.clock())
-        if missing:
-            _refuse_now(ctx, src, "activation_incomplete", detail="; ".join(missing))
-    _write_policy_mode(ctx.store, policy, ns.target)
-    policy = ctx.store.read_policy()
-    with ctx.store.transaction() as state:
-        now = ctx.clock()
-        if ns.target == "enforce" and state["mode"] in ("off", "observe"):
-            _start_transition(ctx, state, now, ns.project_id)
-        _sync_mode(ctx, state, policy, now, ns.project_id)
-        effective = state["mode"]
+    with ctx.store.transaction() as state:   # one control lock: gate, record, policy rewrite, state commit
+        policy = ctx.store.read_policy()
+        if os.stat(ctx.store.policy_path).st_uid != os.getuid():
+            _refuse(ctx, state, src, "owner_mismatch", detail="only the policy owner sets the mode")
+        if ns.target == "enforce":
+            if policy["mode"] == "off":
+                _refuse(ctx, state, src, "activation_incomplete", detail="off goes to observe first")
+            missing = slot_activation.missing(policy, read_events(ctx.store.store_dir), ctx.clock())
+            if missing:
+                _refuse(ctx, state, src, "activation_incomplete", detail="; ".join(missing))
+        effective = _apply_mode(ctx, state, policy, ns.target, ns.project_id)
     ctx.out(f"policy mode {ns.target}; effective {effective}")
     return 0
+
+
+def _apply_mode(ctx: Ctx, state: dict, policy: dict, target: str, project_id: str) -> str:
+    """Record the decision, then rewrite the policy (ADR-005: no policy change without its ledger line).
+
+    The new state is computed and validated with the slotlog lines held back, so a failure before the
+    record leaves neither a ledger line nor a changed policy; the caller's transaction then discards the
+    state. Only after every ``mode_changed`` line is written is ``host.json`` replaced; when that rewrite
+    fails, a ``refused`` line (``store_invalid``, the old mode) follows the record and the state stays."""
+    held: List[Dict[str, Any]] = []
+    before = state["mode"]
+    quiet = replace(ctx, log=held.append)
+    now = ctx.clock()
+    wanted = {**policy, "mode": target}
+    if target == "enforce" and state["mode"] in ("off", "observe"):
+        _start_transition(quiet, state, now, project_id)
+    _sync_mode(quiet, state, wanted, now, project_id)
+    if not held and policy["mode"] != target:   # the policy moves while the execution stays: still a decision
+        held.append(_event(state, "mode_changed", now, {"project_id": project_id, "uid": os.getuid()},
+                           from_mode=state["mode"], to_mode=state["mode"], transition_s=None,
+                           reasons=["policy_mode_set"]))
+    validate_state(state)
+    for ev in held:
+        ctx.log(ev)
+    try:
+        _write_policy_mode(ctx.store, policy, target)
+    except (SlotError, OSError) as exc:   # the record stands; a refused line says it never took effect
+        ctx.log(_event({"mode": before}, "refused", ctx.clock(), {"project_id": project_id, "uid": os.getuid()},
+                       reasons=["store_invalid"], exit_code=EXIT_INVALID))
+        raise Refused("store_invalid", f"policy not rewritten: {exc}") from exc
+    return state["mode"]
 
 
 COMMANDS = {"acquire": cmd_acquire, "run": cmd_run, "release": cmd_release, "status": cmd_status, "mode": cmd_mode}
