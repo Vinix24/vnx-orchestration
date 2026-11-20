@@ -140,6 +140,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
 
+from lib_module import load_lib_module
 from ledger_attempt_state import (KIND_ENDED, KIND_LIVE, KIND_UNKNOWN, LEDGER_FILENAME,
                                   AttemptVerdict, attempt_verdict, read_ledger)
 
@@ -764,7 +765,7 @@ def sweep(
         :class:`OrphanSweepResult` — per-object failures are recorded in
         ``errors`` and never abort the run.
     """
-    import crash_recovery_sweep
+    crash_recovery_sweep = load_lib_module("crash_recovery_sweep")
 
     root = _resolve_repo_root(repo_root)
     data_dir, state_dir, central_resolve_error = _sweep_resolve_stores(root, data_dir, state_dir)

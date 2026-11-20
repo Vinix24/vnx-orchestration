@@ -5,7 +5,7 @@ Verifies that all 4 modules identified in the audit are properly wired
 through at least one real call-path:
   1. PR-6.5d: auto_apply() runs from build_t0_state fallback path
   2. PR-D5-E: UnifiedReportValidator class is importable and usable from governance_emit
-  3. PR-D5-F: VNX_SCHEMA_STRICT toggle in emit_unified_report (shadow-mode + strict)
+  3. PR-D5-F: enforcement profile toggle in emit_unified_report (shadow-mode + strict)
   4. PR-SR-3: smart_router.route() is called from provider_dispatch --auto-route
 """
 
@@ -192,37 +192,37 @@ class TestUnifiedReportValidatorWiring:
 
 
 # ---------------------------------------------------------------------------
-# Test 3: PR-D5-F — VNX_SCHEMA_STRICT toggle in emit_unified_report
+# Test 3: PR-D5-F — enforcement profile toggle in emit_unified_report
 # ---------------------------------------------------------------------------
 
 class TestSchemaStrictToggle:
-    """Verify VNX_SCHEMA_STRICT controls raise vs shadow-mode behavior."""
+    """Verify the enforcement profile controls raise vs shadow-mode behavior."""
 
     def test_shadow_mode_logs_violation(self, tmp_path, caplog):
-        """Default (VNX_SCHEMA_STRICT unset): violations logged, not raised."""
+        """Profile shadow: violations logged, not raised."""
         import logging
 
         from governance_emit import _validate_report_frontmatter
 
         content = "---\nschema_version: 1\n---\n\n# Missing fields\n"
 
-        env_patch = {"VNX_SCHEMA_STRICT": ""}
+        env_patch = {"VNX_OVERRIDE_ENFORCEMENT_PROFILE": "shadow"}
         with patch.dict(os.environ, env_patch, clear=False):
-            os.environ.pop("VNX_SCHEMA_STRICT", None)
+            os.environ.pop("VNX_ENFORCEMENT_PROFILE", None)
             with caplog.at_level(logging.WARNING):
                 _validate_report_frontmatter(content, "test-shadow")
 
         assert any("schema violation (shadow-mode)" in r.message for r in caplog.records)
 
     def test_strict_mode_raises(self):
-        """VNX_SCHEMA_STRICT=1: violations raise SchemaViolation."""
+        """Profile enforced: violations raise SchemaViolation."""
         from unified_report_schema import SchemaViolation
 
         from governance_emit import _validate_report_frontmatter
 
         content = "---\nschema_version: 1\n---\n\n# Missing fields\n"
 
-        with patch.dict(os.environ, {"VNX_SCHEMA_STRICT": "1"}):
+        with patch.dict(os.environ, {"VNX_OVERRIDE_ENFORCEMENT_PROFILE": "enforced"}):
             with pytest.raises(SchemaViolation):
                 _validate_report_frontmatter(content, "test-strict")
 

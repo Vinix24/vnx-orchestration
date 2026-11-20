@@ -24,6 +24,7 @@ from ._common import (
     classify_pattern_category,
     _merge_stored_tags,
 )
+from config_runtime import central_db_flag as _central_db_flag
 try:
     from project_scope import current_project_id, project_filter_enabled
 except ImportError:
@@ -94,7 +95,7 @@ def query_proven_patterns(
     project_id_fn: Optional[Callable[[], Optional[str]]] = None,
 ) -> List[IntelligenceItem]:
     """3-state dispatcher: per-project | central | shadow (metric 3, success_patterns)."""
-    flag = os.environ.get("VNX_USE_CENTRAL_DB", "")
+    flag = _central_db_flag()
     if flag == "":
         return _query_per_project(db, task_class, scope_tags, has_column_fn, reconcile_fn)
     if flag == "1":

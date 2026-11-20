@@ -210,7 +210,8 @@ def _fold(lines: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
                 "point_id": line["point_id"], "state": "open", "bron": line["bron"], "ref": line["ref"],
                 "revisie": line["revisie"], "vraag": line["vraag"], "sluit_bij": line["sluit_bij"],
                 "asked_at": line["asked_at"], "presented": None, "bewijs": None, "unknown_reden": None,
-                "ceiling": line.get("ceiling") if _int(line.get("ceiling"), 1) else None})
+                "ceiling": line.get("ceiling") if _int(line.get("ceiling"), 1) else None,
+                "reason": line.get("reason") if line.get("reason") in GRANT_REASONS else None})
             continue
         point = points.get(line.get("point_id"))  # push_reserved has no point_id: None
         if point is None:
@@ -283,6 +284,11 @@ def read_state(project_id: str, *, state_dir: Optional[Path] = None) -> Dict[str
     return _read_state(sdir, project_id)
 
 
+def read_lines(project_id: str, *, state_dir: Optional[Path] = None) -> List[Dict[str, Any]]:
+    """Every ledger line in file order. Raises QueueUnreadable on a bad line (never a shorter list)."""
+    return _ledger_lines(Path(state_dir) if state_dir is not None else state_dir_for(project_id), project_id)
+
+
 def answers(project_id: str, *, state_dir: Optional[Path] = None) -> List[Dict[str, Any]]:
     """The ``answer`` lines of the ledger in file order. Raises QueueUnreadable on a bad ledger line."""
     sdir = Path(state_dir) if state_dir is not None else state_dir_for(project_id)
@@ -311,9 +317,11 @@ def latest_grant(project_id: str, pr: int, *, state_dir: Optional[Path] = None) 
 
 
 def append_line(project_id: str, kind: str, fields: Mapping[str, Any], *, now: Optional[str] = None,
-                state_dir: Optional[Path] = None) -> Optional[Dict[str, Any]]:
+                state_dir: Optional[Path] = None, guard: Optional[Callable[..., Optional[str]]] = None,
+                ) -> Optional[Dict[str, Any]]:
     """Validate and append one line, then rebuild the state. Returns the line, or None for an ``opened``
-    whose point_id exists. Raises QueueRefused (nothing written) or QueueUnreadable (ledger broken)."""
+    whose point_id exists. ``guard(points, lines)`` runs under the lock, right before the append: a reason it
+    returns is a refusal. Raises QueueRefused (nothing written) or QueueUnreadable (ledger broken)."""
     line = {**fields, "kind": kind, "project_id": project_id, "ts": now or _now()}
     try:
         check_line(project_id, line)
@@ -326,7 +334,8 @@ def append_line(project_id: str, kind: str, fields: Mapping[str, Any], *, now: O
         raise QueueRefused("refused, secret pattern: " + ", ".join(hits))
     sdir = Path(state_dir) if state_dir is not None else state_dir_for(project_id)
     with _locked(sdir):
-        points = _fold(_ledger_lines(sdir, project_id))
+        lines = _ledger_lines(sdir, project_id)
+        points = _fold(lines)
         ids = line["point_ids"] if kind == "push_reserved" else [line["point_id"]]
         known = [i in points for i in ids]
         if kind == "opened" and known[0]:
@@ -335,6 +344,9 @@ def append_line(project_id: str, kind: str, fields: Mapping[str, Any], *, now: O
             raise QueueRefused(f"{kind}: point_id is not in the ledger")
         if kind == "closed" and points[line["point_id"]]["state"] != "open":
             raise QueueRefused("closed: the point is already closed")
+        why = guard(points, lines) if guard is not None else None
+        if why:
+            raise QueueRefused(why)
         _append(sdir, line)
         _write_state(sdir, _read_state(sdir, project_id))
     return line

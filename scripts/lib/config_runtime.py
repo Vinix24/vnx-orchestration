@@ -184,3 +184,10 @@ def get_bool(key: str) -> bool:
     """Bool view of get() — true for any truthy spelling (1/true/yes/on), via config_registry.get_bool."""
     autowire()
     return config_registry.get_bool(key)
+
+
+def central_db_flag() -> str:
+    """``VNX_USE_CENTRAL_DB`` for this process: ``''`` (per-project), ``'1'`` (central) or
+    ``'shadow'``. An unrecognised value is returned as is; each caller decides how to read it.
+    The one read of the key (config-een-oppervlak PR-7): 11 env reads in 8 files became this."""
+    return (get("VNX_USE_CENTRAL_DB") or "").strip()

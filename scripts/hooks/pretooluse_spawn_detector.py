@@ -25,18 +25,18 @@ regex hard-block with a tokenizer:
   4. Recurse into `bash -c` / `sh -c` strings and transparent command-prefix
      runners (nohup/env/setsid/stdbuf), bounded to depth 3.
   5. Shadow-detect lane invocations on the tokenized argv (allow+log by
-     default; block when VNX_HOOK_ENFORCE=1). A lane name as a non-executable
+     default; block under profile enforced). A lane name as a non-executable
      argument (`echo provider_dispatch.py`) does not match.
   6. Fail-open absolutely: any stdin → exactly one allow/block line, never a
      traceback. An unbalanced-quote segment falls back to a best-effort legacy
      regex scan, which still BLOCKS a raw provider spawn — no blanket allow.
 
-Hard-blocked (always, regardless of VNX_HOOK_ENFORCE):
+Hard-blocked (always, regardless of the enforcement profile):
   claude:  -p / --print / --dangerously-skip-permissions
   kimi:    --print / -p
   codex:   exec <subcommand>
 
-Shadow-detected (allow + log when VNX_HOOK_ENFORCE unset/0; block when =1):
+Shadow-detected (allow + log under profile shadow; block under enforced):
   Direct lane-script invocation: subprocess_dispatch.py,
     provider_dispatch.py, dispatch_cli.py
   python[3] -m <lane_module>
@@ -116,7 +116,7 @@ _LANE_MODS_RE = r"(?:" + r"|".join(
 
 _PYTHON_RE = re.compile(r"python[0-9.]*$")
 
-# Headless opt-in flag — shadow-detected (allow+log default; block when VNX_HOOK_ENFORCE=1).
+# Headless opt-in flag — shadow-detected (allow+log default; block under profile enforced).
 # VNX_ADAPTER / --adapter is NOT detected here (legitimate subprocess-pin lane, Wave 5).
 _CLAUDE_HEADLESS_FLAG = "--allow-headless"
 
@@ -397,7 +397,7 @@ def _classify_argv(argv: list[str], enforce_mode: bool, depth: int) -> tuple[str
     exe = os.path.basename(argv[0])
     rest = argv[1:]
 
-    # Hard-block — always block, VNX_HOOK_ENFORCE irrelevant.
+    # Hard-block — always block, the enforcement profile is irrelevant.
     if exe == "claude" and any(a in _CLAUDE_BLOCKED_FLAGS for a in rest):
         return "block", "claude_raw_cli", "block"
     if exe == "kimi" and any(a in _KIMI_BLOCKED_FLAGS for a in rest):
@@ -419,7 +419,7 @@ def _classify_argv(argv: list[str], enforce_mode: bool, depth: int) -> tuple[str
             if sub[2] != "allow":
                 return sub
 
-    # Shadow evasion (respects VNX_HOOK_ENFORCE).
+    # Shadow evasion (respects the enforcement profile).
     shadow_rule = _detect_shadow_argv(argv)
     if shadow_rule:
         if enforce_mode:
@@ -468,12 +468,30 @@ def _classify_command(command: str, enforce_mode: bool, depth: int = 0) -> tuple
     return best
 
 
-def classify(cmd: str) -> str:
-    """Return 'allow' or 'block'. Reads VNX_HOOK_ENFORCE from environment."""
-    enforce_mode = os.environ.get("VNX_HOOK_ENFORCE", "0") == "1"
+def _profile_enforced() -> bool:
+    """The enforcement profile (ADR-087); a reader that raises reads as enforced, with an ERROR."""
     try:
-        decision, _, _ = _classify_command(cmd or "", enforce_mode)
-        return decision
+        import enforcement_profile
+        return enforcement_profile.enforced()
+    except Exception as exc:  # vnx-silent-except: not silent, the ERROR line names the failure
+        sys.stderr.write(f"ERROR pretooluse_spawn_detector: reading VNX_ENFORCEMENT_PROFILE failed "
+                         f"({type(exc).__name__}: {exc}); applying enforced\n")
+        return True
+
+
+def _decide(cmd: str) -> tuple[str, str | None, str, str]:
+    """``(decision, rule, severity, mode)``. Only a shadow match depends on the profile, so the
+    profile is read only then; a hard block (mode ``hard``) and a clean command never read it."""
+    decision, rule, severity = _classify_command(cmd, False)
+    if severity == "shadow" and _profile_enforced():
+        return (*_classify_command(cmd, True), "enforce")
+    return decision, rule, severity, "hard" if severity == "block" else "shadow"
+
+
+def classify(cmd: str) -> str:
+    """Return 'allow' or 'block' under the enforcement profile."""
+    try:
+        return _decide(cmd or "")[0]
     except Exception:  # noqa: BLE001
         return "allow"  # absolute fail-open
 
@@ -528,15 +546,13 @@ def main() -> None:
             return
 
         cmd = raw_cmd
-        enforce_mode = os.environ.get("VNX_HOOK_ENFORCE", "0") == "1"
         try:
-            decision, matched_rule, severity = _classify_command(cmd, enforce_mode)
+            decision, matched_rule, severity, mode = _decide(cmd)
         except Exception:  # noqa: BLE001
             sys.stdout.write("allow\n")
             return
 
         if matched_rule is not None:
-            mode = "enforce" if enforce_mode else "shadow"
             _append_telemetry(cmd, matched_rule, severity, mode)
 
         sys.stdout.write(decision + "\n")

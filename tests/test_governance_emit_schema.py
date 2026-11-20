@@ -148,7 +148,7 @@ class TestShadowMode:
 
 class TestStrictMode:
     def test_raises_on_invalid(self, tmp_data, monkeypatch):
-        monkeypatch.setenv("VNX_SCHEMA_STRICT", "1")
+        monkeypatch.setenv("VNX_OVERRIDE_ENFORCEMENT_PROFILE", "enforced")
         kwargs = _base_report_kwargs(tmp_data)
         kwargs["dispatch_id"] = "test-strict-001"
         kwargs["frontmatter"] = {"schema_version": 1}
@@ -156,7 +156,7 @@ class TestStrictMode:
             emit_unified_report(**kwargs)
 
     def test_passes_on_valid(self, tmp_data, monkeypatch):
-        monkeypatch.setenv("VNX_SCHEMA_STRICT", "1")
+        monkeypatch.setenv("VNX_OVERRIDE_ENFORCEMENT_PROFILE", "enforced")
         kwargs = _base_report_kwargs(tmp_data)
         kwargs["frontmatter"] = _valid_frontmatter()
         path = emit_unified_report(**kwargs)
@@ -180,7 +180,7 @@ class TestValidateReportFrontmatter:
         assert "schema violation (shadow-mode)" in caplog.text
 
     def test_strict_raises(self, monkeypatch):
-        monkeypatch.setenv("VNX_SCHEMA_STRICT", "1")
+        monkeypatch.setenv("VNX_OVERRIDE_ENFORCEMENT_PROFILE", "enforced")
         content = "---\nschema_version: 1\n---\n\n# Body"
         with pytest.raises(SchemaViolation):
             _validate_report_frontmatter(content, "test-003")
@@ -213,7 +213,7 @@ class TestIdempotency:
 
 class TestSchemaIntegration:
     def test_all_required_fields_present_validates(self, tmp_data, monkeypatch):
-        monkeypatch.setenv("VNX_SCHEMA_STRICT", "1")
+        monkeypatch.setenv("VNX_OVERRIDE_ENFORCEMENT_PROFILE", "enforced")
         kwargs = _base_report_kwargs(tmp_data)
         kwargs["dispatch_id"] = "test-integration-001"
         fm = _valid_frontmatter()
@@ -225,7 +225,7 @@ class TestSchemaIntegration:
         validate_file(path)
 
     def test_wrong_schema_version_fails_strict(self, tmp_data, monkeypatch):
-        monkeypatch.setenv("VNX_SCHEMA_STRICT", "1")
+        monkeypatch.setenv("VNX_OVERRIDE_ENFORCEMENT_PROFILE", "enforced")
         kwargs = _base_report_kwargs(tmp_data)
         kwargs["dispatch_id"] = "test-wrong-version"
         fm = _valid_frontmatter()

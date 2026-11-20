@@ -29,7 +29,7 @@ from forge_protection_drift import YamlFetchResult  # noqa: E402
 from merge_target import MergeTarget  # noqa: E402
 
 SHA, PR, APP_ID = "d" * 40, 7, 4869217
-BEFORE_DOOR = ["ci", "review", "adr", "contract_invalid", "branch_protection", "main"]
+BEFORE_DOOR = ["ci", "review", "adr", "contract_invalid", "branch_protection", "main", "morning_pause"]
 DOOR_CHECK_KEYS = {
     "schema", "state", "check_name", "head_sha", "app_id", "check_run_id", "permit_id",
     "published_at", "read_back", "revoked", "revoke_outcome", "merge_outcome",

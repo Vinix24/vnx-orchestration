@@ -27,7 +27,7 @@ ROWS = {
     "VNX_DIGEST_EMAIL": ("string", "", "global", None),
     "VNX_SMTP_HOST": ("string", "smtp.gmail.com", "global", None),
     "VNX_RECEIPT_CLASSIFIER_ENABLED": ("bool", "0", "project", None),
-    "VNX_AUTO_REPORT": ("bool", "0", "project", None),
+    "VNX_AUTO_REPORT": ("bool", "1", "project", None),
     "VNX_ENFORCE_WORKER_PERMISSIONS": ("bool", "0", "project", None),
     "VNX_PROVENANCE_ENFORCEMENT": ("bool", "0", "project", None),
     "VNX_PROVENANCE_LEGACY_ACCEPTED": ("bool", "1", "project", None),
@@ -60,7 +60,7 @@ def test_row_has_the_declared_shape(key):
     type_, default, scope, allowed = ROWS[key]
     entry = cr.CONFIG_REGISTRY[key]
     assert (entry.type, entry.default, entry.scope, entry.allowed_values) == (type_, default, scope, allowed)
-    assert entry.read_site_wired is (key == "VNX_ENFORCEMENT_PROFILE") and entry.writable_from_ui is True
+    assert entry.read_site_wired is (key in ("VNX_ENFORCEMENT_PROFILE", "VNX_AUTO_REPORT")) and entry.writable_from_ui is True
     if allowed:
         assert entry.default in allowed
 

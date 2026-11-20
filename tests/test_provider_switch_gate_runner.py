@@ -64,7 +64,7 @@ def env(tmp_path, monkeypatch):
     reports_dir.mkdir(parents=True)
     # The runner decides for the project its own state dir names.
     (tmp_path / ".vnx-project-id").write_text("runner-test\n", encoding="utf-8")
-    monkeypatch.setattr(gate_runner, "_capture_main_checkout_state", lambda project_root: {"head": "main"})
+    monkeypatch.setattr(gate_runner, "_capture_main_checkout_state", lambda project_root, *a, **k: {"head": "main"})
     receipts: List[Dict[str, Any]] = []
     monkeypatch.setattr(gate_recorder, "emit_governance_receipt",
                         lambda event, **fields: receipts.append({"event": event, **fields}))
