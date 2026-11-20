@@ -10,9 +10,9 @@ from typing import Any, Dict, List, Mapping, Optional
 import operator_queue as oq
 from operator_queue import QueueUnreadable, _locked, read_state
 
-SNAPSHOT_SCHEMA = "ochtendronde_snapshot/1"
-EVENTS_FILENAME = "ochtendronde.ndjson"
-SNAPSHOT_DIR = "ochtendronde"
+SNAPSHOT_SCHEMA = "morning_snapshot/1"
+EVENTS_FILENAME = "morning_round.ndjson"
+SNAPSHOT_DIR = "morning_round"
 EVENT_KINDS = frozenset({"pause_start", "pause_end", "refused", "override"})
 PAUSE_END_REASONS = frozenset({"decided", "deadline"})
 _DAY = re.compile(r"\d{4}-\d{2}-\d{2}")

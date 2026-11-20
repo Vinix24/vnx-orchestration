@@ -831,7 +831,7 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         ".vnx-agent-skills/) or on (the skills at the provider's native, discovered destination, "
         "set per project by the operator). An unknown value reads as off.",
         subsystem="agent-layout", status="SCOPE"),
-    # ochtendronde (ADR-095): morning_pause.py reads these through a getter; since D1b the door
+    # morning round (ADR-095): morning_pause.py reads these through a getter; since D1b the door
     # (stop_conditions.check_morning_pause) and pr_merge read them (morning_pause_gate.py), so all
     # four are wired. VNX_MORNING_PAUSE_ENABLED is the subsystem's canonical flag, inserted last
     # so the CLI's last-inserted rule agrees.

@@ -2406,7 +2406,7 @@ def _log_checkout_lag(spec: DispatchSpec, lag: Optional[int]) -> None:
 # ---------------------------------------------------------------------------
 
 # See point 3 above for the full reasoning and the CI evidence this is based on.
-# ochtendronde D1b (ADR-095): morning_pause is a state_dir-scoped project fact too, so it blocks.
+# morning round D1b (ADR-095): morning_pause is a state_dir-scoped project fact too, so it blocks.
 _STOP_CONDITIONS_BLOCKING_CHECK_IDS = frozenset({"provider_exhausted", "repeated_gate_failure_cause", "morning_pause"})
 
 # 6. OI-1694: a blocking-eligible TRIGGERED check still measures BROADLY (see

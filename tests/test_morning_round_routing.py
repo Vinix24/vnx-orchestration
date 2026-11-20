@@ -1,4 +1,4 @@
-"""ochtendronde D2b: classify analyzer points project or fleet, route fleet points to the vnx-dev ledger."""
+"""morning round D2b: classify analyzer points project or fleet, route fleet points to the vnx-dev ledger."""
 import json
 import sys
 from pathlib import Path
@@ -7,8 +7,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts" / "lib"))
 
-import ochtendronde_agenda as ag
-import ochtendronde_routing as rt
+import morning_snapshot as ag
+import morning_round_routing as rt
 import operator_queue as oq
 import operator_queue_dream_analyzer as qa
 

@@ -2728,7 +2728,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         "--override-morning-pause", default=None,
         help="Escape hatch (ADR-095): merge past the morning pause, with the reason "
              "revert_or_fix_forward or another non-empty operator reason (empty is refused). "
-             "Covers ONLY that preflight; every override is a line in ochtendronde.ndjson.",
+             "Covers ONLY that preflight; every override is a line in morning_round.ndjson.",
     )
     parser.add_argument(
         "--allow-weaken", default=None,
@@ -3203,7 +3203,7 @@ def _run_main_gate(args: argparse.Namespace, head_sha: str) -> Dict[str, Any]:
 def _run_pause_gate(args: argparse.Namespace, override_recorded: bool = False) -> Dict[str, Any]:
     """The ``morning_pause`` preflight (ADR-095): NO-GO while paused, GO with ``--override-morning-pause`` and a reason.
 
-    Every refusal and override is a line in ``ochtendronde.ndjson``; a failing append is printed, never a pass.
+    Every refusal and override is a line in ``morning_round.ndjson``; a failing append is printed, never a pass.
     ``override_recorded`` (the recheck under the lock) means this merge's override line is already
     written: a paused verdict with the reason is then a GO without a second line.
     """
