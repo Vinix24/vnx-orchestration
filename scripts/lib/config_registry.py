@@ -51,7 +51,7 @@ ALLOWED_SCOPES = frozenset(("project", "global"))
 @dataclass(frozen=True)
 class ConfigEntry:
     key: str
-    type: str  # "bool" | "string" | "enum" | "integer"
+    type: str  # "bool" | "string" | "enum" | "integer" | "float"
     default: str
     category: str  # "intelligence" | "dispatch" | "gate"
     description: str
@@ -132,6 +132,18 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
     "VNX_RECEIPT_CLASSIFIER_ENABLED": _e(
         "VNX_RECEIPT_CLASSIFIER_ENABLED", "bool", "0", "intelligence",
         "Receipt classifier opt-in.", subsystem="intelligence-self-learning-loop", status="ACTIVATE", read_site_wired=False),
+    "VNX_RECEIPT_CLASSIFIER_MODE": _e(
+        "VNX_RECEIPT_CLASSIFIER_MODE", "string", "batch", "intelligence",
+        "Receipt classifier mode: batch (default), per_receipt or failures_direct.",
+        subsystem="intelligence-self-learning-loop", status="ACTIVATE", read_site_wired=False),
+    "VNX_RECEIPT_CLASSIFIER_PROVIDER": _e(
+        "VNX_RECEIPT_CLASSIFIER_PROVIDER", "string", "haiku", "intelligence",
+        "Provider of the receipt classifier.",
+        subsystem="intelligence-self-learning-loop", status="ACTIVATE", read_site_wired=False),
+    "VNX_RECEIPT_CLASSIFIER_DAILY_COST_USD": _e(
+        "VNX_RECEIPT_CLASSIFIER_DAILY_COST_USD", "float", "0.20", "intelligence",
+        "Daily USD spend cap of the receipt classifier. Raising it waives the 0.20 USD/day classifier cost cap.",
+        approval=True, subsystem="intelligence-self-learning-loop", status="ACTIVATE", read_site_wired=False),
     "VNX_AUTO_REPORT": _e(
         "VNX_AUTO_REPORT", "bool", "1", "dispatch",
         "Auto-report Stop hook gate. Default on: the value every fabric process saw while "
@@ -163,6 +175,43 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         "VNX_T3_PROVIDER", "string", "", "dispatch",
         "Provider of terminal T3 (layer 2 of the worker pair, ADR-091). Empty: this layer delivers "
         "nothing and the worker registry decides.", subsystem="headless-dispatch-routing", status="ACTIVATE", read_site_wired=False),
+    "VNX_T0_PROVIDER": _e(
+        "VNX_T0_PROVIDER", "string", "claude_code", "dispatch",
+        "Provider of terminal T0.",
+        subsystem="headless-dispatch-routing", status="ACTIVATE", read_site_wired=False),
+    "VNX_T0_SKIP_PERMISSIONS": _e(
+        "VNX_T0_SKIP_PERMISSIONS", "bool", "0", "dispatch",
+        "Launch terminal T0 with the CLI permission prompts skipped. Setting 1 waives the permission prompts "
+        "(--dangerously-skip-permissions) for that terminal.",
+        approval=True, subsystem="headless-dispatch-routing", status="ACTIVATE", read_site_wired=False),
+    "VNX_T1_SKIP_PERMISSIONS": _e(
+        "VNX_T1_SKIP_PERMISSIONS", "bool", "0", "dispatch",
+        "Launch terminal T1 with the CLI permission prompts skipped. Setting 1 waives the permission prompts "
+        "(--dangerously-skip-permissions) for that terminal.",
+        approval=True, subsystem="headless-dispatch-routing", status="ACTIVATE", read_site_wired=False),
+    "VNX_T2_SKIP_PERMISSIONS": _e(
+        "VNX_T2_SKIP_PERMISSIONS", "bool", "0", "dispatch",
+        "Launch terminal T2 with the CLI permission prompts skipped. Setting 1 waives the permission prompts "
+        "(--dangerously-skip-permissions) for that terminal.",
+        approval=True, subsystem="headless-dispatch-routing", status="ACTIVATE", read_site_wired=False),
+    "VNX_T3_SKIP_PERMISSIONS": _e(
+        "VNX_T3_SKIP_PERMISSIONS", "bool", "0", "dispatch",
+        "Launch terminal T3 with the CLI permission prompts skipped. Setting 1 waives the permission prompts "
+        "(--dangerously-skip-permissions) for that terminal.",
+        approval=True, subsystem="headless-dispatch-routing", status="ACTIVATE", read_site_wired=False),
+    "VNX_PAID_LANE_DAILY_BUDGET_USD": _e(
+        "VNX_PAID_LANE_DAILY_BUDGET_USD", "float", "5.00", "dispatch",
+        "Daily USD cap of the paid provider lanes. Raising it waives the 5 USD/day paid-lane cost cap.",
+        approval=True, subsystem="headless-dispatch-routing", status="ACTIVATE", read_site_wired=False),
+    "VNX_REQUIRE_DISPATCH_TRACK": _e(
+        "VNX_REQUIRE_DISPATCH_TRACK", "bool", "0", "dispatch",
+        "Require a track_id on a dispatch. Off (default): the door only warns; on: a dispatch without a track is refused.",
+        subsystem="headless-dispatch-routing", status="ACTIVATE", read_site_wired=True),
+    "VNX_SUPERVISOR_MODE": _e(
+        "VNX_SUPERVISOR_MODE", "string", "legacy", "dispatch",
+        "Unified supervisor opt-in: unified switches on auto-respawn, lease sweep and runtime supervision; legacy leaves them off.",
+        subsystem="headless-dispatch-routing", status="ACTIVATE", read_site_wired=False,
+        allowed_values=("legacy", "unified")),
     "VNX_ENFORCEMENT_PROFILE": _e(
         "VNX_ENFORCEMENT_PROFILE", "string", "shadow", "gate",
         "Enforcement profile: shadow (default) | enforced.", approval=True, subsystem="governance-enforcement-stack", status="ACTIVATE", read_site_wired=True,
@@ -172,10 +221,15 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         "Claude account directories as a JSON list (ADR-090). The reader validates the content.",
         scope="global", approval=True, subsystem="headless-dispatch-routing", status="ACTIVATE", read_site_wired=False),
 
+    "VNX_SCOUT_PROVIDER": _e(
+        "VNX_SCOUT_PROVIDER", "string", "deepseek", "intelligence",
+        "Provider of the scout recon pre-pass; a value outside the allowed set falls back to deepseek.",
+        subsystem="cheap-recon-scout", status="ACTIVATE", read_site_wired=True,
+        allowed_values=("codex", "deepseek", "gemini", "ollama")),
     "VNX_SCOUT_PREPASS": _e(
         "VNX_SCOUT_PREPASS", "bool", "0", "intelligence",
         "Cheap-model scout recon pre-pass in the door (fail-open).",
-        subsystem="cheap-recon-scout", status="ACTIVATE"),
+        subsystem="cheap-recon-scout", status="ACTIVATE", cockpit_canonical=True),
     "VNX_TAGGER_ENABLED": _e(
         "VNX_TAGGER_ENABLED", "bool", "0", "intelligence",
         "Persist-time LLM tagging over the closed VNX vocabulary.",
