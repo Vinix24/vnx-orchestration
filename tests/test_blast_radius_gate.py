@@ -1,4 +1,3 @@
-"""ADR-096 B4b: the door checks the blast radius of a fire against live work and open PRs."""
 import json
 import sys
 from pathlib import Path, PurePosixPath

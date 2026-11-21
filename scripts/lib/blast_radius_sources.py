@@ -24,8 +24,7 @@ from blast_radius import Subject, _branch_of
 
 CACHE_FILENAME = "blast_radius_pr_cache.json"
 CACHE_VERSION = 1
-PR_LIST_LIMIT = 200  # gh pr list --limit; a full page means the list may be cut off (OI-3055)
-REASON_PRS_TRUNCATED = "open_prs_truncated"
+PR_LIST_LIMIT, REASON_PRS_TRUNCATED = 200, "open_prs_truncated"  # a full gh pr list page may be cut off (OI-3055)
 Gh = Callable[[List[str], Path], str]  # gh(argv, cwd) -> stdout; raises on failure
 
 

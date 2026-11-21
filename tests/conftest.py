@@ -572,7 +572,6 @@ def _reconcile_git_off(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture(autouse=True)
 def _blast_radius_gh_off(monkeypatch: pytest.MonkeyPatch) -> None:
-    """ADR-096 B4b: the door's open-PR read never reaches a live, network ``gh`` from the suite (it reads unknown)."""
     import blast_radius_gate
     monkeypatch.setattr(blast_radius_gate, "gh", lambda argv, cwd: (_ for _ in ()).throw(RuntimeError("gh is off in tests")))
 

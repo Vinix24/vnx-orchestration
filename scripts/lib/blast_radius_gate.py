@@ -1,7 +1,4 @@
-"""blast_radius_gate — does a fire touch paths that live work or an open PR also touches? (ADR-096 §10, §12-16, B4b).
-
-One verdict per candidate: ``clear``, ``blast_radius_overlap`` or ``blast_radius_unknown``. Unknown is local
-to this candidate (no halt.json, no fleet-wide stop) and is never read as clear."""
+"""blast_radius_gate — verdict clear, blast_radius_overlap or blast_radius_unknown per candidate (ADR-096 B4b); unknown is local to it and never clear."""
 from __future__ import annotations
 
 import subprocess
@@ -14,8 +11,7 @@ import blast_radius as br
 import blast_radius_sources as brs
 from deliverable_predecessor_gate import append_lines
 
-MODE_KEY, MODES, DEFAULT_MODE = "VNX_BLAST_RADIUS_MODE", ("off", "warn", "refuse"), "warn"
-LEDGER = "blast_radius.ndjson"
+MODE_KEY, MODES, DEFAULT_MODE, LEDGER = "VNX_BLAST_RADIUS_MODE", ("off", "warn", "refuse"), "warn", "blast_radius.ndjson"
 CLEAR, OVERLAP, UNKNOWN = "clear", "blast_radius_overlap", "blast_radius_unknown"
 Hit = namedtuple("Hit", "source other path reason")  # reason "overlap", or why it is unknown
 
@@ -45,14 +41,11 @@ def judge(candidate: br.Subject, sources: Iterable[Tuple[str, brs.Sources]], rep
                     hits.extend(Hit(name, label, p, "overlap") for p in r.paths)
                 elif r.outcome != br.CLEAR:  # unknown, or an outcome this gate does not know: never clear
                     hits.append(Hit(name, label, "", src.reasons.get(other.deliverable_id) or r.reason or r.outcome))
-    if any(h.reason == "overlap" for h in hits):
-        return OVERLAP, tuple(hits)
-    return (UNKNOWN if hits else CLEAR), tuple(hits)
+    return (OVERLAP if any(h.reason == "overlap" for h in hits) else UNKNOWN if hits else CLEAR), tuple(hits)
 
 
 def describe(hits: Sequence[Hit]) -> str:
-    return "; ".join(f"{h.source} {h.other}: {h.path}" if h.reason == "overlap" else f"{h.source} {h.other}: {h.reason}"
-                     for h in hits)
+    return "; ".join(f"{h.source} {h.other}: {h.path if h.reason == 'overlap' else h.reason}" for h in hits)
 
 
 def record(state_dir: Path, project_id: str, dispatch_id: str, hits: Iterable[Hit], *, mode: str, verdict: str,

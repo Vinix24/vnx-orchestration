@@ -2783,8 +2783,7 @@ def _check_predecessor_verdict(
 def _check_blast_radius_verdict(
     spec: DispatchSpec, repo_root: Path, state_dir: Path, override_reason: Optional[str] = None, dry_run: bool = False,
 ) -> Optional[ConstraintVerdict]:
-    """ADR-096 B4b: overlap with live work or an open PR, or an unknown overlap, warns (``warn``, the default) or
-    refuses (``refuse``) this one fire; ``off`` reads nothing, an unknown mode reads as refuse, a dry run writes no line."""
+    """ADR-096 B4b: overlap (or unknown overlap) with live work or an open PR warns or refuses this fire per mode; a dry run writes no line."""
     import sqlite3
     import config_runtime
     import blast_radius as br
