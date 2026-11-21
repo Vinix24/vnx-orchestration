@@ -2781,7 +2781,7 @@ def _check_predecessor_verdict(
 
 
 def _check_blast_radius_verdict(
-    spec: DispatchSpec, *, repo_root: Path, state_dir: Path, override_reason: Optional[str] = None, dry_run: bool = False,
+    spec: DispatchSpec, repo_root: Path, state_dir: Path, override_reason: Optional[str] = None, dry_run: bool = False,
 ) -> Optional[ConstraintVerdict]:
     """ADR-096 B4b: overlap with live work or an open PR, or an unknown overlap, warns (``warn``, the default) or
     refuses (``refuse``) this one fire; ``off`` reads nothing, an unknown mode reads as refuse, a dry run writes no line."""
@@ -2826,15 +2826,14 @@ def _check_blast_radius_verdict(
                                  f"{verdict} for {spec.dispatch_id}: {brg.describe(hits)} (mode {mode}, stored {raw!r}){tail}"))
 
 
-def _blast_radius_refused(spec: DispatchSpec, **kw) -> bool:
-    """Run the blast-radius check; print a warning, or emit the reject and return True."""
-    verdict = _check_blast_radius_verdict(spec, **kw)
+def _blast_radius_reject(spec: DispatchSpec, *args) -> Optional[Reject]:
+    """Run the blast-radius check; print a warning, or return the Reject the door emits."""
+    verdict = _check_blast_radius_verdict(spec, *args)
     if verdict is not None and verdict.severity == "blocking":
-        _emit_reject(Reject(verdict.code, verdict.message))
-        return True
+        return Reject(verdict.code, verdict.message)
     if verdict is not None:
         print(f"[dispatch_cli] [WARN] {verdict.message}", file=sys.stderr)
-    return False
+    return None
 
 
 def _check_stop_conditions_verdict(
@@ -4505,8 +4504,7 @@ def run_dispatch(
     dry_run: bool = False,
     refire_reason: Optional[str] = None,
     stop_conditions_override_reason: Optional[str] = None,
-    track_id_override: Optional[str] = None, predecessor_override_reason: Optional[str] = None,
-    overlap_override_reason: Optional[str] = None,
+    track_id_override: Optional[str] = None, predecessor_override_reason: Optional[str] = None, overlap_override_reason: Optional[str] = None,
 ) -> int:
     """Turn a spec file into a governed dispatch for BOTH lanes.
 
@@ -4587,7 +4585,7 @@ def run_dispatch(
         # kimi stampede (nine dispatches, one quota 403, eight minutes) fired
         # blind because a real fire never checked reachability at all.
         # Provider-schakelaar B: the operator's switch is asked first (_lane_verdict).
-        lane_reject = _lane_verdict(plan, vspec.spec, project_id=project_id, state_dir=state_dir, dry_run=dry_run)
+        lane_reject = _lane_verdict(plan, vspec.spec, project_id=project_id, state_dir=state_dir, dry_run=dry_run) or _blast_radius_reject(vspec.spec, repo_root, state_dir, overlap_override_reason, dry_run)
         if lane_reject is not None:
             _emit_reject(lane_reject)
             return 1
@@ -4598,9 +4596,6 @@ def run_dispatch(
         # SEPARATE sidecar file — it never touches the instruction, so the
         # permit / instruction_sha256 TOCTOU below is untouched. Never blocks the
         # door (best-effort, never raises).
-        if _blast_radius_refused(vspec.spec, repo_root=repo_root, state_dir=state_dir,
-                                 override_reason=overlap_override_reason, dry_run=dry_run):
-            return 1
         if not dry_run:
             _run_scout_prepass(plan, vspec, state_dir=state_dir)
 
