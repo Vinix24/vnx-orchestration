@@ -869,7 +869,7 @@ def _run_dispatch_via_envelope(args):
 def _adapter_plan(model="default"):
     return types.SimpleNamespace(
         provider=Provider.CODEX, model=model, role=None, dispatch_id="r3-codex",
-        target_id="T1", dispatch_paths=(),
+        target_id="T1", dispatch_paths=(), deadline_seconds=600,
     )
 
 

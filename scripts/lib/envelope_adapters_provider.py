@@ -312,6 +312,7 @@ class ProviderAdapter:
                 extra_env=role_env,
                 cwd=cwd,
                 role=plan.role, state_dir=_codex_state_dir(), project_id=getattr(plan, "project_id", None),
+                total_deadline=float(plan.deadline_seconds),
             )
         except BrokenPipeError as exc:
             return _AdapterResult(
@@ -470,6 +471,7 @@ class ProviderAdapter:
                 event_writer=event_writer,
                 extra_env=role_env,
                 cwd=cwd,
+                total_deadline=float(plan.deadline_seconds),
             )
         except BrokenPipeError as exc:
             return _AdapterResult(
@@ -520,6 +522,7 @@ class ProviderAdapter:
                 lane=lane_key,
                 extra_env=role_env,
                 cwd=cwd,
+                total_deadline=float(plan.deadline_seconds),
             )
         except BrokenPipeError as exc:
             return _AdapterResult(

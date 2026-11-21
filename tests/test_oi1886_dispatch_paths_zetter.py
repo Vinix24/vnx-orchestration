@@ -246,6 +246,7 @@ class TestProviderEnvelopeAdapterExportsDispatchPaths:
             dispatch_id="d-oi1886-codex",
             target_id="T1",
             role=ROLE,
+            deadline_seconds=600,
             dispatch_paths=(
                 DispatchPath(PurePosixPath("scripts/lib/foo.py"), PathAccess.READ_WRITE),
             ),
