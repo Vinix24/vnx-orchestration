@@ -20,13 +20,16 @@ for _path in (VNX_ROOT / "scripts", VNX_ROOT / "scripts" / "lib", Path(__file__)
     sys.path.insert(0, str(_path))
 
 import config_registry as cr
+import operator_queue as oq
 import pr_merge
 import pr_size_policy as psp
 import review_risk_class
-from test_pr_merge_door_permit import GO, PR_DATA, FakeGitHub, _merged, _refusal, _run, door
+from test_pr_merge_door_permit import GO, PR, PR_DATA, FakeGitHub, _merged, _refusal, _run, door
+from test_pr_size_grant import grant_line
 
 FIELDS = {"verdict", "lines", "limit", "limit_kind", "security_paths_hit", "mode", "source", "reason", "waived",
-          "detail", "errors"}
+          "detail", "errors", "grant_point_id", "grant_ceiling", "grant_quote", "grant_by", "grant_at"}
+PROJECT = "acme"
 
 
 def _git(cwd: Path, *args: str) -> str:
@@ -53,6 +56,7 @@ def sized(door: FakeGitHub, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
     _git(target, "commit", "-qm", "head")
     head = _git(target, "rev-parse", "HEAD")
     monkeypatch.setattr(review_risk_class, "fetch_merge_refs", lambda *a, **k: "")
+    monkeypatch.setattr(pr_merge, "active_store", lambda: (tmp_path / "data" / "state", PROJECT))
     monkeypatch.setattr(pr_merge, "_run_ci_gate", lambda pr, **k: (dict(GO), dict(PR_DATA, headRefOid=head)))
     calls: Dict[str, List[str]] = {"review": []}
     monkeypatch.setattr(pr_merge, "_run_review_gate",
@@ -133,3 +137,31 @@ def test_a_failing_ci_stops_before_pr_size(door, sized, monkeypatch) -> None:
 def test_pr_size_sits_after_ci_and_before_review() -> None:
     order = pr_merge.PREFLIGHT_ORDER
     assert order.index("ci") + 1 == order.index("pr_size") == order.index("review") - 1
+
+
+def test_refuse_with_a_ceiling_of_750_merges_with_the_grant_on_both_receipts(door, sized, tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("VNX_PR_SIZE_ENFORCE", "refuse")
+    pid = grant_line(tmp_path / "data" / "state", pr=PR, ceiling=750, project=PROJECT)
+    assert _run() == pr_merge.EXIT_OK
+    record, block = _blocks(_merged(door))
+    assert (record["verdict"], record["reason_code"], block["lines"]) == ("GO", "pr_size_within_exception", 700)
+    assert (block["grant_point_id"], block["grant_ceiling"], block["grant_quote"], block["grant_by"]) == (
+        pid, 750, "ok 750", "T0")
+    assert block["grant_at"] and sized["review"] == ["review"]
+
+
+def test_refuse_with_a_ceiling_of_650_refuses_above_exception(door, sized, tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("VNX_PR_SIZE_ENFORCE", "refuse")
+    grant_line(tmp_path / "data" / "state", pr=PR, ceiling=650, project=PROJECT)
+    assert _run() == pr_merge.EXIT_ERROR
+    record, block = _blocks(_refusal(door))
+    assert (record["reason_code"], block["grant_ceiling"], sized["review"]) == ("pr_size_above_exception", 650, [])
+
+
+def test_refuse_with_an_unreadable_ledger_refuses_exception_unknown(door, sized, tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("VNX_PR_SIZE_ENFORCE", "refuse")
+    (tmp_path / "data" / "state" / oq.LEDGER_FILENAME).write_text("{not json\n")
+    assert _run() == pr_merge.EXIT_ERROR
+    record, block = _blocks(_refusal(door))
+    assert (record["reason_code"], block["grant_point_id"], block["grant_ceiling"]) == (
+        "pr_size_exception_unknown", "", None)

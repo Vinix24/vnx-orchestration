@@ -35,6 +35,10 @@ def _answer(d, pid, grant=None, project=P, citaat="exception 12 approved, 650 li
     return oq.append_line(project, "answer", fields, state_dir=d)
 
 
+def _core(got):  # the grant and its point; quote, by and at are asserted in test_valid_grant_is_stored_and_read
+    return {k: got[k] for k in ("grant", "point_id", "revision")}
+
+
 def _ledger(d):
     path = d / oq.LEDGER_FILENAME
     return path.read_text() if path.exists() else ""
@@ -87,7 +91,9 @@ def test_valid_grant_is_stored_and_read(tmp_path):
     _answer(tmp_path, pid, _grant())
     assert json.loads(_ledger(tmp_path).splitlines()[-1])["grant"] == _grant()
     got = oq.latest_grant(P, 12, state_dir=tmp_path)
-    assert got == {"grant": _grant(), "point_id": pid, "revision": 1}
+    assert _core(got) == {"grant": _grant(), "point_id": pid, "revision": 1}
+    line = json.loads(_ledger(tmp_path).splitlines()[-1])
+    assert (got["quote"], got["by"], got["at"]) == ("exception 12 approved, 650 lines", "T0", line["ts"])
 
 
 def test_answer_without_grant_is_valid_and_means_no(tmp_path):
@@ -104,7 +110,7 @@ def test_highest_revision_with_a_grant_wins(tmp_path):
     one, two = _open(tmp_path, revisie=1), _open(tmp_path, revisie=2)
     _answer(tmp_path, two, _grant(ceiling=900))
     _answer(tmp_path, one, _grant(ceiling=650))  # file order must not decide
-    assert oq.latest_grant(P, 12, state_dir=tmp_path) == {"grant": _grant(ceiling=900), "point_id": two, "revision": 2}
+    assert _core(oq.latest_grant(P, 12, state_dir=tmp_path)) == {"grant": _grant(ceiling=900), "point_id": two, "revision": 2}
 
 
 def test_higher_revision_answered_no_keeps_the_lower_grant(tmp_path):
@@ -112,7 +118,7 @@ def test_higher_revision_answered_no_keeps_the_lower_grant(tmp_path):
     _answer(tmp_path, one, _grant(ceiling=650))
     two = _open(tmp_path, revisie=2)
     _answer(tmp_path, two)
-    assert oq.latest_grant(P, 12, state_dir=tmp_path) == {"grant": _grant(ceiling=650), "point_id": one, "revision": 1}
+    assert _core(oq.latest_grant(P, 12, state_dir=tmp_path)) == {"grant": _grant(ceiling=650), "point_id": one, "revision": 1}
 
 
 def test_answer_without_citation_never_counts(tmp_path):

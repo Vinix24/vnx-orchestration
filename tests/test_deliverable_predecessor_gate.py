@@ -177,3 +177,71 @@ def test_matching_proof_never_clears_a_retired_or_unknown_state(output_kind, sta
 ])
 def test_unreadable_proof_or_unknown_kind_stays_blocking(edge, merged, accepted, reason):
     assert dpg.judge([edge], merged, accepted) == (dpg.Finding("pred", True, reason),)
+
+
+def _parts(sd, pr_ref, receipts, state="completed", output_kind="pr", row=True):
+    """P closed with ``pr_ref`` (OI-3054); ``receipts`` is (pr_number, branch) per merged pr_merged line."""
+    with sqlite3.connect(sd / "runtime_coordination.db") as conn:
+        conn.execute("ALTER TABLE dispatches ADD COLUMN pr_ref")
+        if row:
+            conn.execute("INSERT INTO dispatches VALUES (?, ?, ?, ?, ?)", (PID, P, state, output_kind, pr_ref))
+        conn.execute("INSERT INTO deliverable_dependencies VALUES (?, ?, ?, 'hard', NULL)", (PID, C, P))
+    (sd / "t0_receipts.ndjson").write_text("".join(json.dumps(
+        {**MERGED, "pr_number": n, "branch": b, "dispatch_id": b.removeprefix("dispatch/")}) + "\n" for n, b in receipts))
+
+
+N1 = [(3118, f"dispatch/{P}-a"), (3117, f"dispatch/{P}-b"), (3119, f"dispatch/{P}-c")]
+PARTS = [
+    ("#3118,#3117,#3119", N1, None, None),  # the N1 shape: three parts, all merged
+    ("3118, 3117, #3119", N1, None, None),
+    ("#3118,#3117,#3119", N1[:2], UNMERGED, "#3119"),
+    ("#3118,#3117,#3119", N1[:2] + [(3119, "dispatch/dlv-other0000001-a")], UNKNOWN, "#3119"),
+    ("#3118,#3117,#3119", N1 + [(3119, "dispatch/dlv-other0000001")], UNKNOWN, "#3119"),
+    ("#3118", [(3118, f"dispatch/{P}x-a")], UNKNOWN, "#3118"),
+    ("#3118", [(3118, f"dispatch/{P}-a-r2")], None, None),  # a round of a part resolves like _round_base
+    ("#3118", [(3118, f"dispatch/{P}-r2")], None, None),
+    ("#9999", N1, UNMERGED, "#9999"),  # a PR number no receipt carries
+    (None, N1, UNMERGED, None),  # closed without a list: the old rule, no receipt on dispatch/P
+    ("#3118,abc", N1, UNKNOWN, "unreadable"), ("", N1, UNKNOWN, "unreadable"), ("#0", N1, UNKNOWN, "unreadable"),
+    ("3118.0", N1, UNKNOWN, "unreadable"), (3118, N1, UNKNOWN, "unreadable"),
+]
+
+
+@pytest.mark.parametrize("pr_ref,receipts,expected,named", PARTS)
+def test_a_deliverable_shipped_in_parts_satisfies_through_its_closing_pr_list(sd, pr_ref, receipts, expected, named):
+    _parts(sd, pr_ref, receipts)
+    v = _door(sd)
+    assert _reason(v) == expected and (named is None or named in v.message)
+
+
+@pytest.mark.parametrize("change", [dict(state="running"), dict(state="ready"), dict(output_kind="doc")])
+def test_the_pr_list_counts_only_on_a_closed_pr_deliverable(sd, change):
+    _parts(sd, "#3118,#3117,#3119", N1, **change)
+    assert _reason(_door(sd)) == UNMERGED
+
+
+def test_receipts_of_another_project_or_not_merged_do_not_count(sd):
+    _parts(sd, "#3118", [])
+    rows = [{**MERGED, "pr_number": 3118, "branch": f"dispatch/{P}-a", **x}
+            for x in ({"project_id": "other"}, {"conclusion": "closed"}, {"pr_number": "3118"}, {"pr_number": True})]
+    (sd / "t0_receipts.ndjson").write_text("".join(json.dumps(r) + "\n" for r in rows))
+    assert _reason(_door(sd)) == UNMERGED
+
+
+def test_the_old_rule_alone_still_satisfies_a_closed_deliverable(sd):
+    _parts(sd, "#3118,#3117", [(3118, f"dispatch/{P}")])
+    assert _reason(_door(sd)) is None
+
+
+def test_an_unreadable_receipt_line_or_a_missing_close_row_is_unknown_for_a_pr_list(sd, tmp_path_factory):
+    _parts(sd, "#3118,#3117,#3119", N1)
+    with open(sd / "t0_receipts.ndjson", "a") as fh:
+        fh.write('{"event_type": "pr_merged", broken\n')
+    assert _reason(_door(sd)) == UNKNOWN
+    other = tmp_path_factory.mktemp("norow")
+    (other / "t0_receipts.ndjson").write_text("")
+    with sqlite3.connect(other / "runtime_coordination.db") as conn:
+        conn.execute("CREATE TABLE dispatches (project_id, dispatch_id, state, output_kind)")
+        conn.execute("CREATE TABLE deliverable_dependencies (project_id, deliverable_id, depends_on_id, kind, removed_at)")
+    _parts(other, None, N1, row=False)
+    assert _reason(_door(other)) == UNKNOWN

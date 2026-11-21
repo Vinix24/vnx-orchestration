@@ -968,6 +968,17 @@ def _normalize_pr_ref(raw: str) -> Optional[str]:
     return f"#{n}"
 
 
+def _normalize_pr_list_item(raw: str) -> Optional[str]:
+    ref = _normalize_pr_ref(raw)
+    return ref if ref is not None and int(ref[1:]) > 0 else None
+
+
+def _normalize_pr_ref_list(raw: object) -> Optional[str]:
+    """'#3118, 3117' -> '#3118,#3117'; None when any item is not a positive PR number."""
+    refs = [_normalize_pr_list_item(t) for t in str(raw).split(",")]
+    return ",".join(refs) if all(refs) else None
+
+
 def _merge_pr_refs(existing: Optional[str], incoming: list[str]) -> tuple[Optional[str], list[str], list[str]]:
     """Merge new PR refs into an existing comma-separated pr_ref.
 
@@ -3763,16 +3774,16 @@ def cmd_deliverable_close(args: argparse.Namespace) -> int:
         return 2
 
     raw_evidence = getattr(args, "evidence", None)
-    pr_ref = _normalize_pr_ref(raw_evidence) if raw_evidence else None
+    pr_ref = _normalize_pr_ref_list(raw_evidence) if raw_evidence else None  # ADR-096 §3 amendment: the gate reads this ordered list
     if pr_ref is None:
         print(
-            "deliverable close: --evidence <pr> is REQUIRED (the delivering PR, "
-            "as #NNN or NNN). It records an operator attestation of what delivered "
+            "deliverable close: --evidence <pr> is REQUIRED (the delivering PR, as #NNN or NNN, or a comma list "
+            "#NNN,#MMM for a deliverable shipped in parts). It records an operator attestation of what delivered "
             "the work — not just a bare flag. No change made.",
             file=sys.stderr,
         )
         return 2
-    evidence_number = int(pr_ref.lstrip("#"))
+    evidence_number = int(pr_ref.split(",")[0].lstrip("#"))
 
     conn = _db_conn(state_dir)
     try:
@@ -6773,7 +6784,8 @@ def _add_deliverable_parsers(sub: Any, common: Any) -> None:
     p_dclose.add_argument("dispatch_id")
     p_dclose.add_argument(
         "--evidence", required=True, metavar="PR",
-        help="delivering PR as #NNN or NNN (REQUIRED). Records an operator "
+        help="delivering PR as #NNN or NNN, or a comma list #NNN,#MMM for a "
+             "deliverable shipped in parts (REQUIRED). Records an operator "
              "attestation of what delivered the work; VNX does not verify the "
              "merge state at close time.",
     )
