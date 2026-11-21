@@ -221,6 +221,11 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         "Claude account directories as a JSON list (ADR-090). The reader validates the content.",
         scope="global", approval=True, subsystem="headless-dispatch-routing", status="ACTIVATE", read_site_wired=False),
 
+    "VNX_SCOUT_PROVIDER": _e(
+        "VNX_SCOUT_PROVIDER", "string", "deepseek", "intelligence",
+        "Provider of the scout recon pre-pass; a value outside the allowed set falls back to deepseek.",
+        subsystem="cheap-recon-scout", status="ACTIVATE", read_site_wired=True,
+        allowed_values=("codex", "deepseek", "gemini", "ollama")),
     "VNX_SCOUT_PREPASS": _e(
         "VNX_SCOUT_PREPASS", "bool", "0", "intelligence",
         "Cheap-model scout recon pre-pass in the door (fail-open).",
@@ -233,11 +238,6 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         "VNX_TAGGER_PROVIDER", "string", "deepseek", "intelligence",
         "Provider for the LLM tagger (model-agnostic).",
         subsystem="intelligence-self-learning-loop", status="ACTIVATE"),
-    "VNX_SCOUT_PROVIDER": _e(
-        "VNX_SCOUT_PROVIDER", "string", "deepseek", "intelligence",
-        "Provider of the scout recon pre-pass; a value outside the allowed set falls back to deepseek.",
-        subsystem="cheap-recon-scout", status="ACTIVATE", read_site_wired=True,
-        allowed_values=("codex", "deepseek", "gemini", "ollama")),
     "VNX_INTEL_RANK_THEN_BUDGET": _e(
         "VNX_INTEL_RANK_THEN_BUDGET", "bool", "0", "intelligence",
         "Rank intelligence candidates by tag-overlap, then budget.",
