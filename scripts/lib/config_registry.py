@@ -913,6 +913,14 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         "whose hard predecessor has no pr_merged receipt.",
         subsystem="deliverable-predecessor", status="ACTIVATE", cockpit_canonical=True,
         allowed_values=("off", "warn", "refuse")),
+    # ADR-096 B4b: the door reads it through config_runtime (dispatch_cli._check_blast_radius_verdict).
+    "VNX_BLAST_RADIUS_MODE": _e(
+        "VNX_BLAST_RADIUS_MODE", "string", "warn", "dispatch",
+        "Blast radius (ADR-096): overlap of a fire's paths with live work or an open PR warns (warn), "
+        "refuses unless --override-overlap REASON is given (refuse), or is not read (off); "
+        "an unknown value reads as refuse.",
+        subsystem="blast-radius", status="ACTIVATE", cockpit_canonical=True,
+        allowed_values=("off", "warn", "refuse")),
 
 }
 
