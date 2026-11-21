@@ -4,6 +4,7 @@ import json
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -234,3 +235,13 @@ def test_an_override_recorded_at_the_first_check_is_not_recorded_again(merge_doo
     snapshot(merge_seams["sd"])
     assert _run("--override-morning-pause", "operator says go") == pr_merge.EXIT_OK
     assert [e["kind"] for e in events(merge_seams["sd"])] == ["override"]
+
+
+@pytest.mark.parametrize("hour", [7, 8])
+def test_a_test_without_a_snapshot_does_not_depend_on_the_clock(tmp_path, monkeypatch, hour):
+    """The suite default is off, so a door check inside the window with no state dir is clear; env on pauses it."""
+    inside = datetime(2026, 11, 23, hour, 30, tzinfo=ZoneInfo("Europe/Amsterdam"))
+    assert gate.morning_pause_verdict(None, inside, state_dir=None).reason == "disabled"
+    monkeypatch.setenv("VNX_MORNING_PAUSE_ENABLED", "true")
+    unreadable = gate.morning_pause_verdict(None, inside, state_dir=None)
+    assert unreadable.paused and unreadable.reason == "decision_unknown"  # ADR-063: stays fail-closed
