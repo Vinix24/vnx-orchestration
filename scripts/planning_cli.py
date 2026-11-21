@@ -968,6 +968,17 @@ def _normalize_pr_ref(raw: str) -> Optional[str]:
     return f"#{n}"
 
 
+def _normalize_pr_list_item(raw: str) -> Optional[str]:
+    ref = _normalize_pr_ref(raw)
+    return ref if ref is not None and int(ref[1:]) > 0 else None
+
+
+def _normalize_pr_ref_list(raw: object) -> Optional[str]:
+    """'#3118, 3117' -> '#3118,#3117'; None when any item is not a positive PR number."""
+    refs = [_normalize_pr_list_item(t) for t in str(raw).split(",")]
+    return ",".join(refs) if all(refs) else None
+
+
 def _merge_pr_refs(existing: Optional[str], incoming: list[str]) -> tuple[Optional[str], list[str], list[str]]:
     """Merge new PR refs into an existing comma-separated pr_ref.
 
@@ -3763,17 +3774,16 @@ def cmd_deliverable_close(args: argparse.Namespace) -> int:
         return 2
 
     raw_evidence = getattr(args, "evidence", None)
-    refs = [_normalize_pr_ref(t) for t in str(raw_evidence).split(",")] if raw_evidence else [None]
-    if not all(r and int(r.lstrip("#")) > 0 for r in refs):
+    pr_ref = _normalize_pr_ref_list(raw_evidence) if raw_evidence else None  # ADR-096 §3 amendment: the gate reads this ordered list
+    if pr_ref is None:
         print(
-            "deliverable close: --evidence <pr> is REQUIRED (the delivering PR, "
-            "as #NNN or NNN, or a comma list #NNN,#MMM for a deliverable shipped in parts). "
-            "It records an operator attestation of what delivered the work — not just a bare flag. No change made.",
+            "deliverable close: --evidence <pr> is REQUIRED (the delivering PR, as #NNN or NNN, or a comma list "
+            "#NNN,#MMM for a deliverable shipped in parts). It records an operator attestation of what delivered "
+            "the work — not just a bare flag. No change made.",
             file=sys.stderr,
         )
         return 2
-    pr_ref = ",".join(refs)  # ADR-096 §3 amendment: the predecessor gate reads this ordered list
-    evidence_number = int(refs[0].lstrip("#"))
+    evidence_number = int(pr_ref.split(",")[0].lstrip("#"))
 
     conn = _db_conn(state_dir)
     try:
