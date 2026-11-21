@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """adapters/gemini_adapter.py — GeminiAdapter for review and digest tasks.
 
-Executes code review via the `gemini` CLI (not the Vertex AI REST path).
+Executes code review via the `gemini` CLI.
 Review-only: no CODE capability, no file writes, no git commits.
 
 Streaming mode (--output-format stream-json drained via StreamingDrainerMixin, Tier-1) is
@@ -34,7 +34,7 @@ from provider_spawns.gemini_spawn import (  # noqa: E402
     _extract_gemini_usage_metadata as _spawn_extract_usage_metadata,
     _extract_gemini_token_count as _spawn_extract_token_count,
 )
-from vertex_ai_runner import collect_file_contents
+from gate_prompt_files import collect_file_contents
 import provider_switch
 
 logger = logging.getLogger(__name__)

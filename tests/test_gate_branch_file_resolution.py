@@ -22,7 +22,7 @@ SCRIPTS_DIR = VNX_ROOT / "scripts"
 sys.path.insert(0, str(SCRIPTS_DIR))
 sys.path.insert(0, str(SCRIPTS_DIR / "lib"))
 
-import vertex_ai_runner as _vtx
+import gate_prompt_files as _vtx
 
 
 def _run(cmd, cwd):

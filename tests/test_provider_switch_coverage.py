@@ -417,7 +417,6 @@ MEASURED_FLOOR: Tuple[FloorEntry, ...] = (
     FloorEntry("scripts/lib/adapters/gemini_adapter.py"),
     FloorEntry("scripts/lib/adapters/ollama_adapter.py"),
     FloorEntry("scripts/lib/llm_decision_router.py"),
-    FloorEntry("scripts/lib/vertex_ai_runner.py"),
     FloorEntry("scripts/lib/providers/local_gemma/spawn.py"),
     FloorEntry("scripts/lib/providers/provider_lanes/deepseek.py",
                reexport=("provider_spawns.deepseek_harness_spawn", "spawn_deepseek_harness")),
@@ -638,10 +637,6 @@ def test_detector_flags_the_gate_runner_launch(units):
 
 def test_detector_flags_the_ollama_adapter(units):
     assert RULE_HTTP_MODEL_HOST in _rules(units, "scripts/lib/adapters/ollama_adapter.py:OllamaAdapter._drain_http_stream")
-
-
-def test_detector_flags_the_vertex_ai_runner(units):
-    assert RULE_HTTP_MODEL_HOST in _rules(units, "scripts/lib/vertex_ai_runner.py:run_vertex_ai")
 
 
 def test_detector_flags_litellm_completion(units):
