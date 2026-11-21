@@ -450,7 +450,7 @@
                 "const": null,
                 "default": null,
                 "dest": "evidence",
-                "help": "delivering PR as #NNN or NNN (REQUIRED). Records an operator attestation of what delivered the work; VNX does not verify the merge state at close time.",
+                "help": "delivering PR as #NNN or NNN, or a comma list #NNN,#MMM for a deliverable shipped in parts (REQUIRED). Records an operator attestation of what delivered the work; VNX does not verify the merge state at close time.",
                 "metavar": "PR",
                 "nargs": null,
                 "option_strings": [
