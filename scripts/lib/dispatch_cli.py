@@ -2781,6 +2781,61 @@ def _check_predecessor_verdict(
                                  f"(mode {mode}, stored {raw!r}){tail}"))
 
 
+def _check_blast_radius_verdict(
+    spec: DispatchSpec, repo_root: Path, state_dir: Path, override_reason: Optional[str] = None, dry_run: bool = False,
+) -> Optional[ConstraintVerdict]:
+    """ADR-096 B4b: overlap (or unknown overlap) with live work or an open PR warns or refuses this fire per mode; a dry run writes no line."""
+    import sqlite3
+    import config_runtime
+    import blast_radius as br
+    import blast_radius_gate as brg
+    import blast_radius_sources as brs
+    import deliverable_predecessor_gate as dpg
+
+    raw = config_runtime.get(brg.MODE_KEY)
+    mode = brg.DEFAULT_MODE if raw is None else (raw if raw in brg.MODES else "refuse")
+    if mode == "off" or not _spec_is_writing(spec):  # a dispatch that writes nothing has no blast radius
+        return None
+    base = br._round_base(spec.dispatch_id)
+    try:
+        preds = tuple(e.predecessor for e in dpg.read_edges(state_dir / "runtime_coordination.db", spec.project_id, base))
+    except sqlite3.Error:  # vnx-silent-except: predecessors unread means none excluded, which can only add overlap
+        preds = ()
+    # validation made each path a PurePosixPath, which drops the trailing "/" that marks a directory (ADR-096 §5)
+    paths = tuple(p + "/" if (Path(repo_root) / p).is_dir() else p for p in write_paths(spec.dispatch_paths))
+    candidate = br.Subject(base, paths, br._branch_of(base), preds)
+    verdict, hits = brg.judge(candidate, (
+        ("live_work", brs.live_subjects(state_dir, spec.project_id)),
+        ("open_pr", brs.open_pr_subjects(repo_root, spec.project_id, brs.default_cache_path(state_dir), brg.gh))), repo_root)
+    if verdict == brg.CLEAR:
+        return None
+    reason = (override_reason or "").strip()
+    outcome = "override" if reason else ("warned" if mode == "warn" else "refused")
+    if not dry_run:
+        try:
+            brg.record(state_dir, spec.project_id, spec.dispatch_id, hits, mode=mode, verdict=verdict, outcome=outcome,
+                       override_reason=reason)
+        except (OSError, ValueError) as exc:
+            print(f"[dispatch_cli] [WARN] {brg.LEDGER} line not written: {exc!r}", file=sys.stderr)
+            outcome = "refused" if outcome == "override" else outcome  # an override leaves a line (ADR-096 §14)
+    refused = outcome == "refused"
+    tail = ". Refusing to fire: wait for it, narrow dispatch_paths, or --override-overlap REASON." if refused else (
+        f". Override reason: {reason}" if reason else "")
+    return ConstraintVerdict(code=verdict.replace("_", "-"), severity="blocking" if refused else "warn",
+                             override_applied=not refused and bool(reason), message=(
+                                 f"{verdict} for {spec.dispatch_id}: {brg.describe(hits)} (mode {mode}, stored {raw!r}){tail}"))
+
+
+def _blast_radius_reject(spec: DispatchSpec, *args) -> Optional[Reject]:
+    """Run the blast-radius check; print a warning, or return the Reject the door emits."""
+    verdict = _check_blast_radius_verdict(spec, *args)
+    if verdict is not None and verdict.severity == "blocking":
+        return Reject(verdict.code, verdict.message)
+    if verdict is not None:
+        print(f"[dispatch_cli] [WARN] {verdict.message}", file=sys.stderr)
+    return None
+
+
 def _check_stop_conditions_verdict(
     *,
     state_dir: Path,
@@ -4449,7 +4504,7 @@ def run_dispatch(
     dry_run: bool = False,
     refire_reason: Optional[str] = None,
     stop_conditions_override_reason: Optional[str] = None,
-    track_id_override: Optional[str] = None, predecessor_override_reason: Optional[str] = None,
+    track_id_override: Optional[str] = None, predecessor_override_reason: Optional[str] = None, overlap_override_reason: Optional[str] = None,
 ) -> int:
     """Turn a spec file into a governed dispatch for BOTH lanes.
 
@@ -4530,7 +4585,7 @@ def run_dispatch(
         # kimi stampede (nine dispatches, one quota 403, eight minutes) fired
         # blind because a real fire never checked reachability at all.
         # Provider-schakelaar B: the operator's switch is asked first (_lane_verdict).
-        lane_reject = _lane_verdict(plan, vspec.spec, project_id=project_id, state_dir=state_dir, dry_run=dry_run)
+        lane_reject = _lane_verdict(plan, vspec.spec, project_id=project_id, state_dir=state_dir, dry_run=dry_run) or _blast_radius_reject(vspec.spec, repo_root, state_dir, overlap_override_reason, dry_run)
         if lane_reject is not None:
             _emit_reject(lane_reject)
             return 1
@@ -4852,6 +4907,11 @@ def _add_b3_override_arguments(parser) -> None:
         help="Fire although a hard predecessor deliverable is not merged (ADR-096); THIS fire only, "
              "one line in state/deliverable_predecessor.ndjson",
     )
+    parser.add_argument(
+        "--override-overlap", dest="overlap_override_reason", metavar="REASON", default=None,
+        help="Fire although its paths overlap live work or an open PR (ADR-096); THIS fire only, "
+             "one line per hit in state/blast_radius.ndjson",
+    )
 
 
 def _apply_b3_override(parser, args) -> None:
@@ -4865,6 +4925,8 @@ def _apply_b3_override(parser, args) -> None:
         os.environ[B3_OVERRIDE_REASON_ENV] = reason
     if args.predecessor_override_reason is not None and not args.predecessor_override_reason.strip():
         parser.error('--override-predecessor needs a non-empty reason (no silent bypass)')
+    if args.overlap_override_reason is not None and not args.overlap_override_reason.strip():
+        parser.error('--override-overlap needs a non-empty reason (no silent bypass)')
 
 
 def main(argv: Optional[list] = None) -> int:
@@ -4940,6 +5002,7 @@ def main(argv: Optional[list] = None) -> int:
         stop_conditions_override_reason=args.stop_conditions_override_reason,
         track_id_override=args.track_id_override,
         predecessor_override_reason=args.predecessor_override_reason,
+        overlap_override_reason=args.overlap_override_reason,
     )
 
 

@@ -570,6 +570,12 @@ def _reconcile_git_off(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(track_reconciler, "_load_merged_prs_from_gh", lambda *a, **k: frozenset())
 
 
+@pytest.fixture(autouse=True)
+def _blast_radius_gh_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    import blast_radius_gate
+    monkeypatch.setattr(blast_radius_gate, "gh", lambda argv, cwd: (_ for _ in ()).throw(RuntimeError("gh is off in tests")))
+
+
 @pytest.fixture
 def real_load_merged_prs_from_gh():
     """The unstubbed gh merged-PR source, for the tests that exercise it directly."""
