@@ -14,10 +14,10 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional, Sequence
 
 import morning_pause as mp
+from morning_round_routing import FLEET_PROJECT
 from tmux_adapter import AdapterTransportError, run_tmux  # re-exported: morning_round_cli passes run_tmux in
 from morning_snapshot import EVENTS_FILENAME, _next_seq, _snapshot_path, append_event, decision_status, write_snapshot
 
-FLEET_PROJECT = "vnx-dev"
 HARNESS = re.compile(r"claude|\d+\.\d+\.\d+")  # pane_current_command of Claude Code: its name or its version
 Tmux = Callable[[Sequence[str]], "subprocess.CompletedProcess[str]"]
 
