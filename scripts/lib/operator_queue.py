@@ -297,7 +297,8 @@ def answers(project_id: str, *, state_dir: Optional[Path] = None) -> List[Dict[s
 
 def latest_grant(project_id: str, pr: int, *, state_dir: Optional[Path] = None) -> Optional[Dict[str, Any]]:
     """ADR-088 decision 5: the grant of the ``pr:<pr>`` point with the highest revision that carries one, as
-    ``{grant, point_id, revision}``; None when no answer of such a point carries a grant (no ledger is no grant).
+    ``{grant, point_id, revision, quote, by, at}`` (the answer's citation, writer and time); None when no answer
+    of such a point carries a grant (no ledger is no grant).
     A bad ledger line raises QueueUnreadable, never None: "cannot read" is not "no grant" (the door refuses on it).
     Only an answer line with a citation counts; a ``check_line`` without one already makes the ledger unreadable."""
     if not _int(pr, 1):
@@ -312,7 +313,8 @@ def latest_grant(project_id: str, pr: int, *, state_dir: Optional[Path] = None) 
         if line["kind"] != "answer" or "grant" not in line or pid not in revisions or not _text(line["citaat"]):
             continue
         if best is None or revisions[pid] > best["revision"]:  # same revision: the first answer stands
-            best = {"grant": dict(line["grant"]), "point_id": pid, "revision": revisions[pid]}
+            best = {"grant": dict(line["grant"]), "point_id": pid, "revision": revisions[pid],
+                    "quote": line["citaat"], "by": line["vastgelegd_door"], "at": line["ts"]}
     return best
 
 

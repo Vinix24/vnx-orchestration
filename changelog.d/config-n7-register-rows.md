@@ -1,0 +1,1 @@
+- Config registry: rows for the 12 `register` keys of INV-2 (paid-lane and classifier cost caps, classifier mode and provider, track requirement, scout provider, supervisor mode, T0 provider, T0-T3 skip-permissions); no reader changes.

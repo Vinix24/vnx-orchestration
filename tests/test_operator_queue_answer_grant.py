@@ -77,7 +77,8 @@ def test_grant_writes_one_answer_line_that_latest_grant_reads_back_and_closes_an
                      "lines": 480, "measured_at": lines[-1]["ts"]}
     assert env["gh_calls"][0][:6] == ["gh", "pr", "view", "12", "--json", "headRefOid,baseRefName,state"]
     assert env["m_calls"] == [(12, HEAD, "main")]
-    assert oq.latest_grant(PID, 12, state_dir=env["q"]) == {"grant": grant, "point_id": pid, "revision": 1}
+    assert oq.latest_grant(PID, 12, state_dir=env["q"]) == {"grant": grant, "point_id": pid, "revision": 1,
+                                                            "quote": QUOTE, "by": "T0", "at": lines[-1]["ts"]}
     qa.read_asked(PID, data_root=env["root"], state_dir=env["q"])
     assert oq.read_state(PID, state_dir=env["q"])["points"][pid]["state"] == "beantwoord"
 

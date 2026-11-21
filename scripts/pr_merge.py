@@ -108,8 +108,10 @@ Receipt written to t0_receipts.ndjson:
     pr_size     : <dict — ADR-088, on both receipts and on the pr_size record:
                                  verdict, lines, limit, limit_kind,
                                  security_paths_hit (first three), mode, source,
-                                 reason, waived, detail, errors; verdict
-                                 not_evaluated when the preflight never ran>
+                                 reason, waived, detail, errors, and the grant
+                                 judged under (grant_point_id, grant_ceiling,
+                                 grant_quote, grant_by, grant_at; empty without
+                                 one); verdict not_evaluated when never run>
     main_admission: <dict — the ``main`` preflight's admission (ADR-073): the
                                  ``main_window.Admission`` record plus ``overridden``
                                  and ``override_reason``; ``{"mode": "off", ...}``
@@ -451,7 +453,8 @@ def _pr_size_block(block: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     """``pr_size`` on its preflight record and on both receipts: every field always, empty when never measured."""
     empty: Dict[str, Any] = {"verdict": VERDICT_NOT_EVALUATED, "lines": None, "limit": None, "limit_kind": "",
                              "security_paths_hit": [], "mode": "", "source": "", "reason": "", "waived": "",
-                             "detail": "", "errors": []}
+                             "detail": "", "errors": [], "grant_point_id": "", "grant_ceiling": None,
+                             "grant_quote": "", "grant_by": "", "grant_at": ""}
     return dict(empty, **(block or {}))
 
 
@@ -3232,7 +3235,8 @@ def _run_main_gate(args: argparse.Namespace, head_sha: str) -> Dict[str, Any]:
 def _run_pr_size_gate(pr_number: int, pr_data: Optional[Dict[str, Any]], head_sha: str) -> Dict[str, Any]:
     """The ``pr_size`` preflight (ADR-088): ``pr_size_policy.verdict`` on the pinned head, in the target repo.
 
-    Read with the door's own project and store (``active_store``), never GitHub's additions field.
+    Read with the door's own project and store (``active_store``), never GitHub's additions field; above the
+    limit the operator's grant in that store's inbox ledger decides (PG-4), and goes on the record and receipt.
     A NO-GO verdict refuses; GO and WARN pass, WARN with its reason on the record and the receipt.
     Any other outcome, and any exception, is a NO-GO: an unknown result is never a pass.
     """
@@ -3243,10 +3247,11 @@ def _run_pr_size_gate(pr_number: int, pr_data: Optional[Dict[str, Any]], head_sh
         state_dir, project_id = active_store()
         resolver = config_store_db.make_db_resolver(lambda _pid: state_dir, raise_on_error=True)
         verdict = pr_size_policy.verdict(pr_number, head_sha, (pr_data or {}).get("baseRefName"), _target_root(),
-                                         project_id=project_id, resolver=resolver)
+                                         project_id=project_id, resolver=resolver, state_dir=state_dir)
     except Exception as exc:  # vnx-silent-except: any failure to judge the size is a NO-GO naming the type
         verdict = pr_size_policy.Verdict("NO-GO", "pr_size_unmeasured", detail=f"door: {type(exc).__name__}: {exc}")
-    block = {name: getattr(verdict, name) for name in PR_SIZE_FIELDS + ("reason", "waived", "detail", "errors")}
+    block = {name: getattr(verdict, name)
+             for name in PR_SIZE_FIELDS + ("reason", "waived", "detail", "errors") + pr_size_policy.GRANT_FIELDS}
     block.update(verdict=verdict.outcome, security_paths_hit=list(verdict.security_paths_hit),
                  errors=list(verdict.errors))
     passed = verdict.outcome in ("GO", "WARN")
