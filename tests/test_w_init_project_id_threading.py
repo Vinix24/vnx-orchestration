@@ -330,12 +330,24 @@ class TestRunQualityIntelligenceMigration:
 # migration_linter — catches planted violations, passes grandfathered set
 # ---------------------------------------------------------------------------
 
+def _scan(root, **kw):
+    """Linter scan on ``root`` made a git checkout: the guard's matcher reads tracked files."""
+    _git_track(root)
+    return ml.scan(root, **kw)
+
+
+def _git_track(root):
+    import subprocess
+    for args in (["init", "-q"], ["add", "-A"]):
+        subprocess.run(["git", "-C", str(root), *args], check=True, capture_output=True)
+
+
 class TestMigrationLinter:
     """migration_linter.py catches new DEFAULT 'vnx-dev' and passes the allowlist."""
 
     def test_passes_on_clean_tree(self, tmp_path):
         """A directory with no SQL or Python files → no violations."""
-        violations = ml.scan(tmp_path)
+        violations = _scan(tmp_path)
         assert violations == []
 
     def test_catches_planted_violation_in_sql(self, tmp_path):
@@ -345,7 +357,7 @@ class TestMigrationLinter:
         (mig_dir / "0099_new_migration.sql").write_text(
             "ALTER TABLE foo ADD COLUMN project_id TEXT NOT NULL DEFAULT 'vnx-dev';\n"
         )
-        violations = ml.scan(tmp_path)
+        violations = _scan(tmp_path)
         assert len(violations) == 1
         assert "0099_new_migration.sql" in violations[0]["file"]
 
@@ -356,7 +368,7 @@ class TestMigrationLinter:
         (scripts_dir / "new_db_init.py").write_text(
             "ddl = \"CREATE TABLE t (project_id TEXT NOT NULL DEFAULT 'vnx-dev')\"\n"
         )
-        violations = ml.scan(tmp_path)
+        violations = _scan(tmp_path)
         assert len(violations) == 1
         assert "new_db_init.py" in violations[0]["file"]
 
@@ -368,7 +380,7 @@ class TestMigrationLinter:
         (mig_dir / "0010_add_project_id.sql").write_text(
             "ALTER TABLE success_patterns ADD COLUMN project_id TEXT NOT NULL DEFAULT 'vnx-dev';\n"
         )
-        violations = ml.scan(tmp_path, allowlist=ml.ALLOWLISTED_FILES)
+        violations = _scan(tmp_path)
         assert violations == []
 
     def test_allowlisted_file_fails_in_strict_mode(self, tmp_path):
@@ -378,10 +390,9 @@ class TestMigrationLinter:
         (mig_dir / "0010_add_project_id.sql").write_text(
             "ALTER TABLE success_patterns ADD COLUMN project_id TEXT NOT NULL DEFAULT 'vnx-dev';\n"
         )
-        violations = ml.scan(tmp_path, strict=True, allowlist=ml.ALLOWLISTED_FILES)
+        violations = _scan(tmp_path, strict=True)
         assert len(violations) == 1
 
-    @pytest.mark.skip(reason="OI-2080: the repo carries DEFAULT 'vnx-dev' (migration 0032, migration_inventory docstring); the linter flags it until OI-2080 is fixed")
     def test_passes_actual_repo_in_normal_mode(self):
         """The real repo passes the linter in normal mode (no new violations)."""
         violations = ml.scan(_PROJECT_ROOT)
@@ -389,6 +400,34 @@ class TestMigrationLinter:
             f"Unexpected new DEFAULT 'vnx-dev' violations in the repo:\n"
             + "\n".join(f"  {v['file']}:{v['line']}: {v['text']}" for v in violations)
         )
+
+    def test_new_clause_in_a_formerly_allowlisted_file_is_a_violation(self, tmp_path):
+        """AG-G2 red test: a NEW clause in scripts/quality_db_init.py (whole-file allowed before) fails."""
+        scripts_dir = tmp_path / "scripts"
+        scripts_dir.mkdir(parents=True)
+        (scripts_dir / "quality_db_init.py").write_text(
+            "ddl = \"CREATE TABLE brand_new (project_id TEXT NOT NULL DEFAULT 'vnx-dev')\"\n"
+        )
+        violations = _scan(tmp_path)
+        assert [v["file"] for v in violations] == ["scripts/quality_db_init.py"]
+
+    def test_new_clause_under_vnx_cli_is_a_violation(self, tmp_path):
+        (tmp_path / "vnx_cli").mkdir()
+        (tmp_path / "vnx_cli" / "ddl.py").write_text("x = \"a TEXT DEFAULT 'vnx-dev'\"\n")
+        assert [v["file"] for v in _scan(tmp_path)] == ["vnx_cli/ddl.py"]
+
+    def test_double_quoted_clause_is_a_violation(self, tmp_path):
+        (tmp_path / "bin").mkdir()
+        (tmp_path / "bin" / "tool.py").write_text('x = \'a TEXT DEFAULT "vnx-dev"\'\n')
+        assert len(_scan(tmp_path)) == 1
+
+    def test_root_that_is_not_a_git_checkout_fails_loudly(self, tmp_path):
+        import subprocess
+        with pytest.raises(subprocess.CalledProcessError):
+            ml.scan(tmp_path)
+
+    def test_linter_has_no_list_of_its_own(self):
+        assert not hasattr(ml, "ALLOWLISTED_FILES")
 
     def test_violation_reports_correct_line_number(self, tmp_path):
         """Violation dict contains the correct line number."""
@@ -401,7 +440,7 @@ class TestMigrationLinter:
             "# line 4\n"
         )
         (scripts_dir / "check_line.py").write_text(content)
-        violations = ml.scan(tmp_path)
+        violations = _scan(tmp_path)
         assert len(violations) == 1
         assert violations[0]["line"] == 3
 
@@ -413,7 +452,7 @@ class TestMigrationLinter:
         (scripts_dir / "case_test.py").write_text(
             "sql = \"ALTER TABLE t ADD COLUMN pid TEXT DEFAULT 'vnx-dev'\"\n"
         )
-        violations = ml.scan(tmp_path)
+        violations = _scan(tmp_path)
         assert len(violations) == 1
 
     def test_multiple_violations_reported(self, tmp_path):
@@ -426,7 +465,7 @@ class TestMigrationLinter:
             "b = \"also DEFAULT 'vnx-dev' here\"\n"
         )
         (scripts_dir / "multi.py").write_text(content)
-        violations = ml.scan(tmp_path)
+        violations = _scan(tmp_path)
         assert len(violations) == 2
 
     def test_main_exit_code_1_on_violation(self, tmp_path):
@@ -436,10 +475,12 @@ class TestMigrationLinter:
         (mig_dir / "0099_bad.sql").write_text(
             "ALTER TABLE t ADD COLUMN p TEXT DEFAULT 'vnx-dev';\n"
         )
+        _git_track(tmp_path)
         rc = ml.main(["--project-root", str(tmp_path)])
         assert rc == 1
 
     def test_main_exit_code_0_on_clean(self, tmp_path):
         """CLI returns exit code 0 on a clean tree."""
+        _git_track(tmp_path)
         rc = ml.main(["--project-root", str(tmp_path)])
         assert rc == 0
