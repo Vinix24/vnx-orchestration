@@ -3763,16 +3763,17 @@ def cmd_deliverable_close(args: argparse.Namespace) -> int:
         return 2
 
     raw_evidence = getattr(args, "evidence", None)
-    pr_ref = _normalize_pr_ref(raw_evidence) if raw_evidence else None
-    if pr_ref is None:
+    refs = [_normalize_pr_ref(t) for t in str(raw_evidence).split(",")] if raw_evidence else [None]
+    if not all(r and int(r.lstrip("#")) > 0 for r in refs):
         print(
             "deliverable close: --evidence <pr> is REQUIRED (the delivering PR, "
-            "as #NNN or NNN). It records an operator attestation of what delivered "
-            "the work — not just a bare flag. No change made.",
+            "as #NNN or NNN, or a comma list #NNN,#MMM for a deliverable shipped in parts). "
+            "It records an operator attestation of what delivered the work — not just a bare flag. No change made.",
             file=sys.stderr,
         )
         return 2
-    evidence_number = int(pr_ref.lstrip("#"))
+    pr_ref = ",".join(refs)  # ADR-096 §3 amendment: the predecessor gate reads this ordered list
+    evidence_number = int(refs[0].lstrip("#"))
 
     conn = _db_conn(state_dir)
     try:
@@ -6773,7 +6774,8 @@ def _add_deliverable_parsers(sub: Any, common: Any) -> None:
     p_dclose.add_argument("dispatch_id")
     p_dclose.add_argument(
         "--evidence", required=True, metavar="PR",
-        help="delivering PR as #NNN or NNN (REQUIRED). Records an operator "
+        help="delivering PR as #NNN or NNN, or a comma list #NNN,#MMM for a "
+             "deliverable shipped in parts (REQUIRED). Records an operator "
              "attestation of what delivered the work; VNX does not verify the "
              "merge state at close time.",
     )

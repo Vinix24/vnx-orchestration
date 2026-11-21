@@ -284,6 +284,21 @@ def test_close_with_invalid_evidence_fails(state_with_track: tuple[Path, str], c
     assert _close_events(state_dir, dispatch_id) == []
 
 
+@pytest.mark.parametrize("evidence,pr_ref", [("3118,#3117, 3119", "#3118,#3117,#3119"), ("3118,x", None),
+                                             ("3118,", None), ("0", None), ("-4", None)])
+def test_close_records_an_ordered_pr_list_or_refuses_a_bad_one(state_with_track, capsys, evidence, pr_ref):
+    """ADR-096 §3 amendment (OI-3054): a deliverable shipped in parts is closed with its PR list."""
+    state_dir, track_id = state_with_track
+    dispatch_id = _add_and_promote(state_dir, track_id, f"Parts {evidence}")
+    rc = planning_cli.main(["deliverable", "close", dispatch_id, "--evidence", evidence,
+                            "--project-id", PROJECT_ID, "--state-dir", str(state_dir)])
+    capsys.readouterr()
+    row = _dispatch_row(state_dir, dispatch_id)
+    assert (rc, row["state"], row["pr_ref"]) == ((0, "completed", pr_ref) if pr_ref else (2, "ready", None))
+    if pr_ref:
+        assert json.loads(_close_events(state_dir, dispatch_id)[0]["metadata_json"])["evidence_pr"] == 3118
+
+
 # ---------------------------------------------------------------------------
 # unknown id / wrong state
 # ---------------------------------------------------------------------------

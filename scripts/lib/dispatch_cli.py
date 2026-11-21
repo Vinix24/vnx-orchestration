@@ -2758,7 +2758,8 @@ def _check_predecessor_verdict(
     raw = config_runtime.get(dpg.MODE_KEY)
     mode = raw if raw in dpg.MODES else "refuse"
     findings = dpg.assess(dispatch_id, project_id, state_dir) if mode != "off" else ()
-    soft, hard = ([f"{f.predecessor} ({f.reason})" for f in findings if f.hard is h] for h in (False, True))
+    soft, hard = ([f"{f.predecessor} ({f.reason}{': ' + f.detail if f.detail else ''})" for f in findings if f.hard is h]
+                  for h in (False, True))
     if soft:
         print(f"[dispatch_cli] [INFO] soft predecessor(s) of {dispatch_id}, reported only: {', '.join(soft)}", file=sys.stderr)
     if not hard:
