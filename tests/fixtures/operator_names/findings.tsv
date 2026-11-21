@@ -24,14 +24,14 @@ afbf9abfd0f8b16d	scripts/lib/gate_lane_rows.py	kimi-k3	1	model_catalog	kimi_gate
 61ae89f24612cb02	scripts/lib/governance_emit.py	kimi-k3	1	model_catalog	Comment example of the model-name normalisation (kimi-code/k3 -> kimi-k3)	
 1de7ee7e7ac06543	scripts/lib/harness_run_cost.py	kimi-k3	1	model_catalog	Docstring: the kimi model the lane's own resolver returns; prose	
 ac1df096c475d1e2	scripts/lib/headless_dispatch_daemon.py	kimi-k3	1	te_repareren	Comment documents the kimi-k3 code fallback that AG-2b removes; must be reworded with it	AG-2
-0106b7ac7f0f9f70	scripts/lib/headless_dispatch_daemon.py	kimi-k3	1	te_repareren	Headless daemon falls back to model kimi-k3 when VNX_DISPATCH_MODEL is unset, ignoring the registry default (sonnet)	AG-2
+c9a5c9853ffd4b35	scripts/lib/headless_dispatch_daemon.py	kimi-k3	1	te_repareren	Headless daemon hardcodes model kimi-k3 and ignores the registry default (sonnet); AG-2b replaces it with the registry	AG-2
 d94485efe2ecf4c5	scripts/lib/kimi_wrapper.py	kimi-k3	1	model_catalog	DEFAULT_KIMI_MODEL of the kimi CLI wrapper: applies only when the kimi provider is chosen explicitly	
 933a21cbf3bc2404	scripts/lib/merge_target.py	Vinix24	1	upstream_url	Docstring quoting the incident in which the resolved slug was the upstream repo; prose, no behaviour	
 42e5fbf6e025e0e5	scripts/lib/permission_applied_check.py	claude-salesminds	1	te_repareren	USER_FILES maps slot 'sm' to the operator's ~/.claude-salesminds/settings.json in the applied-permission check	AG-3
 374fdf3fc913c2b5	scripts/lib/permission_events_sources.py	claude-salesminds	1	te_repareren	DEFAULT_ACCOUNT_CONFIGS fixes the operator's second account directory ~/.claude-salesminds as a config source of the permission-event reader	AG-3
 83bfba7c234cb7a8	scripts/lib/plan_gate_panel.py	kimi-k3	1	model_catalog	Default plan-gate seat for provider kimi names its catalogue model; the seat list itself is PR-10 (phase 2)	
 6ac4ff1b2a2f1376	scripts/lib/plan_gate_panel.py	Vinix24	1	issue_link	Link to upstream issue #225 (project-root resolution) in a refusal message or docstring; a link, not a default	
-b7f0e1247225626e	scripts/lib/pool_worker_runner.py	kimi-k3	1	te_repareren	Pool runner falls back to model kimi-k3 when the bundle and VNX_DISPATCH_MODEL name none (the provider fallback is the separate `or "kimi"` at :285-288)	AG-2
+c2f69b3cf3bfdd43	scripts/lib/pool_worker_runner.py	kimi-k3	1	te_repareren	Pool runner falls back to model kimi-k3 when the bundle names none (the provider fallback is the separate `or "kimi"` at :285-288)	AG-2
 206704a85501cfa3	scripts/lib/project_root.py	Vinix24	1	issue_link	Link to upstream issue #225 (project-root resolution) in a refusal message or docstring; a link, not a default	
 c2e1ae40604dbede	scripts/lib/project_root.py	Vinix24	1	issue_link	Link to upstream issue #225 (project-root resolution) in a refusal message or docstring; a link, not a default	
 6ac4ff1b2a2f1376	scripts/lib/project_root.py	Vinix24	1	issue_link	Link to upstream issue #225 (project-root resolution) in a refusal message or docstring; a link, not a default	
