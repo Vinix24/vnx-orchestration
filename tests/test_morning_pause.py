@@ -113,7 +113,7 @@ def test_is_paused_with_a_hand_built_bad_window_raises():
 
 def test_registry_keys_have_the_defaults_and_project_scope():
     expected = {
-        "VNX_MORNING_PAUSE_ENABLED": ("bool", "false"),
+        "VNX_MORNING_PAUSE_ENABLED": ("bool", "true"),
         "VNX_MORNING_PAUSE_START": ("string", "07:00"),
         "VNX_MORNING_PAUSE_DEADLINE": ("string", "09:00"),
         "VNX_MORNING_PAUSE_TZ": ("string", "Europe/Amsterdam"),

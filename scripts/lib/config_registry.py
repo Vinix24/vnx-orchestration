@@ -902,9 +902,9 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         "IANA timezone of the morning pause window.",
         subsystem="morning-pause", status="PARK"),
     "VNX_MORNING_PAUSE_ENABLED": _e(
-        "VNX_MORNING_PAUSE_ENABLED", "bool", "false", "dispatch",
+        "VNX_MORNING_PAUSE_ENABLED", "bool", "true", "dispatch",
         "Morning pause (ADR-095): firing and merging stop from the start time until the morning "
-        "points are decided, at the latest at the deadline. Off by default; D4 turns it on.",
+        "points are decided, at the latest at the deadline. On by default (D4b); no snapshot for today inside the window means not started, not paused.",
         subsystem="morning-pause", status="PARK", cockpit_canonical=True),
     # ADR-096 B2: the door reads it through config_runtime (dispatch_cli._check_predecessor_verdict).
     "VNX_DELIVERABLE_PREDECESSOR_MODE": _e(
@@ -912,6 +912,14 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         "Deliverable predecessors (ADR-096): the door refuses (refuse), reports (warn) or skips (off) a fire "
         "whose hard predecessor has no pr_merged receipt.",
         subsystem="deliverable-predecessor", status="ACTIVATE", cockpit_canonical=True,
+        allowed_values=("off", "warn", "refuse")),
+    # ADR-096 B4b: the door reads it through config_runtime (dispatch_cli._check_blast_radius_verdict).
+    "VNX_BLAST_RADIUS_MODE": _e(
+        "VNX_BLAST_RADIUS_MODE", "string", "warn", "dispatch",
+        "Blast radius (ADR-096): overlap of a fire's paths with live work or an open PR warns (warn), "
+        "refuses unless --override-overlap REASON is given (refuse), or is not read (off); "
+        "an unknown value reads as refuse.",
+        subsystem="blast-radius", status="ACTIVATE", cockpit_canonical=True,
         allowed_values=("off", "warn", "refuse")),
 
 }

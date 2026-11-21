@@ -4,6 +4,7 @@ import json
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -78,15 +79,18 @@ def test_all_decided_and_after_deadline_are_clear(seams, decide, now):
 
 
 @pytest.mark.parametrize("key,bad,reason", [
-    (None, None, "decision_unknown"),
     ("VNX_MORNING_PAUSE_START", "7am", "morning_pause_config_invalid: VNX_MORNING_PAUSE_START"),
     ("VNX_MORNING_PAUSE_TZ", "Mars/Base", "morning_pause_config_invalid: VNX_MORNING_PAUSE_TZ"),
     ("VNX_MORNING_PAUSE_ENABLED", "maybe", "morning_pause_config_invalid: VNX_MORNING_PAUSE_ENABLED")])
-def test_no_snapshot_or_bad_config_is_paused(seams, key, bad, reason):
+def test_bad_config_is_paused(seams, key, bad, reason):
     if key:
         seams["cfg"][key] = bad
     res = door(seams)
     assert res.status == sc.CheckStatus.TRIGGERED and res.evidence["reason"].startswith(reason)
+
+
+def test_no_snapshot_today_is_not_started_and_books_nothing(seams):
+    assert door(seams).status == sc.CheckStatus.CLEAR and events(seams["sd"]) == []
 
 
 def test_unreadable_registry_is_paused(seams):
@@ -231,3 +235,13 @@ def test_an_override_recorded_at_the_first_check_is_not_recorded_again(merge_doo
     snapshot(merge_seams["sd"])
     assert _run("--override-morning-pause", "operator says go") == pr_merge.EXIT_OK
     assert [e["kind"] for e in events(merge_seams["sd"])] == ["override"]
+
+
+@pytest.mark.parametrize("hour", [7, 8])
+def test_a_test_without_a_snapshot_does_not_depend_on_the_clock(tmp_path, monkeypatch, hour):
+    """The suite default is off, so a door check inside the window with no state dir is clear; env on pauses it."""
+    inside = datetime(2026, 11, 23, hour, 30, tzinfo=ZoneInfo("Europe/Amsterdam"))
+    assert gate.morning_pause_verdict(None, inside, state_dir=None).reason == "disabled"
+    monkeypatch.setenv("VNX_MORNING_PAUSE_ENABLED", "true")
+    unreadable = gate.morning_pause_verdict(None, inside, state_dir=None)
+    assert unreadable.paused and unreadable.reason == "decision_unknown"  # ADR-063: stays fail-closed

@@ -1,8 +1,9 @@
-"""Guard: no new operator name (kimi-k3, Vinix24, claude-salesminds, quoted vnx-dev) in shipped code.
+"""Guard: no new operator name (kimi-k3, Vinix24, claude-salesminds, vnx-dev, vincentvandeth, salesminds) in shipped code.
 
 Every finding in scope has a row in tests/fixtures/operator_names/findings.tsv with the
 same (path, name, fingerprint) and count. The allowlist is generated from that table only.
-``vnx-dev`` counts only quoted, which includes ``DEFAULT 'vnx-dev'``; ``migration_linter.py``
+``vnx-dev`` counts quoted and bare (AG-G3), which includes ``DEFAULT 'vnx-dev'``; the scope covers
+``dashboard/``, ``configs/``, the two installers and ``CODEOWNERS``; ``migration_linter.py``
 runs on this matcher and this table.
 """
 import copy
@@ -36,7 +37,7 @@ def test_every_finding_has_a_table_row_and_every_row_a_finding():
 
 def test_table_rules_hold():
     rows = on.load_table()
-    assert len(rows) == 270 and sum(r["count"] for r in rows) == 297
+    assert len(rows) == 409 and sum(r["count"] for r in rows) == 440
     assert on.validate_table(rows) == []
 
 
@@ -110,6 +111,7 @@ def _repo(tmp_path, files):
     repo = tmp_path / "repo"
     (repo / "scripts").mkdir(parents=True)
     for rel, text in files.items():
+        (repo / rel).parent.mkdir(parents=True, exist_ok=True)
         (repo / rel).write_text(text, encoding="utf-8")
     _git(repo, "init", "-q")
     _git(repo, "add", "-A")
@@ -198,9 +200,10 @@ DEFAULT_LINE = f"project_id TEXT NOT NULL DEFAULT '{DEV}',\n"
 
 @pytest.mark.parametrize("line, hits", [
     (f"x = '{DEV}'", 1), (f'x = "{DEV}"', 1), (f"DEFAULT '{DEV}'", 1),
-    (f"x = {DEV}", 0), (f"/{DEV}/state", 0), (f"'{DEV}-2'", 0), (f"non-{DEV}", 0),
+    (f"x = {DEV}", 1), (f"/{DEV}/state", 1), (f"# the {DEV} store", 1),
+    ("x = 'vnx'", 0), ("dev-vnx", 0),
 ])
-def test_matcher_counts_the_quoted_form_only(tmp_path, line, hits):
+def test_matcher_counts_the_quoted_and_the_bare_form(tmp_path, line, hits):
     repo = _repo(tmp_path, {"scripts/a.py": line + "\n"})
     assert sum(c for (_, n, _), (c, _) in on.scan(repo).items() if n == DEV) == hits
 
@@ -229,14 +232,68 @@ def test_editing_an_allowed_quoted_line_is_red_both_ways(tmp_path):
     assert sorted(p.split()[0] for p in on.compare(on.scan(repo), allow)) == ["GONE", "NEW"]
 
 
-def test_bare_vnx_dev_is_not_a_finding(tmp_path):
-    repo = _repo(tmp_path, {"scripts/a.py": f"# the {DEV} store\nP = Path.home() / '.vnx-data' / {DEV}\n"})
+def test_table_rows_for_the_fourth_name_are_complete_and_valid():
+    rows = [r for r in on.load_table() if r["name"] == DEV]
+    assert len(rows) == 327 and sum(r["count"] for r in rows) == 355
+    migrations = [r for r in rows if r["path"].startswith("schemas/migrations/")]
+    assert len(migrations) == 65 and sum(r["count"] for r in migrations) == 75
+    assert all(r["category"] != "te_repareren" or r["group"] for r in rows)
+
+
+# --- AG-G3: bare vnx-dev, the wider scope, two more names ---------------------------------------
+
+VINCENT = "vincent" + "vandeth"
+SALES = "sales" + "minds"
+
+
+def _new_file_verdict(tmp_path, rel, text):
+    repo, allow = _baseline(tmp_path)
+    (repo / rel).parent.mkdir(parents=True, exist_ok=True)
+    (repo / rel).write_text(text, encoding="utf-8")
+    _git(repo, "add", "-A")
+    return on.compare(on.scan(repo), allow)
+
+
+def test_new_file_with_a_bare_vnx_dev_is_red(tmp_path):
+    problems = _new_file_verdict(tmp_path, "scripts/hooks/guard.sh", f'[ "$P" = {DEV} ] && exit 1\n')
+    assert len(problems) == 1 and problems[0].startswith(f"NEW scripts/hooks/guard.sh {DEV} ")
+
+
+@pytest.mark.parametrize("rel", ["dashboard/app.js", "dashboard/api/x.py", "configs/panel.yaml"])
+def test_new_file_with_a_quoted_vnx_dev_under_dashboard_or_configs_is_red(tmp_path, rel):
+    problems = _new_file_verdict(tmp_path, rel, f'project: "{DEV}"\n')
+    assert len(problems) == 1 and problems[0].startswith(f"NEW {rel} {DEV} ")
+
+
+@pytest.mark.parametrize("rel", ["install-central.sh", "install-remote.sh", "CODEOWNERS"])
+def test_installers_and_codeowners_are_in_scope(tmp_path, rel):
+    problems = _new_file_verdict(tmp_path, rel, f"owner {VINCENT}\n")
+    assert len(problems) == 1 and problems[0].startswith(f"NEW {rel} {VINCENT} ")
+
+
+@pytest.mark.parametrize("name", [VINCENT, SALES])
+def test_new_file_with_each_extra_name_is_red(tmp_path, name):
+    problems = _new_file_verdict(tmp_path, "scripts/n.py", f"# owner: {name}\n")
+    assert len(problems) == 1 and problems[0].startswith(f"NEW scripts/n.py {name} ")
+
+
+def test_claude_salesminds_is_one_finding_not_two(tmp_path):
+    repo = _repo(tmp_path, {"scripts/a.py": "P = '~/.claude-" + SALES + "'\n"})
+    assert sorted(n for (_, n, _) in on.scan(repo)) == ["claude-" + SALES]
+
+
+def test_extra_names_are_case_sensitive_and_markdown_stays_out(tmp_path):
+    repo = _repo(tmp_path, {"dashboard/a.js": f"// {VINCENT.upper()} {SALES.title()}\n", "configs/n.md": VINCENT + "\n"})
     assert on.scan(repo) == {}
 
 
-def test_table_rows_for_the_fourth_name_are_complete_and_valid():
-    rows = [r for r in on.load_table() if r["name"] == DEV]
-    assert len(rows) == 201 and sum(r["count"] for r in rows) == 225
-    migrations = [r for r in rows if r["path"].startswith("schemas/migrations/")]
-    assert len(migrations) == 61 and sum(r["count"] for r in migrations) == 71
-    assert all(r["category"] != "te_repareren" or r["group"] for r in rows)
+def test_files_outside_the_scope_stay_out(tmp_path):
+    repo = _repo(tmp_path, {"docs/a.txt": f"{DEV} {VINCENT}\n", "other/b.py": f"'{DEV}'\n"})
+    assert on.scan(repo) == {}
+
+
+def test_an_unreadable_scope_file_fails_loudly(tmp_path):
+    repo = _repo(tmp_path, {"dashboard/a.js": "x\n"})
+    (repo / "dashboard/a.js").unlink()
+    with pytest.raises(FileNotFoundError):
+        on.scan(repo)

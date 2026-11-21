@@ -121,7 +121,7 @@ def test_unreadable_global_file_not_strict_falls_through_with_one_warning(gfile,
 
 # config-een-oppervlak PR-1 gave these keys a scope and allowed_values (tests/test_config_registry_pr1_rows.py).
 _PR1_ROWS = {k for k, e in cr.CONFIG_REGISTRY.items() if e.read_site_wired is False and e.scope == "global"} | {
-    "VNX_ENFORCEMENT_PROFILE", "VNX_DELIVERABLE_PREDECESSOR_MODE",  # the latter: ADR-096 §12 off|warn|refuse
+    "VNX_ENFORCEMENT_PROFILE", "VNX_DELIVERABLE_PREDECESSOR_MODE", "VNX_BLAST_RADIUS_MODE",  # the latter: ADR-096 §12 off|warn|refuse
     "VNX_SUPERVISOR_MODE", "VNX_SCOUT_PROVIDER"}  # N7: allowed_values rows
 
 
@@ -169,3 +169,11 @@ def test_strict_callers_fail_closed_on_an_unreadable_global_file(gfile, tmp_path
     monkeypatch.setattr(config_store_db, "make_db_resolver", lambda *a, **k: (lambda pid, key: None))
     with pytest.raises(ValueError, match="global_config_error"):
         dispatch_bridge._doc_style_setting("p1", tmp_path)
+
+
+def test_blast_radius_mode_is_registered_and_matches_the_gate_default():
+    import blast_radius_gate as brg
+    e = cr.CONFIG_REGISTRY["VNX_BLAST_RADIUS_MODE"]
+    assert (e.type, e.default, e.category, e.scope, e.allowed_values) == (
+        "string", "warn", "dispatch", "project", ("off", "warn", "refuse"))
+    assert e.default == brg.DEFAULT_MODE and e.allowed_values == brg.MODES

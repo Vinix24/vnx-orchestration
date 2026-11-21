@@ -478,6 +478,18 @@ def _launchd_guard_temp_roots(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _morning_pause_off_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The morning pause is on by default (ADR-095, D4b); a test outside it must not depend on the clock.
+
+    Inside the morning window a door or merge test without a morning snapshot, state dir or project id
+    reads ``decision_unknown`` and pauses, so the suite would turn red at 07:00-09:00 Amsterdam. The gate
+    itself stays fail-closed; the morning-pause tests inject their config (``get=``) or set the variable
+    back with their own ``monkeypatch.setenv``.
+    """
+    monkeypatch.setenv("VNX_MORNING_PAUSE_ENABLED", "false")
+
+
+@pytest.fixture(autouse=True)
 def _vnx_data_dir_isolation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Redirect VNX_DATA_DIR (+ subsystem dirs) so EventStore() without an
     explicit events_dir cannot write to ~/.vnx-data during any test run.
@@ -568,6 +580,12 @@ def _reconcile_git_off(monkeypatch: pytest.MonkeyPatch) -> None:
 
     _REAL_GH_SOURCE.setdefault("fn", track_reconciler._load_merged_prs_from_gh)
     monkeypatch.setattr(track_reconciler, "_load_merged_prs_from_gh", lambda *a, **k: frozenset())
+
+
+@pytest.fixture(autouse=True)
+def _blast_radius_gh_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    import blast_radius_gate
+    monkeypatch.setattr(blast_radius_gate, "gh", lambda argv, cwd: (_ for _ in ()).throw(RuntimeError("gh is off in tests")))
 
 
 @pytest.fixture
