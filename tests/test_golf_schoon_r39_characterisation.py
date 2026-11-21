@@ -75,7 +75,7 @@ _SID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
 _ANSWER = [{"role": "assistant", "content": [{"type": "text", "text": "done"}]}]
 
 
-def _run_kimi(tmp_path, events=_ANSWER, rc=0, stderr="", monitor=None, env=None, **kw):
+def _run_kimi(tmp_path, events=_ANSWER, rc=0, stderr="", monitor=None, **kw):
     proc = _kimi_proc(events, rc, stderr)
     seen = {}
     real_consume = ks._consume_kimi_stream
@@ -84,8 +84,7 @@ def _run_kimi(tmp_path, events=_ANSWER, rc=0, stderr="", monitor=None, env=None,
         seen.update(chunk_timeout=kwargs["chunk_timeout"], total_deadline=kwargs["total_deadline"])
         return real_consume(**kwargs)
 
-    with patch.dict(os.environ, env or {}), \
-            patch.object(ks, "_start_kimi_subprocess", return_value=(proc, None)) as start, \
+    with patch.object(ks, "_start_kimi_subprocess", return_value=(proc, None)) as start, \
             patch.object(ks, "_resolve_heartbeat_log_path", return_value=tmp_path / "hb.log"), \
             patch.object(ks, "_heartbeat_monitor_loop", monitor or (lambda *a: None)), \
             patch.object(ks, "_consume_kimi_stream", _consume), \
@@ -106,11 +105,11 @@ def test_spawn_kimi_clean_run_argv_event_harvest_and_reap(tmp_path, caplog):
     with caplog.at_level(logging.INFO, logger=ks.logger.name):
         res, seen, start, harvest, reap = _run_kimi(
             tmp_path, stderr=f"To resume this session: kimi -r {_SID}\n",
-            env={"VNX_KIMI_TIMEOUT": "60", "VNX_KIMI_STALL_THRESHOLD": "7"}, cwd=tmp_path,
+            chunk_timeout=7.0, total_deadline=60.0, cwd=tmp_path,
             event_writer=lambda tid, ev, dispatch_id=None: written.append((tid, ev, dispatch_id)))
     assert (res.returncode, res.completion_text, res.error) == (0, "done", None)
     assert res.token_usage == {"input_tokens": 1}
-    assert seen == {"chunk_timeout": 7.0, "total_deadline": 60.0}
+    assert seen == {"chunk_timeout": ks.coerce_chunk_stall(7.0, 60.0), "total_deadline": 60.0}
     first = written[0]
     assert first[0] == "T2" and first[2] == "d-r39" and first[1]["event_type"] == "info"
     assert first[1]["data"]["kind"] == "effective_argv" and first[1]["data"]["yolo"] is True
@@ -123,10 +122,8 @@ def test_spawn_kimi_clean_run_argv_event_harvest_and_reap(tmp_path, caplog):
     reap.assert_called_once_with(_SID, env)
 
 
-def test_spawn_kimi_bad_env_timeouts_keep_defaults_and_scale_stall(tmp_path):
-    os.environ.pop("VNX_KIMI_STALL_THRESHOLD", None)
-    res, seen, _s, harvest, reap = _run_kimi(tmp_path, env={"VNX_KIMI_TIMEOUT": "nope"},
-                                              chunk_timeout=5.0, total_deadline=50.0)
+def test_spawn_kimi_scales_the_stall_with_the_deadline(tmp_path):
+    res, seen, _s, harvest, reap = _run_kimi(tmp_path, chunk_timeout=5.0, total_deadline=50.0)
     assert seen == {"chunk_timeout": ks.coerce_chunk_stall(5.0, 50.0), "total_deadline": 50.0}
     assert res.returncode == 0 and res.token_usage is None
     harvest.assert_not_called()

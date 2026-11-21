@@ -90,8 +90,7 @@ def _adapter_deadline(adapter, terminal_id: str):
 def no_inherited_timeouts(monkeypatch):
     """No deadline or stall override from the shell running the tests."""
     for key in (
-        "VNX_TOTAL_DEADLINE", "VNX_CHUNK_TIMEOUT", "VNX_KIMI_TIMEOUT",
-        "VNX_KIMI_STALL_THRESHOLD", "VNX_KIMI_MODEL",
+        "VNX_TOTAL_DEADLINE", "VNX_CHUNK_TIMEOUT", "VNX_KIMI_MODEL",
     ):
         monkeypatch.delenv(key, raising=False)
 

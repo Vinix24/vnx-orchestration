@@ -1,0 +1,10 @@
+- Removed 18 environment switches (config-een-oppervlak PR-5, ADR-087). Each code path now holds the value it had when the variable was unset; the only behaviour difference with today is that the env override is gone.
+  - `VNX_DEEPSEEK_CLASSIFIER_MODEL` → `deepseek-v4-flash`; `VNX_DEEPSEEK_CLASSIFIER_TIMEOUT` → 60 s.
+  - `VNX_HAIKU_MODEL` and `VNX_HAIKU_TIMEOUT` → the `HaikuProvider` module defaults.
+  - `VNX_GLM_HARNESS_MODEL` → `glm-5.2`; `VNX_DEEPSEEK_HARNESS_MODEL` → `deepseek-v4-pro`; `VNX_GLM_PROXY_URL` → the fixed `DEFAULT_GLM_PROXY_URL` (port 4141). A second proxy port now needs a code change; the one-off `ijk_openrouter.py` calibration script that set port 4142 stops working.
+  - `VNX_KIMI_STALL_THRESHOLD` and `VNX_LITELLM_STALL_THRESHOLD` → the spawn's `chunk_timeout` argument, always scaled with the total deadline (OI-903); `VNX_KIMI_TIMEOUT` and `VNX_LITELLM_TIMEOUT` → the spawn's `total_deadline` argument. The `kimi_gate` stall threshold is fixed at 300 s.
+  - `VNX_HEADLESS_TIMEOUT` → 600 s; the timeout operator hint no longer names a variable.
+  - `VNX_DISPATCH_MODEL` → `sonnet` in the Claude adapter and `kimi-k3` in the pool worker and the headless dispatch daemon.
+  - `VNX_GOVERNANCE_MODE` → the mode in `governance_enforcement.yaml`.
+  - `VNX_BENCH_TASKS_DIR` and `VNX_BENCH_MODELS_FILE` → the `--tasks-dir` and `--models-file` flags (default: the bundled seeds).
+  - `VNX_BENCH_EXTERNAL_SEED` → no external seed overlay (the overlay function is removed). `VNX_BENCH_SCORE_DELIVERABLE_ON_FAILURE` → a failed dispatch is always a DNF.

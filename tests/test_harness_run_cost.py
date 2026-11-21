@@ -669,8 +669,6 @@ class TestTheEnvelopeCallSite:
     ):
         from envelope_types import _AdapterResult
 
-        monkeypatch.delenv("VNX_DEEPSEEK_HARNESS_MODEL", raising=False)
-        monkeypatch.delenv("VNX_GLM_HARNESS_MODEL", raising=False)
         refused = _AdapterResult(returncode=1, completion_text="", status="failure", error="budget",
                                  spawn_refused="paid_lane_budget_exceeded")
 
@@ -681,10 +679,8 @@ class TestTheEnvelopeCallSite:
         assert line["cost_source"] == "unavailable:spawn_refused"
         assert len(_receipts(store.receipts)) == 1, "a budget refusal keeps its receipt"
 
-    def test_lane_model_resolves_placeholders_like_the_adapter(self, monkeypatch):
-        monkeypatch.setenv("VNX_DEEPSEEK_HARNESS_MODEL", "deepseek-flash")
-
-        assert harness_run_cost.lane_model("deepseek-harness", "sonnet") == "deepseek-flash"
+    def test_lane_model_resolves_placeholders_like_the_adapter(self):
+        assert harness_run_cost.lane_model("deepseek-harness", "sonnet") == "deepseek-v4-pro"
         assert harness_run_cost.lane_model("deepseek-harness", "deepseek-v4-pro") == "deepseek-v4-pro"
         assert harness_run_cost.lane_model("claude", "opus") == "opus"
 

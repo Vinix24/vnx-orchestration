@@ -7,9 +7,8 @@ Usage:
 
 Bring-your-own-tasks / bring-your-own-models (decoupled from the bundled seeds):
     python3 scripts/benchmark/run_benchmark.py --tasks-dir /path/to/my/prompts --models-file /path/to/my/models.yaml --dry-run
-    VNX_BENCH_TASKS_DIR=/path/to/my/prompts VNX_BENCH_MODELS_FILE=/path/to/my/models.yaml python3 scripts/benchmark/run_benchmark.py --dry-run
 
---tasks-dir/--models-file (or their VNX_BENCH_TASKS_DIR/VNX_BENCH_MODELS_FILE env equivalents) default to
+--tasks-dir/--models-file default to
 the repo-bundled scripts/benchmark/prompts/ and models.yaml when unset, so existing invocations are unchanged.
 
 For each (model, task):
@@ -192,12 +191,12 @@ def main() -> int:
     parser.add_argument("--output", default=None, help="Override output directory")
     parser.add_argument(
         "--tasks-dir",
-        default=os.environ.get("VNX_BENCH_TASKS_DIR", ""),
+        default="",
         help="Directory of *.txt task prompts (bring-your-own-tasks). Default: bundled scripts/benchmark/prompts/",
     )
     parser.add_argument(
         "--models-file",
-        default=os.environ.get("VNX_BENCH_MODELS_FILE", ""),
+        default="",
         help="Path to a models.yaml (bring-your-own model roster). Default: bundled scripts/benchmark/models.yaml",
     )
     parser.add_argument("--terminal-id", default="BENCH", help="Terminal ID for governance state (default: BENCH)")
