@@ -109,14 +109,19 @@ def record(state_dir: Path, project_id: str, dispatch_id: str, findings: Iterabl
               "candidate": deliverable_of(dispatch_id), "predecessor": f.predecessor, "reason": f.reason,
               "mode": mode, "outcome": outcome, "override_reason": override_reason or None}
              for seq, f in enumerate(f for f in findings if f.hard)]
+    append_lines(state_dir / LEDGER, lines)
+
+
+def append_lines(path: Path, lines: Iterable[dict]) -> None:
+    """Append ``lines`` as NDJSON in one flocked write, looping on a short write; raises OSError (or ValueError on NaN)."""
     payload = memoryview("".join(json.dumps(x, sort_keys=True, allow_nan=False) + "\n" for x in lines).encode())
-    fd = os.open(state_dir / LEDGER, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
         while payload:
             written = os.write(fd, payload)
             if written <= 0:
-                raise OSError(f"short write to {LEDGER}")
+                raise OSError(f"short write to {path.name}")
             payload = payload[written:]
         os.fsync(fd)
     finally:

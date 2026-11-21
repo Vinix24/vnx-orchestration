@@ -24,6 +24,8 @@ from blast_radius import Subject, _branch_of
 
 CACHE_FILENAME = "blast_radius_pr_cache.json"
 CACHE_VERSION = 1
+PR_LIST_LIMIT = 200  # gh pr list --limit; a full page means the list may be cut off (OI-3055)
+REASON_PRS_TRUNCATED = "open_prs_truncated"
 Gh = Callable[[List[str], Path], str]  # gh(argv, cwd) -> stdout; raises on failure
 
 
@@ -129,12 +131,14 @@ def open_pr_subjects(project_root: "str | Path", project_id: str, cache_path: "s
     if not isinstance(project_id, str) or not project_id.strip():
         return Sources(unavailable="no project_id: the PR cache is keyed per project")
     try:
-        listing = json.loads(gh(["pr", "list", "--state", "open", "--limit", "200",
+        listing = json.loads(gh(["pr", "list", "--state", "open", "--limit", str(PR_LIST_LIMIT),
                                  "--json", "number,headRefName,headRefOid"], root))
     except Exception as exc:  # vnx-silent-except: returned as unavailable with its reason
         return Sources(unavailable=f"gh pr list failed: {type(exc).__name__}: {exc}")
     if not isinstance(listing, list):
         return Sources(unavailable=f"gh pr list returned {type(listing).__name__}, not a list")
+    if len(listing) >= PR_LIST_LIMIT:
+        return Sources(unavailable=f"{REASON_PRS_TRUNCATED}: gh pr list returned {len(listing)} rows, the limit")
     cached = _load_cache(cache_path)
     mine = {k: v for k, v in cached.items() if k.startswith(f"{project_id}:")}
     fresh: Dict[str, List[str]] = {}  # this project's entries after the call: other heads drop out
