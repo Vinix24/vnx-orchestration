@@ -67,7 +67,12 @@ def morning_pause_verdict(
     decided: Optional[bool] = None
     if state_dir is not None and project_id:
         try:
-            decided = decision_status(project_id, day, state_dir=Path(state_dir)).all_decided
+            status = decision_status(project_id, day, state_dir=Path(state_dir))
+            decided = status.all_decided
+            # Only a snapshot that is absent means "no round started today": nothing to hold for, and no
+            # ledger line. An unreadable snapshot or ledger stays "unknown" and pauses (ADR-063).
+            if status.snapshot == "missing" and mp.in_window(window, now):
+                return MorningPauseVerdict(False, mp.REASON_NOT_STARTED, day)
         except (OSError, ValueError):  # an unreadable ledger is an unknown status, which pauses
             decided = None
     verdict = mp.is_paused(window, now, decided=decided)

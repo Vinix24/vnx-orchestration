@@ -28,9 +28,10 @@ REASON_AFTER_DEADLINE = "after_deadline"
 REASON_DECIDED = "decided"
 REASON_OPEN_POINTS = "open_points"
 REASON_DECISION_UNKNOWN = "decision_unknown"
+REASON_NOT_STARTED = "not_started"  # no snapshot today: no round started, so nothing to hold for
 REASONS = frozenset((
     REASON_DISABLED, REASON_BEFORE_START, REASON_AFTER_DEADLINE,
-    REASON_DECIDED, REASON_OPEN_POINTS, REASON_DECISION_UNKNOWN,
+    REASON_DECIDED, REASON_OPEN_POINTS, REASON_DECISION_UNKNOWN, REASON_NOT_STARTED,
 ))
 
 _TIME_RE = re.compile(r"^([01][0-9]|2[0-3]):([0-5][0-9])$")

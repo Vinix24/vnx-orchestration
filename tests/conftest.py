@@ -478,6 +478,18 @@ def _launchd_guard_temp_roots(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _morning_pause_off_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The morning pause is on by default (ADR-095, D4b); a test outside it must not depend on the clock.
+
+    Inside the morning window a door or merge test without a morning snapshot, state dir or project id
+    reads ``decision_unknown`` and pauses, so the suite would turn red at 07:00-09:00 Amsterdam. The gate
+    itself stays fail-closed; the morning-pause tests inject their config (``get=``) or set the variable
+    back with their own ``monkeypatch.setenv``.
+    """
+    monkeypatch.setenv("VNX_MORNING_PAUSE_ENABLED", "false")
+
+
+@pytest.fixture(autouse=True)
 def _vnx_data_dir_isolation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Redirect VNX_DATA_DIR (+ subsystem dirs) so EventStore() without an
     explicit events_dir cannot write to ~/.vnx-data during any test run.
