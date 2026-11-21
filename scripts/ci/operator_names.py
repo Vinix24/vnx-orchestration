@@ -6,8 +6,10 @@ SCOPE that carry one of the operator's own names. The generator reads ONLY the
 per-finding table (``tests/fixtures/operator_names/findings.tsv``) and writes the
 allowlist the guard compares against: no path rule, no category per directory.
 A new finding is allowed by a new table row, which shows in the diff, never by
-regenerating. ``vnx-dev`` is matched only quoted (single or double quotes), which
-includes the ``DEFAULT`` clause of a column definition; bare ``vnx-dev`` is not matched (AG-G3).
+regenerating. The sentinel tenant name is matched quoted and bare (AG-G3), which
+includes the ``DEFAULT`` clause of a column definition. The scope covers ``dashboard/``,
+``configs/``, the two installers and ``CODEOWNERS``. The two extra names are
+case-sensitive and the second one skips ``claude-<name>``, which is already a name of its own.
 ``scripts/lib/migration_linter.py`` calls this matcher and this table for that clause.
 """
 from __future__ import annotations
@@ -20,12 +22,15 @@ import subprocess
 import sys
 from pathlib import Path
 
-SCOPE = ("scripts", "vnx_cli", "schemas", "bin", "hooks", ".vnx/vnx_workers.default.yaml")
+SCOPE = ("scripts", "vnx_cli", "schemas", "bin", "hooks", "dashboard", "configs",
+         ".vnx/vnx_workers.default.yaml", "install-central.sh", "install-remote.sh", "CODEOWNERS")
 # The names are built from halves so this module does not match itself.
-_NAMES = ("claude-" + "salesminds", "kimi-" + "k3", "Vinix" + "24")
+_SALES = "sales" + "minds"
+_NAMES = ("claude-" + _SALES, "kimi-" + "k3", "Vinix" + "24", "vincent" + "vandeth")
 _DEV = "vnx-" + "dev"
 NAMES = {n: re.compile(re.escape(n)) for n in _NAMES}
-NAMES[_DEV] = re.compile("['\"]" + re.escape(_DEV) + "['\"]")
+NAMES[_DEV] = re.compile(re.escape(_DEV))
+NAMES[_SALES] = re.compile("(?<!claude-)" + re.escape(_SALES))
 CATEGORIES = ("frozen_migration", "legacy_tenant_reader", "model_catalog",
               "te_repareren", "upstream_url", "issue_link")
 COLUMNS = ("fingerprint", "path", "name", "count", "category", "reason", "group")
