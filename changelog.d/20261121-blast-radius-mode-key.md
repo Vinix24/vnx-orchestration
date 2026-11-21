@@ -1,0 +1,1 @@
+- New registry key `VNX_BLAST_RADIUS_MODE` (scope dispatch, `off|warn|refuse`, default `warn`). The door has read it since B4b (#3128); this PR registers the key so `vnx config set` and the cockpit can reach it.

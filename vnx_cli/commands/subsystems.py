@@ -163,6 +163,8 @@ _ROW_ORDER: List[str] = [
     "morning-pause",
     # ADR-096 B2: the door enforces hard deliverable predecessors
     "deliverable-predecessor",
+    # ADR-096 B4b: the door checks the blast radius of a fire
+    "blast-radius",
     # ACTIVATE-and-measure
     "intelligence-self-learning-loop",
     "dream-consolidation",
