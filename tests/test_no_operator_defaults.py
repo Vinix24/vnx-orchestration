@@ -1,8 +1,9 @@
-"""Guard: no new operator name (kimi-k3, Vinix24, claude-salesminds) in shipped code.
+"""Guard: no new operator name (kimi-k3, Vinix24, claude-salesminds, quoted vnx-dev) in shipped code.
 
 Every finding in scope has a row in tests/fixtures/operator_names/findings.tsv with the
 same (path, name, fingerprint) and count. The allowlist is generated from that table only.
-``vnx-dev`` and ``migration_linter.py`` follow in AG-G2.
+``vnx-dev`` counts only quoted, which includes ``DEFAULT 'vnx-dev'``; ``migration_linter.py``
+runs on this matcher and this table.
 """
 import copy
 import subprocess
@@ -35,7 +36,7 @@ def test_every_finding_has_a_table_row_and_every_row_a_finding():
 
 def test_table_rules_hold():
     rows = on.load_table()
-    assert len(rows) == 69 and sum(r["count"] for r in rows) == 72
+    assert len(rows) == 270 and sum(r["count"] for r in rows) == 297
     assert on.validate_table(rows) == []
 
 
@@ -54,7 +55,8 @@ def _row(**kw):
     (dict(reason="   "), "empty reason"),
     (dict(category="te_repareren", group=""), "needs a group"),
     (dict(category="te_repareren", group="AG-x"), "needs a group"),
-    (dict(name="vnx-dev"), "unknown name"),
+    (dict(name="bogus"), "unknown name"),
+    (dict(name="kimi"), "unknown name"),
 ])
 def test_validate_table_refuses_a_bad_row(override, needle):
     problems = on.validate_table([_row(**override)])
@@ -186,3 +188,55 @@ def test_untracked_files_tests_and_markdown_are_out_of_scope(tmp_path):
 def test_scan_outside_a_git_repo_fails_loudly(tmp_path):
     with pytest.raises(subprocess.CalledProcessError):
         on.scan(tmp_path)
+
+
+# --- the fourth name: quoted vnx-dev, including DEFAULT 'vnx-dev' ------------------------------
+
+DEV = "vnx-" + "dev"
+DEFAULT_LINE = f"project_id TEXT NOT NULL DEFAULT '{DEV}',\n"
+
+
+@pytest.mark.parametrize("line, hits", [
+    (f"x = '{DEV}'", 1), (f'x = "{DEV}"', 1), (f"DEFAULT '{DEV}'", 1),
+    (f"x = {DEV}", 0), (f"/{DEV}/state", 0), (f"'{DEV}-2'", 0), (f"non-{DEV}", 0),
+])
+def test_matcher_counts_the_quoted_form_only(tmp_path, line, hits):
+    repo = _repo(tmp_path, {"scripts/a.py": line + "\n"})
+    assert sum(c for (_, n, _), (c, _) in on.scan(repo).items() if n == DEV) == hits
+
+
+def test_new_default_clause_under_vnx_cli_is_red(tmp_path):
+    repo, allow = _baseline(tmp_path)
+    (repo / "vnx_cli").mkdir()
+    (repo / "vnx_cli/schema.py").write_text(DEFAULT_LINE, encoding="utf-8")
+    _git(repo, "add", "-A")
+    problems = on.compare(on.scan(repo), allow)
+    assert len(problems) == 1 and problems[0].startswith(f"NEW vnx_cli/schema.py {DEV} ")
+
+
+def test_new_default_clause_in_an_already_listed_file_is_red(tmp_path):
+    repo = _repo(tmp_path, {"scripts/a.py": DEFAULT_LINE})
+    allow = _verdict(repo, on.scan(repo))
+    (repo / "scripts/a.py").write_text(DEFAULT_LINE + f"x TEXT DEFAULT \"{DEV}\"\n", encoding="utf-8")
+    problems = on.compare(on.scan(repo), allow)
+    assert len(problems) == 1 and problems[0].startswith(f"NEW scripts/a.py {DEV} ")
+
+
+def test_editing_an_allowed_quoted_line_is_red_both_ways(tmp_path):
+    repo = _repo(tmp_path, {"scripts/a.py": DEFAULT_LINE})
+    allow = _verdict(repo, on.scan(repo))
+    (repo / "scripts/a.py").write_text(DEFAULT_LINE.replace("TEXT", "VARCHAR"), encoding="utf-8")
+    assert sorted(p.split()[0] for p in on.compare(on.scan(repo), allow)) == ["GONE", "NEW"]
+
+
+def test_bare_vnx_dev_is_not_a_finding(tmp_path):
+    repo = _repo(tmp_path, {"scripts/a.py": f"# the {DEV} store\nP = Path.home() / '.vnx-data' / {DEV}\n"})
+    assert on.scan(repo) == {}
+
+
+def test_table_rows_for_the_fourth_name_are_complete_and_valid():
+    rows = [r for r in on.load_table() if r["name"] == DEV]
+    assert len(rows) == 201 and sum(r["count"] for r in rows) == 225
+    migrations = [r for r in rows if r["path"].startswith("schemas/migrations/")]
+    assert len(migrations) == 61 and sum(r["count"] for r in migrations) == 71
+    assert all(r["category"] != "te_repareren" or r["group"] for r in rows)
