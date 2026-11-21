@@ -902,9 +902,9 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         "IANA timezone of the morning pause window.",
         subsystem="morning-pause", status="PARK"),
     "VNX_MORNING_PAUSE_ENABLED": _e(
-        "VNX_MORNING_PAUSE_ENABLED", "bool", "false", "dispatch",
+        "VNX_MORNING_PAUSE_ENABLED", "bool", "true", "dispatch",
         "Morning pause (ADR-095): firing and merging stop from the start time until the morning "
-        "points are decided, at the latest at the deadline. Off by default; D4 turns it on.",
+        "points are decided, at the latest at the deadline. On by default (D4); no snapshot today means not started.",
         subsystem="morning-pause", status="PARK", cockpit_canonical=True),
     # ADR-096 B2: the door reads it through config_runtime (dispatch_cli._check_predecessor_verdict).
     "VNX_DELIVERABLE_PREDECESSOR_MODE": _e(

@@ -78,15 +78,18 @@ def test_all_decided_and_after_deadline_are_clear(seams, decide, now):
 
 
 @pytest.mark.parametrize("key,bad,reason", [
-    (None, None, "decision_unknown"),
     ("VNX_MORNING_PAUSE_START", "7am", "morning_pause_config_invalid: VNX_MORNING_PAUSE_START"),
     ("VNX_MORNING_PAUSE_TZ", "Mars/Base", "morning_pause_config_invalid: VNX_MORNING_PAUSE_TZ"),
     ("VNX_MORNING_PAUSE_ENABLED", "maybe", "morning_pause_config_invalid: VNX_MORNING_PAUSE_ENABLED")])
-def test_no_snapshot_or_bad_config_is_paused(seams, key, bad, reason):
+def test_bad_config_is_paused(seams, key, bad, reason):
     if key:
         seams["cfg"][key] = bad
     res = door(seams)
     assert res.status == sc.CheckStatus.TRIGGERED and res.evidence["reason"].startswith(reason)
+
+
+def test_no_snapshot_today_is_not_started_and_books_nothing(seams):
+    assert door(seams).status == sc.CheckStatus.CLEAR and events(seams["sd"]) == []
 
 
 def test_unreadable_registry_is_paused(seams):
