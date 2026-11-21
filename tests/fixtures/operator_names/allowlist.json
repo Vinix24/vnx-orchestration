@@ -71,7 +71,7 @@
   ["scripts/lib/kimi_wrapper.py", "kimi-k3", "d94485efe2ecf4c5", 1], ["scripts/lib/merge_target.py", "Vinix24", "933a21cbf3bc2404", 1], ["scripts/lib/migrate_schema.py", "vnx-dev", "1c950cc09685c545", 1],
   ["scripts/lib/migration_inventory.py", "vnx-dev", "36388c51ffa330d5", 1], ["scripts/lib/migrations/apply_0015.py", "vnx-dev", "b546d9907a58fde8", 1], ["scripts/lib/migrations/apply_0017.py", "vnx-dev", "af9e0cf7532f60c7", 1],
   ["scripts/lib/migrations/apply_0020.py", "vnx-dev", "243ac6452cf3f704", 1], ["scripts/lib/migrations/apply_0026.py", "vnx-dev", "eae6031e02467c76", 1], ["scripts/lib/migrations/apply_0031.py", "vnx-dev", "a31cf1138573bd69", 1],
-  ["scripts/lib/migrations/apply_0034.py", "vnx-dev", "42157072f0127760", 1], ["scripts/lib/morning_round_routing.py", "vnx-dev", "775cb30658c03167", 1], ["scripts/lib/morning_tick.py", "vnx-dev", "775cb30658c03167", 1],
+  ["scripts/lib/migrations/apply_0034.py", "vnx-dev", "42157072f0127760", 1], ["scripts/lib/morning_round_routing.py", "vnx-dev", "775cb30658c03167", 1],
   ["scripts/lib/operator_queue_dream_analyzer.py", "vnx-dev", "0524ff4b811e8939", 1], ["scripts/lib/operator_queue_dream_analyzer.py", "vnx-dev", "3558737bf1f8ce11", 1], ["scripts/lib/operator_steering_source.py", "salesminds", "179943baf5316da7", 1],
   ["scripts/lib/orphan_sweep.py", "vnx-dev", "53ccc8dcb6f37c81", 1], ["scripts/lib/pattern_dedup.py", "vnx-dev", "243ebead13135458", 1], ["scripts/lib/permission_applied_check.py", "claude-salesminds", "42e5fbf6e025e0e5", 1],
   ["scripts/lib/permission_events_sources.py", "claude-salesminds", "374fdf3fc913c2b5", 1], ["scripts/lib/plan_gate_panel.py", "Vinix24", "6ac4ff1b2a2f1376", 1], ["scripts/lib/plan_gate_panel.py", "kimi-k3", "83bfba7c234cb7a8", 1],
