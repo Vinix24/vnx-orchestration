@@ -262,7 +262,7 @@ def test_envelope_codex_adapter_passes_the_five_fields(tmp_path, worktree):
 
 def test_provider_lane_run_codex_passes_the_five_fields(tmp_path, worktree):
     plan = SimpleNamespace(provider=SimpleNamespace(value="codex"), model="m", dispatch_id="dlv-r4",
-                           target_id="T1", role=ROLE, project_id="proj")
+                           target_id="T1", role=ROLE, project_id="proj", deadline_seconds=600)
     fake = mock.Mock(return_value=_fake_result())
     with mock.patch("provider_spawns.codex_spawn.spawn_codex", fake), \
          mock.patch("provider_dispatch._resolve_state_dir", return_value=tmp_path / "state"):
@@ -270,6 +270,7 @@ def test_provider_lane_run_codex_passes_the_five_fields(tmp_path, worktree):
     kw = fake.call_args.kwargs
     assert (kw["cwd"], kw["role"], kw["state_dir"], kw["dispatch_id"], kw["project_id"]) == (
         worktree, ROLE, tmp_path / "state", "dlv-r4", "proj")
+    assert kw["total_deadline"] == 600.0
 
 
 def _dispatch_codex(tmp_path, worker_cwd):
