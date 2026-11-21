@@ -357,7 +357,6 @@ f983240e5d2a61d3	scripts/lib/harness_run_cost.py	vnx-dev	1	te_repareren	Docstrin
 494a8575c553e0be	scripts/lib/intelligence_injection.py	vnx-dev	1	te_repareren	Debug line of the injection fallback to the vnx-dev project id when the dispatch context has none	AG-1
 243ac6452cf3f704	scripts/lib/migrations/apply_0020.py	vnx-dev	1	frozen_migration	Docstring of a migration runner naming the vnx-dev rows it bootstraps or measured; prose	
 42157072f0127760	scripts/lib/migrations/apply_0034.py	vnx-dev	1	frozen_migration	Docstring of a migration runner naming the vnx-dev rows it bootstraps or measured; prose	
-775cb30658c03167	scripts/lib/morning_tick.py	vnx-dev	1	te_repareren	FLEET_PROJECT names the fleet ledger by the operator's project id; the fabric source identity belongs in the AG-5 fingerprint list	AG-5
 0524ff4b811e8939	scripts/lib/operator_queue_dream_analyzer.py	vnx-dev	1	te_repareren	Fleet routing of the dream analyzer labels and opens points in the vnx-dev ledger, the fabric source project	AG-5
 3558737bf1f8ce11	scripts/lib/operator_queue_dream_analyzer.py	vnx-dev	1	te_repareren	Fleet routing of the dream analyzer labels and opens points in the vnx-dev ledger, the fabric source project	AG-5
 179943baf5316da7	scripts/lib/operator_steering_source.py	salesminds	1	legacy_tenant_reader	Deny-list of project slug parts the steering source never reads; the operator account name is the pattern it excludes	
