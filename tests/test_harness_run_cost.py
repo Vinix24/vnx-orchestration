@@ -25,7 +25,7 @@ registry, real files and the real call sites:
   a spool that fails too: no receipt and no second attempt booked.
 
 Transcripts are real JSONL files under a temporary projects dir
-(``VNX_CLAUDE_PROJECTS_DIR``); the ledger is the real file under a temporary
+(``token_harvest._default_claude_projects_dir``); the ledger is the real file under a temporary
 ``VNX_DATA_DIR``. Only the spawn itself and side effects unrelated to cost
 (git, worktrees, report bodies) are patched.
 """
@@ -84,7 +84,7 @@ def store(tmp_path, monkeypatch):
     monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
     monkeypatch.setenv("VNX_STATE_DIR", str(state))
     monkeypatch.setenv("VNX_PROJECT_ID", PROJECT)
-    monkeypatch.setenv("VNX_CLAUDE_PROJECTS_DIR", str(projects))
+    monkeypatch.setattr(token_harvest, "_default_claude_projects_dir", lambda: projects)
     monkeypatch.delenv("VNX_TMUX_SIGNAL_DIR", raising=False)
     return SimpleNamespace(
         data=data, state=state, projects=projects,
@@ -808,10 +808,6 @@ def _sub_result(success, session_id):
 
 
 class TestTheSubprocessCallSite:
-    @pytest.fixture(autouse=True)
-    def _shared_govern_off(self, monkeypatch):
-        monkeypatch.delenv("VNX_SHARED_GOVERN", raising=False)
-
     def test_every_attempt_writes_a_line_and_the_receipt_names_them(self, store):
         _two_message_transcript(store.projects, "sess-sub-1", model="claude-sonnet-5-5")
         _two_message_transcript(store.projects, "sess-sub-2", model="claude-sonnet-5-5")

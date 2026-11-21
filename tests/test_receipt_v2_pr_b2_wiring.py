@@ -100,15 +100,15 @@ def test_session_id_falls_back_to_args_when_result_has_none(monkeypatch, tmp_pat
     assert captured["session_id"] == "args-session-wins"
 
 
-def test_session_id_falls_back_to_env_when_result_and_args_have_none(monkeypatch, tmp_path):
-    monkeypatch.setenv("VNX_SESSION_ID", "env-session-wins")
+def test_session_id_ignores_the_deleted_env_variable(monkeypatch, tmp_path):
+    monkeypatch.setenv("VNX_SESSION_ID", "env-session-ignored")
     args = argparse.Namespace(
         dispatch_id="b2-sessid-env-wins", terminal_id="T1", instruction="do thing",
         pr_id=None, mandate_id=None,
     )
     result = SimpleNamespace(completion_text="done", token_usage={"input_tokens": 1, "output_tokens": 1})
     captured, _ = _run_emit_governance(monkeypatch, tmp_path, args=args, result=result)
-    assert captured["session_id"] == "env-session-wins"
+    assert captured["session_id"] is None
 
 
 def test_session_id_none_when_nothing_set(monkeypatch, tmp_path):
@@ -127,14 +127,25 @@ def test_session_id_none_when_nothing_set(monkeypatch, tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_toolcall_signals_aggregated_onto_receipt(monkeypatch, tmp_path):
+def test_toolcall_signals_aggregated_from_an_explicit_signal_dir(tmp_path):
     signal_dir = tmp_path / "tmux-signal"
     record_toolcall_event(signal_dir, {"tool_name": "Bash", "tool_input": {"command": "ls"}}, blocked=False)
     record_toolcall_event(signal_dir, {"tool_name": "Bash", "tool_input": {"command": "claude -p x"}}, blocked=True)
     record_toolcall_event(signal_dir, {"tool_name": "Bash", "tool_input": {"command": "pytest"}}, blocked=False)
     record_toolcall_event(signal_dir, {"tool_name": "Bash", "tool_input": {"command": "pytest"}}, blocked=False)
-    monkeypatch.setenv("VNX_TMUX_SIGNAL_DIR", str(signal_dir))
 
+    signals = provider_dispatch._resolve_toolcall_signals(argparse.Namespace(dispatch_id="d"), str(signal_dir))
+
+    assert signals["tool_call_count"] == 4
+    assert signals["tool_call_failures"] == 1
+    assert signals["tool_call_retries"] == 1
+
+
+def test_toolcall_signals_from_the_resolver_land_on_the_receipt(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        provider_dispatch, "_resolve_toolcall_signals",
+        lambda args, signal_dir=None: {"tool_call_count": 4, "tool_call_failures": 1, "tool_call_retries": 1},
+    )
     args = argparse.Namespace(
         dispatch_id="b2-toolcalls-present", terminal_id="T1", instruction="do thing",
         pr_id=None, mandate_id=None,
@@ -150,6 +161,22 @@ def test_toolcall_signals_aggregated_onto_receipt(monkeypatch, tmp_path):
     assert line["tool_call_count"] == 4
     assert line["tool_call_failures"] == 1
     assert line["tool_call_retries"] == 1
+
+
+def test_deleted_signal_dir_variable_no_longer_feeds_the_receipt(monkeypatch, tmp_path):
+    signal_dir = tmp_path / "tmux-signal-ignored"
+    record_toolcall_event(signal_dir, {"tool_name": "Bash", "tool_input": {"command": "ls"}}, blocked=False)
+    monkeypatch.setenv("VNX_TMUX_SIGNAL_DIR", str(signal_dir))
+    args = argparse.Namespace(
+        dispatch_id="b2-toolcalls-env-ignored", terminal_id="T1", instruction="do thing",
+        pr_id=None, mandate_id=None,
+    )
+    result = SimpleNamespace(completion_text="done", token_usage={"input_tokens": 1, "output_tokens": 1})
+
+    captured, lines = _run_emit_governance(monkeypatch, tmp_path, args=args, result=result)
+
+    assert captured["tool_call_count"] is None
+    assert "tool_call_count" not in lines[-1]
 
 
 def test_toolcall_signals_absent_when_signal_dir_unset(monkeypatch, tmp_path):

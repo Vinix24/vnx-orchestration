@@ -268,7 +268,6 @@ class TestTimeoutStallStructuredFailure:
         """Timeout failure record must have all fields needed for T0 reasoning."""
         monkeypatch.setattr("shutil.which", lambda b: "/usr/bin/fake")
         monkeypatch.setenv("VNX_CODEX_GATE_TIMEOUT", "1")
-        monkeypatch.setenv("VNX_CODEX_STALL_THRESHOLD", "300")
 
         runner = GateRunner(
             state_dir=cert_env["state_dir"],
@@ -330,7 +329,7 @@ class TestTimeoutStallStructuredFailure:
         """Stall failure must be distinguishable from timeout in the result."""
         monkeypatch.setattr("shutil.which", lambda b: "/usr/bin/fake")
         monkeypatch.setenv("VNX_CODEX_GATE_TIMEOUT", "300")
-        monkeypatch.setenv("VNX_CODEX_STALL_THRESHOLD", "1")
+        monkeypatch.setitem(sys.modules["headless_adapter"].GATE_STALL_DEFAULTS, "codex_gate", 1)
 
         runner = GateRunner(
             state_dir=cert_env["state_dir"],
@@ -534,7 +533,6 @@ class TestArtifactStability:
         """Failed gate must not leave an orphan report without a completed result."""
         monkeypatch.setattr("shutil.which", lambda b: "/usr/bin/fake")
         monkeypatch.setenv("VNX_CODEX_GATE_TIMEOUT", "1")
-        monkeypatch.setenv("VNX_CODEX_STALL_THRESHOLD", "300")
 
         runner = GateRunner(
             state_dir=cert_env["state_dir"],

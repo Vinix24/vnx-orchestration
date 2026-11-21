@@ -25,7 +25,6 @@ record. Nothing here reads the clock: ``now`` is injected.
 from __future__ import annotations
 
 import json
-import os
 import subprocess
 import sys
 from collections import deque
@@ -35,7 +34,6 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 DEFAULT_CI_WORKFLOW_NAME = "VNX CI"
-CI_WORKFLOW_NAME_ENV_VAR = "VNX_CI_WORKFLOW_NAME"
 DEFAULT_MAIN_BRANCH = "main"
 GH_TIMEOUT = 15
 DEFAULT_LIMIT = 30
@@ -82,8 +80,8 @@ Runner = Callable[..., "subprocess.CompletedProcess"]
 
 
 def resolve_ci_workflow_name(explicit: Optional[str] = None) -> str:
-    """Explicit name, else ``VNX_CI_WORKFLOW_NAME``, else ``VNX CI``."""
-    return explicit or os.environ.get(CI_WORKFLOW_NAME_ENV_VAR) or DEFAULT_CI_WORKFLOW_NAME
+    """Explicit name, else ``VNX CI``."""
+    return explicit or DEFAULT_CI_WORKFLOW_NAME
 
 
 @dataclass(frozen=True)
@@ -568,7 +566,7 @@ def admit(
     running = tuple(e.sha for e in window.entries if e.state == RUN_RUNNING)
     common = dict(max_unverified=max_unverified, max_age_min=max_age_min, window=window,
                   running_shas=running, invalid_config=tuple(invalid_config))
-    if any(CONFIG_UNREADABLE in item for item in invalid_config):
+    if any(m in item for item in invalid_config for m in (CONFIG_UNREADABLE, GLOBAL_CONFIG_UNREADABLE)):
         # The store state is unknown, so "unset" cannot be assumed: fail closed.
         return Admission(verdict=NO_GO, mode=MODE_ON, reason="config_unreadable", **common)
     if max_unverified is None:
@@ -584,6 +582,7 @@ def admit(
 UNVERIFIED_MAX_KEY = "VNX_MAIN_UNVERIFIED_MAX"
 RUN_MAX_AGE_KEY = "VNX_MAIN_RUN_MAX_AGE_MIN"
 CONFIG_UNREADABLE = "project_config unreadable"
+GLOBAL_CONFIG_UNREADABLE = "global_config unreadable"  # ADR-087 layer 3
 
 
 def _positive_int(raw: Any) -> Optional[int]:
@@ -622,16 +621,16 @@ def read_admission_config(
     raw_age, source_age = cr.resolve_with_source(
         RUN_MAX_AGE_KEY, project_id, resolver, use_default_resolver=False, strict_resolver=True)
     for key, source in ((UNVERIFIED_MAX_KEY, source_n), (RUN_MAX_AGE_KEY, source_age)):
-        if source == "project_config_error":
-            invalid.append(f"{key}: {CONFIG_UNREADABLE}")
+        if source in cr.ERROR_SOURCES:
+            invalid.append(f"{key}: {CONFIG_UNREADABLE if source == 'project_config_error' else GLOBAL_CONFIG_UNREADABLE}")
     max_n = None
-    if raw_n not in (None, "") and source_n != "project_config_error":
+    if raw_n not in (None, "") and source_n not in cr.ERROR_SOURCES:
         max_n = _positive_int(raw_n)
         if max_n is None:
             invalid.append(f"invalid_config {UNVERIFIED_MAX_KEY}: {raw_n!r}, read as unset")
     age = _positive_int(raw_age) if raw_age not in (None, "") else None
     if age is None:
-        if raw_age not in (None, "") and source_age != "project_config_error":
+        if raw_age not in (None, "") and source_age not in cr.ERROR_SOURCES:
             invalid.append(f"invalid_config {RUN_MAX_AGE_KEY}: {raw_age!r}, default {DEFAULT_RUN_MAX_AGE_MIN}")
         age = DEFAULT_RUN_MAX_AGE_MIN
     return max_n, age, tuple(invalid)

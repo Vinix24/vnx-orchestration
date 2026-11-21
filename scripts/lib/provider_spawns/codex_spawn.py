@@ -357,14 +357,7 @@ def _resolve_codex_model(model: Optional[str]) -> str:
     )
 
 
-_CODEX_SANDBOX_MODES = ("workspace-write", "read-only", "danger-full-access")
 _POLICY_ABSENT = "policy_absent"
-
-
-def _codex_sandbox_mode() -> Optional[str]:
-    """The ``--sandbox`` mode from ``VNX_CODEX_SANDBOX``, or None when unset or unknown (bypass route)."""
-    sandbox = (os.environ.get("VNX_CODEX_SANDBOX", "") or "").strip()
-    return sandbox if sandbox in _CODEX_SANDBOX_MODES else None
 
 
 def _codex_policy_record(
@@ -373,7 +366,8 @@ def _codex_policy_record(
     """The codex layer-0/layer-1 record, shaped like the P3 material record plus the two layers.
 
     ``fs`` is the sandbox mode only when the argv carries ``--sandbox <mode>``; the bypass
-    route (unset or unknown value) is ``unsupported``. An unknown lane raises ``ValueError``.
+    route, which :func:`_build_cmd` always takes, is ``unsupported``. An unknown lane raises
+    ``ValueError``.
     """
     import permission_harness_map as phm
 
@@ -443,19 +437,15 @@ def _build_cmd(model: Optional[str]) -> list:
     few seconds. This was the t2+ "launch-flakiness": not launch/quota, the sandbox blocking
     file ops (t1 squeaked through on minimal ops). Worker dispatch needs file+command access.
 
-    Default to the full bypass — the worker runs in an ISOLATED worktree cell (same posture
-    as claude's --dangerously-skip-permissions in the bench). Override via VNX_CODEX_SANDBOX
-    ("workspace-write" = recommended safer level that still allows workspace edits + sandboxed
-    command exec; "read-only"/"danger-full-access" also accepted).
+    The worker runs with the full bypass in an ISOLATED worktree cell (same posture as
+    claude's --dangerously-skip-permissions in the bench). There is no env switch for a
+    ``--sandbox`` mode: ``VNX_CODEX_SANDBOX`` was deleted under ADR-087, keeping the route
+    every run took with it unset.
     """
-    cmd = ["codex", "exec", "--json"]
-    sandbox = _codex_sandbox_mode()
-    if sandbox is not None:
-        cmd += ["--sandbox", sandbox]
-    else:
-        cmd += ["--dangerously-bypass-approvals-and-sandbox"]
-    cmd += ["--model", _resolve_codex_model(model)]
-    return cmd
+    return [
+        "codex", "exec", "--json", "--dangerously-bypass-approvals-and-sandbox",
+        "--model", _resolve_codex_model(model),
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -845,19 +835,9 @@ def spawn_codex(
         HealthStatus = None  # type: ignore[assignment]
         SLOW_THRESHOLD = 120.0
 
-    try:
-        chunk_timeout = float(os.environ["VNX_CODEX_STALL_THRESHOLD"])
-    except (KeyError, ValueError):
-        pass
-    try:
-        total_deadline = float(os.environ["VNX_CODEX_TIMEOUT"])
-    except (KeyError, ValueError):
-        pass
     # OI-903: scale the stall timeout with the total deadline so a long deadline
-    # stays the binding constraint. Skipped when VNX_CODEX_STALL_THRESHOLD is set
-    # explicitly — env overrides retain precedence.
-    if "VNX_CODEX_STALL_THRESHOLD" not in os.environ:
-        chunk_timeout = coerce_chunk_stall(chunk_timeout, total_deadline)
+    # stays the binding constraint.
+    chunk_timeout = coerce_chunk_stall(chunk_timeout, total_deadline)
 
     launch_model, early_result = _resolve_launch_model(model)
     if early_result is not None:

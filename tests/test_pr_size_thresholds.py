@@ -58,19 +58,19 @@ def _check(lines: int, project: str = "proj-a", state=None):
 
 def test_registry_carries_the_only_defaults():
     assert config_registry.CONFIG_REGISTRY[WARN].default == "450"
-    assert config_registry.CONFIG_REGISTRY[HOLD].default == "600"
+    assert config_registry.CONFIG_REGISTRY[HOLD].default == "450"
     assert not hasattr(pre_merge_gate, "PR_SIZE_WARN")
     assert not hasattr(pre_merge_gate, "PR_SIZE_HOLD")
 
 
-def test_defaults_warn_above_450_hold_above_600(tmp_path):
+def test_defaults_hold_above_450_with_no_warn_band(tmp_path):
+    # ADR-088 besluit 9. Red run on origin/main: 451 and 500 lines were GO (HOLD was 600).
     state = _state(tmp_path, {})
     assert _check(450, state=state)["detail"] == "450 lines changed vs origin/main"
-    warn = _check(451, state=state)
-    assert warn["status"] == "GO" and ">450 warn threshold, default" in warn["detail"]
-    assert _check(600, state=state)["status"] == "GO"
-    hold = _check(601, state=state)
-    assert hold["status"] == "HOLD" and ">600 hold threshold, default" in hold["detail"]
+    for lines in (451, 500):
+        hold = _check(lines, state=state)
+        assert hold["status"] == "HOLD" and ">450 hold threshold, default" in hold["detail"]
+        assert "warn threshold" not in hold["detail"]
 
 
 def test_project_config_row_holds_that_project_only(tmp_path):
@@ -106,7 +106,7 @@ def test_environment_follows_registry_precedence(tmp_path, monkeypatch):
 
 
 def test_no_project_and_no_state_dir_uses_environment_and_default(monkeypatch):
-    assert _check(601, project=None)["status"] == "HOLD"
+    assert _check(451, project=None)["status"] == "HOLD"
     monkeypatch.setenv(HOLD, "300")
     assert _check(400, project=None)["status"] == "HOLD"
 
@@ -114,42 +114,43 @@ def test_no_project_and_no_state_dir_uses_environment_and_default(monkeypatch):
 @pytest.mark.parametrize("bad", ["abc", "0", "-5", "", "4.5", "None"])
 def test_invalid_hold_falls_back_to_defaults_and_names_the_key(tmp_path, monkeypatch, bad):
     monkeypatch.setenv(HOLD, bad)
-    result = _check(601, state=_state(tmp_path, {}))
+    result = _check(451, state=_state(tmp_path, {}))
     assert result["status"] == "HOLD"
-    assert f"invalid {HOLD}: {bad!r}, default 600" in result["detail"]
-    assert _check(600)["status"] == "GO"
+    assert f"invalid {HOLD}: {bad!r}, default 450" in result["detail"]
+    assert _check(450)["status"] == "GO"
 
 
 @pytest.mark.parametrize("bad", ["abc", "0", "-5"])
 def test_invalid_warn_falls_back_and_keeps_hold_on_default(tmp_path, monkeypatch, bad):
     monkeypatch.setenv(WARN, bad)
-    result = _check(500)
+    result = _check(450)
+    assert result["status"] == "GO"
     assert f"invalid {WARN}: {bad!r}, default 450" in result["detail"]
-    assert ">450 warn threshold" in result["detail"]
-    assert _check(601)["status"] == "HOLD"
+    held = _check(451)
+    assert held["status"] == "HOLD" and ">450 hold threshold, default" in held["detail"]
 
 
 def test_invalid_row_in_project_config_never_disables_the_check(tmp_path):
     state = _state(tmp_path, {"proj-a": {HOLD: "abc"}})
-    result = _check(601, "proj-a", state)
+    result = _check(451, "proj-a", state)
     assert result["status"] == "HOLD"
-    assert f"invalid {HOLD}: 'abc', default 600" in result["detail"]
+    assert f"invalid {HOLD}: 'abc', default 450" in result["detail"]
 
 
 def test_warn_above_hold_falls_back_to_both_defaults(monkeypatch):
     monkeypatch.setenv(WARN, "800")
     monkeypatch.setenv(HOLD, "300")
-    result = _check(500)
-    assert result["status"] == "GO" and ">450 warn threshold, default" in result["detail"]
+    result = _check(400)
+    assert result["status"] == "GO"
     assert "invalid VNX_PR_SIZE_WARN: 800 above VNX_PR_SIZE_HOLD 300" in result["detail"]
-    assert _check(601)["status"] == "HOLD"
+    assert ">450 hold threshold, default" in _check(451)["detail"]
 
 
 def test_unreadable_store_is_named_and_falls_back(tmp_path):
     bad_state = tmp_path / "state"
     bad_state.mkdir()
     (bad_state / "runtime_coordination.db").write_text("not a database")
-    result = _check(601, "proj-a", bad_state)
+    result = _check(451, "proj-a", bad_state)
     assert result["status"] == "HOLD"
 
 
@@ -173,18 +174,18 @@ def _broken_store(tmp_path: Path, kind: str) -> Path:
 @pytest.mark.parametrize("kind", ["garbage", "wrong_schema"])
 def test_unreadable_store_is_named_and_gives_the_defaults(tmp_path, kind):
     th = pre_merge_gate._pr_size_thresholds("proj-a", _broken_store(tmp_path, kind))
-    assert (th["warn"], th["hold"]) == (450, 600)
+    assert (th["warn"], th["hold"]) == (450, 450)
     assert th["warn_source"] == "default" and th["hold_source"] == "default"
     assert len(th["invalid"]) == 2
     for key in (WARN, HOLD):
         assert any("project_config_error" in i and key in i and "could not be read" in i
                    for i in th["invalid"])
-    assert any("default 600" in i for i in th["invalid"])
+    assert all("default 450" in i for i in th["invalid"])
 
 
 def test_unreadable_store_still_judges_by_the_defaults_and_says_so(tmp_path):
     state = _broken_store(tmp_path, "garbage")
-    held = _check(601, state=state)
+    held = _check(451, state=state)
     assert held["status"] == "HOLD" and "project_config_error" in held["detail"]
     ok = _check(100, state=state)
     assert ok["status"] == "GO" and "project_config_error" in ok["detail"]
@@ -196,5 +197,5 @@ def test_missing_project_config_table_is_no_value_not_an_error(tmp_path):
     state.mkdir()
     sqlite3.connect(state / "runtime_coordination.db").close()
     th = pre_merge_gate._pr_size_thresholds("proj-a", state)
-    assert (th["warn"], th["hold"], th["invalid"]) == (450, 600, [])
+    assert (th["warn"], th["hold"], th["invalid"]) == (450, 450, [])
     assert th["hold_source"] == "default"

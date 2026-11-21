@@ -4,7 +4,7 @@ Covers:
 - ADAPTER_DEFAULT_TIERS contains all expected adapters
 - ADAPTER_MINIMUM_TIERS are <= ADAPTER_DEFAULT_TIERS for every adapter
 - resolve_effective_tier returns correct tier per provider
-- Gemini tier follows VNX_GEMINI_STREAM env var
+- Gemini tier is 3 (streaming is off)
 - GOVERNANCE_MIN_TIERS contains coding-strict and business-light
 - get_governance_min_tier returns correct values
 """
@@ -113,16 +113,11 @@ class TestResolveEffectiveTier:
     def test_codex_returns_tier_1(self):
         assert resolve_effective_tier("codex") == 1
 
-    def test_gemini_tier_1_when_stream_enabled(self, monkeypatch):
-        monkeypatch.setenv("VNX_GEMINI_STREAM", "1")
-        assert resolve_effective_tier("gemini") == 1
-
-    def test_gemini_tier_3_when_stream_disabled(self, monkeypatch):
-        monkeypatch.setenv("VNX_GEMINI_STREAM", "0")
+    def test_gemini_tier_3_streaming_is_off(self):
         assert resolve_effective_tier("gemini") == 3
 
-    def test_gemini_tier_3_when_stream_unset(self, monkeypatch):
-        monkeypatch.delenv("VNX_GEMINI_STREAM", raising=False)
+    def test_gemini_tier_ignores_the_deleted_stream_variable(self, monkeypatch):
+        monkeypatch.setenv("VNX_GEMINI_STREAM", "1")
         assert resolve_effective_tier("gemini") == 3
 
     def test_litellm_tier_1_when_streaming(self):
@@ -139,8 +134,7 @@ class TestResolveEffectiveTier:
         tier = resolve_effective_tier("unknown-provider")
         assert 1 <= tier <= 3
 
-    def test_case_insensitive_provider(self, monkeypatch):
-        monkeypatch.setenv("VNX_GEMINI_STREAM", "1")
+    def test_case_insensitive_provider(self):
         assert resolve_effective_tier("GEMINI") == resolve_effective_tier("gemini")
 
     def test_kimi_resolves_to_tier_1_not_generic_2(self):

@@ -185,24 +185,34 @@ cmd_start() {
     log "Loaded project config: $runtime_dir/config.env"
   fi
   # Resolve the T0 provider once. Workers are spawned on demand outside startup.
-  local VNX_PROVIDER="${VNX_T0_PROVIDER:-${VNX_PROVIDER:-claude_code}}"
-  local gemini_model="${VNX_GEMINI_MODEL:-gemini-2.5-pro}"
+  local t0_provider="${VNX_T0_PROVIDER:-claude_code}"
+  local gemini_model="gemini-2.5-pro"
   local codex_model="${VNX_CODEX_MODEL:-gpt-5.1-codex-mini}"
-  local t0_flags="${VNX_T0_FLAGS:-}"
+  local t0_flags=""
 
   # Skip-permissions flags (from preset/custom config)
   local t0_skip="${VNX_T0_SKIP_PERMISSIONS:-0}"
 
   # Queue popup toggle (from preset/custom config)
-  local queue_popup_enabled="${VNX_QUEUE_POPUP_ENABLED:-1}"
+  # Read through the one config surface (stored value > env > registry default), by this
+  # fabric's own binary and never PATH. A failed read stops the start naming the key.
+  local queue_popup_enabled
+  queue_popup_enabled="$("$VNX_HOME/bin/vnx" config get --raw VNX_QUEUE_POPUP_ENABLED)" || {
+    err "vnx config get --raw VNX_QUEUE_POPUP_ENABLED failed; start stopped"
+    return 1
+  }
+  if [ -z "$queue_popup_enabled" ]; then
+    err "VNX_QUEUE_POPUP_ENABLED has no value; start stopped"
+    return 1
+  fi
   export VNX_QUEUE_POPUP_ENABLED="$queue_popup_enabled"
 
-  local t0_model="${VNX_T0_MODEL:-default}"
+  local t0_model="default"
   local t0_cmd=""
   local t0_provider_for_state="claude_code"
   local t0_provider_label="Claude"
   local t0_skip_flag=""
-  case "$VNX_PROVIDER" in
+  case "$t0_provider" in
     codex_cli|codex)
       [ "$t0_skip" = "1" ] && t0_skip_flag=" --full-auto"
       t0_cmd="codex -m $codex_model$t0_skip_flag"
@@ -242,7 +252,7 @@ cmd_start() {
     # If a profile was explicitly selected, kill the existing session and restart
     # fresh so the chosen T0 provider is actually applied.
     if [ -n "$profile_name" ] && [ "${active_cli_count:-0}" -gt 0 ]; then
-      log "Profile '$profile_name' selected — restarting session to apply T0 provider ($VNX_PROVIDER)..."
+      log "Profile '$profile_name' selected — restarting session to apply T0 provider ($t0_provider)..."
       vnx_kill_all_orchestration "$scripts_dir" "$log_dir" "profile_restart"
       tmux kill-session -t "$session_name" 2>/dev/null || true
       sleep 1
@@ -420,12 +430,8 @@ TSJSON
     --project-root "$PROJECT_ROOT" \
     2>/dev/null || log "[start] WARN: session profile save failed (non-fatal)"
 
-  # ── Worktree initialization (if enabled) ────────────────────────────
   # T0-only startup does not create per-terminal worker worktrees. Use
   # 'vnx new-worktree <name>' for feature worktrees.
-  if [ "${VNX_WORKTREES:-false}" = "true" ]; then
-    log "Ignoring VNX_WORKTREES=true: T0-only startup no longer creates fixed worker worktrees."
-  fi
 
   # ── Conversation capture (pipe-pane) ───────────────────────────────────
   tmux pipe-pane -o -t "$T0" "cat >> '$state_dir/t0_conversation.log'"

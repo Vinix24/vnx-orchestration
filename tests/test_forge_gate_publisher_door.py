@@ -25,7 +25,7 @@ import pr_merge  # noqa: E402
 
 SHA = "a" * 40
 APP_ID = 4869217
-GATES = ["ci", "review", "adr", "contract_invalid", "branch_protection", "main"]
+GATES = ["ci", "pr_size", "review", "adr", "contract_invalid", "branch_protection", "main", "morning_pause"]
 
 
 class FakeGitHub:
@@ -177,7 +177,7 @@ def test_each_evidence_refusal_has_its_own_text() -> None:
 @pytest.mark.parametrize("verdict", [None, "NO-GO", "not_evaluated", "go", "GO ", True, 1])
 def test_a_verdict_that_is_not_exactly_go_refuses(verdict: Any) -> None:
     gates = _evidence()["preflight_gates"]
-    gates[2] = {"gate": "adr", "verdict": verdict}
+    gates[3] = {"gate": "adr", "verdict": verdict}
     assert "geen GO" in _refusal(_evidence(preflight_gates=gates))
 
 

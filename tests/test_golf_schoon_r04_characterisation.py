@@ -19,6 +19,7 @@ for sub in ("scripts", "scripts/lib", "scripts/dream"):
     sys.path.insert(0, str(REPO_ROOT / sub))
 
 import consolidator  # noqa: E402
+from content_boundary_pin import pin_boundary
 
 PROJECT = "vnx-dev"
 CONSOLIDATION = {
@@ -41,7 +42,7 @@ CREATE TABLE antipatterns (id INTEGER PRIMARY KEY AUTOINCREMENT, project_id TEXT
 def world(tmp_path, monkeypatch):
     boundary = tmp_path / "boundary.json"
     boundary.write_text(json.dumps({"version": 1}), encoding="utf-8")
-    monkeypatch.setenv("VNX_CONTENT_BOUNDARY_FILE", str(boundary))
+    pin_boundary(monkeypatch, str(boundary))
     monkeypatch.setenv("VNX_PROVIDER_SWITCH_FILE", str(tmp_path / "switch" / "providers.json"))
     monkeypatch.setenv("VNX_DREAM_SCHEDULER_ENABLED", "1")
     monkeypatch.delenv("VNX_DREAM_PROVIDER", raising=False)
@@ -98,7 +99,8 @@ def test_completed_cycle_result_review_events_row_and_stdout(world, capsys):
     assert out.startswith(f"dream run: cycle={result['cycle_id']} project={PROJECT}")
     assert set(result) == {
         "cycle_id", "probe_health", "input_count", "restricted_rows_dropped", "merged_count",
-        "dropped_count", "archived_count", "flagged_count", "review_path"}
+        "dropped_count", "archived_count", "flagged_count", "review_path",
+        "input_hash", "tables_without_valid_until"}  # D3a: additive fields
     assert result["probe_health"] == "ok" and result["input_count"] == 1
     zero = {"antipatterns": 0, "intelligence_injections": 0, "success_patterns": 0}
     assert result["restricted_rows_dropped"] == zero
@@ -120,7 +122,7 @@ def test_completed_cycle_result_review_events_row_and_stdout(world, capsys):
 
 
 def test_provider_receives_patterns_project_provider_and_timeout(world, monkeypatch):
-    monkeypatch.setenv("VNX_DREAM_TIMEOUT", "42")
+    monkeypatch.setattr(consolidator, "_DEFAULT_TIMEOUT", 42)
     world.run()
     patterns, project, provider, timeout = world.calls[0]
     assert project == PROJECT and provider == "deepseek" and timeout == 42.0
@@ -176,7 +178,7 @@ def test_no_patterns_skips_without_calling_the_provider(world):
 
 
 def test_timeout_returns_timeout_result_and_writes_no_review_or_row(world, monkeypatch):
-    monkeypatch.setenv("VNX_DREAM_TIMEOUT", "7")
+    monkeypatch.setattr(consolidator, "_DEFAULT_TIMEOUT", 7)
     world.behaviour["raise"] = subprocess.TimeoutExpired("deepseek", 7)
     result = world.run()
     assert result == {"status": "timeout", "cycle_id": result["cycle_id"],

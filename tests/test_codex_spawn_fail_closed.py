@@ -51,7 +51,6 @@ class TestCodexSpawnModelResolution:
 
     def test_build_cmd_defaults_to_registry_model(self, monkeypatch):
         monkeypatch.delenv("VNX_CODEX_DEFAULT_MODEL", raising=False)
-        monkeypatch.delenv("VNX_CODEX_SANDBOX", raising=False)
         from providers import provider_registry
         expected = provider_registry.load()["openai"].default_model
         assert _build_cmd("") == [
@@ -61,7 +60,6 @@ class TestCodexSpawnModelResolution:
 
     def test_build_cmd_uses_env_default(self, monkeypatch):
         monkeypatch.setenv("VNX_CODEX_DEFAULT_MODEL", "gpt-5.5-test")
-        monkeypatch.delenv("VNX_CODEX_SANDBOX", raising=False)
         assert _build_cmd("") == [
             "codex", "exec", "--json",
             "--dangerously-bypass-approvals-and-sandbox", "--model", "gpt-5.5-test",
@@ -69,7 +67,6 @@ class TestCodexSpawnModelResolution:
 
     def test_build_cmd_explicit_model_overrides_env_default(self, monkeypatch):
         monkeypatch.setenv("VNX_CODEX_DEFAULT_MODEL", "gpt-5.5-test")
-        monkeypatch.delenv("VNX_CODEX_SANDBOX", raising=False)
         assert _build_cmd("gpt-5.5") == [
             "codex", "exec", "--json",
             "--dangerously-bypass-approvals-and-sandbox", "--model", "gpt-5.5",

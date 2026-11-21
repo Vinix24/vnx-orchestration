@@ -111,11 +111,9 @@ class TestStarterInit:
         config2 = init_starter()
         assert config1.data_dir == config2.data_dir
 
-    def test_init_respects_feature_flag(self, vnx_env):
-        os.environ["VNX_STARTER_MODE_ENABLED"] = "0"
-        with pytest.raises(RuntimeError, match="disabled"):
-            init_starter()
-        os.environ.pop("VNX_STARTER_MODE_ENABLED")
+    def test_init_ignores_the_deleted_starter_switch(self, vnx_env, monkeypatch):
+        monkeypatch.setenv("VNX_STARTER_MODE_ENABLED", "0")
+        assert init_starter().data_dir
 
 
 # ---------------------------------------------------------------------------

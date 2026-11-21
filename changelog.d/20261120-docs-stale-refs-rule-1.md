@@ -1,0 +1,1 @@
+- `scripts/ci/check_docs_stale_refs.py` lands with rule 1 (`--rule paths` and `--rule links`): backtick paths and markdown links in the docs must resolve to tracked files, with `--report`, the `generated` label for `BEGIN GENERATED` blocks and `PATH_EXCEPTIONS`. It is not wired into CI yet.

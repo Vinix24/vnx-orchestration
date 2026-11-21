@@ -33,7 +33,7 @@ def no_config_store(monkeypatch) -> None:
     monkeypatch.setattr(config_registry, "_db_resolver", None)
     for key in ("VNX_DEFAULT_REVIEW_STACK", REVIEW_STACK_OVERRIDE, "VNX_REVIEW_GATE_TAKEOVER_CHAIN",
                 "VNX_OVERRIDE_REVIEW_GATE_TAKEOVER_CHAIN", "VNX_CI_GATE_REQUIRED",
-                "VNX_OVERRIDE_CI_GATE_REQUIRED", "VNX_PROFILE_SELECTOR"):
+                "VNX_OVERRIDE_CI_GATE_REQUIRED"):
         monkeypatch.delenv(key, raising=False)
 
 

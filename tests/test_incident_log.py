@@ -11,7 +11,7 @@ Covers:
   - Repeated-failure-loop detection
   - Incident resolution and escalation state transitions
   - Incident summary generation (no shell log parsing)
-  - Shadow mode isolation (VNX_INCIDENT_SHADOW=0 is a no-op)
+  - Shadow mode isolation (always on)
   - Schema initialization is idempotent
 """
 
@@ -37,7 +37,6 @@ from incident_log import (
     get_budget,
     get_incident_history,
     is_in_cooldown,
-    is_shadow_mode,
     resolve_incident,
     reset_budget,
 )
@@ -742,39 +741,8 @@ class TestIncidentSummary:
 # ---------------------------------------------------------------------------
 
 class TestShadowMode:
-    def test_shadow_mode_on_by_default(self, monkeypatch):
-        monkeypatch.delenv("VNX_INCIDENT_SHADOW", raising=False)
-        assert is_shadow_mode() is True
-
-    def test_shadow_mode_can_be_disabled(self, monkeypatch):
-        monkeypatch.setenv("VNX_INCIDENT_SHADOW", "0")
-        assert is_shadow_mode() is False
-
-    def test_shadow_mode_on_when_set_to_1(self, monkeypatch):
-        monkeypatch.setenv("VNX_INCIDENT_SHADOW", "1")
-        assert is_shadow_mode() is True
-
-    def test_supervisor_shadow_crash_noop_when_disabled(self, monkeypatch, state_dir):
-        """When shadow mode is off, record_process_crash is a no-op."""
-        monkeypatch.setenv("VNX_INCIDENT_SHADOW", "0")
-
-        # Import here so monkeypatch takes effect
-        from supervisor_shadow import record_process_crash
-        result = record_process_crash(
-            "dispatcher",
-            pid=12345,
-            state_dir=state_dir,
-        )
-        assert result is None
-
-        # No incidents should have been written
-        with get_connection(state_dir) as conn:
-            count = conn.execute("SELECT COUNT(*) AS cnt FROM incident_log").fetchone()["cnt"]
-        assert count == 0
-
-    def test_supervisor_shadow_crash_records_when_enabled(self, monkeypatch, state_dir):
-        """When shadow mode is on, record_process_crash writes an incident."""
-        monkeypatch.setenv("VNX_INCIDENT_SHADOW", "1")
+    def test_supervisor_shadow_crash_records_an_incident(self, monkeypatch, state_dir):
+        """record_process_crash writes an incident."""
 
         from supervisor_shadow import record_process_crash
         iid = record_process_crash(
@@ -795,7 +763,6 @@ class TestShadowMode:
 
     def test_shadow_does_not_affect_existing_supervisor_state(self, monkeypatch, state_dir, tmp_path):
         """Shadow mode never touches restart_tracking files used by supervisor."""
-        monkeypatch.setenv("VNX_INCIDENT_SHADOW", "1")
         restart_dir = tmp_path / "restart_tracking"
         restart_dir.mkdir()
         tracking_file = restart_dir / "dispatcher.txt"

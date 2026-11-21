@@ -260,7 +260,7 @@ not this doc).
 
 **Hooks actually wired in this repo's `.claude/settings.json`** (see the
 generated *Hooks Wired* table further down, which is the checkable source):
-`session_stop_rotation.py` (Stop). `t0_context_guard.py` runs at user level via
+none. `t0_context_guard.py` runs at user level via
 `vnx guard install`, not in this file (G3, dispatch dlv-2f23d1dbf443). T0's own rotation flow, the mechanism
 that actually ships, is `docs/operations/T0_CONTEXT_ROTATION.md`
 (`scripts/hooks/t0_context_guard.py`, `scripts/t0_rotate_spawn.sh`). `vnx guard install|check`
@@ -609,15 +609,15 @@ liveness with `bash scripts/vnx_supervisor_simple.sh status` or
 `python3 -c "import sys; sys.path.insert(0,'scripts/lib'); import daemon_register as d; print(d.measure_daemon_liveness())"`.
 
 <!-- BEGIN GENERATED: supervised-components -->
-- Dispatcher (native skills, multi-provider dispatch). — `dispatcher_minimal.sh` — `scripts/vnx_supervisor_simple.sh:198`
-- Smart Tap (JSON/Markdown auto-translation). — `smart_tap_json_translator.sh` — `scripts/vnx_supervisor_simple.sh:204`
-- Receipt Processor (report -> receipt -> T0 delivery, adoption tracking). — `receipt_processor.sh` — `scripts/vnx_supervisor_simple.sh:205`
-- Heartbeat ACK Monitor (ACK processing + timeout tracking). — `heartbeat_ack_monitor.py` — `scripts/vnx_supervisor_simple.sh:210`
-- Queue Watcher (dispatch review popup; falls back to auto-accept when VNX_QUEUE_POPUP_ENABLED=0). — `queue_popup_watcher.sh` or `queue_auto_accept.sh` (conditional) — `scripts/vnx_supervisor_simple.sh:212`
-- Dashboard Generator (real-time metrics -> dashboard_status.json). — `generate_valid_dashboard.sh` — `scripts/vnx_supervisor_simple.sh:217`
-- Unified State Manager (state consolidation, 5s cycle). — `unified_state_manager.py` — `scripts/vnx_supervisor_simple.sh:218`
-- Intelligence Daemon (real-time intelligence updates). — `intelligence_daemon.py` — `scripts/vnx_supervisor_simple.sh:219`
-- Recommendations Engine (T0 dispatch suggestions, max 5 pending). — `recommendations_engine_daemon.sh` — `scripts/vnx_supervisor_simple.sh:220`
+- Dispatcher (native skills, multi-provider dispatch). — `dispatcher_minimal.sh` — `scripts/vnx_supervisor_simple.sh:216`
+- Smart Tap (JSON/Markdown auto-translation). — `smart_tap_json_translator.sh` — `scripts/vnx_supervisor_simple.sh:222`
+- Receipt Processor (report -> receipt -> T0 delivery, adoption tracking). — `receipt_processor.sh` — `scripts/vnx_supervisor_simple.sh:223`
+- Heartbeat ACK Monitor (ACK processing + timeout tracking). — `heartbeat_ack_monitor.py` — `scripts/vnx_supervisor_simple.sh:228`
+- Queue Watcher (dispatch review popup; falls back to auto-accept when VNX_QUEUE_POPUP_ENABLED=0). — `queue_popup_watcher.sh` or `queue_auto_accept.sh` (conditional) — `scripts/vnx_supervisor_simple.sh:230`
+- Dashboard Generator (real-time metrics -> dashboard_status.json). — `generate_valid_dashboard.sh` — `scripts/vnx_supervisor_simple.sh:235`
+- Unified State Manager (state consolidation, 5s cycle). — `unified_state_manager.py` — `scripts/vnx_supervisor_simple.sh:236`
+- Intelligence Daemon (real-time intelligence updates). — `intelligence_daemon.py` — `scripts/vnx_supervisor_simple.sh:237`
+- Recommendations Engine (T0 dispatch suggestions, max 5 pending). — `recommendations_engine_daemon.sh` — `scripts/vnx_supervisor_simple.sh:238`
 <!-- END GENERATED: supervised-components -->
 
 ### Hooks Wired in `.claude/settings.json` (generated — do not hand-edit; regenerate with `python3 scripts/generate_architecture_doc.py --write`)
@@ -626,7 +626,7 @@ liveness with `bash scripts/vnx_supervisor_simple.sh status` or
 - **PreToolUse**: `pretooluse_block_raw_claude_spawn.sh`, `pretooluse_worker_scope_enforce.sh`, `pretooluse_block_subagent.sh`
 - **SessionEnd**: `session_reconcile_cleanup.sh`, `build_current_state.py`, `build_doc_indexes.py`
 - **SessionStart**: `session_reconcile_autoclose.sh`, `build_t0_state_hook.sh`, `path_parity_check.sh`, `monitor_tripwire.sh`, `sessionstart.sh`, `hookpin_check.sh`
-- **Stop**: `stop_report_hook.sh`, `session_stop_rotation.py`
+- **Stop**: `stop_report_hook.sh`
 <!-- END GENERATED: hooks -->
 
 `scripts/userpromptsubmit_worker_intelligence_inject.sh` is not in the list above:
@@ -1001,7 +1001,7 @@ Each skill has a `SKILL.md` with YAML frontmatter (required for Codex CLI discov
 ### Path Resolution
 
 `scripts/lib/vnx_paths.sh` provides dynamic path resolution:
-- `_resolve_node_path()` -- finds node via VNX_NODE_PATH > nvm > system PATH
+- `_resolve_node_path()` -- finds node via nvm > system PATH
 - `_resolve_venv_path()` -- finds Python venv in project or main worktree
 - `_resolve_project_root()` -- git-based resolution with worktree awareness
 - Cross-project contamination guard: validates inherited VNX_HOME matches computed default
@@ -1132,7 +1132,7 @@ Commands: `vnx regen-settings --merge` (update VNX keys) | `--full` (first-time 
 
 **`config.env`** (project-level, sourced by `vnx start`):
 ```bash
-VNX_PROVIDER=claude_code       # T0 provider (claude_code/codex_cli/gemini_cli)
+VNX_T0_PROVIDER=claude_code    # T0 provider (claude_code/codex_cli/gemini_cli)
 VNX_MODEL=sonnet               # Default build-worker model: provider_constraints.yaml pins the actual floor/default
 VNX_T1_PROVIDER=codex_cli      # T1 role can use a different provider
 ```

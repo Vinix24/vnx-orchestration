@@ -60,7 +60,8 @@ def store(tmp_path, monkeypatch):
     monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
     monkeypatch.setenv("VNX_STATE_DIR", str(state))
     monkeypatch.setenv("VNX_PROJECT_ID", PROJECT)
-    monkeypatch.setenv("VNX_CLAUDE_PROJECTS_DIR", str(projects))
+    import token_harvest
+    monkeypatch.setattr(token_harvest, "_default_claude_projects_dir", lambda: projects)
     return SimpleNamespace(projects=projects, ledger=data / "events" / "provider_costs.ndjson")
 
 

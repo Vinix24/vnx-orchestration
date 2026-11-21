@@ -1,0 +1,1 @@
+- `scripts/lib/morning_pause.py`: pure morning-pause core (`is_paused`, `window_from_config`) and four `VNX_MORNING_PAUSE_*` registry keys, default off; nothing calls it yet (ochtendronde D1a, ADR-095).

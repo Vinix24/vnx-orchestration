@@ -41,8 +41,14 @@ covered by:
       ``completed``;
   (f) a sibling ``dispatch/other`` branch appearing mid-run (a different,
       concurrent dispatch) still books ``completed``;
-  (g) the exclusion is narrow — a bare ``git branch pr1950`` (no checkout
-      needed) OUTSIDE the ``dispatch/`` prefix still books ``unavailable``.
+  (g) PR content fetched into the main checkout as a local branch outside
+      ``dispatch/`` (``git fetch`` + ``git branch pr1950 FETCH_HEAD``, no
+      checkout) still books ``unavailable``.
+
+OI-2711 / OI-2756: the net reads HEAD, status and the gated PR branch, not
+every local branch, so (h) a sibling worktree's ``git branch hold/x`` and (i)
+another chain's ``git branch -f work HEAD~1`` no longer book the seat, while
+(j) a HEAD switch, a dirty tree and the PR branch moving still do.
 """
 
 from __future__ import annotations
@@ -323,33 +329,118 @@ class TestDispatchBranchChurnIsExcludedFromTheVangnet:
     def test_agent_creates_non_dispatch_branch_in_main_repo_still_caught(
         self, orchestrator_repo, monkeypatch, tmp_path,
     ):
-        """The exclusion is narrow: a branch OUTSIDE the ``dispatch/`` prefix
-        (e.g. the exact ``pr1950`` shape from the 27-09 incident, created
-        here with a bare ``git branch`` — no checkout involved) must still
-        trip the vangnet."""
+        """(g) PR content fetched into the main checkout as a local branch,
+        without a checkout, must still trip the vangnet.
+
+        Rewritten for OI-2711 and OI-2756 (T0 decision on
+        dlv-stoel2-vangnet-alleen-hoofdcheckout, candidate rule 1): this test
+        used a bare ``git branch pr1950`` at the main checkout's own commit.
+        Git cannot tell that apart from a parallel builder creating a branch
+        in a sibling worktree (OI-2711), so the net no longer watches every
+        local branch. The PR #1950 incident was PR content fetched as a local
+        branch: its checkout stays caught by ``head`` (test (c)), and this
+        fetched-branch shape stays caught by ``branches_at_pr_head``.
+        """
         checkout = orchestrator_repo["checkout"]
-        env = _gate_env(tmp_path)
-        calls = []
 
-        def factory(data_dir, timeout_seconds, *, role="plan-reviewer", base_ref=None,
-                total_deadline_seconds=None):
-            def dispatch(provider, model, instruction, dispatch_id):
-                calls.append(1)
-                _run_git(["branch", "pr1950"], checkout)
-                return _pass_report_text()
-            return dispatch
+        def touch():
+            _run_git(["fetch", "origin", "feature/pr-1950"], checkout)
+            _run_git(["branch", "pr1950", "FETCH_HEAD"], checkout)
 
-        monkeypatch.setattr("plan_gate_panel._make_default_dispatcher", factory)
-        monkeypatch.delenv("VNX_KIMI_GATE_MODEL", raising=False)
+        result, calls = _run_seat(orchestrator_repo, monkeypatch, tmp_path, touch)
 
-        runner = _make_runner(env, checkout)
-        payload = _payload("feature/pr-1950", env["reports_dir"] / "kimi-gate-pr1950.md")
-        result = runner.run(gate="kimi_gate", request_payload=payload, pr_number=1950)
-
-        assert len(calls) == 1
+        assert calls == [1]
         assert result["status"] == "unavailable", result
         assert result["reason"] == "harness_lane_touched_main_checkout"
+        assert "branches_at_pr_head" in result["reason_detail"]
         assert "pr1950" in result["reason_detail"]
+
+
+def _run_seat(orchestrator_repo, monkeypatch, tmp_path, during_seat):
+    """Run one kimi harness-lane seat on ``feature/pr-1950``; *during_seat* runs inside the dispatch."""
+    env = _gate_env(tmp_path)
+    calls = []
+
+    def factory(data_dir, timeout_seconds, *, role="plan-reviewer", base_ref=None,
+            total_deadline_seconds=None):
+        def dispatch(provider, model, instruction, dispatch_id):
+            calls.append(1)
+            during_seat()
+            return _pass_report_text()
+        return dispatch
+
+    monkeypatch.setattr("plan_gate_panel._make_default_dispatcher", factory)
+    monkeypatch.delenv("VNX_KIMI_GATE_MODEL", raising=False)
+    runner = _make_runner(env, orchestrator_repo["checkout"])
+    payload = _payload("feature/pr-1950", env["reports_dir"] / "kimi-gate-pr1950.md")
+    return runner.run(gate="kimi_gate", request_payload=payload, pr_number=1950), calls
+
+
+@pytest.fixture
+def sibling_worktree(orchestrator_repo, tmp_path):
+    """A builder's worktree of the same repo, two commits ahead of main, plus a local ``work`` at main."""
+    checkout = orchestrator_repo["checkout"]
+    sibling = tmp_path / "sibling"
+    _run_git(["worktree", "add", str(sibling), "-b", "builder"], checkout)
+    for n in (1, 2):
+        (sibling / f"b{n}.txt").write_text(f"{n}\n")
+        _run_git(["add", f"b{n}.txt"], sibling)
+        _run_git(["commit", "-m", f"builder {n}"], sibling)
+    _run_git(["branch", "work"], checkout)
+    return sibling
+
+
+class TestOtherWorktreesBranchChurnPasses:
+    """(h) + (i): ``refs/heads`` is shared, so branch churn from other worktrees
+    is not evidence that THIS checkout was touched (OI-2711, OI-2756)."""
+
+    def test_sibling_worktree_creates_a_branch_passes(
+        self, orchestrator_repo, sibling_worktree, monkeypatch, tmp_path,
+    ):
+        """OI-2711: ``hold/dlv-e89570f23f95-r2-r2`` appeared while seat 2 ran on #2625."""
+        result, _ = _run_seat(orchestrator_repo, monkeypatch, tmp_path,
+                              lambda: _run_git(["branch", "hold/x"], sibling_worktree))
+        assert result["status"] == "completed", result.get("reason_detail")
+
+    def test_another_chain_resets_work_passes(
+        self, orchestrator_repo, sibling_worktree, monkeypatch, tmp_path,
+    ):
+        """OI-2756: ``work`` was reset by another chain while seat 2 ran on #2709."""
+        result, _ = _run_seat(orchestrator_repo, monkeypatch, tmp_path,
+                              lambda: _run_git(["branch", "-f", "work", "HEAD~1"], sibling_worktree))
+        assert result["status"] == "completed", result.get("reason_detail")
+
+
+class TestMainCheckoutChangesStillCaught:
+    """(j): HEAD, status and the gated PR branch are still watched."""
+
+    def _assert_caught(self, result, field):
+        assert result["status"] == "unavailable", result
+        assert result["reason"] == "harness_lane_touched_main_checkout"
+        assert result["reason_detail"].startswith(f"{field}:") or f"; {field}:" in result["reason_detail"]
+
+    def test_head_switch_is_caught(self, orchestrator_repo, monkeypatch, tmp_path):
+        checkout = orchestrator_repo["checkout"]
+        _run_git(["branch", "other"], checkout)
+        result, _ = _run_seat(orchestrator_repo, monkeypatch, tmp_path,
+                              lambda: _run_git(["switch", "other"], checkout))
+        self._assert_caught(result, "head")
+        self._assert_caught(result, "branches")
+
+    def test_dirty_tree_is_caught(self, orchestrator_repo, monkeypatch, tmp_path):
+        checkout = orchestrator_repo["checkout"]
+        result, _ = _run_seat(orchestrator_repo, monkeypatch, tmp_path,
+                              lambda: (checkout / "marker.txt").write_text("EDITED\n"))
+        self._assert_caught(result, "status")
+
+    def test_pr_branch_moved_is_caught(self, orchestrator_repo, monkeypatch, tmp_path):
+        checkout = orchestrator_repo["checkout"]
+        _run_git(["fetch", "origin", "feature/pr-1950"], checkout)
+        _run_git(["branch", "feature/pr-1950", "origin/feature/pr-1950"], checkout)
+        result, _ = _run_seat(orchestrator_repo, monkeypatch, tmp_path,
+                              lambda: _run_git(["branch", "-f", "feature/pr-1950", "main"], checkout))
+        self._assert_caught(result, "branches")
+        assert "feature/pr-1950" in result["reason_detail"]
 
 
 class TestMissingBranchNeverDispatches:

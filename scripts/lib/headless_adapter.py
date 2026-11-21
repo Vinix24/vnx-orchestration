@@ -98,7 +98,6 @@ GATE_STALL_DEFAULTS: Dict[str, int] = {
 }
 
 GATE_STALL_ENV: Dict[str, str] = {
-    "codex_gate": "VNX_CODEX_STALL_THRESHOLD",
     "claude_github_optional": "VNX_CLAUDE_GITHUB_STALL_THRESHOLD",
     "ci_gate": "VNX_CI_GATE_STALL_THRESHOLD",
 }

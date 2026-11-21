@@ -40,8 +40,6 @@ from pool_state_repo import PoolStateRepository  # noqa: E402
 
 _DOOR_FLAG = "VNX_SINGLE_ENTRY_DISPATCH"
 _LEGACY_FLAG = "VNX_DISPATCH_LEGACY"
-_CONSUMER_FLAG = "VNX_POOL_TASK_CONSUMER"
-_HEARTBEAT_ENV = "VNX_POOL_LEASE_HEARTBEAT_SECONDS"
 
 
 def _env_without(*names: str) -> dict:
@@ -106,7 +104,7 @@ def _lease_row(db_path: Path, terminal_id: str, project_id: str = "proj"):
 
 def test_default_tick_starts_pool_worker_runner_once_and_never_subprocess_dispatch(tmp_path):
     """Default env → exactly one ``pool_worker_runner`` Popen, zero ``subprocess_dispatch``."""
-    env = _env_without(_DOOR_FLAG, _LEGACY_FLAG, _CONSUMER_FLAG)
+    env = _env_without(_DOOR_FLAG, _LEGACY_FLAG)
     result, popen = _tick(tmp_path, env)
 
     assert result.spawned, f"expected one spawn, got errors={result.errors}"
@@ -122,7 +120,7 @@ def test_default_tick_starts_pool_worker_runner_once_and_never_subprocess_dispat
 
 def test_rollback_flag_restores_subprocess_dispatch_route(tmp_path):
     """VNX_SINGLE_ENTRY_DISPATCH=0 → the legacy ``subprocess_dispatch`` worker, and only it."""
-    env = _env_without(_LEGACY_FLAG, _CONSUMER_FLAG)
+    env = _env_without(_LEGACY_FLAG)
     env[_DOOR_FLAG] = "0"
     result, popen = _tick(tmp_path, env)
 
@@ -176,7 +174,7 @@ def test_running_pool_worker_renews_its_lease_and_releases_it_at_the_end(tmp_pat
     PoolStateRepository(db_path, "proj").add_or_refresh_pool_lease("T1", os.getpid(), time.time())
     before = _heartbeat(db_path, "T1")
 
-    monkeypatch.setenv(_HEARTBEAT_ENV, "0.02")
+    monkeypatch.setattr(pool_worker_runner, "LEASE_HEARTBEAT_DEFAULT_S", 0.02)
     monkeypatch.setattr(
         pool_worker_runner, "claim_next_queued_dispatch",
         lambda conn, terminal_id, project_id: "d-lease",
@@ -206,13 +204,3 @@ def test_running_pool_worker_renews_its_lease_and_releases_it_at_the_end(tmp_pat
     assert state == "released", f"worker must release its lease at the end, got state={state!r}"
     assert worker_pid is None
     assert lease_token == ""
-
-
-def test_non_numeric_heartbeat_interval_falls_back_to_the_default(monkeypatch):
-    """A malformed interval is not a crash and not a silent zero delay: the 15s default wins."""
-    monkeypatch.setenv(_HEARTBEAT_ENV, "not-a-number")
-    assert pool_worker_runner._lease_heartbeat_interval() == 15.0
-    monkeypatch.setenv(_HEARTBEAT_ENV, "0")
-    assert pool_worker_runner._lease_heartbeat_interval() == 15.0
-    monkeypatch.setenv(_HEARTBEAT_ENV, "2.5")
-    assert pool_worker_runner._lease_heartbeat_interval() == 2.5

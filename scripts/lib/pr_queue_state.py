@@ -26,7 +26,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from daily_metrics.github_fetch import fetch_merged
 from forge_protection_drift import fetch_ci_workflow_from_main, fetch_yaml_from_ref
-from merge_preflight_ci_check import _resolve_override_reason, check_ci_run_for_head
+from merge_preflight_ci_check import check_ci_run_for_head
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -196,8 +196,6 @@ def _run_jobs(
 
 def _read_workflow(project_root: Path) -> Tuple[Optional[str], str]:
     """The project's CI workflow name, read the way the merge door reads it."""
-    if _resolve_override_reason(None) is not None:
-        return None, ""
     return fetch_ci_workflow_from_main(project_root, fetch=fetch_yaml_from_ref)
 
 

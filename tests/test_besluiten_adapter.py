@@ -176,10 +176,25 @@ def test_a_failed_write_shows_in_niet_vastgelegd(tmp_path):
     assert blok["status"] == "absent" and blok["niet_vastgelegd"] == 1
 
 
-def test_tests_never_resolve_the_real_register():
+def test_tests_never_resolve_the_real_register(monkeypatch):
+    """The conftest isolation redirects the checkout's daily-log: no register path under it reaches the reader."""
     import build_t0_state
-    real = Path(build_t0_state.__file__).resolve().parent.parent / "daily-log"
-    assert not str(build_t0_state._besluiten_logdir()).startswith(str(real))
+    real = build_t0_state._besluiten_logdir().resolve()
+    assert real.name == "daily-log"
+    seen = []
+
+    class _Spy(type(Path())):
+        def exists(self, *args, **kwargs):
+            seen.append(Path(self))
+            return super().exists(*args, **kwargs)
+
+    monkeypatch.setattr(ba, "Path", _Spy)
+    block = build_t0_state._build_besluiten(PID, Path("/nonexistent-state-dir"))
+    assert seen, "the register reader was never reached"
+    for pad in seen:
+        assert pad.name == "besluiten.ndjson"
+        assert real not in pad.resolve().parents, f"real register touched: {pad}"
+    assert block["status"] in ("absent", "ok", "error")
 
 
 def test_inbox_answer_prints_decision(env, capsys):

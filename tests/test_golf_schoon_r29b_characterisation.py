@@ -18,9 +18,9 @@ import dispatch_cli  # noqa: E402
 import dispatch_exit  # noqa: E402
 from dispatch_serialization import LockWaitTimeout  # noqa: E402
 
-_ENV = ("VNX_CURRENT_TRACK_ID", "VNX_PARENT_DISPATCH", "VNX_TASK_CLASS", "VNX_TIER_FROM", "VNX_TIER_TO",
+_ENV = ("VNX_PARENT_DISPATCH", "VNX_TASK_CLASS", "VNX_TIER_FROM", "VNX_TIER_TO",
         "VNX_WORK_REF", "VNX_PR_ID", "VNX_CURRENT_MODEL", "VNX_CURRENT_PROVIDER", "VNX_CURRENT_TERMINAL")
-_FULL_ENV = dict(zip(_ENV, ("trk", "parent-1", "03_refactoring", "t-a", "t-b", "dispatch/x", "2899", "opus", "claude", "T9")))
+_FULL_ENV = dict(zip(_ENV, ("parent-1", "03_refactoring", "t-a", "t-b", "dispatch/x", "2899", "opus", "claude", "T9")))
 _PLAN = {"dispatch_id": "d-r29b", "lane": "claude_headless", "route_reason": "plan-reason", "warnings": (),
          "parent_dispatch": "parent-1", "task_class": "03_refactoring", "tier_from": "t-a", "tier_to": "t-b",
          "work_ref": "dispatch/x", "pr_id": "2899", "model": "opus", "provider": NT("Prov", "value")("claude"),

@@ -14,8 +14,7 @@ Two verbs:
       rotation).
 
 --logdir defaults to the SAME project_id+terminal-scoped path
-context_rotation.write_t0_handoff() (via the Stop-hook safety net,
-scripts/hooks/session_stop_rotation.py) writes to, so `vnx handoff show`
+context_rotation.write_t0_handoff() writes to, so `vnx handoff show`
 with no flags finds the handoff a real rotation produced.
 """
 

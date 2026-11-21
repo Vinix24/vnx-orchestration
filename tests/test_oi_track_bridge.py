@@ -43,6 +43,8 @@ import tracks as tracks_lib
 import track_reconciler
 import import_open_items_to_tracks as bridge
 
+from fixtures.dispatches_schema_fixture import ensure_dispatches_columns
+
 PROJECT_ID = "test-proj"
 
 
@@ -93,6 +95,10 @@ def _build_db_v29(tmp_path: Path) -> Path:
         (29, "0029_track_type_discriminator.sql"),
     ]:
         sql = (_MIGRATIONS / filename).read_text(encoding="utf-8")
+        if version == 27:
+            # 0022 rebuilds dispatches without output_ref/output_kind and 0027 reads them;
+            # declare them here instead of leaning on an import-time preflight hook.
+            ensure_dispatches_columns(conn)
         schema_migration.apply_script_if_below(conn, version, sql)
         conn.commit()
     conn.close()

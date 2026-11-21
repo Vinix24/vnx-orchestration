@@ -89,7 +89,7 @@ def _injection_why_enabled() -> bool:
                 key, strict[1], strict[0], use_default_resolver=False, strict_resolver=True)
         else:
             value, source = config_registry.resolve_with_source(key, strict_resolver=True)
-        if source == "project_config_error":
+        if source in config_registry.ERROR_SOURCES:
             return False  # the registry already logged the key and the exception
         return (value or "").strip().lower() in config_registry._TRUTHY
     except Exception as exc:
@@ -235,19 +235,6 @@ def _emit_injection_outcome_event(
             fcntl.flock(fh, fcntl.LOCK_UN)
 
 
-def _env_flag(name: str) -> Optional[bool]:
-    value = os.environ.get(name)
-    if value is None:
-        return None
-    return value.strip().lower() in {"1", "true", "yes", "on"}
-
-
-def _rollback_mode_enabled() -> bool:
-    rollback = _env_flag("VNX_STATE_SIMPLIFICATION_ROLLBACK")
-    if rollback is None:
-        rollback = _env_flag("VNX_STATE_DUAL_WRITE_LEGACY")
-    return bool(rollback)
-
 # Import tag intelligence engine
 try:
     from tag_intelligence import TagIntelligenceEngine
@@ -305,12 +292,7 @@ class T0IntelligenceGatherer:
 
         # Initialize quality intelligence database
         # Primary: VNX_STATE_DIR (canonical runtime state)
-        # Optional fallback to legacy only when rollback mode is enabled.
         self.quality_db_path = Path(paths["VNX_STATE_DIR"]) / "quality_intelligence.db"
-        if not self.quality_db_path.exists() and _rollback_mode_enabled():
-            legacy_db = Path(paths["VNX_HOME"]) / "state" / "quality_intelligence.db"
-            if legacy_db.exists():
-                self.quality_db_path = legacy_db
         self.quality_db = None
         if self.quality_db_path.exists():
             try:
@@ -1133,14 +1115,8 @@ class T0IntelligenceGatherer:
 
     def extract_task_paths(self, text: str) -> List[str]:
         """Extract file paths from task description"""
-        # Build path prefix pattern from known dirs + VNX_DOCS_DIRS entries
+        # Build path prefix pattern from the known dirs
         prefixes = ['src', 'tests', 'docs', '\\.claude']
-        docs_dirs_raw = os.environ.get("VNX_DOCS_DIRS", "")
-        if docs_dirs_raw:
-            for entry in docs_dirs_raw.split(","):
-                name = Path(entry.strip()).name
-                if name and name not in prefixes:
-                    prefixes.append(re.escape(name))
         path_pattern = r'(?:' + '|'.join(prefixes) + r')/(?:[^\\s`),]+)'
         paths = [p.strip() for p in re.findall(path_pattern, text)]
 

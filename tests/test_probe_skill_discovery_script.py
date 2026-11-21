@@ -111,7 +111,7 @@ exec "@PYTHON@" "$@"
 
 def _env(tmp_path, operator=True, fakes=True, extra=None):
     env = dict(os.environ, HOME=str(tmp_path), TMPDIR=str(tmp_path))
-    env.pop("VNX_CLAUDE_PROJECTS_DIR", None); env.pop("VNX_PROBE_OPERATOR", None)
+    env.pop("VNX_PROBE_OPERATOR", None)
     if operator:
         env["VNX_PROBE_OPERATOR"] = "1"
     if fakes:
@@ -354,7 +354,6 @@ def test_c1_judge_rejects_a_non_object_json_line_in_stream_and_transcript(tmp_pa
         home = tmp_path / "home"; room = home / ".claude" / "projects" / "-p"; room.mkdir(parents=True, exist_ok=True)
         (room / "sid.jsonl").write_text(transcript, encoding="utf-8")
         env = dict(os.environ, HOME=str(home), TMPDIR=str(tmp_path))
-        env.pop("VNX_CLAUDE_PROJECTS_DIR", None)
         return subprocess.run([BASH, "-c", 'source "%s"\npy judge_claude "%s" sid "%s" probe-skill "%s"' % (PROBE, raw, tmp_path, tmp_path / "ev")],
                               capture_output=True, text=True, env=env, check=False).stdout.strip()
 

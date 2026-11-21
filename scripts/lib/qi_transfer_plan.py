@@ -24,15 +24,17 @@ from pathlib import Path
 from typing import Any, Dict, FrozenSet, List, Optional, Tuple
 
 from atomic_io import atomic_write_text
-from pattern_reattribution import (
-    _PATTERN_ID_PREFIX,
-    STATUS_MOVES,
-    TABLES,
-    AttributionIndex,
-    ReattributionDecision,
-    build_attribution_index,
-    decide_row,
-)
+from lib_module import load_lib_module
+
+# scripts/pattern_reattribution.py has the same name: bind the scripts/lib module whatever sys.path order.
+_pattern_reattribution = load_lib_module("pattern_reattribution")
+_PATTERN_ID_PREFIX = _pattern_reattribution._PATTERN_ID_PREFIX
+STATUS_MOVES = _pattern_reattribution.STATUS_MOVES
+TABLES = _pattern_reattribution.TABLES
+AttributionIndex = _pattern_reattribution.AttributionIndex
+ReattributionDecision = _pattern_reattribution.ReattributionDecision
+build_attribution_index = _pattern_reattribution.build_attribution_index
+decide_row = _pattern_reattribution.decide_row
 
 JUNCTION_TABLES: Tuple[str, ...] = (
     "pattern_usage",

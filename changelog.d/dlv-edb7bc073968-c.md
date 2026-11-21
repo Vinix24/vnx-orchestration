@@ -1,0 +1,1 @@
+- Deliverables (ADR-096, B1c): `vnx deliverable add --depends-on dlv-a,dlv-b`, `depend <dlv> --on <dlv> [--kind soft]`, `undepend <dlv> --on <dlv> --reason "..."` and `deps <dlv> [--json]` on both CLI surfaces; a refused dependency (unknown id, duplicate, cycle named in the message) exits 2 with the reason on stderr, and a refused `add` leaves no deliverable behind.

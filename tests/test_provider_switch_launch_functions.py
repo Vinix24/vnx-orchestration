@@ -189,7 +189,7 @@ def _gemini_adapter_legacy(tmp_path, monkeypatch):
 
 def _gemini_adapter_stream(tmp_path, monkeypatch):
     from adapters.gemini_adapter import GeminiAdapter
-    monkeypatch.setenv("VNX_GEMINI_STREAM", "1")
+    monkeypatch.setattr("provider_spawns.gemini_spawn.gemini_stream_enabled", lambda: True)
     return lambda: list(GeminiAdapter("T1").stream_events("x", {"dispatch_id": "d-1"}))
 
 

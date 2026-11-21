@@ -192,13 +192,13 @@ A stall is when the subprocess is alive but producing no output. This is distinc
 
 | Gate Type | Stall Threshold | Env Override |
 |-----------|----------------|--------------|
-| `codex_gate` | 120s | `VNX_CODEX_STALL_THRESHOLD` |
+| `codex_gate` | 300s | none (fixed; the env override was deleted under ADR-087) |
 | `claude_github_optional` | 60s | `VNX_CLAUDE_GITHUB_STALL_THRESHOLD` |
 | `kimi_gate` | No stall detection | n/a |
 | `glm_gate` | No stall detection | n/a |
 | `deepseek_gate` | No stall detection | n/a |
 
-**Added 2026-09-28**: `kimi_gate`/`glm_gate`/`deepseek_gate` run through `_run_harness_lane_path` (`scripts/gate_runner.py:505-549`), a governed dispatch call (`plan_gate_panel._make_default_dispatcher`) bounded only by the harness-lane timeout above — it is not a locally spawned, polled subprocess, so there is no output stream for this runner to watch and no stall threshold to apply. Stall detection (`_run_with_stall_detection` / `_poll_io`, `scripts/gate_runner.py:864-926`) only runs inside `_run_subprocess_path` (`scripts/gate_runner.py:410-453`), which harness-lane gates never reach. `headless_adapter.gate_stall_threshold()` (`scripts/lib/headless_adapter.py:91-106,122-132`) does carry a `kimi_gate` entry (300s default, `VNX_KIMI_STALL_THRESHOLD` override) for the same reason the timeout entry above is dead: it is only consulted by `_run_subprocess_path`.
+**Added 2026-09-28**: `kimi_gate`/`glm_gate`/`deepseek_gate` run through `_run_harness_lane_path` (`scripts/gate_runner.py:505-549`), a governed dispatch call (`plan_gate_panel._make_default_dispatcher`) bounded only by the harness-lane timeout above — it is not a locally spawned, polled subprocess, so there is no output stream for this runner to watch and no stall threshold to apply. Stall detection (`_run_with_stall_detection` / `_poll_io`, `scripts/gate_runner.py:864-926`) only runs inside `_run_subprocess_path` (`scripts/gate_runner.py:410-453`), which harness-lane gates never reach. `headless_adapter.gate_stall_threshold()` (`scripts/lib/headless_adapter.py:91-105,121-131`) does carry a `kimi_gate` entry (300s default, `VNX_KIMI_STALL_THRESHOLD` override) for the same reason the timeout entry above is dead: it is only consulted by `_run_subprocess_path`.
 
 ### 4.3 Timeout/Stall Failure Record
 

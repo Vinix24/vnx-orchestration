@@ -658,6 +658,7 @@ def set_plan_scope(
     rule: Optional[str] = None,
     actor: str = "operator",
     conn: Optional[sqlite3.Connection] = None,
+    event_sink: Optional[list] = None,
 ) -> dict[str, Any]:
     """Write a track's ``plan_scope`` and emit one ``track_plan_scope_set`` event.
 
@@ -675,9 +676,11 @@ def set_plan_scope(
     caller read ``old_scope`` under that same lock. The conn must target the
     state_dir DB (C3-N2).
 
-    The ledger line is written after the UPDATE and before the commit, in both
-    forms: no scope commits without its line, and a write that fails before it
-    (this UPDATE, or a seed the caller ran first) leaves no line behind.
+    Without ``event_sink`` the ledger line is written after the UPDATE and
+    before the commit: no scope commits without its line, and a write that
+    fails before it leaves no line behind. With ``event_sink`` the event is
+    appended there instead and the CALLER emits it after its own commit, so a
+    later failure that rolls the scope back leaves no line saying it was set.
 
     Raises ValueError on an unknown scope or an empty reason, and
     TrackNotFoundError when the track does not exist.
@@ -710,8 +713,8 @@ def set_plan_scope(
             "UPDATE tracks SET metadata_json = ? WHERE track_id = ? AND project_id = ?",
             (new_metadata_json, track_id, project_id),
         )
-        _emit_track_event(
-            state_dir, "track_plan_scope_set", track_id, project_id, actor,
+        _emit_or_defer(
+            event_sink, state_dir, "track_plan_scope_set", track_id, project_id, actor,
             {"old": old_scope, "new": scope, "reason": reason.strip(), "rule": rule},
         )
         if owns:

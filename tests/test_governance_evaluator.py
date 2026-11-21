@@ -512,7 +512,7 @@ class TestCheckAction:
         )
         assert result["blocked"] is True
 
-    @patch.dict(os.environ, {"VNX_AUTONOMY_EVALUATION": "1"})
+    @patch.dict(os.environ, {"VNX_OVERRIDE_ENFORCEMENT_PROFILE": "enforced"})
     def test_enforcement_blocks_forbidden(self, conn):
         with pytest.raises(ForbiddenActionError, match="Forbidden action"):
             check_action(
@@ -523,7 +523,7 @@ class TestCheckAction:
         level = get_escalation_level(conn, "dispatch", "ca-2")
         assert level == "escalate"
 
-    @patch.dict(os.environ, {"VNX_AUTONOMY_EVALUATION": "0"})
+    @patch.dict(os.environ, {"VNX_OVERRIDE_ENFORCEMENT_PROFILE": "shadow"})
     def test_shadow_mode_does_not_block_forbidden(self, conn):
         result = check_action(
             conn, action="branch_merge", actor="runtime",
@@ -532,7 +532,7 @@ class TestCheckAction:
         assert result["outcome"] == "forbidden"
         assert result["enforcement"] is False
 
-    @patch.dict(os.environ, {"VNX_AUTONOMY_EVALUATION": "1"})
+    @patch.dict(os.environ, {"VNX_OVERRIDE_ENFORCEMENT_PROFILE": "enforced"})
     def test_enforcement_allows_t0_forbidden(self, conn):
         result = check_action(
             conn, action="branch_merge", actor="t0",
@@ -547,11 +547,11 @@ class TestCheckAction:
 # ---------------------------------------------------------------------------
 
 class TestFeatureFlag:
-    @patch.dict(os.environ, {"VNX_AUTONOMY_EVALUATION": "0"})
+    @patch.dict(os.environ, {"VNX_OVERRIDE_ENFORCEMENT_PROFILE": "shadow"})
     def test_enforcement_disabled_by_default(self):
         assert not is_enforcement_enabled()
 
-    @patch.dict(os.environ, {"VNX_AUTONOMY_EVALUATION": "1"})
+    @patch.dict(os.environ, {"VNX_OVERRIDE_ENFORCEMENT_PROFILE": "enforced"})
     def test_enforcement_enabled(self):
         assert is_enforcement_enabled()
 

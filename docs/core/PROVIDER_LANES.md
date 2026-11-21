@@ -53,8 +53,8 @@ headless lane without an override.
 
 **Concurrency (#1017):** the claude serial lock is an N-slot semaphore, not a
 single mutex. Default `N=10` (operator directive 2026-08-21, the
-subscription-safe default); `VNX_TMUX_MAX_CONCURRENT` (env var, or the
-registry-backed config-store value) raises or lowers it as an explicit
+subscription-safe default); `VNX_TMUX_MAX_CONCURRENT` (the stored config row, else
+the env var; `VNX_OVERRIDE_TMUX_MAX_CONCURRENT` beats both) raises or lowers it as an explicit
 operator opt-in. See `DISPATCH_RULES.md` §6.
 
 ### claude-subprocess
@@ -234,19 +234,13 @@ worker author its own report through a completion protocol, with `govern()` as t
 backstop that emitted a minimal `contract_status="synthesized"` body when no usable
 report existed. `govern()` itself stays in `dispatch_govern.py`.
 
-**claude-subprocess lane: `govern()` wiring is opt-in (`VNX_SHARED_GOVERN=1`,
-default off).** `dispatch_govern.py`'s own module docstring names the tmux lane
-(removed) and the subprocess lane as its intended callers. Behind the flag,
-`deliver_with_recovery` routes both the success and the
-budget-exhausted-failure path through `govern()`, including
-git-diff synthesis (`base_sha` = the pre-dispatch commit SHA) and schema-complete
-frontmatter, instead of the legacy stub-only `_ensure_unified_report` (success) or
-no report at all (final failure). `govern()`'s authored-report lookup also checks
-the legacy subprocess worker filename (`<dispatch_id>_report.md`, from
-`receipt_writer._ensure_unified_report`'s docstring convention) as a fallback
-alongside the canonical `<dispatch_id>.md`. Receipt writing (`_write_receipt`) is
-unchanged in both flag states. Flag default is off pending a burn-in period;
-flipping it on is a follow-up, not part of this slice.
+**claude-subprocess lane: no `govern()` wiring.** `VNX_SHARED_GOVERN` and the
+`govern()` call sites in `deliver_with_recovery` are deleted (config-een-oppervlak
+PR-7b); the flag was off by default and nothing set it. The lane writes its own
+contract-valid close-out report (`_ensure_unified_report`) on success and emits no
+report on the budget-exhausted failure path. `govern()` stays in
+`dispatch_govern.py` for the lanes that call it. Receipt writing (`_write_receipt`)
+is unchanged.
 
 **provider_dispatch lanes (codex, gemini, kimi, deepseek-harness, litellm): the
 report is synthesized.** These lanes do not author a report. `_emit_governance`

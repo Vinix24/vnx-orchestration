@@ -486,8 +486,8 @@ def _doc_style_setting(project_id: str, root: Path) -> str:
     value, source = config_registry.resolve_with_source(
         _DOC_STYLE_KEY, project_id, resolver, use_default_resolver=False, strict_resolver=True,
     )
-    if source == "project_config_error":  # unknown state is not "off" for a docs dispatch
-        raise ValueError(f"{_DOC_STYLE_KEY} cannot be read from the project config store; no spec staged")
+    if source in config_registry.ERROR_SOURCES:  # unknown state is not "off" for a docs dispatch
+        raise ValueError(f"{_DOC_STYLE_KEY} cannot be read ({source}); no spec staged")
     return (value or "").strip()
 
 

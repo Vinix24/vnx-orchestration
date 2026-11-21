@@ -31,7 +31,7 @@ class TestVnxStartRuntimeGeminiDefault:
             config = StartConfig.from_env()
         assert config.gemini_model == "gemini-2.5-pro"
 
-    def test_from_env_override_with_flash(self):
+    def test_from_env_ignores_the_deleted_model_variable(self):
         env = {
             "PROJECT_ROOT": "/p",
             "VNX_HOME": "/v",
@@ -40,7 +40,7 @@ class TestVnxStartRuntimeGeminiDefault:
         }
         with patch.dict(os.environ, env, clear=True):
             config = StartConfig.from_env()
-        assert config.gemini_model == "gemini-2.5-flash"
+        assert config.gemini_model == "gemini-2.5-pro"
 
     def test_build_provider_command_default_is_pro(self):
         tc = TerminalConfig("T3", PROVIDER_GEMINI, "gemini-2.5-pro", "worker", "C")

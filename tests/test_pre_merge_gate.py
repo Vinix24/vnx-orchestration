@@ -43,7 +43,6 @@ from pre_merge_gate import (
     DELETION_FILE_HOLD,
     SKIPPED_UNVERIFIED,
     DEFAULT_CI_WORKFLOW_NAME,
-    CI_WORKFLOW_NAME_ENV_VAR,
 )
 import config_registry
 
@@ -976,23 +975,19 @@ class TestCheckPRSize:
         assert result["status"] == "HOLD"
         assert result["lines_changed"] == PR_SIZE_HOLD + 1
 
-    def test_warn_threshold_is_450_per_2026_11_09_decision(self, tmp_path):
-        """450 lines is GO without the warning, 451 is GO with the 'large but
-        not blocking' detail, and one above the hold threshold is HOLD."""
-        assert PR_SIZE_WARN == 450
+    def test_hold_threshold_is_450_with_no_warn_band(self, tmp_path):
+        """ADR-088 besluit 9: HOLD equals WARN at 450. 450 lines is GO, 451 and
+        500 are HOLD; no size gives the 'large but not blocking' detail any more.
+        Red run on origin/main: 500 lines was GO with the warning (HOLD 600)."""
+        assert PR_SIZE_WARN == 450 and PR_SIZE_HOLD == 450
         merge_base_ok = MagicMock(returncode=0, stdout="abc1234\n")
-        for lines, status, warned in (
-            (400, "GO", False),
-            (PR_SIZE_WARN, "GO", False),
-            (PR_SIZE_WARN + 1, "GO", True),
-            (PR_SIZE_HOLD + 1, "HOLD", False),
-        ):
+        for lines, status in ((400, "GO"), (450, "GO"), (451, "HOLD"), (500, "HOLD")):
             diff = MagicMock(returncode=0, stdout=f"{lines}\t0\tfile.py\n")
             with patch("pre_merge_gate.subprocess.run", side_effect=[merge_base_ok, diff]):
                 result = check_pr_size(tmp_path, base_ref="origin/main")
             assert result["status"] == status, lines
             assert result["lines_changed"] == lines
-            assert ("large but not blocking" in result["detail"]) is warned, lines
+            assert "large but not blocking" not in result["detail"], lines
 
     def test_small_diff_is_go(self, tmp_path):
         merge_base_ok = MagicMock(returncode=0, stdout="abc1234\n")
@@ -1264,9 +1259,9 @@ class TestCheckCIWorkflow:
         workflow_idx = gh_call_args.index("--workflow")
         assert gh_call_args[workflow_idx + 1] == "CI/CD Pipeline"
 
-    def test_workflow_name_env_var_override(self, tmp_path, monkeypatch):
-        """VNX_CI_WORKFLOW_NAME env var is used when no explicit argument is given."""
-        monkeypatch.setenv(CI_WORKFLOW_NAME_ENV_VAR, "CI/CD Pipeline")
+    def test_workflow_name_env_var_is_not_read(self, tmp_path, monkeypatch):
+        """The deleted VNX_CI_WORKFLOW_NAME no longer names the workflow (config-een-oppervlak N5)."""
+        monkeypatch.setenv("VNX_CI_WORKFLOW_NAME", "CI/CD Pipeline")
         sha = "x" * 40
         mocks = [
             self._git_head_mock(sha),
@@ -1278,22 +1273,17 @@ class TestCheckCIWorkflow:
         assert result["status"] == "GO"
         gh_call_args = mock_run.call_args_list[2].args[0]
         workflow_idx = gh_call_args.index("--workflow")
-        assert gh_call_args[workflow_idx + 1] == "CI/CD Pipeline"
+        assert gh_call_args[workflow_idx + 1] == DEFAULT_CI_WORKFLOW_NAME
 
 
 class TestResolveCIWorkflowName:
-    """_resolve_ci_workflow_name(): explicit arg > env var > default."""
+    """_resolve_ci_workflow_name(): explicit arg > default; the env is not read."""
 
-    def test_explicit_argument_wins_over_env(self, monkeypatch):
-        monkeypatch.setenv(CI_WORKFLOW_NAME_ENV_VAR, "From Env")
+    def test_explicit_argument_wins(self, monkeypatch):
         assert _resolve_ci_workflow_name("From Argument") == "From Argument"
 
-    def test_env_var_used_when_no_argument(self, monkeypatch):
-        monkeypatch.setenv(CI_WORKFLOW_NAME_ENV_VAR, "From Env")
-        assert _resolve_ci_workflow_name(None) == "From Env"
-
-    def test_default_when_nothing_set(self, monkeypatch):
-        monkeypatch.delenv(CI_WORKFLOW_NAME_ENV_VAR, raising=False)
+    def test_default_when_no_argument_even_with_the_deleted_env_set(self, monkeypatch):
+        monkeypatch.setenv("VNX_CI_WORKFLOW_NAME", "From Env")
         assert _resolve_ci_workflow_name(None) == DEFAULT_CI_WORKFLOW_NAME
 
 

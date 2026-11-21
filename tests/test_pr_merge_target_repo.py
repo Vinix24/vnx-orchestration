@@ -587,15 +587,15 @@ class TestCiWorkflow:
 
         assert _workflow_asked(door.gh) == "CI"
 
-    def test_a_project_that_names_none_falls_to_the_environment(self, arrange, monkeypatch):
+    def test_a_project_that_names_none_falls_to_the_default_not_the_environment(self, arrange, monkeypatch):
         monkeypatch.setenv("VNX_CI_WORKFLOW_NAME", "Env Flow")
         door = arrange(main_yaml=consumer_yaml())
 
         door.run()
 
-        assert _workflow_asked(door.gh) == "Env Flow"
+        assert _workflow_asked(door.gh) == "VNX CI"
 
-    def test_a_project_without_a_file_falls_to_the_environment_then_the_default(self, arrange, monkeypatch):
+    def test_a_project_without_a_file_falls_to_the_default(self, arrange, monkeypatch):
         monkeypatch.delenv("VNX_CI_WORKFLOW_NAME", raising=False)
         door = arrange(main_yaml=None)
 
@@ -929,6 +929,20 @@ class TestDoorIntegrityFromAnInstall:
         assert result["verdict"] == "NO-GO"
         assert "scripts/lib/forge_protection_drift.py" in result["message"]
         assert "v1.6.3" in result["message"]
+
+    @pytest.mark.parametrize("path", ["scripts/lib/pr_size_policy.py", "scripts/lib/review_risk_class.py"])
+    def test_an_edited_pr_size_dependency_is_refused_naming_the_file(self, tmp_path, monkeypatch, path):
+        """PG-1d r3: the pr_size preflight trusts the verdict and the line count; both are door files."""
+        assert path in pr_merge._DOOR_INTEGRITY_PATHS
+        install = make_install(tmp_path, version="1.6.3")
+        hashes = _door_files(install)
+        (install / path).write_text("# edited to always return GO\n", encoding="utf-8")
+        install_gh_stub(tmp_path, monkeypatch, _door_rules(hashes, "v1.6.3"))
+
+        result = _REAL_DOOR_BLOB_HASH_GATE(install)
+
+        assert result["verdict"] == "NO-GO"
+        assert path in result["message"]
 
     def test_an_install_whose_tag_is_not_in_the_fabric_repo_is_refused(self, tmp_path, monkeypatch):
         install = make_install(tmp_path, version="9.9.9")

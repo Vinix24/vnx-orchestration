@@ -11,7 +11,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT / "scripts" / "lib") not in sys.path:
     sys.path.insert(0, str(REPO_ROOT / "scripts" / "lib"))
 
-from agent_resolver import agent_folders_enabled, list_available_agents, resolve_agent
+from agent_resolver import list_available_agents, resolve_agent
 
 
 def _make_agent(base: Path, name: str, rel: str = "agents", config: str | None = None) -> Path:
@@ -128,15 +128,6 @@ class TestExtendedConfigParsing:
         _make_agent(tmp_path, "isolated", config="isolation:\n  scope_type: business_folder\n")
         cfg = resolve_agent("isolated", tmp_path)
         assert cfg is not None and cfg.isolation["scope_type"] == "business_folder"
-
-
-class TestFeatureFlag:
-    def test_defaults_to_enabled(self):
-        assert agent_folders_enabled({}) is True
-        assert agent_folders_enabled({"VNX_AGENT_FOLDERS": "1"}) is True
-
-    def test_zero_disables(self):
-        assert agent_folders_enabled({"VNX_AGENT_FOLDERS": "0"}) is False
 
 
 class TestRobustness:

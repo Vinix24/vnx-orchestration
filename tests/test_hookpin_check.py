@@ -321,8 +321,7 @@ def test_locally_assigned_root_var_is_unresolved_not_silently_ok_or_dead(tmp_pat
     string is invisible to this checker — it has no shell parser and cannot
     see an assignment made earlier in the same string. This is the exact
     shape of 3 of vnx-orchestration's own 15 SessionStart/SessionEnd/Stop
-    hook entries today (build_current_state.py, build_doc_indexes.py,
-    session_stop_rotation.py). The design choice (report UNRESOLVED, never
+    hook entries today (build_current_state.py, build_doc_indexes.py). The design choice (report UNRESOLVED, never
     guess OK or MISSING) is documented in the module docstring; this test
     pins that current behavior so a future change is deliberate, not an
     accidental regression that starts producing false PASSes or false FAILs.

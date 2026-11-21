@@ -8,16 +8,15 @@ automatic, gated, or forbidden outcomes against the canonical autonomy policy ma
 
 Escalation and override logic lives in governance_escalation.py.
 
-Feature flag: VNX_AUTONOMY_EVALUATION
-  0 (default) = shadow mode — evaluation runs, emits events, but does not gate or block
-  1 = enforcement mode — evaluation outcomes are binding
+Enforcement profile: VNX_ENFORCEMENT_PROFILE (enforcement_profile.enforced(), ADR-087)
+  shadow (default) = evaluation runs, emits events, but does not gate or block
+  enforced = evaluation outcomes are binding
 
 All evaluations emit coordination_events with event_type='policy_evaluation'.
 """
 
 from __future__ import annotations
 
-import os
 import sqlite3
 from typing import Any, Dict, FrozenSet, List, Optional, Tuple
 
@@ -152,8 +151,9 @@ ALWAYS_ESCALATE_ACTIONS = frozenset({
 # ---------------------------------------------------------------------------
 
 def is_enforcement_enabled() -> bool:
-    """Check if autonomy evaluation enforcement is active."""
-    return os.environ.get("VNX_AUTONOMY_EVALUATION", "0") == "1"
+    """Check if autonomy evaluation enforcement is active (the enforcement profile)."""
+    import enforcement_profile
+    return enforcement_profile.enforced()
 
 
 # ---------------------------------------------------------------------------

@@ -36,7 +36,7 @@ def _make_backups(state_dir: Path, count: int) -> list[Path]:
 
 
 def test_backup_rotation_keeps_last_n(tmp_path, monkeypatch):
-    """backup_existing_db prunes older backups, keeps VNX_DB_BACKUP_KEEP newest."""
+    """backup_existing_db prunes older backups, keeps the 3 newest."""
     state_dir = tmp_path / "state"
     state_dir.mkdir()
 
@@ -59,7 +59,6 @@ def test_backup_rotation_keeps_last_n(tmp_path, monkeypatch):
 
     monkeypatch.setattr(qd, "STATE_DIR", state_dir)
     monkeypatch.setattr(qd, "DB_PATH", db_path)
-    monkeypatch.setenv("VNX_DB_BACKUP_KEEP", "3")
 
     assert qd.backup_existing_db() is True
 
@@ -95,52 +94,6 @@ def test_backup_rotation_keeps_last_n(tmp_path, monkeypatch):
     assert unrelated.read_text() == "leave me alone"
 
 
-def test_backup_rotation_invalid_env_falls_back_to_three(tmp_path, monkeypatch):
-    """Invalid VNX_DB_BACKUP_KEEP falls back to keep=3."""
-    state_dir = tmp_path / "state"
-    state_dir.mkdir()
-
-    db_path = state_dir / "quality_intelligence.db"
-    db_path.write_text("live db")
-
-    pre_backups = _make_backups(state_dir, 5)
-
-    monkeypatch.setattr(qd, "STATE_DIR", state_dir)
-    monkeypatch.setattr(qd, "DB_PATH", db_path)
-    monkeypatch.setenv("VNX_DB_BACKUP_KEEP", "not-a-number")
-
-    assert qd.backup_existing_db() is True
-
-    db_backups = [
-        p for p in state_dir.glob(f"{qd._BACKUP_PREFIX}*")
-        if not (p.name.endswith("-wal") or p.name.endswith("-shm"))
-    ]
-    assert len(db_backups) == 3
-
-
-def test_backup_rotation_zero_env_falls_back_to_three(tmp_path, monkeypatch):
-    """VNX_DB_BACKUP_KEEP=0 falls back to keep=3 and does not delete everything."""
-    state_dir = tmp_path / "state"
-    state_dir.mkdir()
-
-    db_path = state_dir / "quality_intelligence.db"
-    db_path.write_text("live db")
-
-    pre_backups = _make_backups(state_dir, 5)
-
-    monkeypatch.setattr(qd, "STATE_DIR", state_dir)
-    monkeypatch.setattr(qd, "DB_PATH", db_path)
-    monkeypatch.setenv("VNX_DB_BACKUP_KEEP", "0")
-
-    assert qd.backup_existing_db() is True
-
-    db_backups = [
-        p for p in state_dir.glob(f"{qd._BACKUP_PREFIX}*")
-        if not (p.name.endswith("-wal") or p.name.endswith("-shm"))
-    ]
-    assert len(db_backups) == 3
-
-
 def test_backup_rotation_no_op_when_under_limit(tmp_path, monkeypatch):
     """Nothing is pruned when the number of backups is already <= keep."""
     state_dir = tmp_path / "state"
@@ -153,7 +106,6 @@ def test_backup_rotation_no_op_when_under_limit(tmp_path, monkeypatch):
 
     monkeypatch.setattr(qd, "STATE_DIR", state_dir)
     monkeypatch.setattr(qd, "DB_PATH", db_path)
-    monkeypatch.setenv("VNX_DB_BACKUP_KEEP", "3")
 
     assert qd.backup_existing_db() is True
 

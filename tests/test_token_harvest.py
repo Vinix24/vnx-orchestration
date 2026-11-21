@@ -206,7 +206,8 @@ def test_claude_receipt_carries_harvested_token_usage(tmp_path, monkeypatch):
     _write_transcript(projects_dir, "session-receipt-1", [
         _assistant_line("msg_1", _FULL_USAGE),
     ])
-    monkeypatch.setenv("VNX_CLAUDE_PROJECTS_DIR", str(projects_dir))
+    import token_harvest
+    monkeypatch.setattr(token_harvest, "_default_claude_projects_dir", lambda: projects_dir)
 
     from governance_emit import emit_dispatch_receipt
 
@@ -247,7 +248,8 @@ def test_claude_receipt_keeps_real_token_usage_when_already_present(tmp_path, mo
     _write_transcript(projects_dir, "session-receipt-2", [
         _assistant_line("msg_1", _FULL_USAGE),
     ])
-    monkeypatch.setenv("VNX_CLAUDE_PROJECTS_DIR", str(projects_dir))
+    import token_harvest
+    monkeypatch.setattr(token_harvest, "_default_claude_projects_dir", lambda: projects_dir)
 
     from governance_emit import emit_dispatch_receipt
 
@@ -282,7 +284,8 @@ def test_kimi_receipt_never_harvests(tmp_path, monkeypatch):
     _write_transcript(projects_dir, "session-kimi", [
         _assistant_line("msg_1", _FULL_USAGE),
     ])
-    monkeypatch.setenv("VNX_CLAUDE_PROJECTS_DIR", str(projects_dir))
+    import token_harvest
+    monkeypatch.setattr(token_harvest, "_default_claude_projects_dir", lambda: projects_dir)
 
     from governance_emit import emit_dispatch_receipt
 
@@ -350,7 +353,8 @@ def test_deepseek_harness_receipt_carries_harvested_token_usage(tmp_path, monkey
     _write_transcript(projects_dir, "session-receipt-ds", [
         _assistant_line("msg_1", _FULL_USAGE),
     ])
-    monkeypatch.setenv("VNX_CLAUDE_PROJECTS_DIR", str(projects_dir))
+    import token_harvest
+    monkeypatch.setattr(token_harvest, "_default_claude_projects_dir", lambda: projects_dir)
 
     from governance_emit import emit_dispatch_receipt
 
@@ -391,7 +395,8 @@ def test_glm_harness_receipt_carries_harvested_token_usage(tmp_path, monkeypatch
     _write_transcript(projects_dir, "session-receipt-glm", [
         _assistant_line("msg_1", _FULL_USAGE),
     ])
-    monkeypatch.setenv("VNX_CLAUDE_PROJECTS_DIR", str(projects_dir))
+    import token_harvest
+    monkeypatch.setattr(token_harvest, "_default_claude_projects_dir", lambda: projects_dir)
 
     from governance_emit import emit_dispatch_receipt
 

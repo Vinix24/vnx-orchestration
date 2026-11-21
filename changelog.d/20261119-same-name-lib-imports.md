@@ -1,0 +1,1 @@
+- fix(imports): a lib module that imports a same-named sibling (crash_recovery_sweep, pattern_reattribution, cost_tracker) now binds the scripts/lib module whatever the sys.path order, through lib_module.load_lib_module (main red on bb3cb6cd)

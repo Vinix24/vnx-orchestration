@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import subprocess
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -20,8 +19,6 @@ from typing import Any
 
 LIMIT = 1000
 MAX_DEPTH = 6
-LIMIT_ENV = "VNX_DAILY_METRICS_GH_LIMIT"
-MAX_DEPTH_ENV = "VNX_DAILY_METRICS_GH_MAX_DEPTH"
 GH_TIMEOUT_SECONDS = 60
 BASE_FIELDS = ("number", "createdAt", "mergedAt", "headRefOid")
 GH_FAILED, ROW_OUTSIDE_RANGE = "gh_failed", "row_outside_range"
@@ -60,16 +57,6 @@ def parse_timestamp(value: Any) -> datetime | None:
     if stamp.tzinfo is None or stamp.utcoffset() is None:
         return None
     return stamp.astimezone(timezone.utc)
-
-def _env_int(name: str, default: int) -> int:
-    raw = (os.environ.get(name) or "").strip()
-    try:
-        value = int(raw)
-    except ValueError:
-        if raw:
-            log.warning("%s=%r is not a positive integer; using %d", name, raw, default)
-        return default
-    return value if value > 0 else default
 
 def _default_runner(args: Sequence[str], cwd: Path) -> tuple:
     try:
@@ -154,9 +141,9 @@ def fetch_merged(
         start = datetime.combine(from_day, time(0, 0, 0), tzinfo=timezone.utc)
         end = datetime.combine(to_day, time(23, 59, 59), tzinfo=timezone.utc)
         rows, calls, truncated, error, detail = _scan(
-            runner or _default_runner, root, _env_int(LIMIT_ENV, LIMIT),
+            runner or _default_runner, root, LIMIT,
             BASE_FIELDS + tuple(extra_fields), start, end, 1,
-            _env_int(MAX_DEPTH_ENV, MAX_DEPTH))
+            MAX_DEPTH)
         rows = _dedupe(rows)
         if error is None:
             for row in rows:

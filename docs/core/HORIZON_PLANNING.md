@@ -30,6 +30,8 @@ the tracks DB, reached through `vnx horizon`, not a hand-maintained file.
 | `list` | List objectives with phase/horizon/blocked state, plus a short `scope:` tag (`arch`/`light`) at the end of each line. |
 | `show` | Show one objective in detail, including `plan_scope` and the rule that set it. |
 | `set-plan-scope` | Set a track's `plan_scope` by hand; `--reason` is required. The only way down to `light`, and it never closes or attests `OI-PLAN` (see `docs/core/HORIZON_LIFECYCLE.md` stage 1). |
+| `plan-scope review [--json]` | Read-only. Lists every track with an open `OI-PLAN-<track>`: horizon, the current `plan_scope` and its source (`stored`, `transition`, `unreadable`), the proposal (`architecture` or `light`) and the reason, which names the deciding deliverable and path. Rules, in order: a `03_refactoring` deliverable, a deliverable in a schema or security path, a deliverable without readable `dispatch_paths` (or a track without deliverables): `architecture`; otherwise `light`. |
+| `plan-scope review --confirm <track>[,...]` or `--confirm-all` | Needs `--approval-id <id>`; without it the command refuses and writes nothing. A `light` proposal stores `plan_scope=light` (reason `operator-decision: <id>`) and resolves the open `OI-PLAN-<track>`; an `architecture` proposal stores `architecture` and leaves the OI open. `--confirm-all` confirms the tracks the review printed and skips any whose proposal changed on the re-read. No other command calls this path. |
 | `sync` | Reconcile track rows against their declared source. |
 | `drift` | Advisory drift report; the reconciler persists `tracks.derived_status` + a `planning_drift.json` summary (never `tracks.phase`). |
 | `reconcile` | Close/advance tracks against merged-PR evidence (`--apply` to write). |
@@ -45,11 +47,14 @@ top-level alias `vnx deliverable <verb>`:
 
 | Verb | Purpose |
 |---|---|
-| `add` | Add a deliverable to a track (optional `--task-class`/`--routing-floor`/`--dispatch-paths`). The fourth deliverable on a `light` track makes it `architecture` and seeds `OI-PLAN-<track>`; the output says so in one line. |
+| `add` | Add a deliverable to a track (optional `--task-class`/`--routing-floor`/`--dispatch-paths`/`--depends-on dlv-a,dlv-b`). With `--depends-on` the insert and every hard dependency share one `BEGIN IMMEDIATE`: an unknown id or a cycle refuses the whole add (exit 2, the reason on stderr) and leaves no deliverable behind. A deliverable with `--task-class 03_refactoring` on a `light` track makes it `architecture` and seeds `OI-PLAN-<track>`; the output says so in one line. How many deliverables a track has never counts. |
 | `list` | List a track's deliverables, incl. `task_class`/`routing_floor` (explicit "not set" when absent). |
 | `promote` | Promote a deliverable (proposed → ready; human gate). Not the only way out of `proposed`: the reconciler completes a deliverable of a track whose real work is done without a promote (see `docs/core/HORIZON_LIFECYCLE.md` stage 6). |
 | `close` | afboeken (done): close a ready deliverable → completed (operator-attested PR evidence). The reconciler can also complete a deliverable by itself (`deliverable_auto_completed`, stage 6 of the lifecycle). |
 | `set` | Tag an EXISTING deliverable with `task_class`/`routing_floor`/`dispatch_paths` — the rubric fields the plan-gate reads (see `_format_deliverable_for_plan`), and the paths a plan-gate run reads when it names none. |
+| `depend` | `depend <dlv> --on <dlv> [--kind soft]`: record that a deliverable depends on another (ADR-096 §1-2, `scripts/lib/deliverable_dependencies.py`). An unknown id, an existing active edge or a cycle (named in the message) is refused with exit 2. A removed edge is restored. |
+| `undepend` | `undepend <dlv> --on <dlv> --reason "<why>"`: the row stays with `removed_at` and `removed_reason`; an empty reason is refused. |
+| `deps` | `deps <dlv> [--json]`: active and removed dependencies of a deliverable, both directions, within one project (ADR-007). Whether a predecessor is satisfied is not read here (B2). |
 
 A deliverable has more than one way to `completed`. `deliverable close` is the human path. The reconciler is the other: `track_reconciler._reconcile_deliverable_dispatches` (OI-840, OI-1969) ends the deliverable stubs of a track a human declared done. It writes nothing unless `tracks.phase == 'done'` and every non-deliverable dispatch of the track is terminal (`completed`, `expired` or `dead_letter`); then a `proposed` stub becomes `expired` (event `deliverable_expired_on_done`: nothing was built) and every other non-terminal stub becomes `completed` (event `deliverable_auto_completed`, actor `reconciler`), with no promote and no close by a person. Merged-PR or track-level evidence alone never completes a stub. It runs inside every `reconcile_track` call, `vnx horizon reconcile` in check mode included. The full rule is in `docs/core/HORIZON_LIFECYCLE.md` stage 6.
 
@@ -58,7 +63,7 @@ A deliverable has more than one way to `completed`. `deliverable close` is the h
 Since #2110 a new track carries one `plan_scope` in `tracks.metadata_json` (`scripts/lib/plan_scope.py`): `architecture` (the track has a plan-gate, `OI-PLAN-<track>`) or `light` (it has none). A track created before P1 carries no `plan_scope` key; it reads as `architecture` with an open `OI-PLAN` and as `light` without one, and reading writes nothing.
 
 - **One scope per track.** `vnx horizon add` requires `--plan-scope`; `bin/vnx horizon add --help` lists it as REQUIRED for a new track.
-- **Up by itself, down only by hand.** The fourth deliverable on a light track, or a build dispatch at the door whose paths fall in a plan-scope class, makes the track `architecture` and seeds `OI-PLAN-<track>`. Only `vnx horizon set-plan-scope <track> light --reason "..."` goes down, and it does not close `OI-PLAN`.
+- **Up by itself, down only by hand.** A `03_refactoring` deliverable added to or retargeted onto a light track (a pure deletion included), or a build dispatch at the door whose paths fall in a plan-scope class or whose task_class is `03_refactoring`, makes the track `architecture` and seeds `OI-PLAN-<track>`. Only `vnx horizon set-plan-scope <track> light --reason "..."` goes down, and it does not close `OI-PLAN`.
 - **The path classes** are one table, `smart_router.plan_scope_path_category`: `schema`, `security`, `gate-merge`, `store-resolution` and `outside-repo`. `outside-repo` (`smart_router.PLAN_SCOPE_OUTSIDE_REPO`) is a path that leaves the repository: it is classified upward, never as plain code. A dispatch that names no path at all counts as architecture too.
 
 Birth, the transaction and the event line: `docs/core/HORIZON_LIFECYCLE.md` stage 1.

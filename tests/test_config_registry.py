@@ -204,7 +204,6 @@ PR2_NEW_FLAGS = (
     "VNX_LEARNING_LOOP_ENABLED",
     "VNX_DREAM_SCHEDULER_ENABLED",
     "VNX_INJECTION_FEEDBACK_ENABLED",
-    "VNX_PLAN_GATE_COMPLEX_ONLY",
     "VNX_HASH_CHAIN_REQUIRED",
     "VNX_ATTESTATION_REQUIRED",
     "VNX_MIGRATION_SYSTEM",
@@ -230,7 +229,7 @@ def test_pr2_approval_flags_require_approval():
 def test_pr2_non_approval_flags_do_not_require_approval():
     for key in (
         "VNX_LEARNING_LOOP_ENABLED", "VNX_DREAM_SCHEDULER_ENABLED",
-        "VNX_INJECTION_FEEDBACK_ENABLED", "VNX_PLAN_GATE_COMPLEX_ONLY",
+        "VNX_INJECTION_FEEDBACK_ENABLED",
     ):
         assert cr.CONFIG_REGISTRY[key].requires_approval is False
 
@@ -247,12 +246,6 @@ def test_pr2_new_flags_have_correct_subsystem_and_status():
         "VNX_LEARNING_LOOP_ENABLED": ("intelligence-self-learning-loop", "ACTIVATE"),
         "VNX_DREAM_SCHEDULER_ENABLED": ("dream-consolidation", "ACTIVATE"),
         "VNX_INJECTION_FEEDBACK_ENABLED": ("injection-effectiveness-eval-loop", "ACTIVATE"),
-        # "plan-gate-task-class-scope" — matches the docs/core/SUBSYSTEMS.md
-        # seed row (§5 of the PRD), distinct from "plan-gate-panel"
-        # (VNX_PLAN_GATE_ENFORCE) below. Fixed in
-        # framework-status-audit-and-cockpit PR-3 so the cockpit generator has
-        # exactly one canonical flag per ledger row.
-        "VNX_PLAN_GATE_COMPLEX_ONLY": ("plan-gate-task-class-scope", "SCOPE"),
         "VNX_HASH_CHAIN_REQUIRED": ("receipt-hash-chain", "PARK"),
         "VNX_ATTESTATION_REQUIRED": ("signed-attestation", "PARK"),
         "VNX_MIGRATION_SYSTEM": ("migration-mechanisms", "PARK"),
@@ -613,3 +606,92 @@ def test_injection_effectiveness_ledger_flag_stays_why_enabled():
     sub = "injection-effectiveness-eval-loop"
     assert _canonical_flags(cr)[sub] == "VNX_INJECTION_WHY_ENABLED"
     assert cr.canonical_flags()[sub] == "VNX_INJECTION_WHY_ENABLED"
+
+
+# ---------------------------------------------------------------------------
+# PR-size enforcement keys and the `layers` parameter (ADR-088, pr-grootte-afgedwongen PG-0)
+# ---------------------------------------------------------------------------
+
+_SIZE_KEY = "VNX_PR_SIZE_HOLD"
+
+
+def test_pr_size_enforcement_keys_exist_with_their_defaults_and_require_approval():
+    # Red run on origin/main: VNX_PR_SIZE_ENFORCE is unknown and HOLD is 600.
+    expected = {"VNX_PR_SIZE_ENFORCE": ("string", "warn"), "VNX_PR_SIZE_HOLD": ("integer", "450"),
+                "VNX_PR_SIZE_HOLD_SECURITY": ("integer", "300"), "VNX_SECURITY_PATHS": ("string", "")}
+    for key, (type_, default) in expected.items():
+        entry = cr.CONFIG_REGISTRY[key]
+        assert (entry.type, entry.default, entry.category) == (type_, default, "gate"), key
+        assert entry.requires_approval is True, key
+        assert cr.resolve_with_source(key) == (default, "default"), key
+    for value in ("off", "warn", "refuse"):
+        assert value in cr.CONFIG_REGISTRY["VNX_PR_SIZE_ENFORCE"].description
+    # The merge door's pr_size preflight reads all three since PG-1d.
+    for key in ("VNX_PR_SIZE_ENFORCE", "VNX_PR_SIZE_HOLD_SECURITY", "VNX_SECURITY_PATHS"):
+        assert cr.CONFIG_REGISTRY[key].read_site_wired is True, key
+
+
+def test_layers_floor_ignores_override_and_env_the_full_chain_does_not(monkeypatch):
+    cr.set_db_resolver(lambda pid, key: "400" if key == _SIZE_KEY else None)
+    monkeypatch.setenv("VNX_OVERRIDE_PR_SIZE_HOLD", "99999")
+    monkeypatch.setenv(_SIZE_KEY, "88888")
+    assert cr.resolve_with_source(_SIZE_KEY, layers=("project_config", "default")) == (
+        "400", "project_config")
+    assert cr.resolve_with_source(_SIZE_KEY) == ("99999", "override")
+    assert cr.resolve_with_source(_SIZE_KEY, layers=("env", "default")) == ("88888", "env")
+
+
+def test_layers_walk_in_chain_order_whatever_order_they_are_given(monkeypatch):
+    cr.set_db_resolver(lambda pid, key: "400")
+    monkeypatch.setenv("VNX_OVERRIDE_PR_SIZE_HOLD", "300")
+    assert cr.resolve_with_source(_SIZE_KEY, layers=("default", "override")) == ("300", "override")
+    assert cr.resolve_with_source(_SIZE_KEY, layers=("default", "project_config")) == (
+        "400", "project_config")
+
+
+def test_layers_default_only_returns_the_registry_default(monkeypatch):
+    cr.set_db_resolver(lambda pid, key: "400")
+    monkeypatch.setenv("VNX_OVERRIDE_PR_SIZE_HOLD", "300")
+    monkeypatch.setenv(_SIZE_KEY, "350")
+    assert cr.resolve_with_source(_SIZE_KEY, layers=("default",)) == ("450", "default")
+    # A layer subset with no value in it is unset, never a value from a layer left out.
+    assert cr.resolve_with_source("VNX_NOT_A_KEY", layers=("default",)) == (None, "unset")
+
+
+@pytest.mark.parametrize("bad", [("overide",), ("default", "global"), (), "default", (None,)])
+def test_unknown_or_empty_layers_raise(bad):
+    with pytest.raises(ValueError):
+        cr.resolve_with_source(_SIZE_KEY, layers=bad)
+
+
+def test_strict_resolver_keeps_its_meaning_inside_a_layer_subset():
+    def _boom(pid, key):
+        raise RuntimeError("db down")
+    cr.set_db_resolver(_boom)
+    assert cr.resolve_with_source(_SIZE_KEY, strict_resolver=True,
+                                  layers=("project_config", "default")) == (
+        None, "project_config_error")
+    # Without project_config in the subset the resolver is never called.
+    assert cr.resolve_with_source(_SIZE_KEY, strict_resolver=True, layers=("default",)) == (
+        "450", "default")
+
+
+def test_layers_default_is_the_chain_constant_and_names_every_value_source():
+    """A new layer (config-een-oppervlak G2: global) must land in CHAIN_LAYERS and in the walk.
+    Every source resolve_with_source can return, except unset and the *_error ones, is a layer."""
+    import inspect
+    import re
+
+    assert inspect.signature(cr.resolve_with_source).parameters["layers"].default is cr.CHAIN_LAYERS
+    assert cr.CHAIN_LAYERS == ("override", "project_config", "global_config", "env", "default")
+    source = inspect.getsource(cr.resolve_with_source)
+    returned = set(re.findall(r'return [^\n]*?,\s*"([a-z_]+)"', source))
+    value_sources = {s for s in returned if s != "unset" and not s.endswith("_error")}
+    assert value_sources == set(cr.CHAIN_LAYERS)
+
+
+def test_tmux_max_concurrent_description_names_stored_over_env_precedence():
+    desc = cr.CONFIG_REGISTRY["VNX_TMUX_MAX_CONCURRENT"].description
+    assert "still wins over this" not in desc
+    assert "A stored value beats the env var" in desc
+    assert "VNX_OVERRIDE_TMUX_MAX_CONCURRENT beats both" in desc

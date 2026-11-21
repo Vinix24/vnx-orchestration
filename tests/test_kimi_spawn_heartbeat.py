@@ -269,7 +269,7 @@ class TestHeartbeatMonitorLoopKillsSilentWorker(_IsolatedDataDirCase):
 
     def setUp(self):
         super().setUp()
-        env_patch = patch.dict(os.environ, {"VNX_WORKER_HEARTBEAT_SILENCE_SECONDS": "0.2"})
+        env_patch = patch("worker_heartbeat._DEFAULT_SILENCE_THRESHOLD_SECONDS", 0.2)
         env_patch.start()
         self.addCleanup(env_patch.stop)
 
@@ -337,7 +337,7 @@ class TestHeartbeatKilledEventSetAtKillDecision(_IsolatedDataDirCase):
 
     def setUp(self):
         super().setUp()
-        env_patch = patch.dict(os.environ, {"VNX_WORKER_HEARTBEAT_SILENCE_SECONDS": "0.2"})
+        env_patch = patch("worker_heartbeat._DEFAULT_SILENCE_THRESHOLD_SECONDS", 0.2)
         env_patch.start()
         self.addCleanup(env_patch.stop)
 
@@ -399,7 +399,7 @@ class TestHeartbeatMonitorLoopFalsePositiveGuard(_IsolatedDataDirCase):
 
     def setUp(self):
         super().setUp()
-        env_patch = patch.dict(os.environ, {"VNX_WORKER_HEARTBEAT_SILENCE_SECONDS": "0.6"})
+        env_patch = patch("worker_heartbeat._DEFAULT_SILENCE_THRESHOLD_SECONDS", 0.6)
         env_patch.start()
         self.addCleanup(env_patch.stop)
 
@@ -451,7 +451,7 @@ class TestHeartbeatConcurrencyIsolation(_IsolatedDataDirCase):
 
     def setUp(self):
         super().setUp()
-        env_patch = patch.dict(os.environ, {"VNX_WORKER_HEARTBEAT_SILENCE_SECONDS": "0.6"})
+        env_patch = patch("worker_heartbeat._DEFAULT_SILENCE_THRESHOLD_SECONDS", 0.6)
         env_patch.start()
         self.addCleanup(env_patch.stop)
 

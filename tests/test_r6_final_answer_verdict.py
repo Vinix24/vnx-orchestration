@@ -770,7 +770,7 @@ def _panel_dispatcher(tmp_path, final_text, calls, *, report=PLAN_SEAT_REPORT, a
 
 
 def _one_seat_panel(tmp_path, dispatcher, monkeypatch):
-    monkeypatch.setenv("VNX_PANEL_RETRY", "0")
+    monkeypatch.setattr(pgp, "PANEL_RETRY_COUNT", 0)
     return pgp.run_panel(
         doc_text="## Problem\nx\n", track_id="trk", project_id="p1",
         panel=[{"label": "deepseek", "provider": "deepseek", "model_arg": "deepseek-flash"}],
@@ -1015,7 +1015,7 @@ def fake_claude(tmp_path, monkeypatch):
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
     monkeypatch.setenv("VNX_PROJECT_ROOT", str(checkout))
     monkeypatch.setenv("R6_FAKE_CLAUDE_SPEC", str(fake._spec))
-    monkeypatch.setenv("VNX_PANEL_RETRY", "0")
+    monkeypatch.setattr(pgp, "PANEL_RETRY_COUNT", 0)
     for key in ("VNX_TOTAL_DEADLINE", "VNX_CHUNK_TIMEOUT"):
         monkeypatch.delenv(key, raising=False)
     return fake

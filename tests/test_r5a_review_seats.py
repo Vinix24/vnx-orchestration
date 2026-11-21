@@ -203,22 +203,11 @@ class TestSeatResolver:
         assert resolve_review_seats(explicit_stack=["kimi_gate"]).to_record()["key"] == ""
 
 
-class TestAProfileAddsAndRemovesNoSeat:
-    """VNX_PROFILE_SELECTOR=1 used to replace the whole stack with the profile's
-    ``required_gates``: a hard-coded codex+kimi pair, or no reviewer at all."""
+class TestNoGlobProfileDecidesTheSeats:
+    """The glob governance profile (the profile-selector switch) is deleted: the seats and the
+    extra gates of a config-sourced review depend on the configured stack alone."""
 
-    @pytest.fixture
-    def profiles(self, env, monkeypatch):
-        monkeypatch.setenv("VNX_PROFILE_SELECTOR", "1")
-        vnx_dir = env["project_root"] / ".vnx"
-        vnx_dir.mkdir()
-        (vnx_dir / "governance_profiles.yaml").write_text(
-            "scopes:\n  \"agents/\": light\n  \"*\": default\n", encoding="utf-8",
-        )
-
-    def test_the_scheduler_requests_the_config_seats_when_a_profile_applies(self, env, profiles, monkeypatch):
-        """Red on the base: the profile's codex_gate,kimi_gate were requested for a project whose
-        stack names glm_gate, so the scheduler and a fresh read of the key disagreed."""
+    def test_the_scheduler_requests_the_config_seats(self, env, monkeypatch):
         import config_runtime
 
         monkeypatch.setenv("VNX_OVERRIDE_DEFAULT_REVIEW_STACK", "glm_gate")
@@ -226,29 +215,30 @@ class TestAProfileAddsAndRemovesNoSeat:
 
         result = _request(None)
 
-        requested_reviewers = [g for g in _gates(result) if g != "ci_gate"]
-        assert requested_reviewers == configured == ["glm_gate"], (
-            f"scheduler requested {requested_reviewers}, the config names {configured}"
-        )
-        assert "ci_gate" in _gates(result), "the profile still decides the extra gates"
+        assert [g for g in _gates(result) if g != "ci_gate"] == configured == ["glm_gate"]
 
-    def test_a_light_profile_removes_no_seat(self, env, profiles, monkeypatch):
+    @pytest.mark.parametrize("changed", [
+        ["agents/blog-writer/prompt.md"], ["scripts/lib/example.py"], ["dashboard/index.html"], [],
+    ])
+    def test_the_default_stack_gives_the_same_seats_whatever_the_files(self, env, changed):
+        """Pinned against the base, where the selector was unset: the default stack, no profile stack."""
         from review_seats import resolve_review_seats
 
-        monkeypatch.setenv("VNX_OVERRIDE_DEFAULT_REVIEW_STACK", "codex_gate,kimi_gate")
+        seats = resolve_review_seats(changed_files=changed)
 
-        seats = resolve_review_seats(changed_files=["agents/blog-writer/prompt.md"])
+        assert seats.seats == ("codex_gate", "kimi_gate")
+        assert seats.extra_gates == ()
+        assert seats.profile_stack is None
+        assert seats.to_record()["profile_stack"] is None
+
+    def test_ci_gate_still_joins_when_required(self, env, monkeypatch):
+        from review_seats import resolve_review_seats
+
+        monkeypatch.setenv("VNX_OVERRIDE_CI_GATE_REQUIRED", "1")
+        seats = resolve_review_seats(changed_files=["scripts/lib/example.py"])
 
         assert seats.seats == ("codex_gate", "kimi_gate")
         assert seats.extra_gates == ("ci_gate",)
-        assert seats.profile_stack == ("ci_gate",)
-
-    def test_no_profile_applies_without_the_selector(self, env, monkeypatch):
-        from review_seats import resolve_review_seats
-
-        monkeypatch.setenv("VNX_PROFILE_SELECTOR", "0")
-        seats = resolve_review_seats(changed_files=["scripts/lib/example.py"])
-        assert seats.profile_stack is None
 
 
 # ---------------------------------------------------------------------------

@@ -510,7 +510,7 @@ class TestAuditability:
 
 
 # ---------------------------------------------------------------------------
-# 11. ProfileGateResolver — resolve_gate_stack() (VNX_PROFILE_SELECTOR flag)
+# 11. Standing seats held by the governance profiles
 # ---------------------------------------------------------------------------
 
 # Project root for loading the live .vnx/governance_profiles.yaml scope config.
@@ -525,118 +525,12 @@ def _standing_review_seats() -> list[str]:
     return [item.strip() for item in raw.split(",") if item.strip()]
 
 
-class TestProfileGateResolver:
-    """Tests for scripts/lib/profile_gate_resolver.resolve_gate_stack().
-
-    Covers:
-      - flag off → None (caller uses DEFAULT_REVIEW_STACK unchanged)
-      - agents/* → light → [ci_gate]
-      - scripts/ → default → [codex_gate, ci_gate]
-      - mixed files (agents + scripts) → most-restrictive (default) wins
-      - empty changed_files → None
-    """
-
-    def _import_resolver(self):
-        """Import resolve_gate_stack (sys.path already includes scripts/lib)."""
-        from profile_gate_resolver import resolve_gate_stack  # noqa: PLC0415
-        return resolve_gate_stack
-
-    def test_flag_off_returns_none(self, monkeypatch) -> None:
-        monkeypatch.setenv("VNX_PROFILE_SELECTOR", "0")
-        resolve_gate_stack = self._import_resolver()
-        result = resolve_gate_stack(["scripts/lib/foo.py"], project_root=_REPO_ROOT)
-        assert result is None
-
-    def test_flag_unset_returns_none(self, monkeypatch) -> None:
-        monkeypatch.delenv("VNX_PROFILE_SELECTOR", raising=False)
-        resolve_gate_stack = self._import_resolver()
-        result = resolve_gate_stack(["scripts/lib/foo.py"], project_root=_REPO_ROOT)
-        assert result is None
-
-    def test_empty_files_returns_none(self, monkeypatch) -> None:
-        monkeypatch.setenv("VNX_PROFILE_SELECTOR", "1")
-        resolve_gate_stack = self._import_resolver()
-        result = resolve_gate_stack([], project_root=_REPO_ROOT)
-        assert result is None
-
-    def test_agents_path_resolves_to_light_gates(self, monkeypatch) -> None:
-        """agents/* maps to 'light' profile → required_gates = [ci_gate]."""
-        monkeypatch.setenv("VNX_PROFILE_SELECTOR", "1")
-        resolve_gate_stack = self._import_resolver()
-        result = resolve_gate_stack(
-            ["agents/blog-writer/post.md"], project_root=_REPO_ROOT,
-        )
-        assert result == ["ci_gate"]
-
-    def test_scripts_path_resolves_to_default_gates(self, monkeypatch) -> None:
-        """scripts/ maps to 'default' profile → full gate stack."""
-        monkeypatch.setenv("VNX_PROFILE_SELECTOR", "1")
-        resolve_gate_stack = self._import_resolver()
-        result = resolve_gate_stack(
-            ["scripts/lib/gate_request_handler.py"], project_root=_REPO_ROOT,
-        )
-        assert result is not None
-        assert "codex_gate" in result
-        assert "gemini_review" not in result
-        assert "ci_gate" in result
-        # Protected paths keep BOTH standing seats: dropping gemini_review must
-        # not leave a PR completing on codex_gate + ci alone.
-        assert result == [*_standing_review_seats(), "ci_gate"]
-
-    def test_dashboard_path_resolves_to_default_gates(self, monkeypatch) -> None:
-        """dashboard/ maps to 'default' profile — code paths stay protected."""
-        monkeypatch.setenv("VNX_PROFILE_SELECTOR", "1")
-        resolve_gate_stack = self._import_resolver()
-        result = resolve_gate_stack(
-            ["dashboard/index.html"], project_root=_REPO_ROOT,
-        )
-        assert result is not None
-        assert "codex_gate" in result
-        assert "gemini_review" not in result
-        assert result == [*_standing_review_seats(), "ci_gate"]
-
-    def test_mixed_files_most_restrictive_wins(self, monkeypatch) -> None:
-        """When agents/ (light) + scripts/ (default) are mixed, default wins."""
-        monkeypatch.setenv("VNX_PROFILE_SELECTOR", "1")
-        resolve_gate_stack = self._import_resolver()
-        result = resolve_gate_stack(
-            ["agents/blog-writer/post.md", "scripts/lib/gate_request_handler.py"],
-            project_root=_REPO_ROOT,
-        )
-        assert result is not None
-        # default profile has more gates than light → it should win
-        assert "codex_gate" in result
-        assert "gemini_review" not in result
-        assert "ci_gate" in result
-        assert result == [*_standing_review_seats(), "ci_gate"]
-
-    def test_flag_on_returns_list_not_none(self, monkeypatch) -> None:
-        monkeypatch.setenv("VNX_PROFILE_SELECTOR", "1")
-        resolve_gate_stack = self._import_resolver()
-        result = resolve_gate_stack(
-            ["scripts/lib/profile_gate_resolver.py"], project_root=_REPO_ROOT,
-        )
-        assert isinstance(result, list)
-
-    def test_ci_name_normalized_to_ci_gate(self, monkeypatch) -> None:
-        """YAML uses 'ci' but dispatch system uses 'ci_gate'; alias must apply."""
-        monkeypatch.setenv("VNX_PROFILE_SELECTOR", "1")
-        resolve_gate_stack = self._import_resolver()
-        result = resolve_gate_stack(
-            ["scripts/lib/foo.py"], project_root=_REPO_ROOT,
-        )
-        assert result is not None
-        assert "ci" not in result   # raw alias must not appear
-        assert "ci_gate" in result  # normalized name must appear
-
-
 class TestProfilesHoldTheStandingSeats:
     """Every profile that requires review holds both standing review seats.
 
     gemini_review was a review seat of the default profiles. When it was removed
     the seat had to go to kimi_gate (the second seat of VNX_DEFAULT_REVIEW_STACK),
-    not to nothing: with VNX_PROFILE_SELECTOR=1 the profile IS the effective
-    review stack for protected paths.
+    not to nothing: the profiles stay the declared gate set for protected paths.
     """
 
     def test_builtin_default_and_coding_strict_hold_the_seats(self) -> None:

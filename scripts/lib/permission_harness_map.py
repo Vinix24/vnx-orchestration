@@ -57,8 +57,8 @@ _KIMI = {
     "hooks": (DEGRADED, "one PreToolUse ^Shell$ hook in a 0600 config file"),
 }
 _CODEX = {
-    "filesystem_read": (DEGRADED, "--sandbox <mode> from VNX_CODEX_SANDBOX; unsupported on the bypass route"),
-    "filesystem_write": (DEGRADED, "--sandbox <mode> from VNX_CODEX_SANDBOX; unsupported on the bypass route"),
+    "filesystem_read": (DEGRADED, "codex_spawn always takes the bypass route; codex --sandbox <mode> is not wired"),
+    "filesystem_write": (DEGRADED, "codex_spawn always takes the bypass route; codex --sandbox <mode> is not wired"),
     "filesystem_deny": (UNSUPPORTED, "an OS sandbox mode has no per-path deny"),
     "tools_allow": (UNSUPPORTED, "no per-tool allow list"),
     "tools_deny": (UNSUPPORTED, "no per-tool deny"),

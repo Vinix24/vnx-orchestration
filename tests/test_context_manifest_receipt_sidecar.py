@@ -44,7 +44,7 @@ def env(tmp_path, monkeypatch):
         d.mkdir(parents=True)
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("VNX_PROJECT_ID", "proj-a")
-    for name in ("VNX_CLAUDE_PROJECTS_DIR", "VNX_AGENT_LAYOUT", "VNX_TASK_CLASS", "VNX_TIER_FROM",
+    for name in ("VNX_AGENT_LAYOUT", "VNX_TASK_CLASS", "VNX_TIER_FROM",
                  "VNX_TIER_TO", "VNX_PARENT_DISPATCH"):
         monkeypatch.delenv(name, raising=False)
     text = FIXTURE.read_text(encoding="utf-8").replace("{HOME}", str(home)).replace("{REPO}", str(repo))

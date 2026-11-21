@@ -190,12 +190,6 @@ def test_an_error_from_a_building_block_is_refused_not_raised(state_dir, lifecyc
 def test_a_blank_project_or_an_unusable_clock_is_refused(state_dir, project, now):
     _refused(gate.ledger_verdict(state_dir, project, now=now), "invalid_input")
 
-def test_the_activation_commit_defaults_to_the_environment(state_dir, lifecycle_on, monkeypatch):
-    _ended(state_dir)
-    monkeypatch.setenv("VNX_LEDGER_ACTIVATION_COMMIT", REAL_SHA)
-
-    assert (_verdict(state_dir)["cohort"], _verdict(state_dir)["status"]) == (REAL_SHA, "ok")
-
 def _append_once_after(real, state_dir, times):
     """compute_lifecycle_count, then (``times`` calls only) a completed v3 line of unknown
     provenance lands: the ledger changes between the defect count and the attempt read."""

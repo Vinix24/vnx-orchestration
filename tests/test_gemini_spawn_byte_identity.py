@@ -175,7 +175,7 @@ class TestSpawnGeminiStreamingEventWriter:
             collected.append(ev_dict)
 
         with patch("subprocess.Popen", return_value=_FakeProc()), \
-             patch.dict(os.environ, {"VNX_GEMINI_STREAM": "1"}), \
+             patch("provider_spawns.gemini_spawn.gemini_stream_enabled", return_value=True), \
              patch(
                  "provider_spawns.gemini_spawn._GeminiNormalizerHost.drain_stream",
                  return_value=iter(fixture_events),
@@ -231,7 +231,7 @@ class TestSpawnGeminiStreamingEventWriter:
         fixture_events = _fixture_canonical_events("T3", "d1")
 
         with patch("subprocess.Popen", return_value=_FakeProc()), \
-             patch.dict(os.environ, {"VNX_GEMINI_STREAM": "1"}), \
+             patch("provider_spawns.gemini_spawn.gemini_stream_enabled", return_value=True), \
              patch(
                  "provider_spawns.gemini_spawn._GeminiNormalizerHost.drain_stream",
                  return_value=iter(fixture_events),
@@ -278,7 +278,7 @@ class TestLegacyPathSyntheticEvent:
             collected.append(ev_dict)
 
         with patch("subprocess.Popen", return_value=_FakeProc()), \
-             patch.dict(os.environ, {"VNX_GEMINI_STREAM": "0"}), \
+             patch("provider_spawns.gemini_spawn.gemini_stream_enabled", return_value=False), \
              patch(
                  "provider_spawns.gemini_spawn._drain_buffered",
                  return_value=('{"response": "Legacy review findings."}', "", "ok"),

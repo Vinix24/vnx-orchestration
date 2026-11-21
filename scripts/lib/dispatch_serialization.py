@@ -19,23 +19,23 @@ may still dial concurrency up or down via VNX_TMUX_MAX_CONCURRENT — e.g. =8
 for more headroom, or =1 to go back to fully serial; this is an explicit,
 informed choice, not a default the code should creep towards on its own.
 
-Lock is account-level: $VNX_LOCK_DIR or ~/.vnx-data/locks — shared across ALL
-projects and worktrees that use the same Claude subscription, by design: the
-subscription session cap is an account property, not a per-project one.
-Setting VNX_LOCK_DIR per project to get 5 slots per project (instead of 5
-across the whole account) multiplies past the real limit — don't.
+The cap is read through config_runtime (ADR-087): VNX_OVERRIDE_TMUX_MAX_CONCURRENT
+> the stored project_config row > the exported env value > 10.
 
-Lock-wait timeout (VNX_CLAUDE_LOCK_TIMEOUT_SECONDS) is FINITE by default
+Lock is account-level: ~/.vnx-data/locks — shared across ALL projects and
+worktrees that use the same Claude subscription, by design: the subscription
+session cap is an account property, not a per-project one. There is no
+per-project lock dir setting: one would multiply the slots past the real limit.
+
+Lock-wait timeout (_DEFAULT_TIMEOUT_SECONDS, a constant) is FINITE
 (dispatch-20260904-lock-timeout-eindig, OI/gap measured 2026-09-04): the
 default used to be "0" and the wait-loop's `if timeout_secs > 0` guard made
 the TimeoutError branch structurally unreachable at that default — a worker
 waiting on a saturated lane (all N slots busy) polled forever with only a
 one-time 60s log warning, no matter how long the wait ran. See
-_DEFAULT_TIMEOUT_SECONDS below for the grounding of the new default. `0`
-remains a legal, explicit opt-out ("wait forever") via
-VNX_CLAUDE_LOCK_TIMEOUT_SECONDS=0 for an operator who deliberately accepts
-that trade-off — it is no longer the silent default a caller falls into by
-doing nothing.
+_DEFAULT_TIMEOUT_SECONDS below for the grounding of the value. The env
+settings for the timeout, the wait warning and the lock dir were removed in
+config-een-oppervlak PR-6v; tests patch the constants.
 
 Posix-only: requires fcntl (unavailable on Windows).
 """
@@ -66,21 +66,15 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 def _lock_dir() -> Path:
-    """Account-level lock directory: $VNX_LOCK_DIR or ~/.vnx-data/locks."""
-    env = os.environ.get("VNX_LOCK_DIR", "")
-    if env:
-        return Path(env)
+    """Account-level lock directory: ~/.vnx-data/locks."""
     return Path.home() / ".vnx-data" / "locks"
 
 
-def _warn_seconds() -> float:
-    try:
-        return float(os.environ.get("VNX_CLAUDE_LOCK_WAIT_WARN_SECONDS", "60"))
-    except (ValueError, TypeError):
-        return 60.0
+# Seconds a waiter queues before the one-time "still waiting" warning.
+_WAIT_WARN_SECONDS = 60.0
 
 
-# Default lock-wait timeout in seconds (VNX_CLAUDE_LOCK_TIMEOUT_SECONDS), finite
+# Lock-wait timeout in seconds, finite
 # by design (dispatch-20260904-lock-timeout-eindig).
 #
 # Grounded on the documented ceiling for how long any ONE slot-holder may
@@ -107,55 +101,26 @@ def _warn_seconds() -> float:
 _DEFAULT_TIMEOUT_SECONDS = 14400.0  # 4h — see dispatch_spec.DEADLINE_SECONDS_MAX
 
 
-def _timeout_seconds() -> float:
-    """Lock-wait timeout in seconds, from VNX_CLAUDE_LOCK_TIMEOUT_SECONDS.
-
-    Unset -> _DEFAULT_TIMEOUT_SECONDS (finite). Exactly "0" is a legal,
-    explicit opt-out ("wait forever") and is returned as 0.0 verbatim --
-    see the module docstring. A negative or unparseable value is not a sane
-    explicit choice (there is no meaningful negative wait) and falls back to
-    the finite default, same fail-soft-to-default posture as
-    _max_concurrent()'s clamp of bad input below.
-    """
-    raw = os.environ.get("VNX_CLAUDE_LOCK_TIMEOUT_SECONDS")
-    if raw is None:
-        return _DEFAULT_TIMEOUT_SECONDS
-    try:
-        value = float(raw)
-    except (ValueError, TypeError):
-        return _DEFAULT_TIMEOUT_SECONDS
-    if value < 0:
-        return _DEFAULT_TIMEOUT_SECONDS
-    return value
-
-
 def _max_concurrent() -> int:
     """N-slot concurrency limit for the claude-tmux lane.
 
-    Precedence: the process env var VNX_TMUX_MAX_CONCURRENT (an explicit
-    per-session override) wins; then the registry-backed config-plane value
-    (project_config via config_runtime -- the same surface an operator's
-    dashboard flips, category "dispatch", approval-gated); then 10 -- the
-    account-wide default (operator directive 2026-08-21, dispatch-20260821-
-    t0-tmux-concurrency-10; raised from 5 since the per-dispatch tmux
-    paste-buffer fix, #1451 -- see module docstring). Missing, unparseable,
-    zero, or negative values fall back to 10. Only a valid positive integer
-    overrides the default with a different concurrency level. The config
-    lookup is best-effort (fail-soft): a missing state dir / DB leaves the
-    env/default behaviour unchanged, exactly as before this flag was
-    registry-backed.
+    Read through config_runtime (ADR-087): VNX_OVERRIDE_TMUX_MAX_CONCURRENT >
+    the stored project_config row (the dashboard surface, category "dispatch",
+    approval-gated) > the exported env value > 10, the account-wide default
+    (operator directive 2026-08-21, dispatch-20260821-t0-tmux-concurrency-10;
+    see the module docstring). A stored row beats an exported env value.
+    Missing, unparseable, zero, or negative values fall back to 10. An
+    unreadable config is logged and falls back to 10.
     """
-    raw = os.environ.get("VNX_TMUX_MAX_CONCURRENT")
-    if not raw:
-        try:
-            import config_runtime  # noqa: PLC0415
-            raw = config_runtime.get("VNX_TMUX_MAX_CONCURRENT")
-        except Exception as exc:  # vnx-silent-except: unreadable config -> log + fail-soft to default
-            logger.warning(
-                "dispatch_serialization: VNX_TMUX_MAX_CONCURRENT config read failed "
-                "(falling back to default 10, fail-soft direction): %s", exc
-            )
-            raw = None
+    try:
+        import config_runtime  # noqa: PLC0415
+        raw = config_runtime.get("VNX_TMUX_MAX_CONCURRENT")
+    except Exception as exc:  # vnx-silent-except: unreadable config -> log + fail-soft to default
+        logger.warning(
+            "dispatch_serialization: VNX_TMUX_MAX_CONCURRENT config read failed "
+            "(falling back to default 10, fail-soft direction): %s", exc
+        )
+        raw = None
     try:
         n = int(raw) if raw else 10
     except (ValueError, TypeError):
@@ -260,14 +225,13 @@ def _acquire_any_slot_with_warn(
     dispatch_id: Optional[str],
 ) -> int:
     """Acquire the first free slot among fds, with wait-warn and a hard
-    timeout that is FINITE by default (_DEFAULT_TIMEOUT_SECONDS; opt out of
-    it entirely with VNX_CLAUDE_LOCK_TIMEOUT_SECONDS=0 -- see _timeout_seconds()
-    and the module docstring). Polls ALL slots each interval (not just slot 0)
+    timeout that is FINITE (_DEFAULT_TIMEOUT_SECONDS; 0 waits forever, a
+    value only a test sets -- see the module docstring). Polls ALL slots each interval (not just slot 0)
     so whichever holder releases first is grabbed immediately. Raises
     LockWaitTimeout when the timeout elapses with no free slot.
     """
-    warn_secs = _warn_seconds()
-    timeout_secs = _timeout_seconds()
+    warn_secs = _WAIT_WARN_SECONDS
+    timeout_secs = _DEFAULT_TIMEOUT_SECONDS
     start = time.monotonic()
     warned = False
 
@@ -332,9 +296,8 @@ def serialize_lane(
     only; no action needed unless running lock dir on a network filesystem.
 
     Raises LockWaitTimeout (a TimeoutError subclass) if no slot frees up
-    within VNX_CLAUDE_LOCK_TIMEOUT_SECONDS (default _DEFAULT_TIMEOUT_SECONDS,
-    finite; VNX_CLAUDE_LOCK_TIMEOUT_SECONDS=0 opts out and waits forever,
-    explicitly). See the module docstring for the default's rationale.
+    _DEFAULT_TIMEOUT_SECONDS (finite). See the module docstring for its
+    rationale.
     """
     if not serialization_class:
         yield

@@ -199,7 +199,7 @@ For the precise rule, the lifecycle diagram, and the loop, see
 - The tmux-spawn worker lane was removed on 2026-09-18; `claude_headless` (`claude -p` via envelope) is the only Claude worker lane and runs on the Max subscription, not API credits. Tmux remains only as an injection path for interactive codex/kimi/gemini terminals.
 - Gemini is a non-review provider lane: `gemini_review` was retired from the review stack. Build workers default to Sonnet (`workers-kimi-pinned` in `provider_constraints.yaml`); a dispatch spec that names a model, kimi-k3 for example, wins over that default.
 - **T0 runs on Claude Opus** (via Claude Code). The orchestrator role is mirrored for Codex and Gemini/Kimi sessions by `vnx role sync --apply`, but a live T0 on another harness is not proven.
-- Per-dispatch git worktree isolation is unconditional in the headless envelope lane; the older subprocess-adapter lane gates it behind `VNX_ISOLATED_WORKTREE=1`. Parallel multi-track execution is Tier 3, designed and not shipped (ADR-020).
+- Per-dispatch git worktree isolation is unconditional in the headless envelope lane and in the older subprocess-adapter lane. Parallel multi-track execution is Tier 3, designed and not shipped (ADR-020).
 - The receipt hash chain is available per project and off by default (ADR-023), so the ledger is append-only but not tamper-evident unless a project turns the chain on.
 - The content boundary is read by the conversation analyzer and the dream consolidation only, not by the receipt classifier, the tagger or the scout (OI-2172), so it is not a general guarantee about what reaches a non-claude provider.
 - File-based, local-first: not designed for distributed networks.

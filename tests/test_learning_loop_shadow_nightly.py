@@ -89,7 +89,6 @@ def _live_learning_loop():
 def env(tmp_path, monkeypatch):
     """Tmp state dir with a seeded DB and receipts, ensure_env patched onto it."""
     monkeypatch.delenv("VNX_LEARNING_LOOP_PERSIST", raising=False)
-    monkeypatch.delenv("VNX_LEARNING_LOOP_CUTOFF", raising=False)
     monkeypatch.setenv("VNX_PROJECT_ID", "vnx-dev")
     state_dir = tmp_path / "vnx-data" / "vnx-dev" / "state"
     state_dir.mkdir(parents=True)
@@ -194,17 +193,8 @@ def test_receipt_before_cutoff_is_ignored_even_from_history(env):
     assert loop.receipt_stats["before_cutoff"] == 1
 
 
-def test_cutoff_env_override_lets_older_receipts_in(env, monkeypatch):
-    monkeypatch.setenv("VNX_LEARNING_LOOP_CUTOFF", "2026-08-01T00:00:00Z")
-    loop = ll.LearningLoop()
-    failures = loop.extract_failure_patterns(
-        start_time=datetime(2000, 1, 1, tzinfo=timezone.utc)
-    )
-    assert len(failures) == 3
-
-
-def test_unparseable_cutoff_override_raises(env, monkeypatch):
-    monkeypatch.setenv("VNX_LEARNING_LOOP_CUTOFF", "gisteren")
+def test_unparseable_cutoff_constant_raises(env, monkeypatch):
+    monkeypatch.setattr(ll, "DEFAULT_RECEIPT_CUTOFF", "gisteren")
     with pytest.raises(ValueError):
         ll.LearningLoop()
 
@@ -250,11 +240,11 @@ def test_phase_writes_failed_beacon_on_exception(env):
 
 def test_phase_writes_failed_beacon_on_bad_cutoff(env, monkeypatch):
     state_dir, _ = env
-    monkeypatch.setenv("VNX_LEARNING_LOOP_CUTOFF", "nonsense")
+    monkeypatch.setattr(_live_learning_loop(), "DEFAULT_RECEIPT_CUTOFF", "nonsense")
     assert _run_phase(state_dir) == 1
     beacon = json.loads((state_dir / BEACON).read_text())
     assert beacon["status"] == "failed"
-    assert "VNX_LEARNING_LOOP_CUTOFF" in beacon["error"]
+    assert "DEFAULT_RECEIPT_CUTOFF" in beacon["error"]
 
 
 # (e) doctor

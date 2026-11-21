@@ -8,10 +8,8 @@ Covers:
   4. SessionStore.clear() removes a terminal's entry
   5. SessionStore.save() is a no-op for empty session_id
   6. SessionStore.all_sessions() returns all stored sessions
-  7. deliver_via_subprocess passes saved session_id as resume_session when VNX_SESSION_RESUME=1
-  8. deliver_via_subprocess does NOT pass resume_session when VNX_SESSION_RESUME is unset
-  9. deliver_via_subprocess saves new session_id after successful delivery
-  10. deliver_via_subprocess does not crash when SessionStore fails (non-fatal)
+  7. deliver_via_subprocess does NOT pass resume_session, even with a session stored
+  8. deliver_via_subprocess does NOT save the session_id after a delivery
 """
 
 from __future__ import annotations
@@ -179,40 +177,12 @@ _COMMON_PATCHES = [
 
 
 class TestSessionResumePassthrough:
-    def test_resume_session_passed_when_env_set(self, monkeypatch, tmp_path):
-        """When VNX_SESSION_RESUME=1 and a session is stored, deliver() receives resume_session."""
+    def test_no_resume_session_is_passed(self, monkeypatch, tmp_path):
+        """deliver() never receives a resume_session, even with a session stored."""
         import subprocess_dispatch as sd
         from session_store import SessionStore
 
-        monkeypatch.setenv("VNX_SESSION_RESUME", "1")
-
-        store = SessionStore(state_dir=tmp_path)
-        store.save("T1", "prior-session-id", "d-prev")
-
-        mock_adapter = _make_deliver_mocks("new-session-id")
-
-        with patch("provider_spawns.claude_spawn.SubprocessAdapter", return_value=mock_adapter), \
-             patch("subprocess_dispatch.SubprocessAdapter", return_value=mock_adapter), \
-             patch("subprocess_dispatch._inject_skill_context", return_value="instr"), \
-             patch("subprocess_dispatch._inject_permission_profile", return_value="instr"), \
-             patch("subprocess_dispatch._resolve_agent_cwd", return_value=None), \
-             patch("subprocess_dispatch._write_manifest", return_value=Path("/tmp/m.json")), \
-             patch("subprocess_dispatch._promote_manifest", return_value="/tmp/done.json"), \
-             patch("subprocess_dispatch._capture_dispatch_parameters"), \
-             patch("subprocess_dispatch._capture_dispatch_outcome"), \
-             patch("session_store.SessionStore", return_value=store):
-            sd.deliver_via_subprocess("T1", "instruction", "sonnet", "d-test")
-
-        _, kwargs = mock_adapter.deliver.call_args
-        assert kwargs.get("resume_session") == "prior-session-id", (
-            f"Expected prior-session-id, got {kwargs.get('resume_session')!r}"
-        )
-
-    def test_no_resume_when_env_unset(self, monkeypatch, tmp_path):
-        """When VNX_SESSION_RESUME is not set, deliver() receives resume_session=None."""
-        import subprocess_dispatch as sd
-
-        monkeypatch.delenv("VNX_SESSION_RESUME", raising=False)
+        SessionStore(state_dir=tmp_path).save("T1", "prior-session-id", "d-prev")
 
         mock_adapter = _make_deliver_mocks("new-session-id")
 
@@ -232,64 +202,12 @@ class TestSessionResumePassthrough:
             f"Expected None, got {kwargs.get('resume_session')!r}"
         )
 
-    def test_resume_none_when_no_prior_session(self, monkeypatch, tmp_path):
-        """VNX_SESSION_RESUME=1 but no prior session → resume_session=None."""
-        import subprocess_dispatch as sd
-        from session_store import SessionStore
-
-        monkeypatch.setenv("VNX_SESSION_RESUME", "1")
-        store = SessionStore(state_dir=tmp_path)  # empty store
-
-        mock_adapter = _make_deliver_mocks("new-session-id")
-
-        with patch("provider_spawns.claude_spawn.SubprocessAdapter", return_value=mock_adapter), \
-             patch("subprocess_dispatch.SubprocessAdapter", return_value=mock_adapter), \
-             patch("subprocess_dispatch._inject_skill_context", return_value="instr"), \
-             patch("subprocess_dispatch._inject_permission_profile", return_value="instr"), \
-             patch("subprocess_dispatch._resolve_agent_cwd", return_value=None), \
-             patch("subprocess_dispatch._write_manifest", return_value=Path("/tmp/m.json")), \
-             patch("subprocess_dispatch._promote_manifest", return_value="/tmp/done.json"), \
-             patch("subprocess_dispatch._capture_dispatch_parameters"), \
-             patch("subprocess_dispatch._capture_dispatch_outcome"), \
-             patch("session_store.SessionStore", return_value=store):
-            sd.deliver_via_subprocess("T1", "instruction", "sonnet", "d-test")
-
-        _, kwargs = mock_adapter.deliver.call_args
-        assert kwargs.get("resume_session") is None
-
-
 class TestSessionPersistenceAfterDelivery:
-    def test_session_id_saved_after_success(self, monkeypatch, tmp_path):
-        """After successful delivery, captured session_id is saved to SessionStore."""
+    def test_session_id_is_not_saved(self, monkeypatch, tmp_path):
+        """The session_id of a delivery is NOT written to disk."""
         import subprocess_dispatch as sd
         from session_store import SessionStore
 
-        monkeypatch.setenv("VNX_SESSION_RESUME", "1")
-        store = SessionStore(state_dir=tmp_path)
-
-        mock_adapter = _make_deliver_mocks("fresh-session-xyz")
-
-        with patch("provider_spawns.claude_spawn.SubprocessAdapter", return_value=mock_adapter), \
-             patch("subprocess_dispatch.SubprocessAdapter", return_value=mock_adapter), \
-             patch("subprocess_dispatch._inject_skill_context", return_value="instr"), \
-             patch("subprocess_dispatch._inject_permission_profile", return_value="instr"), \
-             patch("subprocess_dispatch._resolve_agent_cwd", return_value=None), \
-             patch("subprocess_dispatch._write_manifest", return_value=Path("/tmp/m.json")), \
-             patch("subprocess_dispatch._promote_manifest", return_value="/tmp/done.json"), \
-             patch("subprocess_dispatch._capture_dispatch_parameters"), \
-             patch("subprocess_dispatch._capture_dispatch_outcome"), \
-             patch("session_store.SessionStore", return_value=store):
-            result = sd.deliver_via_subprocess("T1", "instruction", "sonnet", "d-new")
-
-        assert result.session_id == "fresh-session-xyz"
-        assert store.load("T1") == "fresh-session-xyz"
-
-    def test_session_id_not_saved_when_env_unset(self, monkeypatch, tmp_path):
-        """Without VNX_SESSION_RESUME=1, session_id is NOT written to disk."""
-        import subprocess_dispatch as sd
-        from session_store import SessionStore
-
-        monkeypatch.delenv("VNX_SESSION_RESUME", raising=False)
         store = SessionStore(state_dir=tmp_path)
 
         mock_adapter = _make_deliver_mocks("some-session-id")
@@ -308,30 +226,3 @@ class TestSessionPersistenceAfterDelivery:
         # store was never used so it's still empty
         assert store.load("T1") is None
         assert not (tmp_path / "subprocess_sessions.json").exists()
-
-    def test_no_crash_when_session_store_raises(self, monkeypatch):
-        """SessionStore failures are non-fatal — deliver_via_subprocess still succeeds."""
-        import subprocess_dispatch as sd
-
-        monkeypatch.setenv("VNX_SESSION_RESUME", "1")
-
-        mock_adapter = _make_deliver_mocks("session-id-ok")
-
-        broken_store = MagicMock()
-        broken_store.load.side_effect = RuntimeError("disk full")
-        broken_store.save.side_effect = RuntimeError("disk full")
-
-        with patch("provider_spawns.claude_spawn.SubprocessAdapter", return_value=mock_adapter), \
-             patch("subprocess_dispatch.SubprocessAdapter", return_value=mock_adapter), \
-             patch("subprocess_dispatch._inject_skill_context", return_value="instr"), \
-             patch("subprocess_dispatch._inject_permission_profile", return_value="instr"), \
-             patch("subprocess_dispatch._resolve_agent_cwd", return_value=None), \
-             patch("subprocess_dispatch._write_manifest", return_value=Path("/tmp/m.json")), \
-             patch("subprocess_dispatch._promote_manifest", return_value="/tmp/done.json"), \
-             patch("subprocess_dispatch._capture_dispatch_parameters"), \
-             patch("subprocess_dispatch._capture_dispatch_outcome"), \
-             patch("session_store.SessionStore", return_value=broken_store):
-            result = sd.deliver_via_subprocess("T1", "instruction", "sonnet", "d-test")
-
-        # Delivery succeeds despite store failure
-        assert result.success is True

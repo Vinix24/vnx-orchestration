@@ -56,6 +56,10 @@ CREATE TABLE IF NOT EXISTS dream_pattern_archives (
     archived_reason         TEXT    NOT NULL,
     archived_at             TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
+CREATE TABLE success_patterns (id INTEGER PRIMARY KEY, project_id TEXT, valid_until TEXT);
+CREATE TABLE antipatterns (id INTEGER PRIMARY KEY, project_id TEXT, valid_until TEXT);
+INSERT INTO success_patterns (id, project_id) VALUES (2, 'vnx-dev');
+INSERT INTO antipatterns (id, project_id) VALUES (1, 'vnx-dev');
 """
 
 _CONSOLIDATION = {

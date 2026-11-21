@@ -232,7 +232,7 @@ vnx_proc_acquire_lock() {
   local log_file="$3"
   local mode="${4:-exit}"
   local reason="${5:-singleton}"
-  local max_age="${VNX_LOCK_MAX_AGE:-3600}"
+  local max_age="3600"
 
   mkdir -p "$VNX_LOCKS_DIR" "$VNX_PIDS_DIR"
   local lock_dir="$VNX_LOCKS_DIR/${name}.lock"

@@ -24,6 +24,7 @@ import consolidator  # noqa: E402
 import classifier_providers  # noqa: E402
 import kimi_wrapper  # noqa: E402
 import provider_switch  # noqa: E402
+from content_boundary_pin import pin_boundary
 
 PROJECT = "vnx-dev"
 VALID = {
@@ -66,7 +67,7 @@ def ok_result(payload=None):
 def world(tmp_path, monkeypatch):
     boundary = tmp_path / "boundary.json"
     boundary.write_text(json.dumps({"version": 1}), encoding="utf-8")
-    monkeypatch.setenv("VNX_CONTENT_BOUNDARY_FILE", str(boundary))
+    pin_boundary(monkeypatch, str(boundary))
     monkeypatch.setenv("VNX_PROVIDER_SWITCH_FILE", str(tmp_path / "switch" / "providers.json"))
     monkeypatch.setenv("VNX_DREAM_SCHEDULER_ENABLED", "1")
     monkeypatch.delenv("VNX_DREAM_PROVIDER", raising=False)
@@ -208,7 +209,7 @@ def test_deepseek_without_a_json_object_fails_the_cycle(world):
 
 
 def test_deepseek_timeout_reports_deepseek_timeout(world, monkeypatch):
-    monkeypatch.setenv("VNX_DREAM_TIMEOUT", "42")
+    monkeypatch.setattr(consolidator, "_DEFAULT_TIMEOUT", 42)
     world.deepseek.result = SimpleNamespace(error="timeout after 42s: x", parsed_json=None,
                                             raw_response="", cost_usd=None)
     result = world.run()

@@ -424,20 +424,6 @@ class TestSizeRotationConfig:
         store = EventStore(events_dir=tmp_events_dir)
         assert store._rotation_threshold() == 10 * 1024 * 1024
 
-    def test_env_var_overrides_default(self, tmp_events_dir, monkeypatch):
-        monkeypatch.setenv("VNX_EVENT_STREAM_MAX_BYTES", "1234")
-        store = EventStore(events_dir=tmp_events_dir)
-        assert store._rotation_threshold() == 1234
-
-    def test_ctor_arg_overrides_env(self, tmp_events_dir, monkeypatch):
-        monkeypatch.setenv("VNX_EVENT_STREAM_MAX_BYTES", "1234")
+    def test_ctor_arg_overrides_default(self, tmp_events_dir):
         store = EventStore(events_dir=tmp_events_dir, rotation_threshold_bytes=99)
         assert store._rotation_threshold() == 99
-
-    def test_invalid_env_falls_back_to_default(self, tmp_events_dir, monkeypatch, caplog):
-        import logging
-
-        monkeypatch.setenv("VNX_EVENT_STREAM_MAX_BYTES", "not-a-number")
-        caplog.set_level(logging.WARNING, logger="event_store")
-        store = EventStore(events_dir=tmp_events_dir)
-        assert store._rotation_threshold() == 10 * 1024 * 1024
