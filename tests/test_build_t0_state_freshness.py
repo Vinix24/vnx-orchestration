@@ -464,7 +464,7 @@ def test_system_health_includes_beacon_data_when_beacons_exist(tmp_path: Path) -
     data_dir = tmp_path / "data"
     state_dir = data_dir / "state"
     state_dir.mkdir(parents=True)
-    (state_dir / "terminal_state.json").write_text("{}", encoding="utf-8")
+    (state_dir / "t0_receipts.ndjson").write_text("", encoding="utf-8")
 
     # Write a beacon under data_dir/health/
     HealthBeacon(data_dir, "test_comp", expected_interval_seconds=3600).heartbeat(
@@ -490,7 +490,7 @@ def test_system_health_graceful_when_no_beacons(tmp_path: Path) -> None:
     """_build_system_health does not crash when no beacons directory exists."""
     state_dir = tmp_path / "state"
     state_dir.mkdir(parents=True)
-    (state_dir / "terminal_state.json").write_text("{}", encoding="utf-8")
+    (state_dir / "t0_receipts.ndjson").write_text("", encoding="utf-8")
 
     health = bts._build_system_health(state_dir, db_initialized=True)
     # beacon_health is absent when no beacons exist (beacon_summary returns
@@ -506,7 +506,7 @@ def test_system_health_surfaces_stale_beacon(tmp_path: Path) -> None:
     data_dir = tmp_path / "data"
     state_dir = data_dir / "state"
     state_dir.mkdir(parents=True)
-    (state_dir / "terminal_state.json").write_text("{}", encoding="utf-8")
+    (state_dir / "t0_receipts.ndjson").write_text("", encoding="utf-8")
 
     # Write a manually-aged stale beacon directly (bypass HealthBeacon so we
     # can set an old timestamp).

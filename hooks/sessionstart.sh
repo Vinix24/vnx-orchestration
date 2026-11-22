@@ -56,9 +56,9 @@ ADDITIONAL_CONTEXT=""
 
 case "$TERMINAL" in
   T0)
-    # Gather live terminal states (best-effort, 2s timeout)
-    T0_TERMINAL_STATES=""
     T0_OPEN_ITEMS=""
+    # Set by the probe below; stays "unchecked" when the probe cannot run (never silent).
+    T0_ROLE_LINE="T0 ROLE UNCHECKED: the actor class of this session could not be determined (the role probe did not run); promote, grant and the worker skip may refuse it."
 
     # ── Resolve the CENTRAL state dir (ADR-026), same resolver as the runtime ──
     # The old resolver only checked ".vnx-data/state" / ".claude/vnx-data/state"
@@ -140,24 +140,20 @@ except Exception:
       _VNX_PARKED_BEACONS="$(printf '%s\n' "$_VNX_PATHS_OUT" | sed -n 4p)"
     fi
 
+    # Role check and inbox summary, one interpreter start (scripts/lib/sessionstart_t0_probe.py).
+    # Both must run in THIS process: the actor class is this session's, not a detached builder's.
+    T0_INBOX=""
+    _PROBE_OUT=""
+    if [ -n "$_VNX_PY" ] && [ -f "$_VNX_SCRIPTS_ROOT/lib/sessionstart_t0_probe.py" ]; then
+      _PROBE_OUT="$("$_VNX_PY" "$_VNX_SCRIPTS_ROOT/lib/sessionstart_t0_probe.py" "$_VNX_STATE_DIR" 2>/dev/null || true)"
+    fi
+    if [ -n "$_PROBE_OUT" ] && echo "$_PROBE_OUT" | jq -e 'type == "object"' >/dev/null 2>&1; then
+      T0_ROLE_LINE=$(echo "$_PROBE_OUT" | jq -r '.role_line // "T0 ROLE UNCHECKED: the probe returned no role_line"')
+      T0_INBOX=$(echo "$_PROBE_OUT" | jq -r '.inbox_text // "operator inbox: could not be read (the probe returned no inbox_text); NOT the same as no open questions"')
+    else
+      T0_INBOX="operator inbox: could not be read (the session probe did not run or returned no JSON); NOT the same as no open questions"
+    fi
     if [ -n "$_VNX_STATE_DIR" ] && [ -d "$_VNX_STATE_DIR" ]; then
-      # Terminal states from the shadow state file (scripts/lib/terminal_state_shadow.py).
-      # Golf 3A fix: this used to glob terminal_state_${_t}.json (a per-terminal
-      # suffixed filename) but the actual writer (TERMINAL_STATE_FILENAME in
-      # terminal_state_shadow.py) has only ever written the SINGULAR
-      # terminal_state.json, with a `.terminals.<id>` map inside it. The suffixed
-      # glob matched nothing, on any project — this section silently fell
-      # through to "No terminal state data" every session, discovered via this
-      # dispatch's own measurement discipline, not reported by anything.
-      _tsf="$_VNX_STATE_DIR/terminal_state.json"
-      if [ -f "$_tsf" ]; then
-        for _t in T1 T2 T3; do
-          _status=$(jq -r --arg t "$_t" '.terminals[$t].status // "unknown"' "$_tsf" 2>/dev/null || echo "unknown")
-          _last_activity=$(jq -r --arg t "$_t" '.terminals[$t].last_activity // "unknown"' "$_tsf" 2>/dev/null || echo "unknown")
-          T0_TERMINAL_STATES="${T0_TERMINAL_STATES}${_t}: ${_status} (last_activity: ${_last_activity})\n"
-        done
-      fi
-
       # Open items digest (compact)
       _oi_file="$_VNX_STATE_DIR/open_items.json"
       if [ -f "$_oi_file" ]; then
@@ -190,39 +186,17 @@ except Exception:
       # writes — absent, not zeroed, when that beacon was never written.
       T0_LIFECYCLE=$(jq -r '.lifecycle.line // empty' "$_ci_file" 2>/dev/null || true)
 
-      T0_STATE_SECTION="Terminals:
-$(echo -e "${T0_TERMINAL_STATES:-No terminal state data}")
-${T0_OPEN_ITEMS:-No open items data}
+      T0_STATE_SECTION="${T0_OPEN_ITEMS:-No open items data}
 ${T0_CONTRACT_INVALID}"
       if [ -n "$T0_LIFECYCLE" ]; then
         T0_STATE_SECTION="${T0_STATE_SECTION}
 ${T0_LIFECYCLE}"
       fi
 
-      # operator-vragen-tot-antwoord Q5 (ADR-076 besluit 10): show the open points from
-      # t0_index.json. This hook only READS: it writes no `presented` line (its output lands
-      # in the T0's context, not in front of Vincent) and runs no `vnx inbox` command.
-      T0_INBOX=""
-      if [ -f "$_ci_file" ]; then
-        T0_INBOX=$(jq -r '
-          .operator_inbox as $b
-          | if ($b | type) != "object" then
-              "operator inbox: not readable (t0_index.json has no operator_inbox block; rebuild the index)"
-            elif $b.status == "unknown" then
-              # besluit 11: an unknown source is never zero. Head line, one line per unknown source, then the points.
-              ("operator inbox: could not be read completely (unknown: \($b.reason // "no reason given")); NOT the same as no open questions"),
-              (($b.unknown_sources // [])[] | "  bron \(.name): unknown (\(.reden))"),
-              (($b.points // [])[] | "  [\(.age), presented \(.presented)x] \(.vraag)" + (if (.kopieerblok // "") != "" then "\n    " + .kopieerblok else "" end))
-            elif $b.status != "ok" then
-              "operator inbox: could not be read (\($b.status // "unknown"): \($b.reason // "no reason given")); NOT the same as no open questions"
-            elif ($b.open_total | type) != "number" then
-              "operator inbox: could not be read (open_total missing); NOT the same as no open questions"
-            elif $b.open_total == 0 then empty
-            else
-              ("operator inbox: \($b.open_total) open (+\($b.more // 0) more)"),
-              (($b.points // [])[] | "  [\(.age), presented \(.presented)x] \(.vraag)" + (if (.kopieerblok // "") != "" then "\n    " + .kopieerblok else "" end))
-            end' "$_ci_file" 2>/dev/null || echo "operator inbox: could not be read (t0_index.json unparsable)")
-      fi
+      # operator-vragen-tot-antwoord Q5 (ADR-076 besluit 10): the open points come from the
+      # operator_inbox_summary.json the ledger writer keeps (current after every write; the
+      # t0_index.json block can be hours old since SS-2). This hook only READS: it writes no
+      # `presented` line and runs no `vnx inbox` command.
       if [ -n "$T0_INBOX" ]; then
         T0_STATE_SECTION="${T0_STATE_SECTION}
 ${T0_INBOX}"
@@ -233,7 +207,7 @@ ${T0_INBOX}"
       # "No open items data" default that would read as an ordinary quiet
       # project instead of an unresolved store — the exact fail-open this
       # fix closes.
-      T0_STATE_SECTION="VNX STATE STORE NOT FOUND — terminal states, open items, receipts and PR queue are UNAVAILABLE this session (UNMEASURED, not zero). Resolved path: ${_VNX_STATE_DIR:-<resolution failed: ${_VNX_RESOLVE_WHY}>}. Expected under ADR-026 at ~/.vnx-data/<project_id>/state — verify the receipt processor has run for this project."
+      T0_STATE_SECTION="VNX STATE STORE NOT FOUND — open items, receipts and PR queue are UNAVAILABLE this session (UNMEASURED, not zero). Resolved path: ${_VNX_STATE_DIR:-<resolution failed: ${_VNX_RESOLVE_WHY}>}. Expected under ADR-026 at ~/.vnx-data/<project_id>/state — verify the receipt processor has run for this project."
     fi
 
     # ── Beacon health digest (component heartbeats, D3b absence-is-loud) ──
@@ -348,7 +322,7 @@ $_PF_LINES"
 
     # ── State artifact freshness (golf 3A, absence-is-loud #1, OI-1512 fix-forward) ──
     # T0 reads a handful of point-in-time snapshots at SessionStart (t0_state.json,
-    # open_items.json, terminal_state.json, dashboard_status.json,
+    # open_items.json, dashboard_status.json,
     # t0_recommendations.json) with nothing surfacing how old they are. Measured
     # 2026-08-29: a session orchestrated a merge against a 22-day-old t0_state.json
     # (dashboard_status.json 63 days, t0_recommendations.json 73 days) and nobody
@@ -498,7 +472,8 @@ print('; '.join(r.probed))
     ADDITIONAL_CONTEXT="${ROLE_ALARM:+$ROLE_ALARM
 
 }T0 Master Orchestrator Active${PROJECT_NAME:+ — $PROJECT_NAME}${T0_PLAYBOOK_LINE:+
-$T0_PLAYBOOK_LINE}
+$T0_PLAYBOOK_LINE}${T0_ROLE_LINE:+
+$T0_ROLE_LINE}
 Model-invocable skills: @horizon @planner @panel @fabric-reference
 Operator-only skills (not model-invocable): @t0-orchestrator @architect
 Full registry: skills/skills.yaml (repo) or \$VNX_SKILLS_DIR/skills.yaml (consumer)

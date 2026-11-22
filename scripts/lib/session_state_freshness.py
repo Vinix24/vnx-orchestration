@@ -18,7 +18,7 @@ This module is deliberately NOT a periodic monitor. `producer_freshness.py`
 + `configs/producer_freshness.yaml` already own that job for tables and
 directories that get written to on a cadence (dispatches, review gates,
 governance metrics) — see that module's docstring for the incidents it
-catches. The five artifacts here are a different class: point-in-time
+catches. The four artifacts here are a different class: point-in-time
 SNAPSHOTS that `hooks/sessionstart.sh` (or the T0 role file's own
 Read-Only State Sources list) reads once at the top of a session. Grouping
 them into the producer registry would mean waiting for the next monitor
@@ -80,9 +80,6 @@ data, not evidence the snapshot itself is old).
   open_items.json        last_updated   (confirmed present, 2026-09-04)
   dashboard_status.json  timestamp      (confirmed present, 2026-09-04)
   t0_recommendations.json timestamp     (confirmed present, 2026-09-04)
-  terminal_state.json    (mtime only — no top-level timestamp field; the
-                           per-terminal `last_activity` values inside it are
-                           business data, not the snapshot's own build time)
 
 Read-only. Never writes. `assess_artifact_freshness()` takes `state_dir` as
 already resolved by the caller (same convention as `scripts/health_check.py`
@@ -117,7 +114,6 @@ ARTIFACT_STALE_AFTER_HOURS: Dict[str, float] = {
 ARTIFACTS: Dict[str, Tuple[str, Optional[str]]] = {
     "t0_state": ("t0_state.json", "generated_at"),
     "open_items": ("open_items.json", "last_updated"),
-    "terminal_state": ("terminal_state.json", None),
     "dashboard_status": ("dashboard_status.json", "timestamp"),
     "t0_recommendations": ("t0_recommendations.json", "timestamp"),
 }
