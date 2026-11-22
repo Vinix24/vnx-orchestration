@@ -99,3 +99,17 @@ def test_the_remaining_hooks_are_still_wired_per_event():
             if name not in names:
                 names.append(name)
     assert rows == EXPECTED_SCRIPTS
+
+
+def test_build_t0_state_hook_has_a_numeric_timeout_of_at_most_ten_seconds():
+    """OI-3056: the hook starts a detached build and returns within 2 s; its
+    entry must declare a timeout instead of leaving the harness default."""
+    entries = [
+        hook
+        for event, _matcher, hook in _hooks()
+        if event == "SessionStart" and "build_t0_state_hook.sh" in hook.get("command", "")
+    ]
+    assert len(entries) == 1
+    timeout = entries[0].get("timeout")
+    assert isinstance(timeout, int) and not isinstance(timeout, bool), timeout
+    assert 1 <= timeout <= 10

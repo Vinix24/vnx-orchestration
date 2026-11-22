@@ -158,8 +158,9 @@ class TestStateFreshnessDigestSurfacesAge:
         assert "STATE FRESHNESS: BLOCKED" not in ctx, ctx
 
     def test_threshold_boundary_23h_fresh_25h_stale(self, tmp_path, monkeypatch):
-        """SESSION_STALE_AFTER_HOURS = 24 is exercised at its own boundary,
-        not just on an incident-scale outlier."""
+        """SESSION_STALE_AFTER_HOURS = 24 is exercised at its own boundary for
+        the artifacts that keep it; t0_state has its own 4h limit (OI-3056) and
+        the banner shows each artifact's limit."""
         _clean_env(monkeypatch)
         t0_dir = _make_terminal_project(tmp_path)
         state_dir = _state_dir(tmp_path, monkeypatch)
@@ -168,13 +169,29 @@ class TestStateFreshnessDigestSurfacesAge:
 
         fresh_ts = datetime.now(timezone.utc) - timedelta(hours=23)
         stale_ts = datetime.now(timezone.utc) - timedelta(hours=25)
-        _write_json(state_dir / "t0_state.json", {"generated_at": _iso(fresh_ts)})
+        _write_json(state_dir / "dashboard_status.json", {"timestamp": _iso(fresh_ts)})
         _write_json(state_dir / "open_items.json", {"last_updated": _iso(stale_ts).replace("Z", "")})
 
         out = _run_hook(t0_dir, env)
         ctx = out["hookSpecificOutput"]["additionalContext"]
-        assert "[fresh] t0_state" in ctx, ctx
+        assert "[fresh] dashboard_status" in ctx, ctx
         assert "[STALE] open_items" in ctx, ctx
+        assert "limit 24h" in ctx, ctx
+
+    def test_t0_state_has_its_own_four_hour_limit_in_the_banner(self, tmp_path, monkeypatch):
+        _clean_env(monkeypatch)
+        t0_dir = _make_terminal_project(tmp_path)
+        state_dir = _state_dir(tmp_path, monkeypatch)
+        env = dict(os.environ)
+
+        _write_json(state_dir / "t0_state.json", {
+            "generated_at": _iso(datetime.now(timezone.utc) - timedelta(hours=5))})
+
+        out = _run_hook(t0_dir, env)
+        ctx = out["hookSpecificOutput"]["additionalContext"]
+        assert "STATE FRESHNESS: BLOCKED" in ctx, ctx
+        assert "[STALE] t0_state: age 5 hours, limit 4h" in ctx, ctx
+        assert "their own limit" in ctx, ctx
 
     def test_terminal_state_reads_the_real_schema_not_a_dead_suffix_path(self, tmp_path, monkeypatch):
         """Regression for the second dead read this dispatch's own measurement

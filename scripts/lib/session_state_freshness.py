@@ -37,6 +37,18 @@ incident is nowhere near this boundary), while comfortably covering a single
 long-running autonomous session (T0's own "F60 / overnight feature work"
 policy, bounded to one night, not multiple days).
 
+T0_STATE_STALE_AFTER_HOURS = 4.0 is the shorter limit for ``t0_state`` alone
+(OI-3056). The 24h figure above answers "does this snapshot predate the day's
+work"; it is far too wide for the one snapshot that carries ``live_work``,
+``open_outcomes`` and the PR queue, because a T0 read 12-hour-old state of that
+kind as ``[fresh]`` on 2026-11-21. Measured 2026-11-22 over the 49 T0 rotations
+in the vnx-dev store between 15 and 22 November
+(``~/.vnx-data/vnx-dev/state/t0_rotation/rotation-*``): the time between
+rotations has median 2.1h, p75 4.0h and p90 9.7h. A ``t0_state`` older than one
+p75 session predates the session that reads it. The other artifacts keep 24h.
+Each artifact entry carries its own ``threshold_hours``; the top-level
+``threshold_hours`` stays at 24h for existing readers.
+
 Five outcomes per artifact, not two ("nul telling is eerst een meetfout" /
 "niet-gemeten is een derde tak, geen derde waarde" — the same discipline
 applies to a missing FILE, not just a missing field):
@@ -91,6 +103,15 @@ from beacon_register import parked_artifact_reason
 # number — do not change it without re-measuring the commit-gap cadence it
 # is based on.
 SESSION_STALE_AFTER_HOURS = 24.0
+
+# One p75 T0 session. See the module docstring for the 49-rotation measurement.
+T0_STATE_STALE_AFTER_HOURS = 4.0
+
+# Artifacts with a limit of their own; every other artifact uses the
+# ``threshold_hours`` argument (default SESSION_STALE_AFTER_HOURS).
+ARTIFACT_STALE_AFTER_HOURS: Dict[str, float] = {
+    "t0_state": T0_STATE_STALE_AFTER_HOURS,
+}
 
 # name -> (filename under state_dir, content timestamp field or None for mtime-only)
 ARTIFACTS: Dict[str, Tuple[str, Optional[str]]] = {
@@ -180,6 +201,7 @@ def assess_artifact_freshness(
 
     for name, (filename, field) in ARTIFACTS.items():
         path = state_dir / filename
+        limit = ARTIFACT_STALE_AFTER_HOURS.get(name, threshold_hours)
         parked_reason = parked_artifact_reason(name)
         if not path.exists():
             if parked_reason is not None:
@@ -188,6 +210,7 @@ def assess_artifact_freshness(
                     "age_hours": None,
                     "age_human": None,
                     "source": None,
+                    "threshold_hours": limit,
                     "reason": parked_reason,
                 }
                 any_parked = True
@@ -197,6 +220,7 @@ def assess_artifact_freshness(
                 "age_hours": None,
                 "age_human": None,
                 "source": None,
+                "threshold_hours": limit,
             }
             any_missing = True
             continue
@@ -208,16 +232,18 @@ def assess_artifact_freshness(
                 "age_hours": None,
                 "age_human": None,
                 "source": source,
+                "threshold_hours": limit,
             }
             any_unknown = True
             continue
 
         age_hours = max(0.0, (now - ts).total_seconds() / 3600.0)
-        status = "stale" if age_hours > threshold_hours else "fresh"
+        status = "stale" if age_hours > limit else "fresh"
         entry: Dict[str, Any] = {
             "age_hours": round(age_hours, 2),
             "age_human": _human_age(age_hours),
             "source": source,
+            "threshold_hours": limit,
         }
         if status == "stale" and parked_reason is not None:
             status = "parked"
@@ -247,8 +273,7 @@ def main(argv: Optional[list] = None) -> int:
     if args.json:
         print(json.dumps(result))
     else:
-        threshold = result["threshold_hours"]
-        print(f"Session state freshness (threshold {threshold:.0f}h):")
+        print("Session state freshness (per-artifact limit):")
         for name, info in sorted(result["artifacts"].items()):
             status = info["status"]
             if status == "missing":
@@ -260,7 +285,10 @@ def main(argv: Optional[list] = None) -> int:
                 print(f"  [PARKED] {name}: {age} — {info['reason']}")
             else:
                 marker = "STALE" if status == "stale" else "fresh"
-                print(f"  [{marker}] {name}: age {info['age_human']} (source: {info['source']})")
+                print(
+                    f"  [{marker}] {name}: age {info['age_human']}, "
+                    f"limit {info['threshold_hours']:g}h (source: {info['source']})"
+                )
     return 1 if result["any_stale"] else 0
 
 
