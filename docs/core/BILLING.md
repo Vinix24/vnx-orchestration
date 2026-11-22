@@ -1,0 +1,7 @@
+# Billing follows auth, not the lane
+
+This page holds the measurement behind the billing claim in the README: which lanes run on a subscription and what changes that.
+
+VNX treats AI coding tools as interactive CLI workers, not SDK calls, and that choice raised a real billing question: does the headless lane cost more than the interactive one. I measured it instead of assuming. On 2026-08-11 the interactive tmux lane (removed since 2026-09-18) and the headless `claude -p` lane ran the same CLI under the same OAuth session, and both posted `cost=$0.0000` receipts, confirmed via auth state (no `ANTHROPIC_API_KEY` or `ANTHROPIC_BASE_URL` in the environment, keychain `subscriptionType: max`). The billing boundary is the auth method, not which lane dispatched the work. Set your own `ANTHROPIC_API_KEY` or `ANTHROPIC_BASE_URL` and that changes, since the lane then bills through that key instead of the subscription.
+
+An earlier version of this README assumed a June 15, 2026 Anthropic billing change that would push headless usage to API credits by default. That change was never carried out. The headless lane was opened by direct operator decision (#1455) once subscription billing was confirmed by measurement, not by reading vendor announcements. This describes what this repository measures today; Anthropic's billing terms are the vendor's to change, and I have verified nothing beyond what a `cost=$0.0000` receipt tells me.
