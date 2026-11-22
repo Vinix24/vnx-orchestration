@@ -98,13 +98,20 @@ def _reap_and_log_on_failure(proc: "subprocess.Popen[bytes]", state_dir: Path) -
         return
     if rc == 0:
         return
+    # D1 split (same as the hook had): rc=1 means the build succeeded and wrote
+    # t0_state.json but system_health is degraded/failed; any other non-zero rc
+    # means the build raised before a state file could be produced.
+    if rc == 1:
+        outcome = "built, t0_state.json refreshed, system_health degraded/failed"
+    else:
+        outcome = "failed build, t0_state.json not refreshed"
     try:
         log_path = state_dir.parent / "logs" / "build_t0_state.err"
         log_path.parent.mkdir(parents=True, exist_ok=True)
         with open(log_path, "a", encoding="utf-8") as fh:
             fh.write(
-                "===== %s (rc=%s, fired async via state_rebuild_trigger) =====\n"
-                % (time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), rc)
+                "===== %s (rc=%s, fired async via state_rebuild_trigger) %s =====\n"
+                % (time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), rc, outcome)
             )
     except OSError:
         pass
@@ -113,6 +120,7 @@ def _reap_and_log_on_failure(proc: "subprocess.Popen[bytes]", state_dir: Path) -
 def maybe_trigger_state_rebuild(
     throttle_seconds: int = _DEFAULT_THROTTLE_SECONDS,
     event_type: str = "",
+    reaper_out: Optional[list] = None,
 ) -> bool:
     """Fire build_t0_state.py if throttle expired.
 
@@ -124,6 +132,9 @@ def maybe_trigger_state_rebuild(
     Non-critical events use LOCK_NB — they skip if another rebuild is in flight.
 
     Returns True if rebuild was triggered, False if throttled or on failure.
+
+    ``reaper_out``: when a list is passed, the reaper thread of a fired rebuild
+    is appended to it so the caller (the CLI with ``--wait``) can join it.
 
     Throttle contract:
     - Marker file holds INTEGER epoch seconds (no float — bash arithmetic compat)
@@ -175,11 +186,14 @@ def maybe_trigger_state_rebuild(
                 # D1 (poort E): reap in the background so a crash on this
                 # fire-and-forget path leaves the same evidence a hook-driven
                 # failure would, without blocking this throttle-guarded call.
-                threading.Thread(
+                reaper = threading.Thread(
                     target=_reap_and_log_on_failure,
                     args=(proc, state_dir),
                     daemon=True,
-                ).start()
+                )
+                reaper.start()
+                if reaper_out is not None:
+                    reaper_out.append(reaper)
                 # Atomic throttle marker — write ONLY after Popen succeeded
                 tmp = throttle.with_suffix(".tmp")
                 tmp.write_text(str(now), encoding="utf-8")
@@ -196,14 +210,30 @@ __all__ = ["maybe_trigger_state_rebuild", "CRITICAL_EVENTS"]
 
 
 # CLI entry for bash hooks (e.g., dispatch_lifecycle.sh):
-#   python3 scripts/lib/state_rebuild_trigger.py
+#   python3 scripts/lib/state_rebuild_trigger.py [--event <type>] [--wait]
+# Without --wait the CLI returns as soon as the build is started (the reaper is
+# a daemon thread that dies with this process). With --wait the process joins
+# the reaper before it exits, so a failed build still leaves its incident in
+# build_t0_state.err; the SessionStart hook runs it detached for that reason.
+def _main(argv: Optional[list] = None) -> int:
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Throttled t0_state rebuild trigger")
+    parser.add_argument("--event", default="", help="event type (passed as event_type)")
+    parser.add_argument("--wait", action="store_true",
+                        help="join the reaper so a failed build is logged")
+    args = parser.parse_args(argv)
+    reapers: list = []
+    maybe_trigger_state_rebuild(event_type=args.event, reaper_out=reapers)
+    if args.wait:
+        for reaper in reapers:
+            reaper.join()
+    # Always 0, regardless of outcome: a throttled, fired-and-succeeded and
+    # fired-and-failed rebuild are not told apart by this exit code. A failed
+    # build is logged by _reap_and_log_on_failure (only with --wait does the
+    # CLI process live long enough for that).
+    return 0
+
+
 if __name__ == "__main__":
-    maybe_trigger_state_rebuild()
-    # Always 0, regardless of outcome. There are three outcomes here —
-    # throttled, fired-and-succeeded, fired-and-failed — and this exit code
-    # cannot distinguish them: the call above only fires Popen and returns,
-    # it never wait()s for the child (that would turn a throttle meant to
-    # protect a hot path into a blocking call). A fired-and-failed rebuild
-    # is not silent though — see _reap_and_log_on_failure, which appends to
-    # the shared build_t0_state.err once the child actually exits.
-    sys.exit(0)
+    sys.exit(_main())

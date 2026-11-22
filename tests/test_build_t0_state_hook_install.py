@@ -16,12 +16,15 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
 
 REPO = Path(__file__).resolve().parent.parent
 HOOK = REPO / "scripts" / "hooks" / "build_t0_state_hook.sh"
+TRIGGER = REPO / "scripts" / "lib" / "state_rebuild_trigger.py"
+SEMANTICS = REPO / "scripts" / "lib" / "event_outcome_semantics.py"
 
 # The hook resolves the central state dir via vnx_paths.ensure_env(), which
 # honors VNX_DATA_DIR_EXPLICIT + VNX_DATA_DIR. We pin those at a tmp tree so
@@ -37,6 +40,9 @@ _VNX_ENV_KEYS = (
     "VNX_DISPATCH_DIR",
     "VNX_LOGS_DIR",
     "VNX_PROJECT_ID",
+    # tests/conftest.py sets it to 0 for the suite; the hook starts its build
+    # through the trigger, so these tests need the spawn switched on.
+    "VNX_STATE_REBUILD_TRIGGER",
 )
 
 
@@ -67,6 +73,9 @@ def _make_fake_engine(
     # The hook sources its interpreter helper from its own directory.
     shutil.copy(HOOK.parent / "lib_hook_python.sh", engine / "scripts" / "hooks" / "lib_hook_python.sh")
     (engine / "scripts" / "build_t0_state.py").write_text(builder_source, encoding="utf-8")
+    # The hook starts the build through the trigger of its own engine tree.
+    shutil.copy(TRIGGER, engine / "scripts" / "lib" / "state_rebuild_trigger.py")
+    shutil.copy(SEMANTICS, engine / "scripts" / "lib" / "event_outcome_semantics.py")
     # Minimal vnx_paths stub: ensure_env() returning the pinned dirs, so the
     # hook resolves the central store without the full engine on sys.path.
     (engine / "scripts" / "lib" / "vnx_paths.py").write_text(
@@ -79,6 +88,16 @@ def _make_fake_engine(
         encoding="utf-8",
     )
     return engine
+
+
+def _wait_for(predicate, timeout: float = 20.0) -> bool:
+    """Poll until the detached background build has produced its evidence."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.05)
+    return predicate()
 
 
 def _run_hook(engine: Path, data_dir: Path) -> subprocess.CompletedProcess:
@@ -108,7 +127,7 @@ def test_hook_resolves_builder_via_engine_not_repo_relative(tmp_path: Path) -> N
     builder = (
         "#!/usr/bin/env python3\n"
         "import sys, os, json\n"
-        "out = sys.argv[sys.argv.index('--output') + 1]\n"
+        "out = os.path.join(os.environ['VNX_DATA_DIR'], 'state', 't0_state.json')\n"
         "os.makedirs(os.path.dirname(out), exist_ok=True)\n"
         "# record the builder path the hook invoked so we can assert on it\n"
         "with open(os.path.join(os.path.dirname(out), 'invoked_builder.txt'), 'w') as f:\n"
@@ -122,7 +141,9 @@ def test_hook_resolves_builder_via_engine_not_repo_relative(tmp_path: Path) -> N
     r = _run_hook(engine, data_dir)
     assert r.returncode == 0, r.stdout + r.stderr
 
-    invoked = (data_dir / "state" / "invoked_builder.txt").read_text(encoding="utf-8")
+    marker = data_dir / "state" / "invoked_builder.txt"
+    assert _wait_for(lambda: marker.is_file() and marker.stat().st_size > 0)
+    invoked = marker.read_text(encoding="utf-8")
     # The hook MUST have invoked the builder under the ENGINE tree, not some
     # repo-relative scripts/ path. This is the resolved-command assertion.
     assert invoked == str(engine / "scripts" / "build_t0_state.py"), (
@@ -138,7 +159,7 @@ def test_hook_runs_in_consumer_layout_without_scripts_dir(tmp_path: Path) -> Non
     builder = (
         "#!/usr/bin/env python3\n"
         "import sys, os, json\n"
-        "out = sys.argv[sys.argv.index('--output') + 1]\n"
+        "out = os.path.join(os.environ['VNX_DATA_DIR'], 'state', 't0_state.json')\n"
         "os.makedirs(os.path.dirname(out), exist_ok=True)\n"
         "with open(out, 'w') as f:\n"
         "    json.dump({'generated_at': '2026-08-07T00:00:00+00:00'}, f)\n"
@@ -157,7 +178,7 @@ def test_hook_runs_in_consumer_layout_without_scripts_dir(tmp_path: Path) -> Non
         capture_output=True, text=True, env=env, cwd=str(consumer),
     )
     assert r.returncode == 0, r.stdout + r.stderr
-    assert (data_dir / "state" / "t0_state.json").is_file(), (
+    assert _wait_for((data_dir / "state" / "t0_state.json").is_file), (
         "consumer with no scripts/ must still get a built t0_state.json"
     )
     # The consumer project must NOT have sprouted a scripts/ tree.
@@ -167,9 +188,9 @@ def test_hook_runs_in_consumer_layout_without_scripts_dir(tmp_path: Path) -> Non
 # ── a failing build is visible AND non-blocking ──────────────────────────────
 
 def test_failing_build_is_visible_and_does_not_block(tmp_path: Path) -> None:
-    """A deliberately broken build produces a VISIBLE failure signal on the
-    hook's own stderr, and the hook still exits 0 so the session is not
-    blocked."""
+    """A deliberately broken build is logged by the trigger's reaper in the
+    central build_t0_state.err (the hook has returned by then), and the hook
+    itself still exits 0 so the session is not blocked."""
     builder = (
         "#!/usr/bin/env python3\n"
         "import sys\n"
@@ -180,63 +201,50 @@ def test_failing_build_is_visible_and_does_not_block(tmp_path: Path) -> None:
     data_dir = tmp_path / "data"
 
     r = _run_hook(engine, data_dir)
-    # Non-blocking: the hook MUST exit 0 even when the builder fails.
     assert r.returncode == 0, "a broken state file must not block the session"
-    # Visible: the failure surfaces on the hook's own stderr (not only a log).
-    assert "build_t0_state_hook FAILED" in r.stderr, (
-        f"failed build must be visible on stderr, got stderr={r.stderr!r}"
-    )
-    assert "rc=3" in r.stderr
-    # The real cause line is carried to the session output too.
-    assert "missing module" in r.stderr
-    # No state file was written by a failed build.
-    assert not (data_dir / "state" / "t0_state.json").exists()
-    # The full traceback still lands in the central log for diagnosis.
+    assert "background rebuild" in r.stderr
     err_log = data_dir / "logs" / "build_t0_state.err"
-    assert err_log.is_file(), "full builder stderr must still go to the central log"
-    assert "missing module" in err_log.read_text(encoding="utf-8")
+    assert _wait_for(err_log.is_file), "the reaper must log the failed build"
+    text = err_log.read_text(encoding="utf-8")
+    assert "rc=3" in text
+    assert "failed build" in text
+    assert not (data_dir / "state" / "t0_state.json").exists()
 
 
 def test_failing_build_appends_across_multiple_runs_with_timestamps(tmp_path: Path) -> None:
     """D1 poort C: the error log must APPEND one incident per failed run,
-    each carrying its own timestamp — not overwrite, which left only the
-    last-ever failure visible no matter how many times the build crashed."""
+    each carrying its own timestamp — not overwrite."""
     builder = (
         "#!/usr/bin/env python3\n"
-        "import sys\n"
-        "sys.stderr.write('boom\\n')\n"
         "raise SystemExit(1)\n"
     )
     engine = _make_fake_engine(tmp_path, builder_source=builder)
     data_dir = tmp_path / "data"
+    err_log = data_dir / "logs" / "build_t0_state.err"
 
     r1 = _run_hook(engine, data_dir)
     assert r1.returncode == 0
-    err_log = data_dir / "logs" / "build_t0_state.err"
-    first_content = err_log.read_text(encoding="utf-8")
-    assert first_content.count("boom") == 1
+    assert _wait_for(lambda: err_log.is_file() and err_log.read_text(encoding="utf-8").count("rc=1") == 1)
 
+    # The second session start must not be throttled by the first one.
+    (data_dir / "state" / ".last_state_rebuild_ts").unlink()
     r2 = _run_hook(engine, data_dir)
     assert r2.returncode == 0
-    second_content = err_log.read_text(encoding="utf-8")
-    assert second_content.count("boom") == 2, (
-        f"second failed run must be APPENDED, not overwrite the first: {second_content!r}"
+    assert _wait_for(lambda: err_log.read_text(encoding="utf-8").count("rc=1") == 2), (
+        "second failed run must be APPENDED, not overwrite the first"
     )
     # Each incident carries its own timestamp banner (ISO-ish UTC stamp).
-    assert second_content.count("=====") >= 4, (
-        "expected an opening+closing-style banner pair per incident"
-    )
+    assert err_log.read_text(encoding="utf-8").count("=====") >= 4
 
 
 def test_degraded_health_rc_is_not_reported_as_not_refreshed(tmp_path: Path) -> None:
     """D1 poort D 'PAS OP': rc=1 means the build SUCCEEDED and wrote a fresh
-    t0_state.json, but system_health itself is degraded/failed. The hook
-    must not say "not refreshed" for this rc — that would be a loud
-    falsehood over a file that is in fact fresh."""
+    t0_state.json, but system_health itself is degraded/failed. It must not be
+    logged as "not refreshed" — a loud falsehood over a file that is fresh."""
     builder = (
         "#!/usr/bin/env python3\n"
         "import sys, os, json\n"
-        "out = sys.argv[sys.argv.index('--output') + 1]\n"
+        "out = os.path.join(os.environ['VNX_DATA_DIR'], 'state', 't0_state.json')\n"
         "os.makedirs(os.path.dirname(out), exist_ok=True)\n"
         "with open(out, 'w') as f:\n"
         "    json.dump({'generated_at': '2026-08-30T00:00:00+00:00', 'system_health': {'status': 'degraded'}}, f)\n"
@@ -244,15 +252,16 @@ def test_degraded_health_rc_is_not_reported_as_not_refreshed(tmp_path: Path) -> 
     )
     engine = _make_fake_engine(tmp_path, builder_source=builder)
     data_dir = tmp_path / "data"
+    err_log = data_dir / "logs" / "build_t0_state.err"
 
     r = _run_hook(engine, data_dir)
     assert r.returncode == 0, "still non-blocking"
-    assert "not refreshed" not in r.stderr, f"rc=1 (degraded) is not a refresh failure: {r.stderr!r}"
-    assert "build_t0_state_hook FAILED" not in r.stderr
-    assert "degraded" in r.stderr
-    # The state file IS present and fresh — the build genuinely succeeded.
-    state_path = data_dir / "state" / "t0_state.json"
-    assert state_path.is_file(), "a degraded-health build still writes its state file"
+    assert "FAILED" not in r.stderr
+    assert _wait_for(err_log.is_file)
+    text = err_log.read_text(encoding="utf-8")
+    assert "degraded/failed" in text
+    assert "not refreshed" not in text, f"rc=1 (degraded) is not a refresh failure: {text!r}"
+    assert (data_dir / "state" / "t0_state.json").is_file()
 
 
 def test_failing_build_visible_when_builder_missing(tmp_path: Path) -> None:
@@ -279,7 +288,7 @@ def test_succeeding_build_writes_file_and_stamps_timestamp(tmp_path: Path) -> No
     builder = (
         "#!/usr/bin/env python3\n"
         "import sys, os, json\n"
-        "out = sys.argv[sys.argv.index('--output') + 1]\n"
+        "out = os.path.join(os.environ['VNX_DATA_DIR'], 'state', 't0_state.json')\n"
         "os.makedirs(os.path.dirname(out), exist_ok=True)\n"
         "with open(out, 'w') as f:\n"
         f"    json.dump({{'generated_at': {stamp!r}, 'schema_version': '2.2'}}, f)\n"
@@ -290,13 +299,13 @@ def test_succeeding_build_writes_file_and_stamps_timestamp(tmp_path: Path) -> No
     r = _run_hook(engine, data_dir)
     assert r.returncode == 0, r.stdout + r.stderr
     state_path = data_dir / "state" / "t0_state.json"
-    assert state_path.is_file(), "succeeding build must write t0_state.json"
+    assert _wait_for(state_path.is_file), "succeeding build must write t0_state.json"
     import json as _json
     payload = _json.loads(state_path.read_text(encoding="utf-8"))
     assert payload["generated_at"] == stamp, "payload must carry its build timestamp"
     # No failure signal on a healthy build (the hook does not noise it up).
     assert "FAILED" not in r.stderr
-    assert r.stderr == ""
+    assert r.stderr.count("\n") == 1 and "background rebuild" in r.stderr
 
 
 def test_describe_freshness_reports_age_for_written_state(tmp_path: Path) -> None:

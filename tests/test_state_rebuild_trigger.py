@@ -630,3 +630,109 @@ def test_interpreter_pinned_python_used_when_no_venv(
     monkeypatch.setenv("VNX_HOOK_PINNED_PYTHON", str(pinned))
     assert _popen_argv0(tmp_path) == str(pinned)
     assert _bash_resolver(clean_interp_env) == str(pinned)
+
+
+# ---------------------------------------------------------------------------
+# OI-3056: CLI --event / --wait, real CLI process against a stub builder
+# ---------------------------------------------------------------------------
+
+import os
+import shutil
+
+
+def _cli_engine(tmp_path: Path, builder: str) -> Path:
+    """A throwaway engine tree: the real trigger CLI plus a stub builder."""
+    engine = tmp_path / "engine"
+    (engine / "scripts" / "lib").mkdir(parents=True)
+    shutil.copy(LIB_DIR / "state_rebuild_trigger.py", engine / "scripts" / "lib")
+    shutil.copy(LIB_DIR / "event_outcome_semantics.py", engine / "scripts" / "lib")
+    (engine / "scripts" / "build_t0_state.py").write_text(builder, encoding="utf-8")
+    return engine
+
+
+def _cli(engine: Path, data: Path, *args: str) -> subprocess.CompletedProcess:
+    env = {k: v for k, v in os.environ.items() if not k.startswith("VNX_")}
+    env.update({"VNX_STATE_DIR": str(data / "state"), "VNX_PYTHON": sys.executable})
+    return subprocess.run(
+        [sys.executable, str(engine / "scripts" / "lib" / "state_rebuild_trigger.py"), *args],
+        capture_output=True, text=True, env=env, stdin=subprocess.DEVNULL, timeout=60,
+    )
+
+
+def test_session_start_is_not_a_critical_event() -> None:
+    assert "session_start" not in srt.CRITICAL_EVENTS
+
+
+def test_session_start_event_is_throttled_within_30_seconds(tmp_path: Path) -> None:
+    with mock.patch.object(srt, "_resolve_state_dir", return_value=tmp_path), \
+         mock.patch("state_rebuild_trigger.subprocess.Popen", return_value=_mock_popen()) as mock_p:
+        first = srt.maybe_trigger_state_rebuild(event_type="session_start")
+        second = srt.maybe_trigger_state_rebuild(event_type="session_start")
+    assert first is True
+    assert second is False
+    mock_p.assert_called_once()
+
+
+def test_cli_wait_logs_a_failed_build(tmp_path: Path) -> None:
+    engine = _cli_engine(tmp_path, "raise SystemExit(2)\n")
+    data = tmp_path / "data"
+    r = _cli(engine, data, "--event", "session_start", "--wait")
+    assert r.returncode == 0, r.stderr
+    text = (data / "logs" / "build_t0_state.err").read_text(encoding="utf-8")
+    assert "rc=2" in text
+    assert "failed build, t0_state.json not refreshed" in text
+
+
+def test_cli_wait_logs_degraded_health_as_built(tmp_path: Path) -> None:
+    engine = _cli_engine(tmp_path, "raise SystemExit(1)\n")
+    data = tmp_path / "data"
+    r = _cli(engine, data, "--event", "session_start", "--wait")
+    assert r.returncode == 0, r.stderr
+    text = (data / "logs" / "build_t0_state.err").read_text(encoding="utf-8")
+    assert "rc=1" in text
+    assert "built, t0_state.json refreshed, system_health degraded/failed" in text
+    assert "failed build" not in text
+
+
+def test_cli_wait_logs_nothing_for_a_good_build(tmp_path: Path) -> None:
+    engine = _cli_engine(tmp_path, "pass\n")
+    data = tmp_path / "data"
+    r = _cli(engine, data, "--wait")
+    assert r.returncode == 0, r.stderr
+    assert not (data / "logs" / "build_t0_state.err").exists()
+
+
+def test_cli_session_start_twice_starts_one_build(tmp_path: Path) -> None:
+    engine = _cli_engine(
+        tmp_path,
+        "import os\nopen(os.environ['VNX_STATE_DIR'] + '/runs', 'a').write('x')\n",
+    )
+    data = tmp_path / "data"
+    _cli(engine, data, "--event", "session_start", "--wait")
+    _cli(engine, data, "--event", "session_start", "--wait")
+    assert (data / "state" / "runs").read_text(encoding="utf-8") == "x"
+
+
+def test_cli_without_wait_returns_before_the_build_ends(tmp_path: Path) -> None:
+    engine = _cli_engine(
+        tmp_path,
+        "import os, time\ntime.sleep(4)\nopen(os.environ['VNX_STATE_DIR'] + '/done', 'w').write('x')\n",
+    )
+    data = tmp_path / "data"
+    started = time.monotonic()
+    r = _cli(engine, data)
+    elapsed = time.monotonic() - started
+    assert r.returncode == 0, r.stderr
+    assert elapsed < 3.0, f"CLI waited {elapsed:.2f}s without --wait"
+    assert not (data / "state" / "done").exists()
+    # The detached build still finishes on its own.
+    deadline = time.monotonic() + 20
+    while time.monotonic() < deadline and not (data / "state" / "done").exists():
+        time.sleep(0.05)
+    assert (data / "state" / "done").exists()
+
+
+def test_cli_rejects_an_unknown_flag(tmp_path: Path) -> None:
+    engine = _cli_engine(tmp_path, "pass\n")
+    r = _cli(engine, tmp_path / "data", "--bogus")
+    assert r.returncode != 0

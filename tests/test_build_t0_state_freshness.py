@@ -433,24 +433,19 @@ def test_sessionstart_hook_is_valid_bash_and_visible_failure():
     #    $STATE (not the repo-local .vnx-data split-brain, OI-859), an explicit
     #    interpreter is used, and the hook never blocks (exit 0).
     assert "BASH_SOURCE" in wrapper, "hook must resolve the engine via BASH_SOURCE, not a hardcoded path"
-    assert "$ENGINE_ROOT/scripts/build_t0_state.py" in wrapper
     assert "ENGINE_ROOT" in wrapper and '"$ROOT/scripts/' not in wrapper
-    assert 'build_t0_state.py" --output "$STATE/t0_state.json"' in wrapper
+    assert (
+        '"$ENGINE_ROOT/scripts/lib/state_rebuild_trigger.py" --event session_start --wait'
+        in wrapper
+    ), "hook must start the detached background trigger"
     assert '"$ROOT/.vnx-data/state/t0_state.json"' not in wrapper
-    assert "build_t0_state.err" in wrapper, "builder stderr must go to the central log, not /dev/null"
     assert "exit 0" in wrapper, "a broken state file must never block a session (non-fatal)"
     assert 'vnx_hook_python "$ENGINE_ROOT"' in wrapper, "hook must resolve its interpreter through the shared helper"
-    # 5) OI-1073 defect 2: a FAILED build is VISIBLE, not swallowed. The hook
-    #    surfaces the failure to its own stderr (the mechanism the harness
-    #    surfaces on the session that fired it), not only into a 0-byte log
-    #    nobody opens. The old hook did `exit 0` UNCONDITIONALLY with no signal.
-    assert "build_t0_state_hook FAILED" in wrapper, (
-        "hook must surface a failed build visibly (OI-1073 defect 2), not swallow it"
-    )
-    assert ">&2" in wrapper, "failure message must go to the hook's own stderr"
-    # The conditional: the failure line is only printed when BUILD_RC != 0,
-    # so the hook does not noise up a healthy session.
-    assert "BUILD_RC" in wrapper
+    # 5) Failure logging lives in the trigger's reaper (OI-3056), not in the
+    #    wrapper: the hook has returned long before the build ends.
+    trigger = (_ROOT / "scripts" / "lib" / "state_rebuild_trigger.py").read_text(encoding="utf-8")
+    assert "build_t0_state.err" in trigger, "the trigger's reaper must log a failed build to build_t0_state.err"
+    assert "BUILD_RC" not in wrapper
 
 
 # ---------------------------------------------------------------------------
