@@ -682,8 +682,8 @@ def materialize_artifacts(
     (``gate_runner._run_harness_lane_path``, after it has booked every failed,
     cut-off and timed-out run). When the output carries no verdict block, the
     verdict of the run's final answer is booked instead, appended to the report
-    at ``report_path`` and marked ``verdict_source: final_answer``. The vertex
-    and subprocess strategies pass nothing and keep their behaviour.
+    at ``report_path`` and marked ``verdict_source: final_answer``. The subprocess
+    strategy passes nothing and keeps its behaviour.
     """
     _fail = dict(
         gate=gate, pr_number=pr_number, pr_id=pr_id,
@@ -902,7 +902,7 @@ def _book_completed_run(
     # proxy outage) is caught upstream, in
     # ``gate_runner._run_harness_lane_path``, by reading the failure_reason
     # its dispatcher's report carries in real YAML frontmatter — a guarantee
-    # ONLY that caller has. The vertex and subprocess strategies that also
+    # ONLY that caller has. The subprocess strategy that also
     # call this function hand it raw model stdout, never a governed report,
     # so parsing frontmatter out of it here would be a second, weaker check
     # guessing at a shape those callers never promise. One slot, at the

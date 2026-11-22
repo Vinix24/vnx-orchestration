@@ -122,7 +122,6 @@ def switch_file(tmp_path, monkeypatch) -> Path:
     monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
     for key in ("DEEPSEEK_API_KEY", "OPENROUTER_API_KEY", "MOONSHOT_API_KEY"):
         monkeypatch.setenv(key, "sk-test-not-a-real-key")
-    monkeypatch.setenv("VNX_VERTEX_PROJECT", "test-project")
     return path
 
 
@@ -227,13 +226,6 @@ def _local_gemma_spawn(tmp_path, monkeypatch):
     return lambda: spawn.spawn_local_gemma(instruction="x", dispatch_id="d-1")
 
 
-def _vertex(tmp_path, monkeypatch):
-    import vertex_ai_runner
-    return lambda: vertex_ai_runner.run_vertex_ai(
-        "x", subprocess_run=subprocess.run, urlopen=urllib.request.urlopen,
-    )
-
-
 def _llm_benchmark_api(tmp_path, monkeypatch):
     import llm_benchmark
     return lambda: llm_benchmark._ollama_api("/api/generate", {"model": "m", "prompt": "x"})
@@ -327,7 +319,6 @@ INVOCATIONS: Dict[str, Tuple[str, Callable]] = {
     "scripts/lib/gemini_wrapper.py:gemini_exec": ("gemini", _gemini_wrapper),
     "scripts/lib/kimi_wrapper.py:kimi_exec": ("kimi", _kimi_wrapper),
     "scripts/lib/providers/local_gemma/spawn.py:_run_ollama_fallback": ("local", _local_gemma_ollama),
-    "scripts/lib/vertex_ai_runner.py:run_vertex_ai": ("gemini", _vertex),
     "scripts/llm_benchmark.py:_ollama_api": ("local", _llm_benchmark_api),
     "scripts/llm_benchmark.py:_ollama_stream": ("local", _llm_benchmark_stream),
     "scripts/lib/provider_spawns/claude_spawn.py:spawn_claude": ("deepseek", _claude_spawn),

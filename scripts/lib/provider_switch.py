@@ -1132,7 +1132,6 @@ ENFORCED: Tuple[str, ...] = (
     "scripts/lib/gemini_wrapper.py:gemini_exec",
     "scripts/lib/kimi_wrapper.py:kimi_exec",
     "scripts/lib/providers/local_gemma/spawn.py:_run_ollama_fallback",
-    "scripts/lib/vertex_ai_runner.py:run_vertex_ai",
     "scripts/llm_benchmark.py:_ollama_api",
     "scripts/llm_benchmark.py:_ollama_stream",
     *UNDETECTED_LAUNCH_FUNCTIONS,

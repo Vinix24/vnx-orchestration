@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""W3G regression tests for vertex_ai_runner.build_gemini_prompt.
+"""W3G regression tests for gate_prompt_files.build_gemini_prompt.
 
 OI-1230: build_gemini_prompt must inline each changed file exactly once.
 OI-1093: build_gemini_prompt must include an explicit grounding guardrail
@@ -16,7 +16,7 @@ from unittest.mock import MagicMock
 VNX_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(VNX_ROOT / "scripts" / "lib"))
 
-from vertex_ai_runner import build_gemini_prompt  # noqa: E402
+from gate_prompt_files import build_gemini_prompt  # noqa: E402
 
 
 def _no_branch_subprocess() -> MagicMock:

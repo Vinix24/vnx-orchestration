@@ -743,7 +743,7 @@ class TestOneTruthOnDisk:
         assert twice == once
         assert once.startswith(LANE_REPORT.rstrip("\n"))
 
-    def test_the_vertex_and_subprocess_strategies_never_read_a_final_answer(self, tmp_path):
+    def test_the_subprocess_strategy_never_read_a_final_answer(self, tmp_path):
         """No final_answer_dir, no fallback: the old no_verdict_block booking stands."""
         dispatch_id = "deepseek-gate-pr2066-1792100303"
         _write_archive(tmp_path, dispatch_id, _run_events(dispatch_id, _final_answer(PASS_BLOCK)))
