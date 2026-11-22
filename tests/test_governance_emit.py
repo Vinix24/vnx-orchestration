@@ -606,6 +606,17 @@ def test_stale_rotation_logs_one_info_line(tmp_data, caplog):
     assert "d3" in lines[0].getMessage() and "d3.attempt-1.md" in lines[0].getMessage()
 
 
+def test_stale_contract_valid_report_is_never_rotated(tmp_data):
+    valid = _NEW_VALID.replace("second attempt", "worker's earlier")
+    old = _seed_report(tmp_data, "d9", valid, _ATTEMPT_START - 600)
+    path = _emit(
+        tmp_data, "d9", response="all good",
+        attempt_started_at=_ATTEMPT_START, preserve_partial=False,
+    )
+    assert path == old and path.read_text(encoding="utf-8") == valid
+    assert not list(old.parent.glob("d9.attempt-*.md"))
+
+
 def test_report_written_during_attempt_stays_untouched(tmp_data):
     valid = _NEW_VALID.replace("second attempt", "worker's own")
     old = _seed_report(tmp_data, "d4", valid, _ATTEMPT_START + 5)

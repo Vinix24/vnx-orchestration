@@ -943,6 +943,30 @@ def _rotate_stale_report(report_path: Path, reports_dir: Path, dispatch_id: str)
     return sidecar
 
 
+def _rotation_blocks_emit(
+    report_path: Path, reports_dir: Path, dispatch_id: str,
+    overwrite: bool, attempt_started_at: Optional[Union[datetime, int, float]],
+) -> bool:
+    """OI-3064: rotate a report that is stale AND contract-invalid; True = keep it, stop.
+
+    Returns True only when a rotation was needed but failed (the caller then
+    returns the existing report). A stale report that passes the contract, one
+    that cannot be read (validity unknown), and every case without
+    *attempt_started_at* are left untouched: the pre-OI-3064 rules apply.
+    """
+    if overwrite or attempt_started_at is None or not report_path.exists():
+        return False
+    if not _report_predates_attempt(report_path, attempt_started_at):
+        return False
+    try:
+        existing = report_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False  # validity unknown: never rotate blind
+    if validate_body(existing).valid:
+        return False
+    return _rotate_stale_report(report_path, reports_dir, dispatch_id) is None
+
+
 def emit_unified_report(
     dispatch_id: str,
     terminal_id: str,
@@ -968,11 +992,11 @@ def emit_unified_report(
 
     *attempt_started_at* (OI-3064) is when THIS attempt began: a ``datetime``
     (a naive one is read as local time) or epoch seconds. An existing report
-    whose mtime is before it comes from an earlier attempt: it is rotated to
-    ``<dispatch_id>.attempt-<n>.md`` (first free ``n``, an earlier sidecar is
-    never overwritten) and the fresh report is written at the canonical path.
-    A report written during this attempt follows the rules above. Without it,
-    nothing is rotated.
+    whose mtime is before it and that is contract-invalid (stale and
+    contract-invalid) is rotated to ``<dispatch_id>.attempt-<n>.md`` (first
+    free ``n``, never overwriting a sidecar); the fresh report takes the
+    canonical path. A stale valid report, or one written during this attempt,
+    follows the rules above. Without it, nothing is rotated.
 
     When *body_override* is provided, that exact markdown string is written as
     the report body instead of the generic ## Response wrapper.  The govern()
@@ -1061,13 +1085,8 @@ def emit_unified_report(
                 dispatch_id, _split_exc,
             )
 
-    if report_path.exists() and not overwrite and attempt_started_at is not None:
-        # OI-3064: a report older than this attempt belongs to an earlier
-        # attempt (a refire). Rotate it aside so the fresh output is written
-        # at the canonical path instead of being dropped by the early-return.
-        if _report_predates_attempt(report_path, attempt_started_at):
-            if _rotate_stale_report(report_path, reports_dir, dispatch_id) is None:
-                return report_path
+    if _rotation_blocks_emit(report_path, reports_dir, dispatch_id, overwrite, attempt_started_at):
+        return report_path
 
     if report_path.exists() and not overwrite:
         if preserve_partial:
