@@ -545,3 +545,102 @@ def test_idempotency_fields_unchanged():
     from append_receipt_internals.idempotency import IDEMPOTENCY_FIELDS
     assert "role" not in IDEMPOTENCY_FIELDS
     assert "receipt_kind" not in IDEMPOTENCY_FIELDS
+
+
+# ---------------------------------------------------------------------------
+# OI-3064: a refire rotates the earlier attempt's report aside
+# ---------------------------------------------------------------------------
+
+_NEW_VALID = (
+    "## Summary\n\nThe second attempt delivered the whole change with full coverage "
+    "and every check green.\n\n## Changes\n\n- a.py\n\n## Verification\n\n- pytest ok\n\n"
+    "## Open Items\n\nNone\n"
+)
+_OLD_INVALID = "## Response\n\nwrapper from the failed first attempt\n"
+_ATTEMPT_START = 2_000_000_000.0  # epoch seconds
+
+
+def _seed_report(data_dir, dispatch_id, body, mtime):
+    reports = data_dir / "unified_reports"
+    reports.mkdir(parents=True, exist_ok=True)
+    path = reports / f"{dispatch_id}.md"
+    path.write_text(body, encoding="utf-8")
+    os.utime(path, (mtime, mtime))
+    return path
+
+
+def _emit(data_dir, dispatch_id, response=_NEW_VALID, **kw):
+    return emit_unified_report(
+        dispatch_id=dispatch_id, terminal_id="T1", provider="codex", instruction="x",
+        response_text=response, findings=None, duration_seconds=1.0,
+        data_dir=data_dir, **kw,
+    )
+
+
+def test_stale_invalid_report_is_rotated_to_attempt_1(tmp_data):
+    old = _seed_report(tmp_data, "d1", _OLD_INVALID, _ATTEMPT_START - 600)
+    path = _emit(tmp_data, "d1", attempt_started_at=_ATTEMPT_START, preserve_partial=False)
+    assert path == old
+    assert "second attempt delivered" in path.read_text(encoding="utf-8")
+    sidecar = path.parent / "d1.attempt-1.md"
+    assert sidecar.read_text(encoding="utf-8") == _OLD_INVALID
+
+
+def test_stale_report_never_overwrites_an_earlier_sidecar(tmp_data):
+    old = _seed_report(tmp_data, "d2", _OLD_INVALID, _ATTEMPT_START - 600)
+    first = old.parent / "d2.attempt-1.md"
+    first.write_text("attempt one body", encoding="utf-8")
+    path = _emit(tmp_data, "d2", attempt_started_at=_ATTEMPT_START)
+    assert first.read_text(encoding="utf-8") == "attempt one body"
+    assert (old.parent / "d2.attempt-2.md").read_text(encoding="utf-8") == _OLD_INVALID
+    assert "second attempt delivered" in path.read_text(encoding="utf-8")
+
+
+def test_stale_rotation_logs_one_info_line(tmp_data, caplog):
+    import logging
+    _seed_report(tmp_data, "d3", _OLD_INVALID, _ATTEMPT_START - 600)
+    with caplog.at_level(logging.INFO, logger="governance_emit"):
+        _emit(tmp_data, "d3", attempt_started_at=_ATTEMPT_START)
+    lines = [r for r in caplog.records if "rotated stale report" in r.getMessage()]
+    assert len(lines) == 1 and lines[0].levelno == logging.INFO
+    assert "d3" in lines[0].getMessage() and "d3.attempt-1.md" in lines[0].getMessage()
+
+
+def test_report_written_during_attempt_stays_untouched(tmp_data):
+    valid = _NEW_VALID.replace("second attempt", "worker's own")
+    old = _seed_report(tmp_data, "d4", valid, _ATTEMPT_START + 5)
+    path = _emit(tmp_data, "d4", response="other text", attempt_started_at=_ATTEMPT_START)
+    assert path == old and path.read_text(encoding="utf-8") == valid
+    assert not (old.parent / "d4.attempt-1.md").exists()
+
+
+def test_invalid_report_from_this_attempt_follows_preserve_partial(tmp_data):
+    old = _seed_report(tmp_data, "d5", _OLD_INVALID, _ATTEMPT_START + 5)
+    kept = _emit(tmp_data, "d5", attempt_started_at=_ATTEMPT_START, preserve_partial=False)
+    assert kept.read_text(encoding="utf-8") == _OLD_INVALID
+    _emit(tmp_data, "d5", attempt_started_at=_ATTEMPT_START, preserve_partial=True)
+    assert (old.parent / "d5.partial.md").read_text(encoding="utf-8") == _OLD_INVALID
+    assert not (old.parent / "d5.attempt-1.md").exists()
+
+
+def test_without_attempt_started_at_nothing_is_rotated(tmp_data):
+    old = _seed_report(tmp_data, "d6", _OLD_INVALID, _ATTEMPT_START - 600)
+    path = _emit(tmp_data, "d6", preserve_partial=False)
+    assert path.read_text(encoding="utf-8") == _OLD_INVALID
+    _emit(tmp_data, "d6", preserve_partial=True)
+    assert (old.parent / "d6.partial.md").read_text(encoding="utf-8") == _OLD_INVALID
+    assert not list(old.parent.glob("d6.attempt-*.md"))
+
+
+def test_attempt_started_at_accepts_aware_datetime(tmp_data):
+    from datetime import datetime, timezone
+    _seed_report(tmp_data, "d7", _OLD_INVALID, _ATTEMPT_START - 600)
+    start = datetime.fromtimestamp(_ATTEMPT_START, tz=timezone.utc)
+    path = _emit(tmp_data, "d7", attempt_started_at=start)
+    assert "second attempt delivered" in path.read_text(encoding="utf-8")
+
+
+def test_attempt_started_at_bad_type_raises(tmp_data):
+    _seed_report(tmp_data, "d8", _OLD_INVALID, _ATTEMPT_START - 600)
+    with pytest.raises(TypeError):
+        _emit(tmp_data, "d8", attempt_started_at="yesterday")

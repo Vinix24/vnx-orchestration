@@ -29,8 +29,9 @@ import logging
 import os
 import re
 import sys
+from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 # Ensure the sibling scripts/lib modules resolve even when a caller imports
 # governance_emit by path without scripts/lib already on sys.path.
@@ -883,6 +884,65 @@ def _lift_lane_log_for_report(
         return None
 
 
+def _report_predates_attempt(
+    report_path: Path, attempt_started_at: Union[datetime, int, float],
+) -> bool:
+    """True only when the report's mtime is positively before the attempt start.
+
+    A bad *attempt_started_at* type raises; an unreadable mtime is "not stale"
+    (the report is then handled by the pre-OI-3064 rules, never rotated blind).
+    """
+    if isinstance(attempt_started_at, datetime):
+        started = attempt_started_at.timestamp()
+    elif isinstance(attempt_started_at, (int, float)) and not isinstance(attempt_started_at, bool):
+        started = float(attempt_started_at)
+    else:
+        raise TypeError(
+            f"attempt_started_at must be a datetime or epoch seconds, got {attempt_started_at!r}"
+        )
+    try:
+        return report_path.stat().st_mtime < started
+    except OSError:
+        return False
+
+
+def _rotate_stale_report(report_path: Path, reports_dir: Path, dispatch_id: str) -> Optional[Path]:
+    """Move an earlier attempt's report to ``<id>.attempt-<n>.md`` (first free n).
+
+    ``os.link`` fails on an existing target, so an earlier sidecar is never
+    overwritten. Returns the sidecar, or None when the move failed (the caller
+    then keeps the report as-is).
+    """
+    n = 1
+    while True:
+        sidecar = reports_dir / f"{dispatch_id}.attempt-{n}.md"
+        try:
+            os.link(report_path, sidecar)
+        except FileExistsError:
+            n += 1
+            continue
+        except OSError as exc:
+            logger.warning(
+                "governance_emit: could not rotate stale report %s to %s (%s); keeping it",
+                report_path, sidecar, exc,
+            )
+            return None
+        break
+    try:
+        os.unlink(report_path)
+    except OSError as exc:
+        logger.warning(
+            "governance_emit: rotated stale report %s to %s but could not remove the original (%s)",
+            report_path, sidecar, exc,
+        )
+        return None
+    logger.info(
+        "governance_emit: rotated stale report from an earlier attempt dispatch=%s old=%s sidecar=%s",
+        dispatch_id, report_path, sidecar,
+    )
+    return sidecar
+
+
 def emit_unified_report(
     dispatch_id: str,
     terminal_id: str,
@@ -899,11 +959,20 @@ def emit_unified_report(
     preserve_partial: bool = False,
     model: Optional[str] = None,
     spawn_error: Optional[str] = None,
+    attempt_started_at: Optional[Union[datetime, int, float]] = None,
 ) -> Path:
     """Atomic write to unified_reports/<dispatch_id>.md. Returns path.
 
     Idempotent: returns the existing path without modifying it when the report
     already exists (worker may have written a richer report).
+
+    *attempt_started_at* (OI-3064) is when THIS attempt began: a ``datetime``
+    (a naive one is read as local time) or epoch seconds. An existing report
+    whose mtime is before it comes from an earlier attempt: it is rotated to
+    ``<dispatch_id>.attempt-<n>.md`` (first free ``n``, an earlier sidecar is
+    never overwritten) and the fresh report is written at the canonical path.
+    A report written during this attempt follows the rules above. Without it,
+    nothing is rotated.
 
     When *body_override* is provided, that exact markdown string is written as
     the report body instead of the generic ## Response wrapper.  The govern()
@@ -991,6 +1060,14 @@ def emit_unified_report(
                 "governance_emit: split-brain guard failed (non-fatal) dispatch=%s: %s",
                 dispatch_id, _split_exc,
             )
+
+    if report_path.exists() and not overwrite and attempt_started_at is not None:
+        # OI-3064: a report older than this attempt belongs to an earlier
+        # attempt (a refire). Rotate it aside so the fresh output is written
+        # at the canonical path instead of being dropped by the early-return.
+        if _report_predates_attempt(report_path, attempt_started_at):
+            if _rotate_stale_report(report_path, reports_dir, dispatch_id) is None:
+                return report_path
 
     if report_path.exists() and not overwrite:
         if preserve_partial:

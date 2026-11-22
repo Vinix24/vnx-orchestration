@@ -481,8 +481,13 @@ def _emit_govern_report(
     adapter_result: _AdapterResult,
     duration: float,
     emit_unified_report: Any,
+    start_time: Optional[datetime] = None,
 ) -> Optional[Path]:
     """Emit the unified report for this dispatch. Never fatal.
+
+    OI-3064: ``start_time`` is the attempt start. A report on disk older than it
+    belongs to an earlier attempt (a refire) and is rotated to
+    ``<id>.attempt-<n>.md`` so this attempt's output is not discarded.
 
     REPORT first — idempotent: worker-written file is preserved, not
     overwritten. OI-903: on failure/timeout, a killed worker's partial report
@@ -514,6 +519,7 @@ def _emit_govern_report(
             # lane (#1834, provider_dispatch._emit_governance).
             spawn_error=getattr(adapter_result, "error", None),
             preserve_partial=adapter_result.status != "success",
+            attempt_started_at=start_time,
         )
     except Exception as exc:
         logger.error(
@@ -635,7 +641,7 @@ def _govern(
 
     # REPORT first — idempotent: worker-written file is preserved, not overwritten.
     report_path = _emit_govern_report(
-        spec, adapter_result, duration, emit_unified_report,
+        spec, adapter_result, duration, emit_unified_report, start_time=start_time,
     )
 
     # OI-1017/OI-1048: binding body-contract validation on envelope lanes.
