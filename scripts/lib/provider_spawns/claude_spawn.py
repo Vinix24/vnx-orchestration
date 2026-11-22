@@ -76,7 +76,7 @@ def _switch_family(
     """The family the provider switch decides this spawn on, or None: no redirect is claude.
 
     ``base_url_family`` is the family a harness lane names for its own redirect: the decision is
-    on that family, whatever host the redirect points at (an operator's ``VNX_GLM_PROXY_URL`` on
+    on that family, whatever host the redirect points at (a proxy URL on
     any host or port). Without one, an ``ANTHROPIC_BASE_URL`` in the env the child receives is
     mapped by host, an OpenRouter host to the maker of ``model``. A host the map does not know
     raises ``ProviderDisabledError`` with the host decision (``unknown-identifier``); a label

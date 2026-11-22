@@ -7,7 +7,7 @@ Verifies the account-safety contract of spawn_deepseek_harness():
   - env: ANTHROPIC_AUTH_TOKEN is the DeepSeek key (key-auth, not OAuth)
   - env: CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
   - argv: --strict-mcp-config --mcp-config '{"mcpServers":{}}' (MCP fully off)
-  - model: defaults to deepseek-v4-pro; honours arg + VNX_DEEPSEEK_HARNESS_MODEL
+  - model: defaults to deepseek-v4-pro; honours the arg
   - frontmatter attributes provider=deepseek-harness, sub_provider=deepseek
   - FAIL-CLOSED: missing DEEPSEEK_API_KEY -> no spawn, returncode 1
   - caller extra_env cannot override the mandatory account-safety env
@@ -95,16 +95,9 @@ class TestHarnessHelpers:
         assert resolve_harness_model("deepseek-v4-flash") == "deepseek-v4-flash"
 
     def test_resolve_model_falls_back_to_default(self):
-        with patch.dict("os.environ", {}, clear=False):
-            import os
-            os.environ.pop("VNX_DEEPSEEK_HARNESS_MODEL", None)
-            assert resolve_harness_model(None) == "deepseek-v4-pro"
-            assert resolve_harness_model("") == "deepseek-v4-pro"
-            assert resolve_harness_model("   ") == "deepseek-v4-pro"
-
-    def test_resolve_model_env_override(self):
-        with patch.dict("os.environ", {"VNX_DEEPSEEK_HARNESS_MODEL": "deepseek-v4-flash"}):
-            assert resolve_harness_model(None) == "deepseek-v4-flash"
+        assert resolve_harness_model(None) == "deepseek-v4-pro"
+        assert resolve_harness_model("") == "deepseek-v4-pro"
+        assert resolve_harness_model("   ") == "deepseek-v4-pro"
 
 
 # ---------------------------------------------------------------------------

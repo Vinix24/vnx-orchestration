@@ -8,7 +8,7 @@ Source of truth: `scripts/lib/exit_classifier.py`.
 | Class | Retryable | Meaning | Operator action |
 |-------|-----------|---------|-----------------|
 | `SUCCESS` | No | Exit code 0, no error conditions | Check output artifact for results |
-| `TIMEOUT` | Yes | Subprocess exceeded time limit | Increase `VNX_HEADLESS_TIMEOUT` or simplify the prompt |
+| `TIMEOUT` | Yes | Subprocess exceeded time limit | Simplify the prompt or split the task |
 | `TOOL_FAIL` | Yes | Transient tool/network error | Retry is safe — check stderr for details |
 | `INFRA_FAIL` | Yes | Binary missing, OOM, or infrastructure problem | Check CLI binary install or system resources |
 | `NO_OUTPUT` | Yes | Subprocess produced no output (hung or crashed silently) | Check for deadlocks or oversized prompts |

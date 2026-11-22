@@ -419,7 +419,7 @@ def _baseline_prompt(sd, root, role, did):
             skill_prefix, "build_skill_prefix",
             side_effect=AssertionError("build_skill_prefix ran with no skill")):
         ok = subprocess_dispatch.deliver_with_recovery(
-            # Same model the pool run resolves (VNX_DISPATCH_MODEL default).
+            # Same model the pool run resolves (the fixed pool default).
             terminal_id="T1", instruction="do the task", model="kimi-k3",
             dispatch_id=did, role=role, max_retries=0, auto_commit=False)
     assert ok is True, "the no-skill baseline delivery failed"

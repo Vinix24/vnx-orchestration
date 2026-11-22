@@ -16,7 +16,6 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import os
 import subprocess
 import sys
 import tempfile
@@ -145,7 +144,7 @@ def main() -> int:
     parser.add_argument("--results-dir", default=None, help="Path to results directory")
     parser.add_argument(
         "--tasks-dir",
-        default=os.environ.get("VNX_BENCH_TASKS_DIR", ""),
+        default="",
         help="Directory of *.txt task prompts to look up original task text (bring-your-own-tasks). "
              "Default: bundled scripts/benchmark/prompts/",
     )

@@ -1091,8 +1091,8 @@ UNDETECTED_LAUNCH_FUNCTIONS: Dict[str, str] = {
         "delegates to spawn_claude with the DeepSeek ANTHROPIC_BASE_URL, labelled deepseek; "
         "no process call in its own body",
     "scripts/lib/provider_spawns/glm_harness_spawn.py:spawn_glm_harness":
-        "delegates to spawn_claude with the proxy ANTHROPIC_BASE_URL (VNX_GLM_PROXY_URL, "
-        "default :4141), labelled glm; no process call in its own body",
+        "delegates to spawn_claude with the proxy ANTHROPIC_BASE_URL (default "
+        ":4141), labelled glm; no process call in its own body",
     "scripts/lib/provider_spawns/kimi_spawn.py:_start_kimi_subprocess":
         "Popen of an argv that arrives as a parameter; the literal 'kimi' head sits in "
         "_build_kimi_cmd, called by spawn_kimi",

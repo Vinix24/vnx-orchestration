@@ -585,19 +585,9 @@ def spawn_litellm(
     tool_call_shape triggers pre-spawn validation for format mismatch detection.
     sub_provider and lane are propagated to audit events per ADR-016.
     """
-    try:
-        chunk_timeout = float(os.environ.get("VNX_LITELLM_STALL_THRESHOLD", chunk_timeout))
-    except (TypeError, ValueError):
-        pass
-    try:
-        total_deadline = float(os.environ.get("VNX_LITELLM_TIMEOUT", total_deadline))
-    except (TypeError, ValueError):
-        pass
     # OI-903: scale the stall timeout with the total deadline so a long deadline
-    # stays the binding constraint. Skipped when VNX_LITELLM_STALL_THRESHOLD is set
-    # explicitly — env overrides retain precedence.
-    if "VNX_LITELLM_STALL_THRESHOLD" not in os.environ:
-        chunk_timeout = coerce_chunk_stall(chunk_timeout, total_deadline)
+    # stays the binding constraint.
+    chunk_timeout = coerce_chunk_stall(chunk_timeout, total_deadline)
 
     try:
         _validate_tool_shape(prompt, tool_call_shape)

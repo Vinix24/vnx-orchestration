@@ -558,7 +558,8 @@ def test_glm_harness_proxy_unreachable_error_reaches_report_body(tmp_path, monke
     """The glm-harness spawn layer fail-closes on an unreachable litellm proxy;
     the report body must carry that diagnosis instead of "(no response captured)"."""
     url = "http://127.0.0.1:1"
-    monkeypatch.setenv("VNX_GLM_PROXY_URL", url)
+    from provider_spawns import glm_harness_spawn
+    monkeypatch.setattr(glm_harness_spawn, "_proxy_url", lambda: url)
     args = _make_args("glm-harness", dispatch_id="glm-proxy-unreachable-001")
     with patch("event_store.EventStore", MagicMock()):
         rc = provider_dispatch._dispatch_glm_harness(args)

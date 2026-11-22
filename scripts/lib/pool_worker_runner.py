@@ -224,7 +224,7 @@ def run(terminal_id: str, project_id: str, *,
     """
     _sd = state_dir or _resolve_state_dir()
     _dd = dispatch_dir or _resolve_dispatch_dir()
-    _model = model or os.environ.get("VNX_DISPATCH_MODEL", "kimi-k3")
+    _model = model or "kimi-k3"
 
     with get_connection(_sd) as conn:
         dispatch_id = claim_next_queued_dispatch(conn, terminal_id, project_id)

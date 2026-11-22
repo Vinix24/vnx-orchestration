@@ -41,7 +41,7 @@ FC_UNKNOWN = "UNKNOWN"
 # Operator hints per failure class
 _OPERATOR_HINTS = {
     FC_SUCCESS: "Run completed successfully. Check output artifact for results.",
-    FC_TIMEOUT: "Increase VNX_HEADLESS_TIMEOUT or simplify the prompt.",
+    FC_TIMEOUT: "Simplify the prompt or split the task.",
     FC_TOOL_FAIL: "Transient error — retry is safe. Check stderr for details.",
     FC_INFRA_FAIL: "Infrastructure problem — check CLI binary install or system resources.",
     FC_NO_OUTPUT: "Subprocess hung silently. Check for deadlocks or oversized prompts.",
