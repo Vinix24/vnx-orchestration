@@ -64,6 +64,8 @@ def _make_fake_engine(
     (engine / "scripts" / "lib").mkdir(parents=True)
     shutil.copy(HOOK, engine / "scripts" / "hooks" / "build_t0_state_hook.sh")
     os.chmod(engine / "scripts" / "hooks" / "build_t0_state_hook.sh", 0o755)
+    # The hook sources its interpreter helper from its own directory.
+    shutil.copy(HOOK.parent / "lib_hook_python.sh", engine / "scripts" / "hooks" / "lib_hook_python.sh")
     (engine / "scripts" / "build_t0_state.py").write_text(builder_source, encoding="utf-8")
     # Minimal vnx_paths stub: ensure_env() returning the pinned dirs, so the
     # hook resolves the central store without the full engine on sys.path.
