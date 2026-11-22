@@ -29,8 +29,9 @@ import logging
 import os
 import re
 import sys
+from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 # Ensure the sibling scripts/lib modules resolve even when a caller imports
 # governance_emit by path without scripts/lib already on sys.path.
@@ -883,6 +884,119 @@ def _lift_lane_log_for_report(
         return None
 
 
+def _report_predates_attempt(
+    report_path: Path, attempt_started_at: Union[datetime, int, float],
+) -> bool:
+    """True only when the report's mtime is positively before the attempt start.
+
+    A bad *attempt_started_at* type raises; an unreadable mtime is "not stale"
+    (the report is then handled by the pre-OI-3064 rules, never rotated blind).
+    """
+    if isinstance(attempt_started_at, datetime):
+        started = attempt_started_at.timestamp()
+    elif isinstance(attempt_started_at, (int, float)) and not isinstance(attempt_started_at, bool):
+        started = float(attempt_started_at)
+    else:
+        raise TypeError(
+            f"attempt_started_at must be a datetime or epoch seconds, got {attempt_started_at!r}"
+        )
+    try:
+        return report_path.stat().st_mtime < started
+    except OSError:
+        return False
+
+
+def _rotate_stale_report(report_path: Path, reports_dir: Path, dispatch_id: str) -> Optional[Path]:
+    """Move an earlier attempt's report to ``<id>.attempt-<n>.md`` (first free n).
+
+    ``os.link`` fails on an existing target, so an earlier sidecar is never
+    overwritten. Returns the sidecar, or None when the move failed (the caller
+    then keeps the report as-is).
+    """
+    n = 1
+    while True:
+        sidecar = reports_dir / f"{dispatch_id}.attempt-{n}.md"
+        try:
+            os.link(report_path, sidecar)
+        except FileExistsError:
+            n += 1
+            continue
+        except OSError as exc:
+            logger.warning(
+                "governance_emit: could not rotate stale report %s to %s (%s); keeping it",
+                report_path, sidecar, exc,
+            )
+            return None
+        break
+    try:
+        os.unlink(report_path)
+    except OSError as exc:
+        logger.warning(
+            "governance_emit: rotated stale report %s to %s but could not remove the original (%s)",
+            report_path, sidecar, exc,
+        )
+        return None
+    logger.info(
+        "governance_emit: rotated stale report from an earlier attempt dispatch=%s old=%s sidecar=%s",
+        dispatch_id, report_path, sidecar,
+    )
+    return sidecar
+
+
+def _rotation_blocks_emit(
+    report_path: Path, reports_dir: Path, dispatch_id: str,
+    overwrite: bool, attempt_started_at: Optional[Union[datetime, int, float]],
+) -> bool:
+    """OI-3064: rotate a report that is stale AND contract-invalid; True = keep it, stop.
+
+    Returns True only when a rotation was needed but failed (the caller then
+    returns the existing report). A stale report that passes the contract, one
+    that cannot be read (validity unknown), and every case without
+    *attempt_started_at* are left untouched: the pre-OI-3064 rules apply.
+    """
+    if overwrite or attempt_started_at is None or not report_path.exists():
+        return False
+    if not _report_predates_attempt(report_path, attempt_started_at):
+        return False
+    try:
+        existing = report_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False  # validity unknown: never rotate blind
+    if validate_body(existing).valid:
+        return False
+    return _rotate_stale_report(report_path, reports_dir, dispatch_id) is None
+
+
+def _warn_report_store_split_brain(report_path: Path, dispatch_id: str, data_dir: Path) -> None:
+    """OI-1635: before writing the generic wrapper, flag a real report in another store.
+
+    Only runs when nothing exists yet at *report_path*. The worker and this
+    emitter can disagree on "VNX_DATA_DIR" (see provider_dispatch._worker_role_env);
+    a hit means the central ledger is about to receive a narrative stand-in
+    while the actual work sits elsewhere, unlinked from the audit trail, so it
+    is logged as an error. The guard is advisory and never breaks report emit.
+    """
+    if report_path.exists():
+        return
+    try:
+        from data_dir_guard import check_report_store_split_brain
+        _orphan = check_report_store_split_brain(dispatch_id, data_dir)
+        if _orphan is not None:
+            logger.error(
+                "VNX_REPORT_STORE_SPLIT_BRAIN: dispatch=%s about to write the "
+                "generic wrapper at %s, but a worker report already exists at "
+                "%s — the worker and the governance emitter resolved the VNX "
+                "data dir to different stores; that richer report is orphaned "
+                "from the audit trail",
+                dispatch_id, report_path, _orphan,
+            )
+    except Exception as _split_exc:  # noqa: BLE001 — advisory guard must never break report emit
+        logger.debug(
+            "governance_emit: split-brain guard failed (non-fatal) dispatch=%s: %s",
+            dispatch_id, _split_exc,
+        )
+
+
 def emit_unified_report(
     dispatch_id: str,
     terminal_id: str,
@@ -899,11 +1013,17 @@ def emit_unified_report(
     preserve_partial: bool = False,
     model: Optional[str] = None,
     spawn_error: Optional[str] = None,
+    attempt_started_at: Optional[Union[datetime, int, float]] = None,
 ) -> Path:
     """Atomic write to unified_reports/<dispatch_id>.md. Returns path.
 
     Idempotent: returns the existing path without modifying it when the report
     already exists (worker may have written a richer report).
+
+    *attempt_started_at* (OI-3064): when THIS attempt began, a ``datetime`` or
+    epoch seconds. A stale and contract-invalid report (mtime before it) is
+    rotated to ``<id>.attempt-<n>.md`` and the fresh one takes its place; any
+    other existing report follows the rules here. Without it, nothing rotates.
 
     When *body_override* is provided, that exact markdown string is written as
     the report body instead of the generic ## Response wrapper.  The govern()
@@ -966,31 +1086,10 @@ def emit_unified_report(
 
     report_path = reports_dir / f"{dispatch_id}.md"
 
-    # OI-1635: nothing exists yet at report_path — about to write the generic
-    # completion-text wrapper below. Before doing that, check whether the
-    # worker's REAL report landed in a DIFFERENT known store (the worker and
-    # this emitter can disagree on "VNX_DATA_DIR" — see
-    # provider_dispatch._worker_role_env). A hit here means the central ledger
-    # is about to receive a narrative stand-in while the actual work sits
-    # elsewhere, unlinked from the audit trail — never silent about that.
-    if not report_path.exists():
-        try:
-            from data_dir_guard import check_report_store_split_brain
-            _orphan = check_report_store_split_brain(dispatch_id, data_dir)
-            if _orphan is not None:
-                logger.error(
-                    "VNX_REPORT_STORE_SPLIT_BRAIN: dispatch=%s about to write the "
-                    "generic wrapper at %s, but a worker report already exists at "
-                    "%s — the worker and the governance emitter resolved the VNX "
-                    "data dir to different stores; that richer report is orphaned "
-                    "from the audit trail",
-                    dispatch_id, report_path, _orphan,
-                )
-        except Exception as _split_exc:  # noqa: BLE001 — advisory guard must never break report emit
-            logger.debug(
-                "governance_emit: split-brain guard failed (non-fatal) dispatch=%s: %s",
-                dispatch_id, _split_exc,
-            )
+    _warn_report_store_split_brain(report_path, dispatch_id, data_dir)
+
+    if _rotation_blocks_emit(report_path, reports_dir, dispatch_id, overwrite, attempt_started_at):
+        return report_path
 
     if report_path.exists() and not overwrite:
         if preserve_partial:
