@@ -104,24 +104,10 @@ class TestCentralStoreResolution:
         )
 
         expected_state_dir.mkdir(parents=True, exist_ok=True)
-        # Golf 3A fix-forward: this fixture used to write the singular-terminal
-        # filename `terminal_state_T1.json` with a top-level `current_task`
-        # field. Measured against the real writer
-        # (scripts/lib/terminal_state_core.py:TERMINAL_STATE_FILENAME) while
-        # fixing hooks/sessionstart.sh's own dead read of that same filename:
-        # the writer has only ever produced the SINGULAR `terminal_state.json`
-        # with a `.terminals.<id>` map (no `current_task` field — the hook
-        # reads `.status` / `.last_activity` per terminal). This test's own
-        # purpose is central-store PATH resolution (D4), not the terminal-state
-        # schema, so the fixture is corrected to match reality rather than the
-        # dead-code path both the hook and this fixture used to share.
-        (expected_state_dir / "terminal_state.json").write_text(
-            json.dumps({"terminals": {"T1": {"status": "busy", "last_activity": "UNIQUE-TASK-MARKER-9f2a"}}}),
-            encoding="utf-8",
-        )
         (expected_state_dir / "open_items.json").write_text(
             json.dumps({"items": [
                 {"status": "open", "severity": "blocker", "id": "OI-1", "title": "UNIQUE-OI-MARKER-7b3c"},
+                {"status": "open", "severity": "warn", "id": "OI-2", "title": "UNIQUE-TASK-MARKER-9f2a"},
             ]}),
             encoding="utf-8",
         )
@@ -140,8 +126,8 @@ class TestCentralStoreResolution:
         """Not-found is a third state, not a silent zero: when the resolved
         central path does not exist on disk (no dispatch/receipt-processor
         has ever run for this project), the hook must say so LOUDLY, never
-        fall through to the ordinary "No open items data" / "No terminal
-        state data" defaults — those must read as "measured: empty", not
+        fall through to the ordinary "No open items data" / "No open items
+        data" defaults — those must read as "measured: empty", not
         "unmeasured"."""
         _clean_env(monkeypatch)
         t0_dir = _make_terminal_project(tmp_path)

@@ -128,7 +128,6 @@ class TestStateFreshnessDigestSurfacesAge:
         _write_json(state_dir / "open_items.json", {"last_updated": _iso(now_ts).replace("Z", "")})
         _write_json(state_dir / "dashboard_status.json", {"timestamp": _iso(now_ts)})
         _write_json(state_dir / "t0_recommendations.json", {"timestamp": _iso(now_ts).replace("Z", "")})
-        _write_json(state_dir / "terminal_state.json", {"terminals": {}})
 
         out = _run_hook(t0_dir, env)
         ctx = out["hookSpecificOutput"]["additionalContext"]
@@ -193,28 +192,30 @@ class TestStateFreshnessDigestSurfacesAge:
         assert "[STALE] t0_state: age 5 hours, limit 4h" in ctx, ctx
         assert "their own limit" in ctx, ctx
 
-    def test_terminal_state_reads_the_real_schema_not_a_dead_suffix_path(self, tmp_path, monkeypatch):
-        """Regression for the second dead read this dispatch's own measurement
-        found: terminal_state_shadow.py writes the singular
-        `terminal_state.json` with a `.terminals.<id>` map — the pre-fix hook
-        looked for `terminal_state_T1.json`, which the writer never produces,
-        so this section always fell through to 'No terminal state data'."""
-        _clean_env(monkeypatch)
-        t0_dir = _make_terminal_project(tmp_path)
-        state_dir = _state_dir(tmp_path, monkeypatch)
-        env = dict(os.environ)
+    def test_terminal_state_is_neither_a_freshness_line_nor_a_terminals_block(self, tmp_path, monkeypatch):
+        """OI-3058: terminal_state.json has no writer since T-G1. A 17-day-old file
+        (or none) with every other artifact fresh gives no BLOCKED, no terminal_state
+        line and no Terminals block."""
+        for n, age in enumerate((timedelta(days=17), None)):
+            _clean_env(monkeypatch)
+            t0_dir = _make_terminal_project(tmp_path, name=f"project-{n}")
+            state_dir = _state_dir(tmp_path / f"home-{n}", monkeypatch)
+            now_ts = datetime.now(timezone.utc) - timedelta(minutes=5)
+            _write_json(state_dir / "t0_state.json", {"generated_at": _iso(now_ts)})
+            _write_json(state_dir / "open_items.json", {"last_updated": _iso(now_ts).replace("Z", ""), "items": []})
+            _write_json(state_dir / "dashboard_status.json", {"timestamp": _iso(now_ts)})
+            _write_json(state_dir / "t0_recommendations.json", {"timestamp": _iso(now_ts).replace("Z", "")})
+            if age is not None:
+                path = state_dir / "terminal_state.json"
+                _write_json(path, {"terminals": {"T1": {"status": "busy", "last_activity": "2026-10-30T00:00:00+00:00"}}})
+                old = (datetime.now(timezone.utc) - age).timestamp()
+                os.utime(path, (old, old))
 
-        _write_json(state_dir / "terminal_state.json", {
-            "terminals": {
-                "T1": {"status": "busy", "last_activity": "2026-09-04T10:00:00+00:00"},
-                "T2": {"status": "idle", "last_activity": "2026-08-30T08:18:15+00:00"},
-            }
-        })
-
-        out = _run_hook(t0_dir, env)
-        ctx = out["hookSpecificOutput"]["additionalContext"]
-        assert "No terminal state data" not in ctx, ctx
-        assert "T1: busy" in ctx, ctx
+            ctx = _run_hook(t0_dir, dict(os.environ))["hookSpecificOutput"]["additionalContext"]
+            assert "STATE FRESHNESS: ok" in ctx, ctx
+            assert "BLOCKED" not in ctx, ctx
+            assert "] terminal_state" not in ctx, ctx
+            assert "Terminals:" not in ctx and "T1: busy" not in ctx, ctx
 
     def test_hook_is_valid_bash(self):
         result = subprocess.run(["bash", "-n", str(HOOK)], capture_output=True, text=True)

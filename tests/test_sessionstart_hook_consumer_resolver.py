@@ -54,13 +54,10 @@ def _git_init(path: Path) -> None:
 
 def _write_state(state: Path, terminal_marker: str, oi_marker: str) -> None:
     state.mkdir(parents=True, exist_ok=True)
-    (state / "terminal_state.json").write_text(
-        json.dumps({"terminals": {"T1": {"status": "busy", "last_activity": terminal_marker}}}),
-        encoding="utf-8",
-    )
     (state / "open_items.json").write_text(
         json.dumps({"items": [
             {"status": "open", "severity": "blocker", "id": "OI-1", "title": oi_marker},
+            {"status": "open", "severity": "warn", "id": "OI-2", "title": terminal_marker},
         ]}),
         encoding="utf-8",
     )

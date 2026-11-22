@@ -2053,10 +2053,7 @@ def _build_system_health(
     # R6.1: DB health (locked/malformed) takes precedence over other signals.
     if db_health in ("failed", "degraded"):
         status = db_health
-    elif (
-        not (state_dir / "terminal_state.json").exists()
-        and not (state_dir / "t0_receipts.ndjson").exists()
-    ):
+    elif not (state_dir / "t0_receipts.ndjson").exists():
         status = "degraded"
     else:
         status = "healthy"
