@@ -35,7 +35,7 @@
 # before a state file could be produced (the true "not refreshed" case).
 #
 # Uses an explicit interpreter: bare `python3` can be relinked out from under
-# the hook (OI-852/OI-857) — repo venv > pinned homebrew 3.12 > bare python3.
+# the hook (OI-852/OI-857); lib_hook_python.sh `vnx_hook_python` resolves it.
 
 set -u
 
@@ -57,9 +57,8 @@ if [ ! -f "$ENGINE_ROOT/scripts/build_t0_state.py" ]; then
     exit 0
 fi
 
-PY="$ENGINE_ROOT/.venv/bin/python"
-[ -x "$PY" ] || PY="/opt/homebrew/opt/python@3.12/bin/python3.12"
-[ -x "$PY" ] || PY="python3"
+source "$HOOK_DIR/lib_hook_python.sh"
+PY="$(vnx_hook_python "$ENGINE_ROOT")"
 
 # Resolve the CENTRAL state + logs dirs via the same resolver the CLI uses.
 # The bash resolver (vnx_paths.sh) applies a worktree override that points at

@@ -439,7 +439,7 @@ def test_sessionstart_hook_is_valid_bash_and_visible_failure():
     assert '"$ROOT/.vnx-data/state/t0_state.json"' not in wrapper
     assert "build_t0_state.err" in wrapper, "builder stderr must go to the central log, not /dev/null"
     assert "exit 0" in wrapper, "a broken state file must never block a session (non-fatal)"
-    assert ".venv/bin/python" in wrapper or "python3.12" in wrapper
+    assert 'vnx_hook_python "$ENGINE_ROOT"' in wrapper, "hook must resolve its interpreter through the shared helper"
     # 5) OI-1073 defect 2: a FAILED build is VISIBLE, not swallowed. The hook
     #    surfaces the failure to its own stderr (the mechanism the harness
     #    surfaces on the session that fired it), not only into a 0-byte log

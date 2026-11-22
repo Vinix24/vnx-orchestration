@@ -29,6 +29,13 @@ STATE_DIR="$VNX_STATE_DIR"
 SCRIPTS_DIR="$VNX_BASE/scripts"
 APPEND_RECEIPT_SCRIPT="$SCRIPTS_DIR/append_receipt.py"
 
+# Interpreter for the converter scan (OI-2975): the bare python3 can lack PyYAML.
+# Resolved once, rooted at the engine root, by the shared fabric helper.
+# shellcheck source-path=SCRIPTDIR
+# shellcheck source=hooks/lib_hook_python.sh
+source "$SCRIPT_DIR/hooks/lib_hook_python.sh"
+RP_PYTHON="$(vnx_hook_python "$VNX_BASE")"
+
 # PHASE 1C: Singleton enforcement - prevent duplicate processes
 # shellcheck source-path=SCRIPTDIR
 # shellcheck source=singleton_enforcer.sh
@@ -381,7 +388,7 @@ _ppr_collect_pending() {
 # built. Best-effort: a beacon-write failure never aborts the scan.
 _run_receipt_converter_scan() {
     local _converter_stderr _converter_rc
-    _converter_stderr="$(python3 "$SCRIPTS_DIR/lib/report_to_receipt_converter.py" \
+    _converter_stderr="$("$RP_PYTHON" "$SCRIPTS_DIR/lib/report_to_receipt_converter.py" \
         --state-dir "$STATE_DIR" \
         "$UNIFIED_REPORTS" "$HEADLESS_REPORTS" 2>&1 >/dev/null)"
     _converter_rc=$?
@@ -393,7 +400,7 @@ _run_receipt_converter_scan() {
     if [ "$_converter_rc" -ne 0 ]; then
         log "ERROR" "report_to_receipt_converter scan FAILED non-fatal, processor continues (exit $_converter_rc)"
     fi
-    printf '%s' "$_converter_stderr" | python3 "$SCRIPTS_DIR/lib/receipt_conversion_rejection_beacon.py" \
+    printf '%s' "$_converter_stderr" | "$RP_PYTHON" "$SCRIPTS_DIR/lib/receipt_conversion_rejection_beacon.py" \
         --state-dir "$STATE_DIR" 2>>"$PROCESSING_LOG" \
         || log "WARN" "Failed to record receipt-conversion-rejection beacon (non-fatal)"
     return 0

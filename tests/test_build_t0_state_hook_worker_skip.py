@@ -34,6 +34,7 @@ def _engine(tmp_path: Path, actor_class_source: str | None = None) -> Path:
     (engine / "scripts" / "hooks").mkdir(parents=True)
     (engine / "scripts" / "lib").mkdir(parents=True)
     shutil.copy(HOOK, engine / "scripts" / "hooks" / "build_t0_state_hook.sh")
+    shutil.copy(HOOK.parent / "lib_hook_python.sh", engine / "scripts" / "hooks" / "lib_hook_python.sh")
     (engine / "scripts" / "build_t0_state.py").write_text(_STUB, encoding="utf-8")
     (engine / "scripts" / "lib" / "vnx_paths.py").write_text(
         "import os\n"
