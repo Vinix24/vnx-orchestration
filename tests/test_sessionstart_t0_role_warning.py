@@ -27,6 +27,7 @@ def _project(tmp_path: Path) -> Path:
     (tmp_path / "project" / ".vnx").mkdir(parents=True)
     t0 = tmp_path / "project" / ".claude" / "terminals" / "T0"
     t0.mkdir(parents=True)
+    (t0 / "CLAUDE.md").write_text("@role-orchestrator.md\n", encoding="utf-8")
     return t0
 
 
@@ -54,7 +55,20 @@ def test_without_any_role_marker_the_digest_warns_with_the_class(tmp_path, monke
     ctx = _ctx(HOOK, _project(tmp_path), _env(tmp_path, monkeypatch))
     assert "T0 ROLE MISSING" in ctx and "classified 'unknown'" in ctx
     assert "CLAUDE_ROLE=orchestrator" in ctx and "claude --resume" in ctx
-    assert ctx.index("T0 ROLE MISSING") < ctx.index("T0 Master Orchestrator Active")
+    lines = ctx.split("\n")
+    assert lines[0].startswith("T0 Master Orchestrator Active")
+    # The playbook line stays inside the first kilobyte (R4), so the role line follows it.
+    assert lines[1].startswith(("Playbook file", "T0 PLAYBOOK SOURCE MISSING"))
+    assert lines[2].startswith("T0 ROLE MISSING")
+
+
+def test_with_the_import_alarm_and_a_missing_role_the_order_is_alarm_header_role(tmp_path, monkeypatch):
+    t0 = _project(tmp_path)
+    (t0 / "CLAUDE.md").unlink()  # no import: the import alarm applies
+    ctx = _ctx(HOOK, t0, _env(tmp_path, monkeypatch))
+    alarm, header, role = (ctx.index(m) for m in ("ROLE NOT LOADED", "T0 Master Orchestrator Active", "T0 ROLE MISSING"))
+    assert ctx.startswith("ROLE NOT LOADED") and alarm < header < role
+    assert ctx[header:].split("\n")[2].startswith("T0 ROLE MISSING")
 
 
 def test_a_worker_marker_is_warned_with_its_class(tmp_path, monkeypatch):

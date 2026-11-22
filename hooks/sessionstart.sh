@@ -471,10 +471,9 @@ print('; '.join(r.probed))
 
     ADDITIONAL_CONTEXT="${ROLE_ALARM:+$ROLE_ALARM
 
-}${T0_ROLE_LINE:+$T0_ROLE_LINE
-
 }T0 Master Orchestrator Active${PROJECT_NAME:+ — $PROJECT_NAME}${T0_PLAYBOOK_LINE:+
-$T0_PLAYBOOK_LINE}
+$T0_PLAYBOOK_LINE}${T0_ROLE_LINE:+
+$T0_ROLE_LINE}
 Model-invocable skills: @horizon @planner @panel @fabric-reference
 Operator-only skills (not model-invocable): @t0-orchestrator @architect
 Full registry: skills/skills.yaml (repo) or \$VNX_SKILLS_DIR/skills.yaml (consumer)
