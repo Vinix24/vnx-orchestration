@@ -42,8 +42,8 @@ T0_STATE_STALE_AFTER_HOURS = 4.0 is the shorter limit for ``t0_state`` alone
 work"; it is far too wide for the one snapshot that carries ``live_work``,
 ``open_outcomes`` and the PR queue, because a T0 read 12-hour-old state of that
 kind as ``[fresh]`` on 2026-11-21. Measured 2026-11-22 over the 49 T0 rotations
-in the vnx-dev store between 15 and 22 November
-(``~/.vnx-data/vnx-dev/state/t0_rotation/rotation-*``): the time between
+of the operator's development store between 15 and 22 November
+(the rotation run directories under ``state/t0_rotation/``): the time between
 rotations has median 2.1h, p75 4.0h and p90 9.7h. A ``t0_state`` older than one
 p75 session predates the session that reads it. The other artifacts keep 24h.
 Each artifact entry carries its own ``threshold_hours``; the top-level
@@ -177,6 +177,27 @@ def _artifact_timestamp(path: Path, field: Optional[str]) -> Tuple[Optional[date
         return None, None
 
 
+def _entry(
+    status: str,
+    limit: float,
+    *,
+    source: Optional[str] = None,
+    age_hours: Optional[float] = None,
+    reason: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Build one artifact entry; ``reason`` is only present on a parked one."""
+    entry: Dict[str, Any] = {
+        "status": status,
+        "age_hours": None if age_hours is None else round(age_hours, 2),
+        "age_human": None if age_hours is None else _human_age(age_hours),
+        "source": source,
+        "threshold_hours": limit,
+    }
+    if reason is not None:
+        entry["reason"] = reason
+    return entry
+
+
 def assess_artifact_freshness(
     state_dir: Path,
     now: Optional[datetime] = None,
@@ -205,53 +226,31 @@ def assess_artifact_freshness(
         parked_reason = parked_artifact_reason(name)
         if not path.exists():
             if parked_reason is not None:
-                artifacts[name] = {
-                    "status": "parked",
-                    "age_hours": None,
-                    "age_human": None,
-                    "source": None,
-                    "threshold_hours": limit,
-                    "reason": parked_reason,
-                }
+                artifacts[name] = _entry("parked", limit, reason=parked_reason)
                 any_parked = True
-                continue
-            artifacts[name] = {
-                "status": "missing",
-                "age_hours": None,
-                "age_human": None,
-                "source": None,
-                "threshold_hours": limit,
-            }
-            any_missing = True
+            else:
+                artifacts[name] = _entry("missing", limit)
+                any_missing = True
             continue
 
         ts, source = _artifact_timestamp(path, field)
         if ts is None:
-            artifacts[name] = {
-                "status": "unknown",
-                "age_hours": None,
-                "age_human": None,
-                "source": source,
-                "threshold_hours": limit,
-            }
+            artifacts[name] = _entry("unknown", limit, source=source)
             any_unknown = True
             continue
 
         age_hours = max(0.0, (now - ts).total_seconds() / 3600.0)
         status = "stale" if age_hours > limit else "fresh"
-        entry: Dict[str, Any] = {
-            "age_hours": round(age_hours, 2),
-            "age_human": _human_age(age_hours),
-            "source": source,
-            "threshold_hours": limit,
-        }
+        extra: Dict[str, Any] = {}
         if status == "stale" and parked_reason is not None:
             status = "parked"
-            entry["reason"] = parked_reason
+            extra["reason"] = parked_reason
             any_parked = True
         elif status == "stale":
             any_stale = True
-        artifacts[name] = {"status": status, **entry}
+        artifacts[name] = _entry(
+            status, limit, source=source, age_hours=age_hours, **extra
+        )
 
     return {
         "threshold_hours": threshold_hours,
