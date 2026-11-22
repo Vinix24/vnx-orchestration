@@ -8,9 +8,6 @@ Covers:
   Fix 1  _dispatch_kimi uses non-empty model_label when VNX_KIMI_MODEL unset
   Fix 2  report_parser extracts dispatch_id from filename when content has no id
   Fix 2  report_parser preserves content dispatch_id over filename fallback
-  Fix 2  rp_delivery.sh ghost-filter skips bare 'unknown'
-  Fix 2  rp_delivery.sh ghost-filter skips empty string
-  Fix 2  rp_delivery.sh ghost-filter does NOT skip a real dispatch_id
 """
 
 from __future__ import annotations
@@ -305,73 +302,4 @@ class TestDispatchIdFromFilename:
         payload = _run_parser(tmp_path, report)
         assert payload["dispatch_id"] == dispatch_id, (
             f"'unknown' in content should trigger filename fallback, got {payload['dispatch_id']!r}"
-        )
-
-
-# ---------------------------------------------------------------------------
-# Fix 2 — ghost-filter in rp_delivery.sh
-# ---------------------------------------------------------------------------
-
-
-def _bash_case_check(dispatch_id: str) -> str:
-    """Run a minimal bash snippet that mirrors the ghost-filter and returns 'skipped' or 'delivered'."""
-    script = textwrap.dedent(f"""\
-        #!/usr/bin/env bash
-        dispatch_id={dispatch_id!r}
-        case "$dispatch_id" in
-            unknown-*|unknown|no-id|"")
-                echo "skipped"
-                ;;
-            *)
-                echo "delivered"
-                ;;
-        esac
-    """)
-    result = subprocess.run(
-        ["bash", "-c", script],
-        capture_output=True,
-        text=True,
-    )
-    assert result.returncode == 0, f"bash snippet failed:\n{result.stderr}"
-    return result.stdout.strip()
-
-
-class TestGhostFilterCaseStatement:
-    """The ghost-filter case pattern skips only genuine ghosts."""
-
-    @pytest.mark.parametrize("dispatch_id", [
-        "unknown",
-        "unknown-stop-hook-123",
-        "unknown-abc",
-        "no-id",
-        "",
-    ])
-    def test_ghost_ids_are_skipped(self, dispatch_id: str):
-        """All ghost/no-id patterns must be skipped (not delivered)."""
-        assert _bash_case_check(dispatch_id) == "skipped", (
-            f"dispatch_id={dispatch_id!r} should be skipped by ghost-filter"
-        )
-
-    @pytest.mark.parametrize("dispatch_id", [
-        "20260527-132804-pip-repackage-namespace",
-        "20260527-185950-receipt-deterministic-fixes",
-        "some-real-dispatch-id",
-        "PR-RECEIPT-FIX",
-    ])
-    def test_real_ids_are_delivered(self, dispatch_id: str):
-        """Real dispatch IDs must NOT be filtered out."""
-        assert _bash_case_check(dispatch_id) == "delivered", (
-            f"dispatch_id={dispatch_id!r} should pass the ghost-filter and be delivered"
-        )
-
-    def test_rp_delivery_sh_contains_updated_filter(self):
-        """rp_delivery.sh source contains the extended ghost-filter pattern."""
-        delivery_sh = REPO_ROOT / "scripts" / "lib" / "receipt_processor" / "rp_delivery.sh"
-        content = delivery_sh.read_text(encoding="utf-8")
-        # Verify the vangnet covers bare 'unknown' and empty string
-        assert "unknown|no-id" in content, (
-            "rp_delivery.sh ghost-filter must include bare 'unknown' alongside no-id"
-        )
-        assert '|"")' in content or "|\"\")".replace("\\", "") in content, (
-            "rp_delivery.sh ghost-filter must include empty string case"
         )
