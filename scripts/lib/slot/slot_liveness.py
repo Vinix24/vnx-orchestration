@@ -14,6 +14,7 @@ Interface for RS-3 (admission) and RS-6 (supervisor):
 
 from __future__ import annotations
 
+import os
 import subprocess
 
 ALIVE = "alive"
@@ -59,10 +60,24 @@ def _run_ps(argv):
     return subprocess.run(argv, capture_output=True, text=True, check=True, timeout=30).stdout
 
 
-def snapshot(run=_run_ps):
+def _fill_sessions(rows, getsid):
+    """macOS ``ps -o sess=`` prints 0 for every process; ask the kernel for those rows' session id.
+
+    A row whose process is gone by now (``ProcessLookupError``) keeps 0, which matches no session;
+    any other error propagates, so ``snapshot`` gives no table (UNKNOWN), never a missing member."""
+    for row in rows:
+        if row["session"] == "0":
+            try:
+                row["session"] = str(getsid(row["pid"]))
+            except ProcessLookupError:  # vnx-silent-except: exited after ps; 0 matches no lease session
+                pass
+    return rows
+
+
+def snapshot(run=_run_ps, getsid=os.getsid):
     """One process table, or None when it could not be read."""
     try:
-        return parse_process_table(run(PS_ARGV))
+        return _fill_sessions(parse_process_table(run(PS_ARGV)), getsid)
     except Exception:  # vnx-silent-except: an unreadable table is UNKNOWN for every verdict, never GONE
         return None
 

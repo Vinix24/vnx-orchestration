@@ -105,8 +105,25 @@ def test_unparseable_text_gives_none(text):
 
 def test_snapshot_parses_recorded_text_and_passes_ps_argv():
     seen = []
-    tbl = sl.snapshot(lambda argv: seen.append(argv) or ps((1, 0, "0", T1)))
+    tbl = sl.snapshot(lambda argv: seen.append(argv) or ps((1, 0, "0", T1)), getsid=lambda pid: 0)
     assert seen == [sl.PS_ARGV] and tbl == [{"pid": 1, "ppid": 0, "session": "0", "start_time": T1}]
+
+
+def test_macos_zero_session_column_is_filled_from_getsid():
+    # macOS ps prints sess=0 for every process: without getsid every run lease stays UNKNOWN forever
+    def getsid(pid):
+        if pid == 300:
+            raise ProcessLookupError(pid)
+        return {200: 77}[pid]
+    tbl = sl.snapshot(lambda argv: ps((200, 1, "0", T1), (300, 1, "0", T1), (400, 1, "9", T1)), getsid=getsid)
+    assert [r["session"] for r in tbl] == ["77", "0", "9"]
+    assert verdict(run_lease("r", "77"), tbl) == sl.ALIVE
+
+
+def test_getsid_error_other_than_gone_gives_no_table():
+    def denied(pid):
+        raise PermissionError(pid)
+    assert sl.snapshot(lambda argv: ps((200, 1, "0", T1)), getsid=denied) is None
 
 
 def test_supervisor_gone_tree_alive():
