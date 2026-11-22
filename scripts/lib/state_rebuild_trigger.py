@@ -28,6 +28,7 @@ from event_outcome_semantics import COMPLETION_EVENT_TYPES
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _DEFAULT_THROTTLE_SECONDS = 30
 STATE_REBUILD_TRIGGER_ENV = "VNX_STATE_REBUILD_TRIGGER"
+DEFAULT_PINNED_PYTHON = "/opt/homebrew/opt/python@3.12/bin/python3.12"
 
 # The completion family (ADR-045 §2: dispatch_finished next to task_complete)
 # plus the legacy literals this trigger has always honoured and the two failure
@@ -35,6 +36,31 @@ STATE_REBUILD_TRIGGER_ENV = "VNX_STATE_REBUILD_TRIGGER"
 CRITICAL_EVENTS = set(COMPLETION_EVENT_TYPES) | {
     "completion", "complete", "task_failed", "task_timeout",
 }
+
+
+def _executable_file(path: str) -> bool:
+    return bool(path) and os.access(path, os.X_OK) and not os.path.isdir(path)
+
+
+def _resolve_interpreter() -> str:
+    """Pick the interpreter for the rebuild child (OI-3060).
+
+    Same precedence as ``vnx_hook_python`` in scripts/hooks/lib_hook_python.sh:
+    VNX_PYTHON > <repo>/.venv/bin/python > VNX_HOOK_PINNED_PYTHON (default
+    homebrew 3.12) > fallback. The bare ``python3`` on PATH can be a build
+    without PyYAML, so the last fallback is this process's own interpreter,
+    never the literal ``python3``.
+    """
+    env_python = os.environ.get("VNX_PYTHON", "")
+    if _executable_file(env_python):
+        return env_python
+    venv_python = str(_REPO_ROOT / ".venv" / "bin" / "python")
+    if _executable_file(venv_python):
+        return venv_python
+    pinned = os.environ.get("VNX_HOOK_PINNED_PYTHON") or DEFAULT_PINNED_PYTHON
+    if _executable_file(pinned):
+        return pinned
+    return sys.executable
 
 
 def _resolve_state_dir() -> Path:
@@ -141,7 +167,7 @@ def maybe_trigger_state_rebuild(
 
             try:
                 proc = subprocess.Popen(
-                    ["python3", str(_REPO_ROOT / "scripts" / "build_t0_state.py")],
+                    [_resolve_interpreter(), str(_REPO_ROOT / "scripts" / "build_t0_state.py")],
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                     start_new_session=True,

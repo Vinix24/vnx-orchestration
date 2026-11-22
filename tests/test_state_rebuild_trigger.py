@@ -551,3 +551,82 @@ def test_a_cli_child_inherits_the_switch_and_starts_no_rebuild(tmp_path: Path) -
     out = sp.run([sys.executable, "-c", code], env=env, capture_output=True, text=True, timeout=60)
     assert out.returncode == 0, out.stderr
     assert out.stdout.split() == ["True", "1"]
+
+
+# ---------------------------------------------------------------------------
+# Interpreter pin (OI-3060): never the bare python3 on PATH
+# ---------------------------------------------------------------------------
+
+HELPER = REPO_ROOT / "scripts" / "hooks" / "lib_hook_python.sh"
+
+
+def _fake_python(path: Path) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    path.chmod(0o755)
+    return path
+
+
+@pytest.fixture
+def clean_interp_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    monkeypatch.delenv("VNX_PYTHON", raising=False)
+    monkeypatch.setenv("VNX_HOOK_PINNED_PYTHON", str(tmp_path / "no-such-python"))
+    root = tmp_path / "root"
+    root.mkdir()
+    monkeypatch.setattr(srt, "_REPO_ROOT", root)
+    return root
+
+
+def _bash_resolver(root: Path) -> str:
+    out = subprocess.run(
+        ["bash", "-c", f'source "{HELPER}"; vnx_hook_python "{root}"'],
+        capture_output=True, text=True, check=True,
+    )
+    return out.stdout.strip()
+
+
+def _popen_argv0(tmp_path: Path) -> str:
+    with mock.patch.object(srt, "_resolve_state_dir", return_value=tmp_path / "state"), \
+         mock.patch("state_rebuild_trigger.subprocess.Popen", return_value=_mock_popen()) as mock_p:
+        assert srt.maybe_trigger_state_rebuild() is True
+    return mock_p.call_args.args[0][0]
+
+
+def test_interpreter_falls_back_to_sys_executable_never_bare_python3(
+    tmp_path: Path, clean_interp_env: Path
+) -> None:
+    argv0 = _popen_argv0(tmp_path)
+    assert argv0 == sys.executable
+    assert argv0 != "python3"
+
+
+def test_interpreter_uses_repo_venv(tmp_path: Path, clean_interp_env: Path) -> None:
+    venv = _fake_python(clean_interp_env / ".venv" / "bin" / "python")
+    assert _popen_argv0(tmp_path) == str(venv)
+    assert _bash_resolver(clean_interp_env) == str(venv)
+
+
+def test_interpreter_vnx_python_wins_over_venv(
+    tmp_path: Path, clean_interp_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _fake_python(clean_interp_env / ".venv" / "bin" / "python")
+    override = _fake_python(tmp_path / "other" / "py")
+    monkeypatch.setenv("VNX_PYTHON", str(override))
+    assert _popen_argv0(tmp_path) == str(override)
+    assert _bash_resolver(clean_interp_env) == str(override)
+
+
+def test_interpreter_vnx_python_directory_is_ignored(
+    tmp_path: Path, clean_interp_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("VNX_PYTHON", str(tmp_path))
+    assert _popen_argv0(tmp_path) == sys.executable
+
+
+def test_interpreter_pinned_python_used_when_no_venv(
+    tmp_path: Path, clean_interp_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pinned = _fake_python(tmp_path / "pinned" / "python3.12")
+    monkeypatch.setenv("VNX_HOOK_PINNED_PYTHON", str(pinned))
+    assert _popen_argv0(tmp_path) == str(pinned)
+    assert _bash_resolver(clean_interp_env) == str(pinned)

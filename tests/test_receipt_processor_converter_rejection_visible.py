@@ -164,3 +164,39 @@ echo "REACHED_END=yes"
     processing_log = (dirs["state"] / "receipt_processing.log").read_text(encoding="utf-8")
     assert "FAILED non-fatal" in processing_log
     assert "exit 1" in processing_log
+
+
+def _recording_stub(path: Path, log: Path, *, exit_code: int = 0) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        f'#!/bin/sh\necho "$0 $*" >> "{log}"\ncat >/dev/null 2>&1 || true\nexit {exit_code}\n',
+        encoding="utf-8",
+    )
+    path.chmod(0o755)
+    return path
+
+
+def test_converter_and_beacon_use_the_pinned_interpreter_not_bare_python3(tmp_path: Path) -> None:
+    """OI-2975: the converter and the beacon must start on VNX_PYTHON, never on
+    the bare python3 first on PATH (which can be a build without PyYAML)."""
+    dirs = _make_dirs(tmp_path)
+    stub_scripts = _make_stub_converter(tmp_path)
+    (stub_scripts / "lib" / "receipt_conversion_rejection_beacon.py").write_text("", encoding="utf-8")
+    pinned_log = tmp_path / "pinned.log"
+    bare_log = tmp_path / "bare.log"
+    pinned = _recording_stub(tmp_path / "pin" / "py", pinned_log)
+    _recording_stub(tmp_path / "bare_bin" / "python3", bare_log, exit_code=1)
+
+    cmd = (
+        f'export PATH="{tmp_path / "bare_bin"}:$PATH"\n'
+        f'export VNX_PYTHON="{pinned}"\n'
+        + ENV_PREAMBLE.format(rp_script=RP_SCRIPT, **dirs)
+        + f'SCRIPTS_DIR="{stub_scripts}"\n_run_receipt_converter_scan\n'
+    )
+    result = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+
+    pinned_calls = pinned_log.read_text(encoding="utf-8").splitlines()
+    assert any("report_to_receipt_converter.py" in c for c in pinned_calls), pinned_calls
+    assert any("receipt_conversion_rejection_beacon.py" in c for c in pinned_calls), pinned_calls
+    assert not bare_log.exists(), f"bare python3 was started: {bare_log.read_text()}"
