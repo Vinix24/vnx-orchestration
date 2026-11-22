@@ -967,6 +967,36 @@ def _rotation_blocks_emit(
     return _rotate_stale_report(report_path, reports_dir, dispatch_id) is None
 
 
+def _warn_report_store_split_brain(report_path: Path, dispatch_id: str, data_dir: Path) -> None:
+    """OI-1635: before writing the generic wrapper, flag a real report in another store.
+
+    Only runs when nothing exists yet at *report_path*. The worker and this
+    emitter can disagree on "VNX_DATA_DIR" (see provider_dispatch._worker_role_env);
+    a hit means the central ledger is about to receive a narrative stand-in
+    while the actual work sits elsewhere, unlinked from the audit trail, so it
+    is logged as an error. The guard is advisory and never breaks report emit.
+    """
+    if report_path.exists():
+        return
+    try:
+        from data_dir_guard import check_report_store_split_brain
+        _orphan = check_report_store_split_brain(dispatch_id, data_dir)
+        if _orphan is not None:
+            logger.error(
+                "VNX_REPORT_STORE_SPLIT_BRAIN: dispatch=%s about to write the "
+                "generic wrapper at %s, but a worker report already exists at "
+                "%s — the worker and the governance emitter resolved the VNX "
+                "data dir to different stores; that richer report is orphaned "
+                "from the audit trail",
+                dispatch_id, report_path, _orphan,
+            )
+    except Exception as _split_exc:  # noqa: BLE001 — advisory guard must never break report emit
+        logger.debug(
+            "governance_emit: split-brain guard failed (non-fatal) dispatch=%s: %s",
+            dispatch_id, _split_exc,
+        )
+
+
 def emit_unified_report(
     dispatch_id: str,
     terminal_id: str,
@@ -1056,31 +1086,7 @@ def emit_unified_report(
 
     report_path = reports_dir / f"{dispatch_id}.md"
 
-    # OI-1635: nothing exists yet at report_path — about to write the generic
-    # completion-text wrapper below. Before doing that, check whether the
-    # worker's REAL report landed in a DIFFERENT known store (the worker and
-    # this emitter can disagree on "VNX_DATA_DIR" — see
-    # provider_dispatch._worker_role_env). A hit here means the central ledger
-    # is about to receive a narrative stand-in while the actual work sits
-    # elsewhere, unlinked from the audit trail — never silent about that.
-    if not report_path.exists():
-        try:
-            from data_dir_guard import check_report_store_split_brain
-            _orphan = check_report_store_split_brain(dispatch_id, data_dir)
-            if _orphan is not None:
-                logger.error(
-                    "VNX_REPORT_STORE_SPLIT_BRAIN: dispatch=%s about to write the "
-                    "generic wrapper at %s, but a worker report already exists at "
-                    "%s — the worker and the governance emitter resolved the VNX "
-                    "data dir to different stores; that richer report is orphaned "
-                    "from the audit trail",
-                    dispatch_id, report_path, _orphan,
-                )
-        except Exception as _split_exc:  # noqa: BLE001 — advisory guard must never break report emit
-            logger.debug(
-                "governance_emit: split-brain guard failed (non-fatal) dispatch=%s: %s",
-                dispatch_id, _split_exc,
-            )
+    _warn_report_store_split_brain(report_path, dispatch_id, data_dir)
 
     if _rotation_blocks_emit(report_path, reports_dir, dispatch_id, overwrite, attempt_started_at):
         return report_path
