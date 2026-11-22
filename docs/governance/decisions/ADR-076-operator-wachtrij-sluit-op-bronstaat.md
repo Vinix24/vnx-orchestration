@@ -176,3 +176,13 @@ Stopregels uit het plan blijven gelden: een levering waarin een punt sluit terwi
 ## Terugweg
 
 De wachtrij leest alleen en schrijft alleen in eigen bestanden. Terugdraaien is de twee regels uit `role-orchestrator.md` halen, het blok `operator_inbox` uit `build_t0_state.py` halen en `operator_queue.ndjson` en `operator_queue.json` laten staan of verwijderen; niemand anders leest ze. Geen bron wordt gewijzigd, dus er is geen datamigratie terug.
+
+## Amendment (2026-11-22): the session start reads a summary the ledger writer keeps
+
+**Decided by:** Operator plan-gate of 2026-11-22, track `session-start`, OI-3057. Measured 2026-11-21: `vnx inbox --json --limit 5` took 12.8 s because `show()` runs every source reader first, so the SessionStart budget of 0.5 s always expired and every T0 session started without the open questions.
+
+- **Decision 10 stays for `vnx inbox show` and for every `presented` line.** `show()` still runs the readers before it reads the ledger, and a point is still never presented from a derived state.
+- **The session start reads a summary.** The SessionStart digest and `t0_index.operator_inbox` read `state/operator_inbox_summary.json` instead of running `show()`. The summary reflects the ledger as of its last write, not a fresh reader run: a point a reader would open appears there after the next `vnx inbox` run.
+- **One writer, every path.** `operator_queue._publish` rewrites `operator_queue.json` and the summary together, under the writer's lock, atomically (temp file, fsync, `os.replace`). `append_line` (every kind: opened, presented, closed, unknown, answer), `reserve`, `compact` and `rebuild_state` all end in it, so a new write path cannot forget the summary. `show()` ends in `rebuild_state`, so a run of `vnx inbox` brings a stale or missing summary current even when no reader appended a line.
+- **One ordering.** The summary holds at most 5 points in the order of decision 10, from `operator_queue.order_points`, the same function `show()` uses.
+- **The staleness rule.** The summary records `ledger_bytes`, the size of `operator_queue.ndjson` right after the write. `operator_queue.read_inbox_summary` compares it with the current size: equal is `current` (as of `generated_at`); different is `stale` (a write that did not finish its rewrite, or a writer outside the module); no file is `missing`. A reader says so and never prints the old count as current; an unreadable ledger line is `status: unknown` with its line number, never a count.

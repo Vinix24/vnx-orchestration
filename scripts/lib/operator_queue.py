@@ -29,7 +29,10 @@ except ImportError:  # vnx-silent-except: imported as scripts.lib.operator_queue
 LEDGER_FILENAME = "operator_queue.ndjson"
 STATE_FILENAME = "operator_queue.json"
 LOCK_FILENAME = ".operator_queue.lock"
+SUMMARY_FILENAME = "operator_inbox_summary.json"
+SUMMARY_POINTS = 5
 SCHEMA = "operator_queue/1"
+SUMMARY_SCHEMA = "operator_inbox_summary/1"
 KINDS: Dict[str, tuple] = {
     "opened": ("point_id", "bron", "ref", "revisie", "vraag", "sluit_bij", "asked_at", "opened_by"),
     "presented": ("point_id", "kanaal", "sessie"),
@@ -72,11 +75,16 @@ def point_id(project_id: str, bron: int, ref: str, revisie: int) -> str:
 
 def _now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-def _ts_ok(value: Any) -> bool:
+def parse_ts(value: Any) -> Optional[datetime]:
     try:
-        return datetime.fromisoformat(value.strip().replace("Z", "+00:00")).tzinfo is not None
-    except (ValueError, AttributeError):  # vnx-silent-except: absent or malformed is invalid
-        return False
+        ts = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except (ValueError, AttributeError):  # vnx-silent-except: absent or malformed is no time
+        return None
+    return ts if ts.tzinfo is not None else None
+
+
+def _ts_ok(value: Any) -> bool:
+    return parse_ts(value) is not None
 
 
 def _text(value: Any) -> bool:
@@ -234,6 +242,19 @@ def _read_state(state_dir: Path, project_id: str) -> Dict[str, Any]:
     return {"schema": SCHEMA, "project_id": project_id, "status": "ok", "reason": None, "line": None, "points": points}
 
 
+def presented_counts(lines: List[Dict[str, Any]]) -> Dict[str, int]:
+    counts: Dict[str, int] = {}
+    for line in lines:
+        if line["kind"] == "presented":
+            counts[line["point_id"]] = counts.get(line["point_id"], 0) + 1
+    return counts
+
+
+def order_points(points: List[Dict[str, Any]], counts: Mapping[str, int]) -> List[Dict[str, Any]]:
+    """Decision 10: never presented first, then fewest presented, then oldest asked_at, ties on point_id."""
+    return sorted(points, key=lambda p: (counts.get(p["point_id"], 0), parse_ts(p["asked_at"]), p["point_id"]))
+
+
 @contextmanager
 def _locked(state_dir: Path) -> Iterator[None]:
     Path(state_dir).mkdir(parents=True, exist_ok=True)
@@ -245,8 +266,8 @@ def _locked(state_dir: Path) -> Iterator[None]:
             fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
 
-def _write_state(state_dir: Path, state: Mapping[str, Any]) -> None:
-    path = Path(state_dir) / STATE_FILENAME
+def _write_state(state_dir: Path, state: Mapping[str, Any], filename: str = STATE_FILENAME) -> None:
+    path = Path(state_dir) / filename
     tmp = path.with_name(path.name + f".{os.getpid()}.tmp")
     try:
         with open(tmp, "w", encoding="utf-8") as handle:  # vnx-atomic-write: temp file, fsync, replace
@@ -257,6 +278,69 @@ def _write_state(state_dir: Path, state: Mapping[str, Any]) -> None:
     except BaseException:
         tmp.unlink(missing_ok=True)
         raise
+
+
+def _ledger_size(state_dir: Path) -> int:
+    try:
+        return (Path(state_dir) / LEDGER_FILENAME).stat().st_size
+    except FileNotFoundError:
+        return 0
+
+
+def _build_summary(state_dir: Path, project_id: str) -> Dict[str, Any]:
+    size = _ledger_size(state_dir)  # taken before the read: a writer outside this module can only make it look stale
+    summary: Dict[str, Any] = {"schema": SUMMARY_SCHEMA, "project_id": project_id, "generated_at": _now(),
+                               "ledger_bytes": size, "status": "ok", "reason": None, "line": None,
+                               "open_total": None, "more": None, "points": []}
+    try:
+        lines = _ledger_lines(state_dir, project_id)
+    except QueueUnreadable as exc:
+        return {**summary, "status": "unknown", "reason": str(exc), "line": exc.line}
+    blocks = {ln["point_id"]: ln.get("kopieerblok", "") for ln in lines if ln["kind"] == "opened"}
+    counts = presented_counts(lines)
+    ranked = order_points([p for p in _fold(lines).values() if p["state"] == "open"], counts)
+    keep = ("point_id", "bron", "ref", "vraag", "asked_at")
+    return {**summary, "open_total": len(ranked), "more": max(len(ranked) - SUMMARY_POINTS, 0),
+            "points": [{**{k: p[k] for k in keep}, "presented": counts.get(p["point_id"], 0),
+                        "kopieerblok": blocks.get(p["point_id"], "")} for p in ranked[:SUMMARY_POINTS]]}
+
+
+def _publish(state_dir: Path, project_id: str) -> Dict[str, Any]:
+    """The one place every ledger write ends in (inside the lock): rewrite the state and the inbox summary."""
+    state = _read_state(state_dir, project_id)
+    summary = _build_summary(state_dir, project_id)
+    _write_state(state_dir, state)
+    _write_state(state_dir, summary, SUMMARY_FILENAME)
+    return state
+
+
+def read_inbox_summary(project_id: str, *, state_dir: Optional[Path] = None) -> Dict[str, Any]:
+    """``{freshness, summary, reason}``. ``current``: ``ledger_bytes`` equals the ledger's size now. ``stale``: it
+    differs, or the summary cannot be read (never print its count as current). ``missing``: no summary file."""
+    sdir = Path(state_dir) if state_dir is not None else state_dir_for(project_id)
+    path = sdir / SUMMARY_FILENAME
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return {"freshness": "missing", "summary": None, "reason": "no summary yet, run `vnx inbox`"}
+    except (OSError, ValueError) as exc:
+        return {"freshness": "stale", "summary": None, "reason": f"{path}: unreadable ({type(exc).__name__})"}
+    try:
+        summary = json.loads(raw)
+        if (summary["schema"], summary["project_id"]) != (SUMMARY_SCHEMA, project_id) or not _int(summary["ledger_bytes"], 0):
+            raise ValueError("schema, project_id or ledger_bytes does not match")
+        if summary["status"] not in ("ok", "unknown") or not _ts_ok(summary["generated_at"]):
+            raise ValueError("status or generated_at malformed")
+        if summary["status"] == "ok" and not (_int(summary["open_total"], 0) and _int(summary["more"], 0)
+                                              and isinstance(summary["points"], list)):
+            raise ValueError("open_total, more or points malformed")
+        now_size = _ledger_size(sdir)
+    except (ValueError, KeyError, TypeError, OSError) as exc:
+        return {"freshness": "stale", "summary": None, "reason": f"{path}: unreadable ({type(exc).__name__}: {exc})"[:200]}
+    if now_size != summary["ledger_bytes"]:
+        return {"freshness": "stale", "summary": summary,
+                "reason": f"the ledger changed after the summary ({summary['ledger_bytes']} -> {now_size} bytes), run `vnx inbox`"}
+    return {"freshness": "current", "summary": summary, "reason": None}
 
 
 def _append(state_dir: Path, line: Mapping[str, Any]) -> None:
@@ -274,8 +358,7 @@ def rebuild_state(project_id: str, *, state_dir: Optional[Path] = None) -> Dict[
     """Rebuild ``operator_queue.json`` from the ledger alone and return it."""
     sdir = Path(state_dir) if state_dir is not None else state_dir_for(project_id)
     with _locked(sdir):
-        _write_state(sdir, state := _read_state(sdir, project_id))
-        return state
+        return _publish(sdir, project_id)
 
 
 def read_state(project_id: str, *, state_dir: Optional[Path] = None) -> Dict[str, Any]:
@@ -350,7 +433,7 @@ def append_line(project_id: str, kind: str, fields: Mapping[str, Any], *, now: O
         if why:
             raise QueueRefused(why)
         _append(sdir, line)
-        _write_state(sdir, _read_state(sdir, project_id))
+        _publish(sdir, project_id)
     return line
 
 
@@ -390,7 +473,7 @@ def reserve(project_id: str, choose: Callable[[Dict[str, Any]], List[str]], *, s
         except ValueError as exc:
             raise QueueRefused(str(exc)) from exc
         _append(sdir, line)
-        _write_state(sdir, _read_state(sdir, project_id))
+        _publish(sdir, project_id)
     return ids
 
 
@@ -441,5 +524,5 @@ def compact(project_id: str, *, now: Optional[datetime] = None, dry_run: bool = 
         except BaseException:
             tmp.unlink(missing_ok=True)
             raise
-        _write_state(sdir, _read_state(sdir, project_id))
+        _publish(sdir, project_id)
     return result
