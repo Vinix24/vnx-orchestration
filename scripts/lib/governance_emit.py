@@ -990,13 +990,10 @@ def emit_unified_report(
     Idempotent: returns the existing path without modifying it when the report
     already exists (worker may have written a richer report).
 
-    *attempt_started_at* (OI-3064) is when THIS attempt began: a ``datetime``
-    (a naive one is read as local time) or epoch seconds. An existing report
-    whose mtime is before it and that is contract-invalid (stale and
-    contract-invalid) is rotated to ``<dispatch_id>.attempt-<n>.md`` (first
-    free ``n``, never overwriting a sidecar); the fresh report takes the
-    canonical path. A stale valid report, or one written during this attempt,
-    follows the rules above. Without it, nothing is rotated.
+    *attempt_started_at* (OI-3064): when THIS attempt began, a ``datetime`` or
+    epoch seconds. A stale and contract-invalid report (mtime before it) is
+    rotated to ``<id>.attempt-<n>.md`` and the fresh one takes its place; any
+    other existing report follows the rules here. Without it, nothing rotates.
 
     When *body_override* is provided, that exact markdown string is written as
     the report body instead of the generic ## Response wrapper.  The govern()
