@@ -13,17 +13,18 @@ import json
 import logging
 import os
 import re
+import secrets
 import select
+import shlex
 import shutil
 import signal
 import subprocess
 import sys
 import time
-import urllib.request
 from datetime import datetime, timedelta, timezone
-from functools import lru_cache
+from functools import lru_cache, partial
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR / "lib"))
@@ -38,8 +39,10 @@ from providers import provider_registry
 import gate_artifacts as _art
 import provider_costs
 import provider_switch
-import vertex_ai_runner as _vtx
 import gate_dispatch_table
+import review_delta_shadow
+import review_delta_decide
+import review_scope
 from gate_worktree import (
     create_gate_worktree,
     remove_gate_worktree,
@@ -165,45 +168,295 @@ def resolve_codex_review_effort(risk_class: Optional[str]) -> str:
 _ProbePopen = subprocess.Popen
 
 
-@lru_cache(maxsize=1)
-def resolve_review_interpreter() -> Optional[str]:
-    """The first of VNX_REVIEW_PYTHON, VNX_PYTHON, sys.executable, python3.12, python3
-    that is a file and imports pytest within 10 s; None when none of them has it."""
-    for candidate in (
-        os.environ.get("VNX_REVIEW_PYTHON"),
-        os.environ.get("VNX_PYTHON"),
-        sys.executable,
-        shutil.which("python3.12"),
-        shutil.which("python3"),
-    ):
-        if not (candidate and os.path.isfile(candidate)):
-            continue
-        try:
-            proc = _ProbePopen(
-                [candidate, "-c", "import pytest"],
-                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-            proc.communicate(timeout=10)
-            if proc.returncode == 0:
-                return candidate
-        except OSError:  # vnx-silent-except: an interpreter that cannot start is no candidate
-            continue
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.communicate()
-    return None
+REVIEW_PYTHON_KEY = "VNX_REVIEW_PYTHON"
+REVIEW_PYTHONPATH_KEY = "VNX_REVIEW_PYTHONPATH"
+# Rules of the interpreter choice, named in the prompt and on the request.
+RULE_PROJECT_CONFIG, RULE_PROJECT_VENV, RULE_FABRIC_CHAIN = 1, 2, 3
+_RULE_TEXT = {
+    RULE_PROJECT_CONFIG: "rule 1: VNX_REVIEW_PYTHON from the project's project_config",
+    RULE_PROJECT_VENV: "rule 2: the project's own .venv/bin/python",
+    RULE_FABRIC_CHAIN: "rule 3: the fabric's interpreter chain (OI-2591)",
+}
+# The gate worktree has a random name and does not exist when the prompt is built; the prompt
+# carries a token and ``_run_with_stall_detection`` swaps in the real path at the spawn.
+# The token is random per request and lives on the request payload (``worktree_token``), next to
+# the prompt that carries it: a stored prompt run again in another process keeps its own token.
+# A PR diff cannot carry it in advance, and the fill-in (``_fill_worktree_token``) only touches
+# the tests block that ``_review_tests_block`` appends last: a literal token-shaped string in the
+# diff, title or body stays literal. A payload without a valid stored token is never substituted.
+WORKTREE_TOKEN_FIELD = "worktree_token"
+_WORKTREE_TOKEN_RE = re.compile(r"@@VNX_GATE_WORKTREE_[0-9a-f]{16}@@")
+_TESTS_BLOCK_HEADER = "\n\n## Running the PR's tests\n\n"
 
 
-def _review_tests_block(interpreter: Optional[str]) -> str:
-    """The codex prompt block naming the interpreter that runs the PR's tests (OI-2591)."""
-    if not interpreter:
-        body = ("No interpreter with pytest was found on this host, so this PR's tests "
-                "cannot be run. `residual_risk` must say that the tests did not run.\n")
-    else:
-        body = (f"Run the PR's tests with `{interpreter} -m pytest <files> -q -p "
-                "no:cacheprovider` before the verdict, and report what came out.\n")
-    return "\n\n## Running the PR's tests\n\n" + body
+def _valid_worktree_token(token: Any) -> bool:
+    return isinstance(token, str) and bool(_WORKTREE_TOKEN_RE.fullmatch(token))
+
+
+def _request_worktree_token(request_payload: Dict[str, Any]) -> str:
+    """The request's worktree token: the stored one when valid, else a new one stored now.
+    Called where a prompt is built, so the token and the prompt that carries it travel together."""
+    kept = request_payload.get(WORKTREE_TOKEN_FIELD)
+    if _valid_worktree_token(kept):
+        return kept
+    token = f"@@VNX_GATE_WORKTREE_{secrets.token_hex(8)}@@"
+    request_payload[WORKTREE_TOKEN_FIELD] = token
+    return token
+
+
+def _fill_worktree_token(prompt: str, worktree: Path, token: Any) -> str:
+    """Swap ``token`` for the worktree path, inside the tests block only.
+    The block is the tail of the prompt, from its last header. Without that header, or without
+    a valid token (a prompt built elsewhere), the prompt comes back unchanged (fail closed)."""
+    if not _valid_worktree_token(token):
+        return prompt
+    head, sep, block = prompt.rpartition(_TESTS_BLOCK_HEADER)
+    if not sep:
+        return prompt
+    return head + sep + block.replace(token, str(worktree))
+
+
+def _imports_pytest(candidate: Optional[str]) -> bool:
+    """True when ``candidate`` is a file that imports pytest within 10 s."""
+    if not (candidate and os.path.isfile(candidate)):
+        return False
+    proc = None
+    try:
+        proc = _ProbePopen(
+            [candidate, "-c", "import pytest"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        proc.communicate(timeout=10)
+        return proc.returncode == 0
+    except OSError:  # vnx-silent-except: an interpreter that cannot start is no candidate
+        return False
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.communicate()
+        return False
+
+
+def _project_root_of(directory: Optional[Path]) -> Optional[str]:
+    """The directory above ``git rev-parse --git-common-dir`` measured from ``directory`` (the
+    process's cwd when None): the main checkout of whatever project the gate worktree belongs to.
+    None when git does not answer, so no ``.venv`` is guessed."""
+    try:
+        proc = _ProbePopen(
+            ["git", "rev-parse", "--git-common-dir"], cwd=str(directory) if directory else None,
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+        )
+        out, _err = proc.communicate(timeout=10)
+    except (OSError, subprocess.TimeoutExpired):  # vnx-silent-except: no answer means no project .venv, rule 3 follows
+        return None
+    common = (out or "").strip()
+    if proc.returncode != 0 or not common:
+        return None
+    return str((Path(directory or Path.cwd()) / common).resolve().parent)
+
+
+def _run_interpreter(request_payload: Dict[str, Any], project_root: Optional[Path]) -> "tuple[Optional[str], int]":
+    """The run's review interpreter, resolved once and kept on the request as ``review_interpreter``
+    ({path, rule}; path None when none imports pytest). Rule 2 measures the repository the gate runs
+    for: ``project_root``, else the one this file lives in (the first candidate of
+    ``project_root.resolve_project_root``), measured with ``git``, not the cwd nor the not-yet-made worktree."""
+    kept = request_payload.get("review_interpreter")
+    if isinstance(kept, dict) and "rule" in kept and "path" in kept:
+        return kept["path"], kept["rule"]
+    interpreter, rule = resolve_review_interpreter_with_rule(worktree=project_root or Path(__file__).resolve().parent)
+    request_payload["review_interpreter"] = {"path": interpreter, "rule": rule}
+    return interpreter, rule
+
+
+def _project_config_value(key: str, project_id: Optional[str]) -> str:
+    import config_registry
+    import config_runtime
+
+    config_runtime.autowire()
+    return (config_registry.get(key, project_id or None) or "").strip()
+
+
+def _project_review_python(project_id: Optional[str]) -> str:
+    """Rule 1's VNX_REVIEW_PYTHON, by source: the project's row or the override; env, default or unset give ""."""
+    import config_registry
+    import config_runtime
+
+    config_runtime.autowire()
+    value, source = config_registry.resolve_with_source(REVIEW_PYTHON_KEY, project_id or None)
+    return (value or "").strip() if source in ("project_config", "override") else ""
+
+
+def _is_safe_interpreter_path(path: str) -> bool:
+    """An interpreter path that goes into the prompt's command: absolute and free of any
+    shell metacharacter or whitespace (the same character set as a test path)."""
+    return os.path.isabs(path) and _is_safe_test_path(path[1:])
+
+
+@lru_cache(maxsize=32)
+def _resolve_cached(project_id: str, root: str, configured: str, env_python: str) -> "tuple[Optional[str], int]":
+    """Keyed on everything the answer depends on, so two projects (or a changed or removed
+    ``project_config`` row: ``configured`` is "" without one) never share an entry."""
+    if configured and _is_safe_interpreter_path(configured) and _imports_pytest(configured):
+        return configured, RULE_PROJECT_CONFIG
+    if root:
+        venv_python = os.path.join(root, ".venv", "bin", "python")
+        if _is_safe_interpreter_path(venv_python) and _imports_pytest(venv_python):
+            return venv_python, RULE_PROJECT_VENV
+    for candidate in (env_python or None, os.environ.get("VNX_PYTHON"), sys.executable,
+                      shutil.which("python3.12"), shutil.which("python3")):
+        if _imports_pytest(candidate):
+            return candidate, RULE_FABRIC_CHAIN
+    return None, RULE_FABRIC_CHAIN
+
+
+def resolve_review_interpreter_with_rule(
+    project_id: Optional[str] = None, worktree: Optional[Path] = None,
+) -> "tuple[Optional[str], int]":
+    """``(interpreter, rule)``: the first of the project's ``VNX_REVIEW_PYTHON`` (rule 1), its
+    ``<projectroot>/.venv/bin/python`` (rule 2) and the OI-2591 chain VNX_REVIEW_PYTHON,
+    VNX_PYTHON, sys.executable, python3.12, python3 (rule 3) that imports pytest; None when none
+    does. The answer is cached per (project, project root, rule-1 value, env value)."""
+    return _resolve_cached(project_id or "", _project_root_of(worktree) or "",
+                           _project_review_python(project_id),
+                           os.environ.get(REVIEW_PYTHON_KEY) or "")
+
+
+def resolve_review_interpreter(
+    project_id: Optional[str] = None, worktree: Optional[Path] = None,
+) -> Optional[str]:
+    return resolve_review_interpreter_with_rule(project_id, worktree)[0]
+
+
+resolve_review_interpreter.cache_clear = _resolve_cached.cache_clear  # type: ignore[attr-defined]
+
+
+def _assemble_reviewer_prompt(pr: str, diff_text: str, verdict_contract: str, instruction: str,
+                              worktree: Optional[Path] = None,
+                              interpreter_rule: "Optional[tuple[Optional[str], int]]" = None,
+                              worktree_token: Optional[str] = None) -> str:
+    """The codex reviewer prompt: untrusted-data sandwich (OI-1442), reviewer role policy and ADR rules, tests block.
+    The full review and the delta round (DR-6, deciding and shadow) all build it here."""
+    l3 = build_review_prompt(gate_name="reviewer", pr=pr, diff_text=diff_text, verdict_contract=verdict_contract,
+                             max_chars=0, agentic=True, instruction=instruction)
+    assembled = PromptAssembler().assemble(dispatch_metadata={"role": "reviewer"}, instruction=l3)
+    interpreter, rule = interpreter_rule or resolve_review_interpreter_with_rule(worktree=worktree)
+    pythonpath = _project_config_value(REVIEW_PYTHONPATH_KEY, None)
+    return (format_for_provider(assembled, "codex")["pipe_input"]
+            + _review_tests_block(interpreter, diff_text, rule=rule, worktree=worktree, worktree_token=worktree_token,
+                                  pythonpath=[e.strip() for e in pythonpath.split(",") if e.strip()]))
+
+
+def _reviewer_assembler(request_payload: Dict[str, Any], project_root: Optional[Path], codex: bool):
+    """The reviewer-prompt builder for one run; the interpreter is resolved here, once, and only for codex."""
+    return partial(_assemble_reviewer_prompt, str(request_payload.get("pr_number")),
+                   interpreter_rule=_run_interpreter(request_payload, project_root) if codex else None,
+                   worktree_token=_request_worktree_token(request_payload) if codex else None)
+
+
+_DIFF_HEADER_RE = re.compile(r"^diff --git a/(\S+) b/(\S+)$")
+_NEVER_BLOCKING = ("A missing test command is never a blocking requirement: "
+                   "do not return `blocked` because a test could not be run.\n")
+
+
+def _is_test_path(path: str) -> bool:
+    """A test-named file of any type, or a ``.py`` file under a tests dir (conftest, helpers).
+    A fixture such as ``tests/fixtures/data.json`` is not a test file."""
+    parts = path.split("/")
+    name = parts[-1]
+    stem = name.split(".", 1)[0]
+    if stem.startswith("test_") or stem.endswith(("_test", "_spec")) or ".test." in name or ".spec." in name:
+        return True
+    return name.endswith(".py") and bool({"tests", "test"} & set(parts[:-1]))
+
+
+def _changed_test_files(diff_text: str) -> List[str]:
+    """Test files the diff adds or changes, in diff order; a deleted file is left out."""
+    files: List[str] = []
+    current: Optional[str] = None
+    for line in diff_text.splitlines():
+        header = _DIFF_HEADER_RE.match(line)
+        if header:
+            current = header.group(2) if _is_test_path(header.group(2)) else None
+            if current:
+                files.append(current)
+        elif current and line.startswith("deleted file mode"):
+            files.remove(current)
+            current = None
+    return files
+
+
+# A test path comes from the PR diff, so the PR author controls it. Only a path made of these
+# characters, and not starting with ``-`` (a pytest option), may enter the shell command the
+# reviewer runs; every shell metacharacter and all whitespace fall outside it (OI-2785 round 2).
+_SAFE_TEST_PATH_RE = re.compile(r"[A-Za-z0-9._/+@=,:%-]+")
+
+
+def _is_safe_test_path(path: str) -> bool:
+    return bool(_SAFE_TEST_PATH_RE.fullmatch(path)) and not path.startswith("-")
+
+
+def _safe_relative_dir(path: str) -> bool:
+    """A VNX_REVIEW_PYTHONPATH entry: relative, no ``..``, no ``:`` (the PYTHONPATH separator), and the same characters as a test path."""
+    return (_is_safe_test_path(path) and not path.startswith("/")
+            and ".." not in path.split("/") and ":" not in path)
+
+
+_IMPORT_CHECK = (
+    "import importlib, pathlib, sys; root = pathlib.Path(sys.argv[1]); "
+    "names = sorted(d.name for d in root.iterdir() if (d / '__init__.py').is_file()); "
+    "print(importlib.import_module(names[0]).__file__ if names else 'no package under ' + str(root))"
+)
+
+
+def _review_tests_block(interpreter: Optional[str], diff_text: str = "", *, rule: int = RULE_FABRIC_CHAIN,
+                        worktree: Optional[Path] = None, pythonpath: Sequence[str] = (),
+                        worktree_token: Optional[str] = None) -> str:
+    """The codex prompt block naming the test command per changed test type (OI-2591, OI-2785).
+    Only ``.py`` tests get a command (pytest); every other type gets a read-them line. A path
+    with a shell metacharacter or whitespace never enters the command: it is named as text.
+    ``pythonpath`` entries (VNX_REVIEW_PYTHONPATH, relative to the worktree root) go first in
+    ``PYTHONPATH`` as absolute worktree paths, behind an import check that shows where the
+    package really loads from; a refused entry is named as text, like a refused test file."""
+    changed = _changed_test_files(diff_text)
+    tests = [p for p in changed if _is_safe_test_path(p)]
+    refused = [p for p in changed if not _is_safe_test_path(p)]
+    python = [shlex.quote(p) for p in tests if p.endswith(".py")]
+    others = sorted({os.path.splitext(p)[1] or "(no extension)" for p in tests if not p.endswith(".py")})
+    wt = str(worktree) if worktree else (worktree_token if _valid_worktree_token(worktree_token) else "<worktree>")
+    paths = [f"{wt}/{p}" for p in pythonpath if _safe_relative_dir(p)]
+    refused_paths = [p for p in pythonpath if not _safe_relative_dir(p)]
+    body = ""
+    if python or not tests:
+        files = " ".join(python) if python else "<files>"
+        if not interpreter:
+            body = ("No interpreter with pytest was found on this host, so this PR's tests "
+                    "cannot be run. `residual_risk` must say that the tests did not run.\n")
+        else:
+            # Measured (report, dlv-51038adbdea0-r2): PYTHONPATH alone is not enough while PYTHONSAFEPATH is
+            # set, tests that import from the repo root fail to collect; so it is unset inside this command only.
+            env = ""
+            if paths or rule != RULE_FABRIC_CHAIN:
+                env = "env -u PYTHONSAFEPATH " + (f"PYTHONPATH={shlex.quote(':'.join(paths))} " if paths else "")
+            body = (f"Run the PR's tests with `{env}{interpreter} -m pytest {files} -q -p "
+                    "no:cacheprovider` before the verdict, and report what came out.\n")
+            if rule != RULE_FABRIC_CHAIN:
+                body += f"The interpreter was chosen by {_RULE_TEXT[rule]}.\n"
+            if paths:
+                check = (f"{env}{interpreter} -c {shlex.quote(_IMPORT_CHECK)} {shlex.quote(paths[0])}")
+                body += (f"Run `{check}` first: it prints the `__file__` of the project package. The "
+                         f"package must load from inside the gate worktree ({wt}); the shared .venv "
+                         "may hold an editable install of the main checkout. When the printed path is "
+                         "outside the gate worktree, `residual_risk` must say so. That is never a "
+                         "reason for `blocked`.\n")
+    for ext in others:
+        body += (f"- `{ext}` test files: there is no test command for this type on this host; "
+                 "read those tests instead of running them.\n")
+    for path in refused:
+        body += ("- Test file left out of the command because its path holds a shell "
+                 f"metacharacter or whitespace; read it as text, never run it: {json.dumps(path)}\n")
+    for path in refused_paths:
+        body += ("- PYTHONPATH entry left out of the command because it is not a safe relative "
+                 f"path (shell metacharacter, whitespace, absolute or `..`): {json.dumps(path)}\n")
+    return _TESTS_BLOCK_HEADER + body + _NEVER_BLOCKING
 
 
 # The dispatcher (plan_gate_panel._make_default_dispatcher) reports a provider_dispatch
@@ -537,47 +790,69 @@ def _git_capture(args: List[str], cwd: str) -> str:
     return result.stdout.strip()
 
 
-def _capture_branch_heads(cwd: str) -> str:
-    """Return a stable, comparable snapshot of local branch heads, excluding ``dispatch/*``.
+def _capture_branch_heads(cwd: str, names: List[str]) -> str:
+    """Return a stable ``"<name> <sha>"`` snapshot of exactly the local branches in *names*.
 
-    ``dispatch/<id>`` is not evidence of a touched main checkout: the fabric
-    mints one for every dispatch, and ``refs/heads`` is shared across every
-    worktree of a repo — so it moves for reasons that have nothing to do
-    with THIS checkout being touched. Two sources of that churn are normal
-    even on a clean harness-lane run:
-
-      1. The gate's own dispatch: ``_prepare_provider_workdir`` ->
-         ``create_dispatch_worktree`` runs ``git worktree add <path> -b
-         dispatch/<safe_id>`` for the provider's isolated worktree, and that
-         branch is left behind after teardown (measured: dozens of stale
-         ``dispatch/glm-gate-pr...`` branches accumulate over time).
-      2. Any OTHER dispatch running concurrently in a sibling worktree of
-         the same repo mints its own ``dispatch/<id>`` at the same time.
-
-    Filtering those out by name is deliberately narrow — it is not "ignore
-    all branch churn", it is "ignore the one prefix the fabric itself owns
-    and creates as a side effect of dispatching, per worktree". Every OTHER
-    branch appearing, disappearing, or being reset to a different commit is
-    still exactly what this vangnet exists to catch (PR #1950's stray
-    ``pr1950``, still reproduced in
-    ``TestAgentTouchingMainCheckoutIsCaught``). Compared by name AND sha via
-    ``git for-each-ref``, not by name alone, so a branch reset to a
-    different commit under an unchanged name is still caught too.
+    OI-2711 / OI-2756: this used to list every local branch except
+    ``dispatch/*``. ``refs/heads`` is shared by every worktree of the repo, so
+    a parallel builder creating ``hold/<id>-r2-r2`` (OI-2711, #2625) or
+    another chain resetting ``work`` to ``origin/main`` (OI-2756, #2709) booked
+    the seat ``harness_lane_touched_main_checkout`` although nothing touched
+    the orchestrator's own checkout. The net now reads only the branches that
+    say something about THIS checkout and THIS review: the branch HEAD points
+    to in the main checkout and the gated PR's head branch (see
+    ``_capture_main_checkout_state``). Compared by name AND sha, so a branch
+    reset under an unchanged name is still caught; a listed branch that does
+    not exist locally is written as ``<name> <absent>``, so its creation or
+    deletion is a change too.
     """
+    wanted = sorted({name for name in names if name})
+    if not wanted:
+        return ""
     raw = _git_capture(
-        ["for-each-ref", "--format=%(refname:short) %(objectname)", "refs/heads"], cwd,
+        ["for-each-ref", "--format=%(refname:short) %(objectname)",
+         *[f"refs/heads/{name}" for name in wanted]],
+        cwd,
     )
     if raw.startswith("<git "):
         return raw
-    lines = [
-        line for line in raw.splitlines()
-        if line.strip() and not line.split(" ", 1)[0].startswith("dispatch/")
-    ]
-    return "\n".join(sorted(lines))
+    found = {}
+    for line in raw.splitlines():
+        name, _, sha = line.strip().partition(" ")
+        if name in wanted:
+            found[name] = sha
+    return "\n".join(f"{name} {found.get(name, '<absent>')}" for name in wanted)
 
 
-def _capture_main_checkout_state(project_root: Optional[Path]) -> Dict[str, str]:
-    """Snapshot the orchestrator's OWN checkout: HEAD ref/sha, branch heads, working-tree status.
+def _branches_at_pr_head(cwd: str, pr_head_sha: str) -> str:
+    """Names of local branches outside ``dispatch/`` whose tip is the gated PR's head commit.
+
+    PR #1950 rule (T0 decision on dlv-stoel2-vangnet-alleen-hoofdcheckout, rule 1):
+    the incident was PR content fetched into the main checkout as a local
+    branch. A checkout of it moves ``head``; this field also catches the
+    shape without a checkout (``git fetch origin <pr branch>`` + ``git branch
+    pr1950 FETCH_HEAD``). ``dispatch/*`` is excluded because the gate's own
+    provider worktree is ``dispatch/<id>`` created from ``origin/<pr branch>``,
+    so it carries the PR head by design. The builders of OI-2711/OI-2756
+    branch from ``origin/main`` or their own commits, never the PR head.
+    """
+    if not pr_head_sha or pr_head_sha.startswith("<git "):
+        return pr_head_sha
+    raw = _git_capture(
+        ["for-each-ref", "--format=%(refname:short)", "--points-at", pr_head_sha, "refs/heads"], cwd,
+    )
+    if raw.startswith("<git "):
+        return raw
+    return "\n".join(sorted(
+        line.strip() for line in raw.splitlines()
+        if line.strip() and not line.strip().startswith("dispatch/")
+    ))
+
+
+def _capture_main_checkout_state(
+    project_root: Optional[Path], branch: str = "", pr_head_sha: Optional[str] = None,
+) -> Dict[str, str]:
+    """Snapshot the orchestrator's OWN checkout: HEAD, the branches tied to it and the review, status.
 
     OI-1887 vangnet: the harness-lane isolation this file builds (PR-branch
     worktree via ``--base-ref``, an explicit "stay in your worktree" line in
@@ -588,19 +863,35 @@ def _capture_main_checkout_state(project_root: Optional[Path]) -> Dict[str, str]
     (see ``_main_checkout_state_diff``), it catches a touched main checkout
     even when the model ignored every instruction meant to prevent it.
 
-    HEAD is the symbolic ref (branch name) when on a branch, falling back to
-    the raw sha in detached HEAD — either way, a value that changes the
-    instant something runs `git checkout`/`git switch` in this checkout.
-    Branch heads exclude ``dispatch/*`` — see ``_capture_branch_heads``.
+    Fields (OI-2711, OI-2756: HEAD, status and the gated PR branch, not
+    every local branch):
+
+    * ``head``: the symbolic ref when on a branch, the raw sha in detached
+      HEAD — it changes the instant something runs `git checkout`/`git
+      switch` in this checkout.
+    * ``status``: ``git status --porcelain`` of this checkout.
+    * ``branches``: name and sha of HEAD's branch and of *branch*, the gated
+      PR's head branch (``_capture_branch_heads``). Branch churn elsewhere in
+      the shared ``refs/heads`` no longer books the seat.
+    * ``branches_at_pr_head``: local branches outside ``dispatch/`` at the PR
+      head commit (``_branches_at_pr_head``). *pr_head_sha* is resolved from
+      ``origin/<branch>`` when not given; the caller passes the before
+      snapshot's ``pr_head_sha`` to the after capture, so a push to the PR
+      during the seat does not move the reference point.
     """
     cwd = str(project_root) if project_root else "."
     head = _git_capture(["symbolic-ref", "-q", "HEAD"], cwd)
+    head_branch = head[len("refs/heads/"):] if head.startswith("refs/heads/") else ""
     if head.startswith("<git "):
         head = _git_capture(["rev-parse", "HEAD"], cwd)
+    if branch and pr_head_sha is None:
+        pr_head_sha = _git_capture(["rev-parse", "--verify", "-q", f"origin/{branch}^{{commit}}"], cwd)
     return {
         "head": head,
-        "branches": _capture_branch_heads(cwd),
+        "branches": _capture_branch_heads(cwd, [head_branch, branch]),
         "status": _git_capture(["status", "--porcelain"], cwd),
+        "branches_at_pr_head": _branches_at_pr_head(cwd, pr_head_sha or "") if branch else "",
+        "pr_head_sha": pr_head_sha or "",
     }
 
 
@@ -617,10 +908,23 @@ def _main_checkout_state_diff(
     """
     diffs = [
         f"{key}: {before.get(key)!r} -> {after.get(key)!r}"
-        for key in ("head", "branches", "status")
+        for key in ("head", "branches", "status", "branches_at_pr_head")
         if before.get(key) != after.get(key)
     ]
     return "; ".join(diffs) if diffs else None
+
+
+def _main_checkout_drift_since(
+    project_root: Optional[Path], branch: str, before: Dict[str, str],
+) -> Optional[str]:
+    """Re-capture the orchestrator's checkout and diff it against *before*.
+
+    The after capture reuses the before snapshot's ``pr_head_sha``, so a push to
+    the PR during the seat does not move the reference point. None when nothing
+    moved (see ``_main_checkout_state_diff``).
+    """
+    after = _capture_main_checkout_state(project_root, branch, pr_head_sha=before.get("pr_head_sha"))
+    return _main_checkout_state_diff(before, after)
 
 
 def _codex_model_refusal(
@@ -787,8 +1091,8 @@ class GateRunner:
         # earlier execution). ``_mark_executing`` remains the only minter, at the
         # transition to ``executing``; every record after it carries this run's id.
         request_payload.pop(gate_status.EXECUTION_ID_FIELD, None)
+        request_payload.pop("review_interpreter", None)  # resolved once per run, not reused from an earlier one
         provider = _rec.resolve_gate_provider(gate)
-        using_vertex = gate == "gemini_review" and os.environ.get("VNX_GEMINI_ROUTING", "oauth") == "vertex"
         # Harness-lane gates (C6 step 1) delegate to the governed dispatcher
         # instead of a PATH binary or a spawned script. Resolved here so the
         # dispatch below routes to _run_harness_lane_path, never to a PATH
@@ -796,63 +1100,54 @@ class GateRunner:
         harness_provider = ""
 
         # Provider switch (provider-schakelaar C): decided before anything is marked executing
-        # or launched, on every path (subprocess, vertex, harness lane), with the gate name as
+        # or launched, on every path (subprocess, harness lane), with the gate name as
         # the identifier. An unregistered gate keeps its unsupported_gate_type answer below.
         switched_off = self._refuse_if_switched_off(
             gate, pr_number=pr_number, pr_id=pr_id, request_payload=request_payload)
         if switched_off is not None:
             return switched_off
 
-        if not using_vertex:
-            # OI-1490: three outcomes, not one. Before this, an unregistered
-            # gate and a lane-routed gate both collapsed into "binary not
-            # found in PATH" — a name this runner had just invented from the
-            # gate's own name. Each now says what is actually true, and the
-            # two new reasons are PERMANENT: neither is in
-            # gate_obligation_runner._TEMPORARY_NOT_EXECUTABLE_REASONS,
-            # because no amount of waiting installs a binary that was never a
-            # binary. `provider_not_installed` stays temporary and stays
-            # correct for the gates it actually describes.
-            if provider is None:
-                return self._refuse_unregistered(gate, pr_number, pr_id, request_payload)
-            kind, provider_name = provider
-            if kind == _rec.GATE_PROVIDER_HARNESS_LANE:
-                # C6 step 1: glm_gate/kimi_gate route through the governed
-                # dispatcher, not a PATH binary. The provider string is the
-                # lane's own identifier ("glm-harness"/"kimi") — never a
-                # shutil.which target.
-                harness_provider = provider_name
-            elif kind == _rec.GATE_PROVIDER_DETERMINISTIC:
-                # GE-6: the local half runs in deterministic_gate, and the GitHub
-                # half of each gate is already where it belongs (ci_gate inline in
-                # gate_executor.execute_gate, wiring_gate at request time). This
-                # runner drives prompted CLIs, so it says so instead of looking up
-                # a binary named after the kind.
-                return self._refuse_deterministic(
-                    gate, pr_number, pr_id, request_payload, kind, provider_name,
-                )
-            else:
-                binary = provider_name
-                if shutil.which(binary) is None:
-                    return self._not_executable(
-                        gate=gate, pr_number=pr_number, pr_id=pr_id, request_payload=request_payload,
-                        reason="provider_not_installed",
-                        reason_detail=f"{binary} binary not found in PATH",
-                    )
+        # OI-1490: three outcomes, not one. Before this, an unregistered
+        # gate and a lane-routed gate both collapsed into "binary not
+        # found in PATH" — a name this runner had just invented from the
+        # gate's own name. Each now says what is actually true, and the
+        # two new reasons are PERMANENT: neither is in
+        # gate_obligation_runner._TEMPORARY_NOT_EXECUTABLE_REASONS,
+        # because no amount of waiting installs a binary that was never a
+        # binary. `provider_not_installed` stays temporary and stays
+        # correct for the gates it actually describes.
+        if provider is None:
+            return self._refuse_unregistered(gate, pr_number, pr_id, request_payload)
+        kind, provider_name = provider
+        if kind == _rec.GATE_PROVIDER_HARNESS_LANE:
+            # C6 step 1: glm_gate/kimi_gate route through the governed
+            # dispatcher, not a PATH binary. The provider string is the
+            # lane's own identifier ("glm-harness"/"kimi") — never a
+            # shutil.which target.
+            harness_provider = provider_name
+        elif kind == _rec.GATE_PROVIDER_DETERMINISTIC:
+            # GE-6: the local half runs in deterministic_gate, and the GitHub
+            # half of each gate is already where it belongs (ci_gate inline in
+            # gate_executor.execute_gate, wiring_gate at request time). This
+            # runner drives prompted CLIs, so it says so instead of looking up
+            # a binary named after the kind.
+            return self._refuse_deterministic(
+                gate, pr_number, pr_id, request_payload, kind, provider_name,
+            )
         else:
-            binary = GATE_BINARIES.get(gate, "")
+            binary = provider_name
+            if shutil.which(binary) is None:
+                return self._not_executable(
+                    gate=gate, pr_number=pr_number, pr_id=pr_id, request_payload=request_payload,
+                    reason="provider_not_installed",
+                    reason_detail=f"{binary} binary not found in PATH",
+                )
 
-        prompt = self._resolve_prompt(gate, request_payload, using_vertex)
+        prompt = self._resolve_prompt(gate, request_payload)
         if prompt and "prompt" not in request_payload:
             request_payload["prompt"] = prompt
 
         self._mark_executing(gate, request_payload, pr_number=pr_number, pr_id=pr_id)
-
-        if using_vertex:
-            return self._run_vertex_path(
-                gate=gate, pr_number=pr_number, pr_id=pr_id,
-                prompt=prompt, request_payload=request_payload, pid=os.getpid(),
-            )
 
         if harness_provider:
             return self._run_harness_lane_path(
@@ -961,36 +1256,18 @@ class GateRunner:
         )
 
     def _resolve_prompt(
-        self, gate: str, request_payload: Dict[str, Any], using_vertex: bool,
+        self, gate: str, request_payload: Dict[str, Any],
     ) -> str:
-        """Build or enrich the prompt for the given gate type.
-
-        build_gemini_prompt / build_codex_prompt already inline file contents.
-        When we build the prompt here we must NOT also append
-        collect_file_contents, or each ``--- FILE:`` section will be duplicated
-        in the Vertex prompt. We only enrich with file contents when the caller
-        supplied the prompt externally (e.g. a contract prompt) and the prompt
-        therefore does not yet carry the file bodies.
-        """
-        external_prompt = request_payload.get("prompt", "")
-        prompt = external_prompt
+        """Build the prompt for the given gate type when the caller supplied none."""
+        prompt = request_payload.get("prompt", "")
+        if gate == "codex_gate":  # once per run, before any prompt is built
+            _run_interpreter(request_payload, self._project_root)
         if not prompt and gate == "gemini_review":
             prompt = self._build_gemini_prompt(request_payload)
         elif not prompt and gate == "codex_gate":
             prompt = self._build_codex_prompt(request_payload)
         elif not prompt and self._is_harness_lane_gate(gate):
             prompt = self._build_harness_lane_prompt(gate, request_payload)
-        if (
-            using_vertex
-            and gate == "gemini_review"
-            and prompt
-            and external_prompt
-        ):
-            file_contents = _vtx.collect_file_contents(
-                request_payload, subprocess_run=subprocess.run,
-            )
-            if file_contents:
-                prompt = prompt + "\n\n" + file_contents
         return prompt
 
     def _mark_executing(
@@ -1057,8 +1334,11 @@ class GateRunner:
             )
 
         try:
+            plan = review_delta_decide.plan_round(  # DR-6: under delta the codex seat may decide with the delta round
+                gate=gate, prompt=prompt, request_payload=request_payload, state_dir=self._state_dir, worktree=worktree_path,
+                assemble=_reviewer_assembler(request_payload, self._project_root, gate == "codex_gate"))
             result = self._run_with_stall_detection(
-                gate=gate, binary=binary, prompt=prompt,
+                gate=gate, binary=binary, prompt=plan.prompt,
                 timeout=gate_timeout(gate), stall_threshold=gate_stall_threshold(gate),
                 request_payload=request_payload,
                 cwd=worktree_path,
@@ -1093,50 +1373,21 @@ class GateRunner:
                 result=result, request_payload=request_payload,
                 requests_dir=self._requests_dir, results_dir=self._results_dir,
             )
-        return _art.materialize_artifacts(
+        record = _art.materialize_artifacts(
             gate=gate, pr_number=pr_number, pr_id=pr_id,
-            stdout=result["stdout"], request_payload=request_payload,
+            stdout=plan.stdout_for(result["stdout"]), request_payload=plan.request_for(request_payload),
             duration_seconds=result["duration_seconds"],
             requests_dir=self._requests_dir, results_dir=self._results_dir,
             reports_dir=self._reports_dir,
         )
-
-    def _run_vertex_path(
-        self,
-        *,
-        gate: str,
-        pr_number: Optional[int],
-        pr_id: str,
-        prompt: str,
-        request_payload: Dict[str, Any],
-        pid: int,
-    ) -> Dict[str, Any]:
-        """Run Vertex AI REST path and feed output into artifact pipeline."""
-        _start = time.monotonic()
-        try:
-            raw_text = self._run_vertex_ai(prompt)
-        except Exception as exc:
-            duration = time.monotonic() - _start
-            return _rec.record_failure(
-                gate=gate, pr_number=pr_number, pr_id=pr_id,
-                result={
-                    "reason": "vertex_api_error",
-                    "reason_detail": str(exc),
-                    "duration_seconds": duration,
-                    "partial_output_lines": 0,
-                    "runner_pid": pid,
-                },
-                request_payload=request_payload,
-                requests_dir=self._requests_dir,
-                results_dir=self._results_dir,
-            )
-        return _art.materialize_artifacts(
-            gate=gate, pr_number=pr_number, pr_id=pr_id,
-            stdout=raw_text, request_payload=request_payload,
-            duration_seconds=time.monotonic() - _start,
-            requests_dir=self._requests_dir, results_dir=self._results_dir,
-            reports_dir=self._reports_dir,
-        )
+        if gate == "codex_gate" and review_scope.active_review_scope(self._state_dir).runs_shadow:  # DR-4b/DR-6: only under delta_shadow or delta; never changes ``record`` (fail-open)
+            review_delta_shadow.run_shadow(
+                request_payload=request_payload, state_dir=self._state_dir, project_root=self._project_root,
+                assemble=_reviewer_assembler(request_payload, self._project_root, True),
+                run=lambda delta_prompt, cwd: self._run_with_stall_detection(
+                    gate=gate, binary=binary, prompt=delta_prompt, timeout=gate_timeout(gate),
+                    stall_threshold=gate_stall_threshold(gate), request_payload=dict(request_payload), cwd=cwd))
+        return record
 
     def _refuse_unresolved_lane(
         self, gate: str, provider: str, pr_number: Optional[int], pr_id: str,
@@ -1230,7 +1481,7 @@ class GateRunner:
         model = os.environ.get(model_env, default_model) if model_env else default_model
         request_payload.update(dispatch_id=dispatch_id, provider=provider, model=model)
 
-        main_checkout_before = _capture_main_checkout_state(self._project_root)
+        main_checkout_before = _capture_main_checkout_state(self._project_root, branch)
 
         _start = time.monotonic()
         dispatch_exc: Optional[Exception] = None
@@ -1255,9 +1506,7 @@ class GateRunner:
         # FIRST and ONLY write for a touched checkout, short-circuiting every
         # branch below (a raised exception included) rather than wrapping
         # each one's own write after the fact.
-        main_checkout_drift = _main_checkout_state_diff(
-            main_checkout_before, _capture_main_checkout_state(self._project_root),
-        )
+        main_checkout_drift = _main_checkout_drift_since(self._project_root, branch, main_checkout_before)
         if main_checkout_drift:
             log.error(
                 "OI-1887: harness-lane gate=%s pr=%s touched the orchestrator's own "
@@ -1315,7 +1564,7 @@ class GateRunner:
         # outage/verdict separation this file's own docstring promises).
         #
         # This is the ONE slot for this check. materialize_artifacts is
-        # shared by the vertex and subprocess strategies too, whose `stdout`
+        # shared by the subprocess strategy too, whose `stdout`
         # is raw model output, never a governed report with real frontmatter
         # — teaching it to parse YAML frontmatter out of arbitrary model text
         # would be guessing at a shape only the harness lane actually
@@ -1400,16 +1649,6 @@ class GateRunner:
             results_dir=self._results_dir,
         )
 
-    # Vertex AI wrappers — stay here so tests can patch gate_runner.subprocess.run
-
-    def _run_vertex_ai(self, prompt: str) -> str:
-        """Call Vertex AI REST API. Delegates to vertex_ai_runner."""
-        return _vtx.run_vertex_ai(
-            prompt,
-            subprocess_run=subprocess.run,
-            urlopen=urllib.request.urlopen,
-        )
-
     @staticmethod
     def _fetch_gh_pr_diff(pr_number: Optional[int]) -> str:
         """Fetch authoritative PR diff via gh pr diff.
@@ -1467,27 +1706,16 @@ class GateRunner:
         diff_content = GateRunner._fetch_gh_pr_diff(pr_number)
         # OI-1851: uncapped, but the record still carries the real size.
         request_payload["diff_coverage"] = gate_depth.diff_coverage(diff_content, 0)
-        l3 = build_review_prompt(
-            gate_name="reviewer",
-            pr=str(pr_number),
-            diff_text=diff_content,
-            verdict_contract=_REVIEWER_VERDICT_TEMPLATE,
-            max_chars=0,
-            agentic=True,
+        return _assemble_reviewer_prompt(
+            str(pr_number), diff_content, _REVIEWER_VERDICT_TEMPLATE,
+            interpreter_rule=_run_interpreter(request_payload, None),
+            worktree_token=_request_worktree_token(request_payload),
             instruction=(
                 f"Review the PR diff in the untrusted-data block, on branch {branch} "
                 f"(risk: {risk}). "
                 "Findings MUST cite specific NEW lines from this diff — "
                 "do not flag pre-existing code."
             ),
-        )
-        assembled = PromptAssembler().assemble(
-            dispatch_metadata={"role": "reviewer"},
-            instruction=l3,
-        )
-        return (
-            format_for_provider(assembled, "codex")["pipe_input"]
-            + _review_tests_block(resolve_review_interpreter())
         )
 
     @staticmethod
@@ -1504,9 +1732,8 @@ class GateRunner:
         identical on purpose, so the two gates review the same PR under the
         same contract.
 
-        One difference since R12: this builder also serves the vertex route, a
-        single REST call with no tools and no checkout, so it passes
-        ``agentic=False`` and the prompt carries no working-directory rule.
+        One difference since R12: this builder passes ``agentic=False``, so the
+        prompt carries no working-directory rule.
         """
         branch = request_payload.get("branch", "")
         risk = (request_payload.get("risk_class") or "medium")
@@ -1710,7 +1937,10 @@ class GateRunner:
         cmd = self._build_gate_cmd(gate, binary, request_payload)
         # OI-2591: only the codex seat gets one, and only to name the interpreter
         # that runs the PR's tests; every other gate inherits as before (env=None).
-        interpreter = resolve_review_interpreter() if gate == "codex_gate" else None
+        # The run's one resolution (kept on the request since the prompt was built); no probe here.
+        interpreter = _run_interpreter(request_payload, self._project_root)[0] if gate == "codex_gate" else None
+        if cwd and prompt:
+            prompt = _fill_worktree_token(prompt, cwd, request_payload.get(WORKTREE_TOKEN_FIELD))
         spawn_env = None if not interpreter else {**os.environ, "VNX_REVIEW_PYTHON": interpreter}
         start = time.monotonic()
         try:

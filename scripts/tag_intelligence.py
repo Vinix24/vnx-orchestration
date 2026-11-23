@@ -24,6 +24,7 @@ try:
     from vnx_paths import ensure_env
 except Exception as exc:
     raise SystemExit(f"Failed to load vnx_paths: {exc}")
+from pattern_activation import injectable_clause
 
 # Structured recommendation types (MVP)
 RECOMMENDATION_TYPES = {"claude_md_patch", "prevention_rule", "routing_hint"}
@@ -609,14 +610,15 @@ class TagIntelligenceEngine:
                 # Query for all matching subsets
                 seen_ids = set()
                 rules = []
+                guard_sql, guard_params = injectable_clause(self.db, Path(self.db_path).parent)
                 for subset in subsets:
                     tag_str = json.dumps(subset)
-                    cursor = self.db.execute("""
+                    cursor = self.db.execute(f"""
                         SELECT id, tag_combination, rule_type, description, recommendation,
                                confidence, triggered_count, created_at, last_triggered
                         FROM prevention_rules
-                        WHERE tag_combination = ? AND confidence >= ?
-                    """, (tag_str, min_confidence))
+                        WHERE tag_combination = ? AND confidence >= ? AND {guard_sql}
+                    """, (tag_str, min_confidence, *guard_params))
 
                     for row in cursor:
                         if row['id'] not in seen_ids:
@@ -631,14 +633,15 @@ class TagIntelligenceEngine:
                 return rules
             else:
                 # Get all rules above confidence threshold
-                query = """
+                guard_sql, guard_params = injectable_clause(self.db, Path(self.db_path).parent)
+                query = f"""
                     SELECT tag_combination, rule_type, description, recommendation,
                            confidence, triggered_count, created_at, last_triggered
                     FROM prevention_rules
-                    WHERE confidence >= ?
+                    WHERE confidence >= ? AND {guard_sql}
                     ORDER BY confidence DESC, triggered_count DESC
                 """
-                cursor = self.db.execute(query, (min_confidence,))
+                cursor = self.db.execute(query, (min_confidence, *guard_params))
 
                 rules = []
                 for row in cursor:

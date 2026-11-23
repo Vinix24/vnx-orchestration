@@ -20,6 +20,7 @@ from typing import Any, Sequence
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
 from project_root import resolve_state_dir  # noqa: E402
+from ndjson_hash_chain import unchained_write
 
 DEFAULT_CENTRAL = resolve_state_dir(caller_file=__file__) / "t0_receipts.ndjson"
 CUTOFF_DATE = "20260515"
@@ -201,7 +202,14 @@ def apply_plan(plan: BackfillPlan) -> ApplyResult:
     appended_count = len(plan.lines_to_append)
     if appended_count == 0:
         return ApplyResult(None, 0, 0, old_line_count, old_line_count)
+    # ChainedLedgerRefused (a RuntimeError) before the backup: main prints it and exits 2.
+    with unchained_write(central_path):
+        return _backup_and_append(plan, central_path, old_line_count, appended_count)
 
+
+def _backup_and_append(plan: BackfillPlan, central_path: Path, old_line_count: int,
+                       appended_count: int) -> ApplyResult:
+    """Body of ``apply_plan``; the caller holds the ledger lock and has refused a chained ledger."""
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     backup_path = Path(f"{central_path}.bak-backfill-{stamp}")
     if backup_path.exists():

@@ -18,7 +18,7 @@ import subprocess
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 from adapter_types import (
     CAPABILITY_ATTACH,
@@ -152,6 +152,18 @@ def _run_tmux(*args: str, timeout: int = 10) -> subprocess.CompletedProcess:
         text=True,
         timeout=timeout,
     )
+
+
+def run_tmux(args: Sequence[str], timeout: int = 10) -> subprocess.CompletedProcess:
+    """Run one tmux command for a caller outside the adapter (display a format, send literal keys, send Enter).
+
+    Raises ``AdapterTransportError`` when tmux is not installed or does not answer within ``timeout``; a non-zero
+    exit comes back in the ``CompletedProcess`` for the caller to read.
+    """
+    try:
+        return _run_tmux(*args, timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise AdapterTransportError(f"tmux {args[0] if args else ''} did not run", transport_detail=str(exc)) from exc
 
 
 def _tmux_send_keys(pane_id: str, *keys: str, literal: bool = False) -> int:

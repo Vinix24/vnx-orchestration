@@ -29,10 +29,16 @@ RECORD_TYPE = "plan_gate_pass"
 VERIFIED = "verified"          # a signed record exists AND its signature verifies
 PRESENT_UNSIGNED = "present"   # a hash-chained record exists but is unsigned/unverifiable
 ABSENT = "absent"              # no plan-gate-pass record for this track
+_RESERVED_FIELDS = ("type", "prev_hash", "signature", "signer_identity")  # skipped from extra_fields
+_IDENTITY_FIELDS = ("track_id", "project_id")  # an extra_fields value other than the argument refuses the append
 
 
 def _ledger_path(repo_root: "str | Path") -> Path:
     return Path(repo_root) / _LEDGER
+
+
+class LatestPassChanged(Exception):
+    """The pass a caller signed is no longer the latest of its track: nothing was appended (OI-2849)."""
 
 
 _TRACE_PROFILE_PREFIX = "profile="
@@ -67,6 +73,9 @@ def emit_plan_gate_pass(
     scope: Optional[str] = None,
     governance_variant: Optional[str] = None,
     gov_trace: Optional[str] = None,
+    extra_fields: Optional[Dict[str, Any]] = None,
+    verify_with: "str | Path | None" = None,
+    expect_latest_hash: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """Append a ``plan_gate_pass`` record for a track to the repo-committed ledger.
 
@@ -84,11 +93,13 @@ def emit_plan_gate_pass(
     always present with an empty-string default — there an empty value means
     "no derivation for this round"; here absence means "no derivation at all".
     Signed when ``key_path`` + ``signer_identity`` are provided (tamper-proof);
-    otherwise appended unsigned but hash-chained (tamper-evident). Best-effort:
-    returns the appended record on success, ``None`` on any failure (never raises).
+    otherwise appended unsigned but hash-chained (tamper-evident). ``extra_fields`` are copied
+    on before signing (``track_id``/``project_id`` only with the argument's own value, else ``None``); a signed record failing ``verify_with`` is not appended (OI-2849), and with
+    ``expect_latest_hash`` a latest pass of another hash, rechecked under the append's ledger lock,
+    raises ``LatestPassChanged`` unwritten. Otherwise best-effort: the record, or ``None`` on failure.
     """
     try:
-        from ndjson_hash_chain import append_chained_entry  # noqa: PLC0415
+        from ndjson_hash_chain import _append_chained_entry_locked, _ledger_locked, compute_entry_hash  # noqa: PLC0415
 
         record: Dict[str, Any] = {
             "type": RECORD_TYPE,
@@ -112,15 +123,28 @@ def emit_plan_gate_pass(
             label = profile_label_from_trace(gov_trace)
             if label:
                 record["gate_profile"] = label
+        for key, value in (extra_fields or {}).items():
+            if key in _IDENTITY_FIELDS and value != record[key]:
+                return None  # the recheck and the append must target the same track and project
+            if key not in _RESERVED_FIELDS:
+                record[key] = value
         if key_path and signer_identity:
-            from attestation import sign_manifest  # noqa: PLC0415
+            from attestation import sign_manifest, verify_attestation  # lazy: ssh-keygen path only
             record["signer_identity"] = signer_identity
             record = sign_manifest(record, key_path)
+            if verify_with is not None and not verify_attestation(record, verify_with):
+                return None
 
         ledger = _ledger_path(repo_root)
         ledger.parent.mkdir(parents=True, exist_ok=True)
-        append_chained_entry(ledger, record)
+        with _ledger_locked(ledger):  # one hold for the recheck and the append (ADR-034 § 4)
+            latest = verify_plan_gate_pass(repo_root, track_id, project_id)[1] if expect_latest_hash else None
+            if expect_latest_hash and (latest is None or compute_entry_hash(latest) != expect_latest_hash):
+                raise LatestPassChanged(track_id)
+            _append_chained_entry_locked(ledger, record)
         return record
+    except LatestPassChanged:
+        raise
     except Exception:  # noqa: BLE001 — emission must never break the gate resolution
         return None
 

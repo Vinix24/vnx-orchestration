@@ -178,45 +178,69 @@ class TestDeliverAdapterPathPropagatesPrId:
 # ---------------------------------------------------------------------------
 
 class TestDeliverFallbackPathPropagatesPrId:
-    def test_deliver_with_recovery_receives_pr_id(self, tmp_path):
-        """When adapter import fails, deliver_with_recovery must receive pr_id."""
-        meta = _minimal_meta(pr_id="461")
+    """The adapter-less fallback hands pr_id to the single-entry door.
+
+    Since 99fd28cd9 (door-flip D2) the door is on by default, so
+    ``deliver_with_recovery`` only runs as the VNX_DISPATCH_LEGACY=1 rollback route.
+    """
+
+    def _run(self, tmp_path, meta, env=None):
         state_dir = tmp_path / "state"
         state_dir.mkdir()
-
         mock_dwr = MagicMock(return_value=True)
         mock_sd = MagicMock()
         mock_sd.deliver_with_recovery = mock_dwr
-
         with (
             patch("headless_dispatch_daemon._repo_root", return_value=tmp_path),
             # None in sys.modules causes ModuleNotFoundError (subclass of ImportError)
             patch.dict("sys.modules", {"adapters": None, "subprocess_dispatch": mock_sd}),
+            patch.dict("os.environ", env or {}),
+            patch("dispatch_bridge.deliver_via_door", return_value=True) as mock_door,
         ):
-            _deliver(meta, tmp_path / "active.md", state_dir)
+            result = _deliver(meta, tmp_path / "active.md", state_dir)
+        return result, mock_dwr, mock_door
 
-        assert mock_dwr.called, "deliver_with_recovery was not called on fallback path"
-        _, kwargs = mock_dwr.call_args
-        assert kwargs.get("pr_id") == "461", (
-            f"Expected pr_id='461', got {kwargs.get('pr_id')!r}"
-        )
+    def test_door_receives_pr_id(self, tmp_path):
+        result, mock_dwr, mock_door = self._run(tmp_path, _minimal_meta(pr_id="461"))
+        assert result[0] is True
+        assert mock_door.called, "deliver_via_door was not called on fallback path"
+        assert mock_door.call_args.kwargs.get("pr_id") == "461"
+        assert not mock_dwr.called
 
-    def test_deliver_with_recovery_pr_id_none_propagated(self, tmp_path):
-        """When pr_id is None and adapter unavailable, None is forwarded."""
-        meta = _minimal_meta(pr_id=None)
+    def test_door_receives_pr_id_none(self, tmp_path):
+        _, _, mock_door = self._run(tmp_path, _minimal_meta(pr_id=None))
+        assert mock_door.called
+        assert mock_door.call_args.kwargs.get("pr_id") is None
+
+    def test_legacy_rollback_deliver_with_recovery_receives_pr_id(self, tmp_path):
+        """The legacy lambda handed to the door still forwards pr_id."""
         state_dir = tmp_path / "state"
         state_dir.mkdir()
-
         mock_dwr = MagicMock(return_value=True)
         mock_sd = MagicMock()
         mock_sd.deliver_with_recovery = mock_dwr
-
+        meta = _minimal_meta(pr_id="461")
         with (
             patch("headless_dispatch_daemon._repo_root", return_value=tmp_path),
             patch.dict("sys.modules", {"adapters": None, "subprocess_dispatch": mock_sd}),
+            patch.dict("os.environ", {"VNX_DISPATCH_LEGACY": "1"}),
         ):
             _deliver(meta, tmp_path / "active.md", state_dir)
+        assert mock_dwr.called, "deliver_with_recovery was not called on rollback path"
+        assert mock_dwr.call_args.kwargs.get("pr_id") == "461"
 
+    def test_legacy_rollback_pr_id_none_propagated(self, tmp_path):
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        mock_dwr = MagicMock(return_value=True)
+        mock_sd = MagicMock()
+        mock_sd.deliver_with_recovery = mock_dwr
+        meta = _minimal_meta(pr_id=None)
+        with (
+            patch("headless_dispatch_daemon._repo_root", return_value=tmp_path),
+            patch.dict("sys.modules", {"adapters": None, "subprocess_dispatch": mock_sd}),
+            patch.dict("os.environ", {"VNX_DISPATCH_LEGACY": "1"}),
+        ):
+            _deliver(meta, tmp_path / "active.md", state_dir)
         assert mock_dwr.called
-        _, kwargs = mock_dwr.call_args
-        assert kwargs.get("pr_id") is None
+        assert mock_dwr.call_args.kwargs.get("pr_id") is None

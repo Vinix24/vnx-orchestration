@@ -10,9 +10,11 @@ docstring for the split's seam order.
 
 from __future__ import annotations
 
+import json
 import logging
+import os
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from envelope_types import EnvelopeSpec, _AdapterResult
 
@@ -196,6 +198,74 @@ def _materialize_shadow_skills(spec: EnvelopeSpec, cwd: Optional[Path]) -> None:
         logger.warning("agent skill materialisation for role %r: %s", spec.role, type(exc).__name__)
 
 
+_SETTING_LEVELS = {"user", "project", "local"}
+_SETTING_KEY = "VNX_BUILDER_SETTING_SOURCES"
+
+
+def _setting_sources() -> List[str]:
+    import config_registry
+    import config_runtime
+
+    config_runtime.autowire()
+    raw, _src = config_registry.resolve_with_source(_SETTING_KEY)
+    items = [p.strip() for p in str(raw or "").split(",") if p.strip()]
+    if items and len(set(items)) == len(items) and set(items) <= _SETTING_LEVELS:
+        return items
+    logger.warning("%s: invalid value %r, using project,local", _SETTING_KEY, raw)
+    return ["project", "local"]
+
+
+def _memory_excludes() -> List[str]:
+    """``claudeMdExcludes`` entries for the user-level CLAUDE.md and rules.
+
+    A worktree lives under ``$HOME``, so the CLI's walk-up from the working directory reads
+    ``~/.claude/CLAUDE.md`` and ``~/.claude/rules/*.md`` as project memory whatever
+    ``--setting-sources`` says (claude-code#87590). Both the home ``.claude`` and the config
+    dir in use are listed, each also in its ``resolve()`` form (symlinked config dirs).
+    """
+    dirs = [Path.home() / ".claude"]
+    cfg = os.environ.get("CLAUDE_CONFIG_DIR")
+    if cfg:
+        dirs.append(Path(cfg))
+    found = set()
+    for d in dirs:
+        for base in (str(d), str(d.resolve())):
+            found.update((base + "/CLAUDE.md", base + "/rules/**"))
+    return sorted(found)
+
+
+def _carried_user_settings() -> List[str]:
+    """``--settings`` JSON: ``cleanupPeriodDays`` from the user file plus the memory excludes.
+
+    ``effortLevel`` is deliberately not carried: Opus 5.5 and later models ignore that user
+    key and start at their own default, and ``--effort`` would raise the builder above it.
+    """
+    cfg = os.environ.get("CLAUDE_CONFIG_DIR") or str(Path.home() / ".claude")
+    path = Path(cfg) / "settings.json"
+    settings: Dict[str, Any] = {}
+    if path.exists():
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            raise ValueError("user settings is not a JSON object")
+        days = data.get("cleanupPeriodDays")
+        if isinstance(days, int) and not isinstance(days, bool):
+            settings["cleanupPeriodDays"] = days
+    settings["claudeMdExcludes"] = _memory_excludes()
+    return ["--settings", json.dumps(settings, sort_keys=True)]
+
+
+def _builder_cli_args() -> List[str]:
+    try:
+        sources = _setting_sources()
+        if set(sources) == _SETTING_LEVELS:
+            return []
+        carried = [] if "user" in sources else _carried_user_settings()
+        return ["--setting-sources", ",".join(sources)] + carried
+    except Exception as exc:  # fail to today's posture: a spawn never fails on this helper
+        logger.warning("%s: %s: %s, builder keeps the user level", _SETTING_KEY, type(exc).__name__, exc)
+        return []
+
+
 class ClaudeSubprocessAdapter:
     """Wraps spawn_claude — reuses existing spawn without reimplementation.
 
@@ -237,6 +307,7 @@ class ClaudeSubprocessAdapter:
                 # K-4c (ADR-045 §5): hands the caller the child's pid the moment
                 # claude actually spawned, so it can record start-time evidence.
                 extra_env=extra_env, on_spawn=on_spawn,
+                extra_cli_args=_builder_cli_args() or None,
             )
         except BrokenPipeError as exc:
             return _AdapterResult(
@@ -255,6 +326,7 @@ class ClaudeSubprocessAdapter:
                 "cache_hit": int(
                     raw_usage.get("cache_read_input_tokens", 0) or 0
                 ),
+                "cache_write": int(raw_usage.get("cache_creation_input_tokens", 0) or 0),
             }
         refused = getattr(result, "spawn_refused", None)
         common = {

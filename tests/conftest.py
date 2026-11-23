@@ -72,6 +72,12 @@ del _env_key, _subdir
 # already delenv/setenv it themselves (test_data_dir_guard.py,
 # test_path_resolution_regression.py, etc.) and win via monkeypatch.
 os.environ["VNX_DATA_HOME"] = str(Path(_CONFTEST_ISOLATION_TMP) / "account-home")
+# Every lifecycle line starts a detached `build_t0_state.py` (state_rebuild_trigger) that
+# inherits the test's VNX_STATE_DIR and runs init_schema on it while the test reads the same
+# store: "no such table: dispatches" / "no such column: project_id" under load (OI-2590,
+# OI-2712, OI-2729). Set here, it reaches every test and every subprocess a test starts;
+# a test of the trigger itself removes it with monkeypatch.delenv.
+os.environ["VNX_STATE_REBUILD_TRIGGER"] = "0"
 # VNX_PROJECT_ID is the operator's own project (every operator shell and worker here
 # exports vnx-dev). Left in the environment it outranks the project a test's fixture
 # derives: init/migrate backfills refuse with an ADR-007 project_id conflict, and
@@ -442,6 +448,48 @@ def _no_ambient_vnx_project_id(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _besluiten_register_isolation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # No test reads the checkout's real daily-log/besluiten.ndjson: build_t0_state resolves the folder from here.
+    import besluiten_adapter
+    import vnx_paths  # scripts/lib only: scripts/ is not on sys.path and must not be (shared module names)
+
+    real_state_block = besluiten_adapter.state_block
+    # The folder build_t0_state._besluiten_logdir() resolves: PROJECT_ROOT from vnx_paths, also in a worktree.
+    checkout_logdir = Path(vnx_paths.resolve_paths()["PROJECT_ROOT"]).resolve() / "daily-log"
+
+    def _isolated_state_block(project_id, logdir, **kwargs):
+        # Only the checkout's own folder is redirected; a test that names another folder keeps it.
+        if Path(logdir).resolve() == checkout_logdir:
+            logdir = tmp_path / "_besluiten_isolated"
+        return real_state_block(project_id, logdir, **kwargs)
+
+    monkeypatch.setattr(besluiten_adapter, "state_block", _isolated_state_block)
+
+
+@pytest.fixture(autouse=True)
+def _launchd_guard_temp_roots(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A fake engine under ``tmp_path`` is under the temp dir the install guard refuses.
+
+    The guard keeps its temp-dir rule in the suite: this swaps the set of temp roots for
+    one nothing lives under, in the environment so the ``reload_plist.sh`` subprocess sees
+    it too. The guard's own temp-root tests delete or re-set the variable.
+    """
+    monkeypatch.setenv("VNX_LAUNCHD_GUARD_TEMP_ROOTS", "/nonexistent-vnx-test-temp-root")
+
+
+@pytest.fixture(autouse=True)
+def _morning_pause_off_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The morning pause is on by default (ADR-095, D4b); a test outside it must not depend on the clock.
+
+    Inside the morning window a door or merge test without a morning snapshot, state dir or project id
+    reads ``decision_unknown`` and pauses, so the suite would turn red at 07:00-09:00 Amsterdam. The gate
+    itself stays fail-closed; the morning-pause tests inject their config (``get=``) or set the variable
+    back with their own ``monkeypatch.setenv``.
+    """
+    monkeypatch.setenv("VNX_MORNING_PAUSE_ENABLED", "false")
+
+
+@pytest.fixture(autouse=True)
 def _vnx_data_dir_isolation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Redirect VNX_DATA_DIR (+ subsystem dirs) so EventStore() without an
     explicit events_dir cannot write to ~/.vnx-data during any test run.
@@ -489,6 +537,17 @@ def _provider_switch_isolation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
 
 
 @pytest.fixture(autouse=True)
+def _global_config_isolation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin the global config file (ADR-087 layer 3) to an absent file in an empty temp dir.
+
+    Layer 3 beats env (layer 4), so a developer's ~/.vnx/config.json would otherwise beat a
+    monkeypatched env value in a local test (plan V3.6). A test that needs a specific file
+    sets VNX_GLOBAL_CONFIG_FILE itself: same function-scoped monkeypatch, later call wins.
+    """
+    monkeypatch.setenv("VNX_GLOBAL_CONFIG_FILE", str(tmp_path / "_vnx_global_config" / "config.json"))
+
+
+@pytest.fixture(autouse=True)
 def _vnx_provider_env_file_isolation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """OI-2182: keep every test off the operator's real provider env file.
 
@@ -503,20 +562,36 @@ def _vnx_provider_env_file_isolation(tmp_path: Path, monkeypatch: pytest.MonkeyP
     monkeypatch.setenv("VNX_PROVIDER_ENV_FILE", str(tmp_path / "absent-provider-usage.env"))
 
 
+_REAL_GH_SOURCE: dict = {}
+
+
 @pytest.fixture(autouse=True)
 def _reconcile_git_off(monkeypatch: pytest.MonkeyPatch) -> None:
-    """OI-1155: pin track_reconciler source 4 (``gh pr list``) OFF for the suite.
+    """OI-1155: stub track_reconciler source 3 (``gh pr list``) to an empty set for the suite.
 
-    source 4 is default-ON in production (_load_merged_pr_numbers), which would
+    The source is always on in production (_load_merged_pr_numbers), which would
     make every reconciler test shell out to a live, network ``gh pr list`` from
     the repo-root CWD and pollute local-only assertions with real merged PR
-    numbers. Pinning VNX_RECONCILE_GIT=0 keeps the suite deterministic and
-    offline-safe. Tests that pin the default-ON behaviour
-    (tests/test_track_reconciler_prref_evidence.py: test_gh_source_on_by_default
-    / test_gh_source_opt_out_by_flag) monkeypatch-delenv / setenv this flag
-    per-test — the last write wins within the same function scope.
+    numbers. The stub keeps the suite deterministic and offline-safe. A test that
+    needs a gh answer patches ``_load_merged_prs_from_gh`` itself (the later write
+    wins) or takes the ``real_load_merged_prs_from_gh`` fixture to run the real one.
     """
-    monkeypatch.setenv("VNX_RECONCILE_GIT", "0")
+    import track_reconciler
+
+    _REAL_GH_SOURCE.setdefault("fn", track_reconciler._load_merged_prs_from_gh)
+    monkeypatch.setattr(track_reconciler, "_load_merged_prs_from_gh", lambda *a, **k: frozenset())
+
+
+@pytest.fixture(autouse=True)
+def _blast_radius_gh_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    import blast_radius_gate
+    monkeypatch.setattr(blast_radius_gate, "gh", lambda argv, cwd: (_ for _ in ()).throw(RuntimeError("gh is off in tests")))
+
+
+@pytest.fixture
+def real_load_merged_prs_from_gh():
+    """The unstubbed gh merged-PR source, for the tests that exercise it directly."""
+    return _REAL_GH_SOURCE["fn"]
 
 
 @pytest.fixture(autouse=True)
@@ -646,6 +721,17 @@ def _stub_merge_target_resolution(monkeypatch: pytest.MonkeyPatch) -> None:
     (tests/test_pr_merge_target_repo.py, tests/test_merge_target.py) put the real
     function back or run it against a stub ``gh`` on PATH: same function-scoped
     ``monkeypatch`` instance, later call wins.
+
+    DR-7 round 2: ``pr_merge._git_in_target`` is refused here as well, because
+    the merge-tree record that runs after a confirmed merge reads git in the
+    pinned target — the suite's own checkout for every ``main()``-route test.
+    That was a real ``git fetch origin`` per successful merge test (up to twice,
+    a network dependency that also moved the checkout's remote-tracking refs).
+    The refused runner returns a failed ``CompletedProcess`` (128, fixed stderr)
+    without starting a process, so such a record books
+    ``merge_tree_unavailable`` and the suite stays offline and isolated. The
+    tests that drive a real throwaway repository
+    (tests/test_pr_merge_merged_tree.py) put the real runner back over it.
     """
     try:
         import pr_merge
@@ -653,6 +739,8 @@ def _stub_merge_target_resolution(monkeypatch: pytest.MonkeyPatch) -> None:
         # Same reason as the two stubs beside this one: pr_merge is only
         # importable once a pr_merge test module has put scripts/ on sys.path.
         return
+    import subprocess
+
     from merge_target import MergeTarget
 
     monkeypatch.setattr(
@@ -660,6 +748,15 @@ def _stub_merge_target_resolution(monkeypatch: pytest.MonkeyPatch) -> None:
         "resolve_merge_target",
         lambda engine_root, **_kwargs: MergeTarget(project_root=Path(engine_root), repo="vnx-test/target"),
     )
+
+    def refused_git_in_target(args, timeout=None):
+        return subprocess.CompletedProcess(
+            ["git", *args], 128, stdout="",
+            stderr="git is offline in the unit-test run "
+                   "(tests/conftest.py::_stub_merge_target_resolution)",
+        )
+
+    monkeypatch.setattr(pr_merge, "_git_in_target", refused_git_in_target)
 
 
 @pytest.fixture(autouse=True)
@@ -967,6 +1064,22 @@ def make_vnx_dispatch_bundle(vnx_dispatch_dir: Path):
 
 
 @pytest.fixture(autouse=True)
+def _restore_sys_modules():
+    """Put back every ``sys.modules`` entry a test removed or replaced.
+
+    A test that pops a module and re-imports it leaves a fresh object behind. A later test
+    file that patched the collection-time object then patches a module the code under test
+    no longer imports (E1: the patch missed and the write hit the real central store). Only
+    removed or replaced entries return; a module first imported during the test stays.
+    """
+    before = dict(sys.modules)
+    yield
+    for name, module in before.items():
+        if sys.modules.get(name) is not module:
+            sys.modules[name] = module
+
+
+@pytest.fixture(autouse=True)
 def _operator_actor_class_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
     """In-process planning commands run as the operator unless a test says otherwise.
 
@@ -988,3 +1101,24 @@ def _operator_actor_class_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
     # Patch the probe, not the stream: derive() resolves _stdin_isatty at call time,
     # and sys.stdin stays what pytest provides for every other code path.
     monkeypatch.setattr(actor_class, "_stdin_isatty", lambda: True)
+
+
+@pytest.fixture()
+def approve_learning_persist(monkeypatch: pytest.MonkeyPatch):
+    """Write an unused learning-loop approval record and select it (ADR-068 besluit 18), the way
+    ``_write_record`` in test_qi_learning_approval.py does until ``write_record`` lands. Without an id
+    it approves the empty change set: a persist-mode loop whose bridge step writes no rows. Returns the path."""
+    import qi_learning_approval as qla
+    from atomic_io import slot_lock
+
+    def _approve(state_dir, proposal_id=None):
+        proposal_id = proposal_id or qla.preview([])["proposal_id"]
+        path = qla.record_path(Path(state_dir), proposal_id)
+        record = {"proposal_id": proposal_id, "changes_sha256": proposal_id[6:], "approved_by": "operator",
+                  "approved_at": "2026-11-10T08:00:00+00:00", "reason": "test approval", "consumed_at": None}
+        with slot_lock(path):
+            path.write_text(json.dumps(record), encoding="utf-8")
+        monkeypatch.setenv(qla.APPROVED_ENV, proposal_id)
+        return path
+
+    return _approve

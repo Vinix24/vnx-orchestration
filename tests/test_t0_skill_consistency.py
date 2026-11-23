@@ -17,6 +17,9 @@ import pytest
 REPO_ROOT = Path(__file__).parent.parent
 SKILL_MD = REPO_ROOT / "skills" / "t0-orchestrator" / "SKILL.md"
 CLAUDE_MD = REPO_ROOT / ".claude" / "terminals" / "T0" / "CLAUDE.md"
+# CLAUDE.md is a thin pointer since 33b20af75; the bash blocks and the policy
+# codes live in the canonical role file it imports.
+ROLE_MD = CLAUDE_MD.parent / "role-orchestrator.md"
 SCRIPTS_DIR = REPO_ROOT / "skills" / "t0-orchestrator" / "scripts"
 
 
@@ -73,9 +76,9 @@ def _extract_bash_blocks(md_text: str) -> list[str]:
 
 class TestCaseB:
     def test_bash_blocks_parse(self):
-        text = CLAUDE_MD.read_text()
+        text = ROLE_MD.read_text()
         blocks = _extract_bash_blocks(text)
-        assert blocks, "No bash blocks found in CLAUDE.md — check extraction regex"
+        assert blocks, "No bash blocks found in role-orchestrator.md — check extraction regex"
         failures = []
         for i, block in enumerate(blocks):
             # Replace placeholder tokens so bash -n doesn't choke on them
@@ -90,7 +93,7 @@ class TestCaseB:
             if result.returncode != 0:
                 failures.append((i, result.stderr.strip()))
             Path(tmp_path).unlink(missing_ok=True)
-        assert not failures, f"Bash syntax errors in CLAUDE.md blocks: {failures}"
+        assert not failures, f"Bash syntax errors in role-orchestrator.md blocks: {failures}"
 
 
 # ---------------------------------------------------------------------------
@@ -134,7 +137,7 @@ class TestCaseC:
 
 class TestCaseD:
     def test_policy_codes_no_duplicates(self):
-        text = CLAUDE_MD.read_text()
+        text = ROLE_MD.read_text()
         # Match bold policy codes like **A1**, **B2**, **E6**, etc.
         codes = re.findall(r"\*\*([A-Z]\d+)(?:\s+\([^)]+\))?\*\*", text)
         seen = {}
@@ -146,14 +149,15 @@ class TestCaseD:
                     duplicates.append(code)
             else:
                 seen[code] = 1
-        assert not duplicates, f"Duplicate policy codes in CLAUDE.md: {duplicates}"
+        assert not duplicates, f"Duplicate policy codes in role-orchestrator.md: {duplicates}"
 
     def test_policy_codes_present(self):
-        text = CLAUDE_MD.read_text()
-        required = ["A1", "A2", "B1", "B2", "B3", "B4", "C1", "D1", "D2", "E1"]
+        text = ROLE_MD.read_text()
+        # B1 (gemini stall) is gone on purpose: gemini is no longer a reviewer (2a01005ec).
+        required = ["A1", "A2", "B2", "B3", "B4", "C1", "D1", "D2", "E1"]
         # Codes may appear as **A1**, **A1 (label)**, or **A1:** — accept any bold start
         missing = [c for c in required if not re.search(rf"\*\*{re.escape(c)}[\s(*:]", text)]
-        assert not missing, f"Expected policy codes missing from CLAUDE.md: {missing}"
+        assert not missing, f"Expected policy codes missing from role-orchestrator.md: {missing}"
 
 
 # ---------------------------------------------------------------------------

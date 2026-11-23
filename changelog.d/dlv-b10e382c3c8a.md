@@ -1,1 +1,0 @@
-- Ledger (track `ledger-is-falsifiable`, PR 3): `ledger_health` and the quality digest drop pytest noise rows through `receipt_outcome.noise_reason`, so a registry id covered only by a pytest row now shows in `gaps`.

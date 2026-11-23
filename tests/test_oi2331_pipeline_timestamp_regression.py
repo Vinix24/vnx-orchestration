@@ -13,7 +13,7 @@ import os
 import sqlite3
 import sys
 import tempfile
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -93,6 +93,65 @@ def test_quality_digest_load_receipts_mixed_types(tmp_path):
     ])
     result = _load_recent_receipts(tmp_path, hours=1)
     assert len(result) == 4
+
+
+def _recent(fmt: str) -> str:
+    """A timestamp 5 minutes ago, rendered with ``fmt`` (inside the 1h window)."""
+    return (datetime.now(timezone.utc) - timedelta(minutes=5)).strftime(fmt)
+
+
+def test_quality_digest_iso_z_without_subseconds_loads(tmp_path):
+    """OI-1687: ``...07Z`` used to get a second +00:00 and was dropped."""
+    from build_t0_quality_digest import _load_recent_receipts
+
+    _write_receipts(tmp_path / "t0_receipts.ndjson", [_recent("%Y-%m-%dT%H:%M:%SZ")])
+    assert len(_load_recent_receipts(tmp_path, hours=1)) == 1
+
+
+def test_quality_digest_iso_offset_without_subseconds_loads(tmp_path):
+    """OI-1687: an explicit offset without sub-seconds must load."""
+    from build_t0_quality_digest import _load_recent_receipts
+
+    _write_receipts(tmp_path / "t0_receipts.ndjson", [_recent("%Y-%m-%dT%H:%M:%S+00:00")])
+    assert len(_load_recent_receipts(tmp_path, hours=1)) == 1
+
+
+def test_quality_digest_iso_z_with_subseconds_loads(tmp_path):
+    from build_t0_quality_digest import _load_recent_receipts
+
+    _write_receipts(tmp_path / "t0_receipts.ndjson", [_recent("%Y-%m-%dT%H:%M:%S.123456Z")])
+    assert len(_load_recent_receipts(tmp_path, hours=1)) == 1
+
+
+def test_quality_digest_naive_iso_is_read_as_utc(tmp_path):
+    from build_t0_quality_digest import _load_recent_receipts
+
+    # Inside the window as UTC; a local-time reading would shift it out in
+    # any zone more than 55 minutes away from UTC.
+    _write_receipts(tmp_path / "t0_receipts.ndjson", [_recent("%Y-%m-%dT%H:%M:%S")])
+    assert len(_load_recent_receipts(tmp_path, hours=1)) == 1
+
+
+def test_quality_digest_naive_iso_outside_window_is_dropped(tmp_path):
+    from build_t0_quality_digest import _load_recent_receipts
+
+    old = (datetime.now(timezone.utc) - timedelta(hours=3)).strftime("%Y-%m-%dT%H:%M:%S")
+    _write_receipts(tmp_path / "t0_receipts.ndjson", [old])
+    assert _load_recent_receipts(tmp_path, hours=1) == []
+
+
+def test_quality_digest_unparseable_timestamp_skipped_with_one_counted_warning(tmp_path, caplog):
+    from build_t0_quality_digest import _load_recent_receipts
+
+    _write_receipts(tmp_path / "t0_receipts.ndjson", [
+        "gisteren", _recent("%Y-%m-%dT%H:%M:%SZ"),
+    ])
+    with caplog.at_level("WARNING"):
+        result = _load_recent_receipts(tmp_path, hours=1)
+    assert len(result) == 1
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warnings) == 1
+    assert "1" in warnings[0].getMessage().split("skipped", 1)[-1][:12]
 
 
 # ---------------------------------------------------------------------------

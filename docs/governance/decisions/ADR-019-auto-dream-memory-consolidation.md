@@ -85,3 +85,7 @@ T0 review-gate workflow integration (dispatch trigger on pending-review.json), o
 - `claudedocs/archive/CC-COMMUNITY-SYNTHESIS-2026-05-29.md` §A-14 — architecture choice record
 - `claudedocs/archive/CC-COMMUNITY-RESEARCH-OPUS-2026-05-29.md` §A4 — Boris Cherny REM-sleep analogy
 - Memory: `governance-receipt-gap` — original dormant self-learning loop record
+
+## Amendment 2026-11-12
+
+The post-30-day auto-apply in decision 4 is not implemented: no code under `scripts/dream/` applies a change without an operator decision. Every cycle writes a pending review file and applies nothing; archives and the cycle status change only when the operator approves that review (`approve_cycle` in `scripts/dream/review_gate.py`). The liveness contract and the 30-day threshold as policy are in ADR-066.

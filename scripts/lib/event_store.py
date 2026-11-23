@@ -33,10 +33,9 @@ logger = logging.getLogger(__name__)
 # Size-rotation threshold (10 MB). Once the live stream exceeds this it is
 # archived to the per-dispatch archive dir and truncated to 0 — a size-based
 # rotation, not a log-only warning. Configurable per instance via the
-# ``rotation_threshold_bytes`` ctor arg or the VNX_EVENT_STREAM_MAX_BYTES env
-# var; this module constant is the default and stays patchable for tests.
+# ``rotation_threshold_bytes`` ctor arg; this module constant is the default and
+# stays patchable for tests.
 _SIZE_ROTATION_BYTES = 10 * 1024 * 1024
-_SIZE_ROTATION_ENV = "VNX_EVENT_STREAM_MAX_BYTES"
 # Hard upper bound (50 MB): auto-truncate with emergency archive to prevent
 # lane blockage when the size rotation keeps failing. Deliberately higher than
 # the rotation threshold so rotation handles the normal case first.
@@ -86,11 +85,27 @@ def resolve_archive_file(directory: Union[str, Path], dispatch_id: str) -> Optio
 
 
 def open_archive_text(path: Union[str, Path]) -> IO[str]:
-    """Open a plain or gzip archive file as UTF-8 text, chosen by suffix."""
+    """Open a plain or gzip archive file as UTF-8 text, chosen by suffix.
+
+    A plain archive the compressor replaced by its ``.gz`` between resolving
+    and opening (ADR-081 decision 3) is opened once as ``<id>.ndjson.gz`` of
+    the same id; only when that is missing too the ``FileNotFoundError`` of the
+    plain path is raised.
+    """
     path = Path(path)
     if path.name.endswith(".gz"):
         return gzip.open(path, "rt", encoding="utf-8", errors="replace")
-    return open(path, "r", encoding="utf-8", errors="replace")
+    try:
+        return open(path, "r", encoding="utf-8", errors="replace")
+    except FileNotFoundError:
+        if not path.name.endswith(ARCHIVE_SUFFIX):
+            raise
+        gz_path = path.with_name(path.name + ".gz")
+        try:
+            return gzip.open(gz_path, "rt", encoding="utf-8", errors="replace")
+        except FileNotFoundError:
+            pass
+        raise
 
 
 def list_archive_files(directory: Union[str, Path], recursive: bool = False) -> List[Path]:
@@ -275,18 +290,55 @@ def _own_event_lines(content: bytes, dispatch_id: str) -> bytes:
     return b"".join(line + b"\n" for line in kept)
 
 
-def _append_to_archive_file(dest: Path, mode: int, payload: bytes) -> None:
-    """Add *payload* to an existing plain or ``.gz`` archive without rewriting its head.
+ARCHIVE_LOCK_NAME = ".archive.lock"
 
-    Written through ``_replace_from_scratch`` so a concurrent reader never sees
-    a half-appended archive. A ``.gz`` archive gains a new gzip member, which
-    ``gzip``/``open_archive_text`` read back in order after the members already
-    there.
+
+def _extend_gz_archive(dest: Path, mode: int, content: bytes) -> bool:
+    """Add the lines of *content* *dest* (a ``.gz`` archive) lacks as a new gzip member.
+
+    Deduplicated like ``_extend_archive``. The new member starts on its own
+    line even when the last member lacks a final newline. Returns whether
+    *dest* was written.
     """
-    if dest.name.endswith(".gz"):
-        _replace_from_scratch(dest, mode, dest.read_bytes(), gzip.compress(payload))
-        return
-    _extend_archive(dest, mode, payload)
+    head = gzip.decompress(dest.read_bytes())
+    held = {line.rstrip(b"\r\n") for line in head.splitlines(keepends=True)}
+    tail = b"".join(
+        line for line in content.splitlines(keepends=True) if line.rstrip(b"\r\n") not in held
+    )
+    if not tail:
+        return False
+    if head and not head.endswith(b"\n"):
+        tail = b"\n" + tail
+    if not tail.endswith(b"\n"):
+        tail += b"\n"
+    _replace_from_scratch(dest, mode, dest.read_bytes(), gzip.compress(tail))
+    return True
+
+
+def _write_archive(directory: Path, name: str, mode: int, content: bytes) -> Path:
+    """The one write boundary of the archive (ADR-081 decision 2): add *content* to the archive of *name*.
+
+    Every archive writer goes through here, after it took its lock on the live
+    stream (fixed order: live, then archive). Under ``<directory>/.archive.lock``
+    (LOCK_EX, blocking) it resolves the archive the id already has: a plain is
+    extended, a ``.gz`` gains a new gzip member, and only an id without an
+    archive gets a new plain, so a plain never appears beside a ``.gz``. Lines
+    the archive holds are not added twice. Returns the archive path written to
+    (the path the id has, or would get, when nothing was new).
+    """
+    directory.mkdir(parents=True, exist_ok=True)
+    with open(directory / ARCHIVE_LOCK_NAME, "ab") as lock_f:
+        fcntl.flock(lock_f.fileno(), fcntl.LOCK_EX)
+        try:
+            existing = resolve_archive_file(directory, name)
+            if existing is not None and existing.name.endswith(".gz"):
+                _extend_gz_archive(existing, mode, content)
+                return existing
+            dest = existing or directory / f"{name}{ARCHIVE_SUFFIX}"
+            _extend_archive(dest, mode, content)
+            return dest
+        finally:
+            fcntl.flock(lock_f.fileno(), fcntl.LOCK_UN)
 
 
 def _events_dir() -> Path:
@@ -299,14 +351,14 @@ def _events_dir() -> Path:
     ``~/.vnx-system/versions/<v>/.vnx-data`` — where the append then failed
     with a permission error.
 
-    Resolution order is now env-first and shared with
+    OI-1276: resolution is shared with receipts and with
     ``headless_dispatch_daemon._default_data_dir`` via
-    ``data_dir_resolution.resolve_data_dir_fail_loud``:
-    1. VNX_DATA_DIR set           → VNX_DATA_DIR/events
-    2. VNX_PROJECT_ID set         → $HOME/.vnx-data/<project_id>/events  (central ledger)
-    3. Fallback → canonical resolver (vnx_paths.resolve_paths()["VNX_DATA_DIR"])
+    ``data_dir_resolution.resolve_data_dir_fail_loud``, which returns
+    ``vnx_paths.resolve_paths()["VNX_DATA_DIR"]``: ``VNX_DATA_DIR`` counts only
+    with ``VNX_DATA_DIR_EXPLICIT=1`` (issue #225); a bare one is named on
+    stderr and ignored, so events never split from receipts.
 
-    Every step is refused with a ``DataDirResolutionError`` naming the chain if
+    Every result is refused with a ``DataDirResolutionError`` naming the chain if
     it would land under ``~/.vnx-system/versions/`` — a read-only version store
     is never a valid data dir.
     """
@@ -375,24 +427,12 @@ class EventStore:
     def _rotation_threshold(self) -> int:
         """Resolve the size-rotation threshold.
 
-        Precedence: explicit ctor arg > VNX_EVENT_STREAM_MAX_BYTES env var >
-        module default (_SIZE_ROTATION_BYTES). The module default stays
-        patchable so tests can construct a store without an explicit value and
-        still lower the threshold.
+        Precedence: explicit ctor arg > module default (_SIZE_ROTATION_BYTES).
+        The module default stays patchable so tests can construct a store
+        without an explicit value and still lower the threshold.
         """
         if self._rotation_threshold_bytes is not None:
             return int(self._rotation_threshold_bytes)
-        env = os.environ.get(_SIZE_ROTATION_ENV)
-        if env:
-            try:
-                return int(env)
-            except ValueError:
-                logger.warning(
-                    "event_store: invalid %s=%r — using default %d bytes",
-                    _SIZE_ROTATION_ENV,
-                    env,
-                    _SIZE_ROTATION_BYTES,
-                )
         return _SIZE_ROTATION_BYTES
 
     def _oversize_flag_path(self, terminal: str, run_id: Optional[str] = None) -> Path:
@@ -447,7 +487,6 @@ class EventStore:
             return
         threshold = self._rotation_threshold()
         rotated_size: Optional[int] = None
-        tmp: Optional[Path] = None
         try:
             with open(path, "ab+") as f:
                 fcntl.flock(f.fileno(), fcntl.LOCK_EX)
@@ -458,17 +497,11 @@ class EventStore:
                     size = os.fstat(f.fileno()).st_size
                     if size <= threshold:
                         return
-                    dest = (
-                        self.archive_dir(terminal)
-                        / f"{self._size_rotation_archive_id()}.ndjson"
-                    )
-                    dest.parent.mkdir(parents=True, exist_ok=True)
-                    tmp = dest.with_name(dest.name + ".tmp")
                     f.seek(0)
-                    with open(tmp, "wb") as tmp_f:
-                        shutil.copyfileobj(f, tmp_f)
-                    os.replace(tmp, dest)
-                    tmp = None
+                    _write_archive(
+                        self.archive_dir(terminal), self._size_rotation_archive_id(),
+                        stat.S_IMODE(os.fstat(f.fileno()).st_mode), f.read(),
+                    )
                     f.seek(0)
                     f.truncate(0)
                     f.flush()
@@ -484,11 +517,6 @@ class EventStore:
                 exc_info=True,
             )
             self._write_oversize_flag(terminal, run_id)
-            if tmp is not None:
-                try:
-                    tmp.unlink(missing_ok=True)
-                except OSError:
-                    pass
             return
 
         self._sequences.pop(self._stream_key(terminal, run_id), None)
@@ -832,10 +860,10 @@ class EventStore:
                 content = f.read()
                 if not content:
                     return None
-                archive_path = self.archive_dir(terminal)
-                archive_path.mkdir(parents=True, exist_ok=True)
-                dest = archive_path / f"{archive_id}.ndjson"
-                _extend_archive(dest, stat.S_IMODE(os.fstat(f.fileno()).st_mode), content)
+                dest = _write_archive(
+                    self.archive_dir(terminal), archive_id,
+                    stat.S_IMODE(os.fstat(f.fileno()).st_mode), content,
+                )
             finally:
                 fcntl.flock(f.fileno(), fcntl.LOCK_UN)
         logger.info("event_store: archived %s -> %s", event_file, dest)
@@ -944,13 +972,7 @@ class EventStore:
                 if not late:
                     return None
                 mode = stat.S_IMODE(os.fstat(f.fileno()).st_mode)
-                dest = resolve_archive_file(self.archive_dir(terminal), dispatch_id)
-                if dest is None:
-                    dest = self.archive_dir(terminal) / f"{dispatch_id}{ARCHIVE_SUFFIX}"
-                    dest.parent.mkdir(parents=True, exist_ok=True)
-                    _replace_from_scratch(dest, mode, late)
-                else:
-                    _append_to_archive_file(dest, mode, late)
+                dest = _write_archive(self.archive_dir(terminal), dispatch_id, mode, late)
                 f.seek(0)
                 f.truncate(0)
                 f.flush()
@@ -1066,9 +1088,8 @@ class EventStore:
                 if owned_only and not _stream_belongs_to(content, dispatch_id):
                     return None
                 if content:
-                    dest.parent.mkdir(parents=True, exist_ok=True)
                     live_mode = stat.S_IMODE(os.fstat(f.fileno()).st_mode)
-                    _extend_archive(dest, live_mode, content)
+                    dest = _write_archive(dest.parent, archive_id(dest), live_mode, content)
                     f.seek(0)
                     f.truncate(0)
                     f.flush()

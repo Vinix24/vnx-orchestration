@@ -39,6 +39,7 @@ with patch.dict(os.environ, _import_env):
     from conversation_analyzer.deep_analyzer import LLMOutcome
 
 import quality_db_init  # noqa: E402
+from content_boundary_pin import pin_boundary
 
 TENANT = "tenant-t"
 OTHER_TENANT = "other-proj"
@@ -120,7 +121,7 @@ def world(tmp_path, monkeypatch):
         "client_project_ids": [],
     }))
     monkeypatch.setenv("HOME", str(home))
-    monkeypatch.setenv("VNX_CONTENT_BOUNDARY_FILE", str(boundary_file))
+    pin_boundary(monkeypatch, str(boundary_file))
     monkeypatch.setenv("VNX_PROJECT_ID", "vnx-dev")
     monkeypatch.delenv("VNX_ANALYZER_RESTRICTED_CLAUDE_CAP", raising=False)
 
@@ -480,7 +481,7 @@ def test_a7_a_fresh_store_has_the_columns(world):
 
 def test_a8_without_a_boundary_file_every_session_is_restricted_and_the_error_is_loud(
         world, monkeypatch, capsys):
-    monkeypatch.setenv("VNX_CONTENT_BOUNDARY_FILE", str(world["tmp"] / "does-not-exist.json"))
+    pin_boundary(monkeypatch, str(world["tmp"] / "does-not-exist.json"))
     _four_sessions(world)
     with Spies() as spies:
         _run(world)

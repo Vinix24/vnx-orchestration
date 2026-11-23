@@ -5,10 +5,12 @@ real functions; only ``run_gh_pr_list`` (the network call) is stubbed.
 """
 from __future__ import annotations
 
+import gzip
 import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -569,3 +571,82 @@ class TestAGuardedRefusalKeepsTheLock:
         assert result.reason == "removed"
         assert not wt.path.exists()
         assert not fx.branch_exists("dispatch/x")
+
+
+class TestArchiveCompressionSweep:
+    """eventarchief-compressie C3: after its own work the sweep compresses the archive, fail-open."""
+
+    @staticmethod
+    def _archive(tmp_path: Path, name: str, data: bytes) -> Path:
+        directory = tmp_path / "home" / ".vnx-data" / "alpha" / "events" / "archive" / "T1"
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / f"{name}.ndjson"
+        path.write_bytes(data)
+        old = time.time() - 30 * 86400
+        os.utime(path, (old, old))
+        return path
+
+    def _released(self, fx, monkeypatch, tmp_path, capsys, *extra) -> tuple[dict, str]:
+        wt = fx.worktree("x")
+        stub_prs(monkeypatch, [])
+        write_decision(tmp_path / "home", "alpha", "x", "reject", "alpha")
+        report = run_main(fx, *extra)
+        assert report["candidates"][0]["released"] is True and not wt.path.exists()
+        return report, capsys.readouterr().err
+
+    def test_apply_compresses_old_plain_archives_of_the_store(self, fx, monkeypatch, tmp_path, capsys):
+        plain = self._archive(tmp_path, "d1", b'{"a":1}\n')
+        _, err = self._released(fx, monkeypatch, tmp_path, capsys)
+        assert not plain.exists()
+        assert gzip.decompress(plain.with_name("d1.ndjson.gz").read_bytes()) == b'{"a":1}\n'
+        assert "archiefcompressie {'compressed': 1} gestopt=done" in err
+
+    def test_a_symlinked_terminal_directory_is_skipped_and_logged(self, fx, monkeypatch, tmp_path, capsys):
+        real = self._archive(tmp_path, "d1", b'{"a":1}\n')
+        archive = real.parent.parent
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        target = outside / "old.ndjson"
+        target.write_bytes(b"keep\n")
+        old = time.time() - 30 * 86400
+        os.utime(target, (old, old))
+        (archive / "T2").symlink_to(outside, target_is_directory=True)
+        _, err = self._released(fx, monkeypatch, tmp_path, capsys)
+        assert target.read_bytes() == b"keep\n" and not (outside / "old.ndjson.gz").exists()
+        assert f"archiefmap overgeslagen: {archive / 'T2'} -> {outside.resolve()}" in err
+        assert not real.exists() and real.with_name("d1.ndjson.gz").exists()
+
+    def test_a_symlinked_archive_root_is_refused_and_logged(self, fx, monkeypatch, tmp_path, capsys):
+        real = self._archive(tmp_path, "d1", b'{"a":1}\n')
+        archive = real.parent.parent
+        moved = tmp_path / "moved"
+        archive.rename(moved)
+        archive.symlink_to(moved, target_is_directory=True)
+        _, err = self._released(fx, monkeypatch, tmp_path, capsys)
+        assert (moved / "T1" / "d1.ndjson").exists() and not list(moved.rglob("*.gz"))
+        assert f"archiefwortel geweigerd: {archive}" in err and "archiefcompressie {" not in err
+
+    def test_dry_run_compresses_nothing(self, fx, tmp_path):
+        plain = self._archive(tmp_path, "d1", b'{"a":1}\n')
+        assert crw.main(["--repo-root", str(fx.repo), "--json"]) == 0
+        assert plain.exists() and not plain.with_name("d1.ndjson.gz").exists()
+
+    def test_a_raising_compressor_keeps_exit_code_and_work_and_logs_one_line(self, fx, monkeypatch, tmp_path, capsys):
+        import event_archive_compress
+
+        def boom(*_args, **_kwargs):
+            raise PermissionError("archief onleesbaar")
+
+        monkeypatch.setattr(event_archive_compress, "compress_archive_round", boom)
+        plain = self._archive(tmp_path, "d1", b'{"a":1}\n')
+        _, err = self._released(fx, monkeypatch, tmp_path, capsys)  # asserts rc 0 and the release
+        assert "archiefcompressie mislukt: PermissionError: archief onleesbaar" in err
+        assert plain.exists()
+
+    def test_a_divergent_pair_is_logged_and_kept(self, fx, monkeypatch, tmp_path, capsys):
+        plain = self._archive(tmp_path, "d1", b"one\n")
+        gz = plain.with_name("d1.ndjson.gz")
+        gz.write_bytes(gzip.compress(b"other\n"))
+        _, err = self._released(fx, monkeypatch, tmp_path, capsys)
+        assert f"divergent paar blijft staan: {plain} {gz}" in err
+        assert plain.read_bytes() == b"one\n" and gzip.decompress(gz.read_bytes()) == b"other\n"

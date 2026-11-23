@@ -9,7 +9,7 @@
 set -euo pipefail
 
 REPO_ROOT="${VNX_AGGREGATOR_REPO_ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}"
-AGG_DIR="${VNX_AGGREGATOR_DIR:-$HOME/.vnx-aggregator}"
+AGG_DIR="$HOME/.vnx-aggregator"
 LOG_DIR="$AGG_DIR/logs"
 LOG_FILE="$LOG_DIR/refresh.log"
 

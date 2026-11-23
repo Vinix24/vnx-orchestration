@@ -480,3 +480,145 @@ class TestContractFlowDispatchIdTopLevel:
 
         assert "dispatch_id" in payload, "dispatch_id must always be present in ci_gate contract payload"
         assert payload["dispatch_id"] == ""
+
+
+# ---------------------------------------------------------------------------
+# reviews-zonder-uitkomst D4, step 0: does a run started outside the obligation
+# runner count on the obligation record (head_runs)?
+# ---------------------------------------------------------------------------
+
+HEAD_D4 = "ab" * 20
+DEGENERATE_D4 = {"gate": "codex_gate", "pr_number": 7, "status": "unavailable", "reason": "gate_execution_degenerate"}
+
+
+def _d4_request(env, dispatch_id, head=HEAD_D4):
+    (env["requests_dir"] / "pr-7-codex_gate.json").write_text(json.dumps({
+        "gate": "codex_gate", "pr_number": 7, "status": "requested", "commit_sha": head, "dispatch_id": dispatch_id,
+    }))
+
+
+def _d4_obligation(env, dispatch_id="d4-step0"):
+    import gate_obligations
+
+    return gate_obligations.register_obligation(
+        env["state_dir"], dispatch_id=dispatch_id, gate="codex_gate", pr_number=7, branch="fix/step0",
+    )
+
+
+def _d4_run(env, result=DEGENERATE_D4):
+    """One execute_gate by hand, the reviewer patched to ``result``; returns the GateRunner.run mock."""
+    with patch("gate_runner.GateRunner.run", return_value=dict(result)) as run:
+        _make_manager().execute_gate(gate="codex_gate", pr_number=7)
+    return run
+
+
+class TestRequestAndExecuteCountsOnTheObligation:
+    """D4a: a run counts on its obligation where it launches, execute_gate, whoever started it."""
+
+    @pytest.fixture(autouse=True)
+    def _cwd(self, manager_env, monkeypatch):
+        monkeypatch.chdir(manager_env["project_root"])
+
+    def test_a_reviewer_run_outside_the_runner_updates_head_runs(self, manager_env):
+        obligation = _d4_obligation(manager_env)
+        _d4_request(manager_env, "d4-step0")
+        _d4_run(manager_env)
+
+        head_runs = json.loads(obligation.read_text()).get("head_runs") or {}
+        assert head_runs.get("head_sha") == HEAD_D4
+        assert head_runs.get("reviewer_runs") == 1
+
+    def test_two_degenerate_runs_by_hand_cap_the_obligation_and_a_third_still_runs(self, manager_env):
+        obligation = _d4_obligation(manager_env)
+        _d4_request(manager_env, "d4-step0")
+        _d4_run(manager_env)
+        _d4_run(manager_env)
+        record = json.loads(obligation.read_text())
+        assert record["reason"] == "degenerate_retry_cap" and record["status"] == "pending"
+        assert HEAD_D4[:8] in record["reason_detail"]
+
+        assert _d4_run(manager_env).call_count == 1, "execute_gate counts, it refuses nothing at the cap"
+        assert json.loads(obligation.read_text())["head_runs"]["reviewer_runs"] == 3
+
+    def test_a_quota_refusal_does_not_count_and_a_new_head_starts_at_one(self, manager_env):
+        obligation = _d4_obligation(manager_env)
+        _d4_request(manager_env, "d4-step0")
+        _d4_run(manager_env, {**DEGENERATE_D4, "reason": "lane_exhausted"})
+        assert "head_runs" not in json.loads(obligation.read_text())
+        _d4_run(manager_env)
+        _d4_request(manager_env, "d4-step0", head="cd" * 20)
+        _d4_run(manager_env)
+        assert json.loads(obligation.read_text())["head_runs"]["reviewer_runs"] == 1
+
+    def test_a_lane_that_rewrites_the_dispatch_id_still_counts_on_the_original(self, manager_env):
+        obligation = _d4_obligation(manager_env)
+
+        def harness_run(*, request_payload, **_ignored):
+            request_payload["dispatch_id"] = "gate-glm_gate-pr7-generated"  # as _run_harness_lane_path does
+            return dict(DEGENERATE_D4)
+
+        for expected in (1, 2):
+            _d4_request(manager_env, "d4-step0")
+            with patch("gate_runner.GateRunner.run", side_effect=harness_run):
+                _make_manager().execute_gate(gate="codex_gate", pr_number=7)
+            assert json.loads(obligation.read_text()).get("head_runs", {}).get("reviewer_runs") == expected
+        assert json.loads(obligation.read_text())["reason"] == "degenerate_retry_cap"
+
+    @pytest.mark.parametrize("dispatch_id", ["", "d4-other", "../d4-step0", "/tmp/d4-step0"])
+    def test_no_dispatch_id_no_obligation_or_an_unsafe_id_writes_nothing(self, manager_env, dispatch_id):
+        obligation = _d4_obligation(manager_env)
+        before = obligation.read_text()
+        _d4_request(manager_env, dispatch_id)
+        _d4_run(manager_env)
+        assert obligation.read_text() == before
+        assert sorted(p.name for p in obligation.parent.iterdir()) == ["d4-step0.json"]
+
+    def test_an_unreadable_obligation_counts_nothing_and_is_logged(self, manager_env, caplog):
+        obligation = _d4_obligation(manager_env)
+        obligation.write_text("{not json")
+        _d4_request(manager_env, "d4-step0")
+        with caplog.at_level("WARNING", logger="gate_run_guard"):
+            _d4_run(manager_env)
+        assert obligation.read_text() == "{not json"
+        assert "unreadable" in caplog.text and "not counted" in caplog.text
+
+    def test_a_run_through_the_obligation_runner_is_counted_once(self, manager_env, monkeypatch):
+        import gate_obligation_runner as runner
+        import review_gate_manager as rgm
+
+        for name in ("VNX_REVIEW_GATE_TAKEOVER_CHAIN", "VNX_OVERRIDE_VNX_REVIEW_GATE_TAKEOVER_CHAIN"):
+            monkeypatch.delenv(name, raising=False)
+        obligation = _d4_obligation(manager_env, "d4-runner")
+        manager = _make_manager()
+
+        def request_and_execute(*, pr_number, dispatch_id="", **_ignored):
+            _d4_request(manager_env, dispatch_id)
+            manager.execute_gate(gate="codex_gate", pr_number=pr_number)
+            return {"gates": [], "has_required_failure": False}
+
+        runs = []
+
+        def degenerate_run(self, *, gate, pr_number, **_ignored):
+            runs.append(gate)
+            record = {**DEGENERATE_D4, "commit_sha": HEAD_D4, "dispatch_id": "d4-runner"}
+            manager._result_path(gate, pr_number).write_text(json.dumps(record))
+            return record
+
+        monkeypatch.setattr(manager, "request_and_execute", request_and_execute)
+        monkeypatch.setattr(rgm, "_compute_changed_files", lambda branch: [])
+        monkeypatch.setattr(runner, "_build_manager", lambda state_dir: manager)
+        monkeypatch.setattr(runner, "_branch_from_github", lambda pr, owner_repo, snapshot=None: None)
+        monkeypatch.setattr(runner, "_resolve_github_owner_repo", lambda state_dir: "Vinix24/vnx-orchestration")
+        monkeypatch.setattr(runner, "_new_github_snapshot", lambda owner_repo: None)
+        monkeypatch.setattr(runner, "_get_pr_head_sha_for_gate", lambda pr_number: HEAD_D4)
+        monkeypatch.setattr(runner, "_pr_state_from_github", lambda pr_number, owner_repo, snapshot=None: "OPEN")
+        monkeypatch.setattr(runner, "_list_open_prs", lambda owner_repo: {"prs": [], "suspect": False})
+        with patch("gate_runner.GateRunner.run", degenerate_run):
+            first = runner.run(manager_env["state_dir"])["outcomes"][0]
+            assert json.loads(obligation.read_text())["head_runs"]["reviewer_runs"] == 1, "counted once"
+            second = runner.run(manager_env["state_dir"])["outcomes"][0]
+
+        assert runs == ["codex_gate", "codex_gate"], "both runs went through execute_gate"
+        assert (first["action"], second["action"]) == ("pending", "retry_capped")
+        record = json.loads(obligation.read_text())
+        assert record["head_runs"]["reviewer_runs"] == 2 and record["reason"] == "degenerate_retry_cap"

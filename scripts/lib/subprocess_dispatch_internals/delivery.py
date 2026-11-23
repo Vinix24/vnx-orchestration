@@ -164,35 +164,6 @@ def _resolve_agent_cwd_and_log_profile(role: str | None) -> "Path | None":
     return agent_cwd
 
 
-def _load_resume_session(terminal_id: str) -> "str | None":
-    """Load prior session ID for --resume when VNX_SESSION_RESUME=1."""
-    if os.environ.get("VNX_SESSION_RESUME", "0") != "1":
-        return None
-    try:
-        from session_store import SessionStore as _SessionStore
-        resume_session = _SessionStore().load(terminal_id)
-        if resume_session:
-            logger.info(
-                "deliver_via_subprocess: resuming %s with session_id=%s",
-                terminal_id, resume_session,
-            )
-        return resume_session
-    except Exception as _exc:
-        logger.debug("deliver_via_subprocess: session load failed: %s", _exc)
-        return None
-
-
-def _save_resume_session(terminal_id: str, session_id: str, dispatch_id: str) -> None:
-    """Persist session_id for next dispatch's --resume (success path only)."""
-    if not session_id or os.environ.get("VNX_SESSION_RESUME", "0") != "1":
-        return
-    try:
-        from session_store import SessionStore as _SessionStore
-        _SessionStore().save(terminal_id, session_id, dispatch_id=dispatch_id)
-    except Exception as _exc:
-        logger.debug("deliver_via_subprocess: session save failed: %s", _exc)
-
-
 def _start_heartbeat(
     terminal_id: str,
     dispatch_id: str,
@@ -356,30 +327,8 @@ def deliver_via_subprocess(
         dispatch_paths=dispatch_paths, pr_id=pr_id, skill=skill,
     )
 
-    resume_session = _load_resume_session(terminal_id)
-    extra_env = _build_worker_identity_env(terminal_id)
-
-    # PR-6.5e: per-worker state directory for N-worker isolation.
-    from vnx_paths import resolve_worker_state_dir
-    worker_state_dir = resolve_worker_state_dir(terminal_id)
-    extra_env["VNX_WORKER_STATE_DIR"] = str(worker_state_dir)
-
-    # OI-1886: the tmux lane's VNX_WORKER_ROLE / VNX_DISPATCH_PATHS export
-    # (TmuxInteractiveDispatch._spawn_session) never had an equivalent here —
-    # this lane's docstring claimed to mirror it but never did. Re-derive both
-    # from this call's own role/dispatch_paths params via the shared setters
-    # (dispatch_identity.normalize_role, worker_permissions.dispatch_paths_env_value)
-    # so the PreToolUse worker-scope hook resolves the real role and, when this
-    # dispatch declared paths, narrows write scope to them.
-    from dispatch_identity import normalize_role
-    from worker_permissions import dispatch_paths_env_value
-
-    _resolved_role = normalize_role(role)
-    if _resolved_role:
-        extra_env["VNX_WORKER_ROLE"] = _resolved_role
-    _dp_env = dispatch_paths_env_value(dispatch_paths)
-    if _dp_env is not None:
-        extra_env["VNX_DISPATCH_PATHS"] = _dp_env
+    resume_session = None  # a prior session is never resumed
+    extra_env = _build_spawn_env(terminal_id, role, dispatch_paths)
 
     # Mutable cell so the silence heartbeat thread can access the adapter
     # reference after spawn_claude() has started the subprocess.
@@ -435,48 +384,9 @@ def deliver_via_subprocess(
         # kill the worker process on silence timeout (OI-944 / OI-1007).
         process_cell[0] = spawn_result
 
-        if spawn_result.token_usage:
-            _dispatch_token_usage[dispatch_id] = spawn_result.token_usage
-        if spawn_result.completion_text:
-            _dispatch_completion_text[dispatch_id] = spawn_result.completion_text
-
-        # --- completion classification (mirrors _classify_completion) ---
-        session_id = spawn_result.session_id
-        event_count = spawn_result.events_written
-        rotation_triggered = rotation_triggered_box[0]
-
-        if rotation_triggered:
-            completed = _sd._promote_manifest(dispatch_id)
-            return _SubprocessResult(
-                success=False, session_id=session_id, event_count=event_count,
-                manifest_path=completed or manifest_path,
-                touched_files=frozenset(touched_files),
-            )
-
-        if spawn_result.returncode != 0 or spawn_result.timed_out:
-            if spawn_result.timed_out:
-                logger.warning(
-                    "deliver_via_subprocess: timeout-terminated dispatch %s for %s — fail-closed",
-                    dispatch_id, terminal_id,
-                )
-            else:
-                logger.warning(
-                    "deliver_via_subprocess: subprocess exited %d for %s — fail-closed",
-                    spawn_result.returncode, terminal_id,
-                )
-            return _SubprocessResult(
-                success=False, session_id=session_id, event_count=event_count,
-                manifest_path=manifest_path, spawn_refused=getattr(spawn_result, "spawn_refused", None),
-                touched_files=frozenset(touched_files),
-            )
-
-        completed = _sd._promote_manifest(dispatch_id, stage="completed")
-        _save_resume_session(terminal_id, session_id or "", dispatch_id)
-        _mark_handover_processed(pending_handover)
-        return _SubprocessResult(
-            success=True, session_id=session_id, event_count=event_count,
-            manifest_path=completed or manifest_path,
-            touched_files=frozenset(touched_files),
+        return _classify_spawn_result(
+            spawn_result, terminal_id, dispatch_id, manifest_path,
+            pending_handover, touched_files, rotation_triggered_box[0],
         )
 
     finally:
@@ -486,29 +396,121 @@ def deliver_via_subprocess(
             heartbeat_thread.join(timeout=5)
         # Stop the silence heartbeat thread.
         _stop_silence_heartbeat(silence_stop, silence_thread)
-        # Event archive + report-pipeline trigger using the same adapter instance
-        # that ran the dispatch (via spawn_result._adapter).  This preserves
-        # session_id in the trigger file — byte-identical with the pre-4.6.2 path.
-        # Fall back to a fresh adapter if spawn_result is undefined (rare exception path).
-        try:
-            _cleanup_adapter = (
-                spawn_result._adapter
-                if spawn_result is not None and spawn_result._adapter is not None
-                else _sd.SubprocessAdapter()
+        _archive_events_and_trigger_report(spawn_result, terminal_id, dispatch_id, agent_cwd)
+
+
+def _build_spawn_env(
+    terminal_id: str, role: str | None, dispatch_paths: "list[str] | None",
+) -> dict:
+    """Build the extra env for spawn_claude: identity, worker state dir, role, paths."""
+    extra_env = _build_worker_identity_env(terminal_id)
+
+    # PR-6.5e: per-worker state directory for N-worker isolation.
+    from vnx_paths import resolve_worker_state_dir
+    worker_state_dir = resolve_worker_state_dir(terminal_id)
+    extra_env["VNX_WORKER_STATE_DIR"] = str(worker_state_dir)
+
+    # OI-1886: the tmux lane's VNX_WORKER_ROLE / VNX_DISPATCH_PATHS export
+    # (TmuxInteractiveDispatch._spawn_session) never had an equivalent here —
+    # this lane's docstring claimed to mirror it but never did. Re-derive both
+    # from this call's own role/dispatch_paths params via the shared setters
+    # (dispatch_identity.normalize_role, worker_permissions.dispatch_paths_env_value)
+    # so the PreToolUse worker-scope hook resolves the real role and, when this
+    # dispatch declared paths, narrows write scope to them.
+    from dispatch_identity import normalize_role
+    from worker_permissions import dispatch_paths_env_value
+
+    _resolved_role = normalize_role(role)
+    if _resolved_role:
+        extra_env["VNX_WORKER_ROLE"] = _resolved_role
+    _dp_env = dispatch_paths_env_value(dispatch_paths)
+    if _dp_env is not None:
+        extra_env["VNX_DISPATCH_PATHS"] = _dp_env
+    return extra_env
+
+
+def _classify_spawn_result(
+    spawn_result,
+    terminal_id: str,
+    dispatch_id: str,
+    manifest_path,
+    pending_handover,
+    touched_files: "set[str]",
+    rotation_triggered: bool,
+) -> _SubprocessResult:
+    """Record token usage/completion text and map the spawn outcome to a result."""
+    import subprocess_dispatch as _sd
+    if spawn_result.token_usage:
+        _dispatch_token_usage[dispatch_id] = spawn_result.token_usage
+    if spawn_result.completion_text:
+        _dispatch_completion_text[dispatch_id] = spawn_result.completion_text
+
+    # --- completion classification (mirrors _classify_completion) ---
+    session_id = spawn_result.session_id
+    event_count = spawn_result.events_written
+
+    if rotation_triggered:
+        completed = _sd._promote_manifest(dispatch_id)
+        return _SubprocessResult(
+            success=False, session_id=session_id, event_count=event_count,
+            manifest_path=completed or manifest_path,
+            touched_files=frozenset(touched_files),
+        )
+
+    if spawn_result.returncode != 0 or spawn_result.timed_out:
+        if spawn_result.timed_out:
+            logger.warning(
+                "deliver_via_subprocess: timeout-terminated dispatch %s for %s — fail-closed",
+                dispatch_id, terminal_id,
             )
-            event_store = _cleanup_adapter.event_store
-            if event_store is not None:
-                try:
-                    event_store.clear(terminal_id, archive_dispatch_id=dispatch_id)
-                except Exception as _exc:
-                    logger.debug(
-                        "deliver_via_subprocess: event archive+clear failed: %s", _exc,
-                    )
-            _cleanup_adapter.trigger_report_pipeline(
-                terminal_id, dispatch_id,
-                cwd=str(agent_cwd) if agent_cwd is not None else None,
+        else:
+            logger.warning(
+                "deliver_via_subprocess: subprocess exited %d for %s — fail-closed",
+                spawn_result.returncode, terminal_id,
             )
-        except Exception as _exc:
-            logger.debug(
-                "deliver_via_subprocess: cleanup adapter failed: %s", _exc,
-            )
+        return _SubprocessResult(
+            success=False, session_id=session_id, event_count=event_count,
+            manifest_path=manifest_path, spawn_refused=getattr(spawn_result, "spawn_refused", None),
+            touched_files=frozenset(touched_files),
+        )
+
+    completed = _sd._promote_manifest(dispatch_id, stage="completed")
+    _mark_handover_processed(pending_handover)
+    return _SubprocessResult(
+        success=True, session_id=session_id, event_count=event_count,
+        manifest_path=completed or manifest_path,
+        touched_files=frozenset(touched_files),
+    )
+
+
+def _archive_events_and_trigger_report(
+    spawn_result, terminal_id: str, dispatch_id: str, agent_cwd,
+) -> None:
+    """Archive the event stream and trigger the report pipeline (never raises)."""
+    import subprocess_dispatch as _sd
+    # Event archive + report-pipeline trigger using the same adapter instance
+    # that ran the dispatch (via spawn_result._adapter).  This preserves
+    # session_id in the trigger file — byte-identical with the pre-4.6.2 path.
+    # Fall back to a fresh adapter if spawn_result is undefined (rare exception path).
+    try:
+        _cleanup_adapter = (
+            spawn_result._adapter
+            if spawn_result is not None and spawn_result._adapter is not None
+            else _sd.SubprocessAdapter()
+        )
+        event_store = _cleanup_adapter.event_store
+        if event_store is not None:
+            try:
+                event_store.clear(terminal_id, archive_dispatch_id=dispatch_id)
+            except Exception as _exc:
+                logger.debug(
+                    "deliver_via_subprocess: event archive+clear failed: %s", _exc,
+                )
+        _cleanup_adapter.trigger_report_pipeline(
+            terminal_id, dispatch_id,
+            cwd=str(agent_cwd) if agent_cwd is not None else None,
+        )
+    except Exception as _exc:
+        logger.debug(
+            "deliver_via_subprocess: cleanup adapter failed: %s", _exc,
+        )

@@ -1,1 +1,0 @@
-- The governance override record now carries project_id and delivery_id (unknown when missing) in metadata_json, and the B3-cap override books one such record per capped PR next to its round-ledger line (zelfst PR-4).

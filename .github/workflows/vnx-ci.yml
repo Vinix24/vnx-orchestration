@@ -4,10 +4,29 @@ on:
   push:
     branches: ["main", "baseline/**"]
   pull_request:
+  # The way back without touching the repository variable (C3, criterion 7):
+  # xdist_off does what VNX_CI_XDIST=0 does. "xdist off" is the one expression
+  # ((vars.VNX_CI_XDIST || '1') == '0' || inputs.xdist_off), in the shard `if:`, the
+  # aggregator's timeout and its --xdist-off flag. An unset variable is null, and
+  # `null == '0'` is true (GitHub compares mixed types as numbers, 0 == 0), so
+  # the variable is read through `|| '1'` (run 44234967120 skipped every shard).
+  workflow_dispatch:
+    inputs:
+      xdist_off:
+        description: "Serial sweep: the shards skip, the aggregator runs the whole tree"
+        type: boolean
+        default: false
 
 jobs:
+  # Profile A since C3 (track pr-ci-onder-zes-minuten): four shards and a guards
+  # job, and this aggregator, which keeps the required check name and is green
+  # only on positive evidence (scripts/ci/profile_a_aggregate.py decide, then
+  # the completeness over the four shards). ADR C3a (#2987) allows a blocking
+  # check in a job the required check needs and requires `success` of.
   profile-a:
     name: Profile A (doctor + core tests)
+    needs: [profile-a-shard-1, profile-a-shard-2, profile-a-shard-3, profile-a-shard-4, profile-a-guards]
+    if: ${{ always() }}
     # Pinned to the 24.04 image deliberately (2026-10-30): the moving
     # `latest` runner label was bumped to the 26.04 image, which turned main
     # red on run 41079080194 — four profile-a suites died inside `install-central`
@@ -17,21 +36,13 @@ jobs:
     # pin. OI "Main-CI rood door runner-image" holds the way back to the
     # moving label.
     runs-on: ubuntu-24.04
-    # Bounds a hung job to minutes instead of GitHub's 6-hour hard runner
-    # limit. Measured baseline over 6 completed runs (18-08/19-08 2026):
-    # 16-21 min end to end; by 2026-10-16 the suite had doubled (run
-    # 38911196655 on b39838cf: 35.4 min, pytest 2089 s). D4 switched Profile A
-    # to the two-phase xdist shape and set this from the merge window it lands
-    # on: `xdist_parity_history.py --last-d3-merge 983c944f` reads 23 in-window
-    # runs, all exit 0, and the longest shadow suite wall time is 1134 s (run
-    # 41827919472 on 65b7aa65, 2026-11-04), so 2 x 1134 s = 2268 s = 37.8 min,
-    # rounded up to whole minutes: 38. Still the vangnet for whatever hangs
-    # next, not a fix for the apt-mirror hang fixed in the prelude.
-    # VNX_CI_XDIST=0 is the way back to the serial sweep; on main that shape
-    # takes 52 to 54.8 minutes (OI-2523), so that branch gets 80 (OI-2525) --
-    # the bridge D3c (#2378) set on 2026-11-03, kept as the rollback's bound
-    # now that D4 sizes the xdist branch from the measured window.
-    timeout-minutes: ${{ vars.VNX_CI_XDIST == '0' && 80 || 38 }}
+    # Xdist off is the way back to the serial sweep in this one job; on main
+    # that shape takes 52 to 54.8 minutes (OI-2523), so it gets 80 (OI-2525),
+    # the bridge D3c (#2378) set on 2026-11-03. Otherwise the job only reads
+    # the shards' evidence (or runs the four light docs tests): 15.
+    # An unset repository variable is null, and null == '0' is true in Actions
+    # (mixed types compare as numbers), so the variable is read through `|| '1'`.
+    timeout-minutes: ${{ ((vars.VNX_CI_XDIST || '1') == '0' || inputs.xdist_off) && 80 || 15 }}
 
     steps:
       - name: Checkout
@@ -49,6 +60,181 @@ jobs:
       # VNX paths, the profile classifier and the doctor: one composite action
       # shared with the nightly serial truth, so the two never run against a
       # different tool set. Fatal here, as each of those steps was before.
+      - name: Profile A prelude
+        id: prelude
+        uses: ./.github/actions/profile-a-prelude
+
+      # The shards' artifacts, each into shard-k/. Non-fatal: a missing
+      # artifact reaches the decision below as "shard k: no evidence".
+      - name: Download the shard evidence
+        if: ${{ steps.prelude.outputs.profile == 'heavy' }}
+        continue-on-error: true
+        timeout-minutes: 2
+        uses: actions/download-artifact@v4
+        with:
+          pattern: profile-a-shard-*
+          path: ${{ runner.temp }}/profile-a-shards
+
+      - name: Place the shard evidence under shard-k
+        if: ${{ steps.prelude.outputs.profile == 'heavy' }}
+        env:
+          PROFILE_A_EVIDENCE: ${{ runner.temp }}/profile-a-evidence
+        run: |
+          set -euo pipefail
+          mkdir -p "$PROFILE_A_EVIDENCE"
+          for k in 1 2 3 4; do
+            if [ -d "$RUNNER_TEMP/profile-a-shards/profile-a-shard-$k" ]; then
+              mv "$RUNNER_TEMP/profile-a-shards/profile-a-shard-$k" "$PROFILE_A_EVIDENCE/shard-$k"
+            fi
+          done
+
+      # Green only on positive evidence; exit 1 and 2 end the job red. The mode
+      # picks the one step below that runs.
+      - name: Profile A aggregate decision
+        id: aggregate
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+          XDIST_OFF: ${{ ((vars.VNX_CI_XDIST || '1') == '0' || inputs.xdist_off) && 'true' || 'false' }}
+          CI_PROFILE: ${{ steps.prelude.outputs.profile }}
+          PROFILE_A_EVIDENCE: ${{ runner.temp }}/profile-a-evidence
+        run: |
+          set -euo pipefail
+          mkdir -p "$PROFILE_A_EVIDENCE"
+          printf '%s' "$NEEDS_JSON" > "$RUNNER_TEMP/needs.json"
+          case "$XDIST_OFF" in
+            true) xdist_off=(--xdist-off) ;;
+            false) xdist_off=() ;;
+            *) echo "xdist off is '$XDIST_OFF', not true or false" >&2; exit 2 ;;
+          esac
+          python3 "$GITHUB_WORKSPACE/scripts/ci/profile_a_aggregate.py" decide \
+            --needs "$RUNNER_TEMP/needs.json" \
+            --shard-jobs profile-a-shard-1,profile-a-shard-2,profile-a-shard-3,profile-a-shard-4 \
+            --guards-job profile-a-guards \
+            --profile "$CI_PROFILE" \
+            --evidence-root "$PROFILE_A_EVIDENCE" \
+            ${xdist_off[@]+"${xdist_off[@]}"} \
+            --output "$PROFILE_A_EVIDENCE/aggregate-verdict.json" \
+            --summary "${GITHUB_STEP_SUMMARY:-/dev/null}" > "$RUNNER_TEMP/aggregate-mode"
+          mode="$(cat "$RUNNER_TEMP/aggregate-mode")"
+          case "$mode" in
+            mode=light|mode=sharded|mode=serial) echo "$mode" >> "$GITHUB_OUTPUT" ;;
+            *) echo "profile_a_aggregate printed '$mode', not a mode" >&2; exit 2 ;;
+          esac
+
+      # Docs-only PR (classify_ci_profile.py "light"): the doctor ran in the
+      # prelude; these four stdlib-only doc tests (links, archive, SUBSYSTEMS.md,
+      # unique ADR numbers) also run in the full sweep. Also with xdist off.
+      - name: Profile A light route (docs-only PR)
+        id: light
+        if: ${{ steps.aggregate.outputs.mode == 'light' || (steps.aggregate.outputs.mode == 'serial' && steps.prelude.outputs.profile == 'light') }}
+        run: |
+          set -euo pipefail
+          pytest -q \
+            "$GITHUB_WORKSPACE/tests/test_docs_index.py" \
+            "$GITHUB_WORKSPACE/tests/test_docs_archive.py" \
+            "$GITHUB_WORKSPACE/tests/test_subsystems_md_exists.py" \
+            "$GITHUB_WORKSPACE/tests/test_adr_numbers_unique.py" \
+            -p no:cacheprovider
+
+      # Nothing may be dropped (no continue-on-error): a test in no shard or in
+      # two, a test run twice, collections or sources that differ per shard, a
+      # failed collection or an unrecorded skip fails the job.
+      - name: Check the xdist completeness (required)
+        id: completeness
+        if: ${{ steps.aggregate.outputs.mode == 'sharded' }}
+        env:
+          VNX_HOME: ${{ steps.prelude.outputs.vnx-home }}
+          VNX_DATA_DIR: ${{ steps.prelude.outputs.vnx-data-dir }}
+          PROFILE_A_EVIDENCE: ${{ runner.temp }}/profile-a-evidence
+        run: |
+          set -euo pipefail
+          python3 "$GITHUB_WORKSPACE/scripts/ci/check_xdist_parity.py" completeness \
+            --shard-dir "$PROFILE_A_EVIDENCE/shard-1" --shard-dir "$PROFILE_A_EVIDENCE/shard-2" \
+            --shard-dir "$PROFILE_A_EVIDENCE/shard-3" --shard-dir "$PROFILE_A_EVIDENCE/shard-4" \
+            --constraints "$GITHUB_WORKSPACE/scripts/ci/profile_a_constraints.txt" \
+            --expected-skips "$GITHUB_WORKSPACE/scripts/ci/xdist_expected_skips.txt" \
+            --output "$PROFILE_A_EVIDENCE/xdist-completeness-verdict.json" \
+            --summary "${GITHUB_STEP_SUMMARY:-/dev/null}" \
+            --head-sha "${{ github.event.pull_request.head.sha || github.sha }}" \
+            --tested-sha "$GITHUB_SHA" \
+            --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --event "$GITHUB_EVENT_NAME" --ref "$GITHUB_REF_NAME"
+
+      # Xdist off: the serial whole-tree sweep in this one job, with the one
+      # selection the nightly serial truth uses too. VNX_CI_XDIST is set here
+      # so the workflow_dispatch input reaches the selection as well.
+      - name: Profile A serial sweep (xdist off)
+        id: serial-sweep
+        if: ${{ steps.aggregate.outputs.mode == 'serial' && steps.prelude.outputs.profile == 'heavy' }}
+        env:
+          VNX_HOME: ${{ steps.prelude.outputs.vnx-home }}
+          VNX_DATA_DIR: ${{ steps.prelude.outputs.vnx-data-dir }}
+          VNX_CI_XDIST: "0"
+          PROFILE_A_EVIDENCE: ${{ runner.temp }}/profile-a-evidence
+        run: |
+          set -euo pipefail
+          bash "$GITHUB_WORKSPACE/scripts/ci/profile_a_pytest_args.sh" "$PROFILE_A_EVIDENCE/args"
+          bash "$GITHUB_WORKSPACE/scripts/ci/profile_a_run_phase.sh" full "$PROFILE_A_EVIDENCE"
+
+      # ADR-074 besluit 15: the impact shadow. It holds the selector's choice
+      # against this run's evidence and decides nothing. It can never turn the
+      # job red: the script exits 0 on every path and the step is
+      # continue-on-error. Not part of any required check.
+      - name: Impact shadow record (never fails the job)
+        id: impact-shadow
+        if: ${{ always() && steps.prelude.outputs.profile != 'light' }}
+        continue-on-error: true
+        timeout-minutes: 4
+        env:
+          VNX_HOME: ${{ steps.prelude.outputs.vnx-home }}
+          VNX_DATA_DIR: ${{ steps.prelude.outputs.vnx-data-dir }}
+          PROFILE_A_EVIDENCE: ${{ runner.temp }}/profile-a-evidence
+        run: bash "$GITHUB_WORKSPACE/scripts/ci/impact_shadow_step.sh" "$PROFILE_A_EVIDENCE" "$RUNNER_TEMP/impact-shadow"
+
+      - name: Upload the impact shadow record
+        if: ${{ always() && steps.prelude.outputs.profile != 'light' }}
+        continue-on-error: true
+        timeout-minutes: 4
+        uses: actions/upload-artifact@v4
+        with:
+          name: impact-shadow
+          path: ${{ runner.temp }}/impact-shadow/
+          if-no-files-found: warn
+          overwrite: true
+
+      # OI-1420: state how much of the tree the sweep skips, non-fatally.
+      - name: Test exclusions coverage summary
+        if: ${{ always() }}
+        continue-on-error: true
+        run: python3 "$GITHUB_WORKSPACE/scripts/ci/check_test_exclusions.py" "$GITHUB_WORKSPACE" --summary | tee -a "${GITHUB_STEP_SUMMARY:-/dev/null}"
+
+      # Evidence, also when the suite is red. Non-fatal: an artifact-service
+      # hiccup must not turn this required job red.
+      - name: Upload Profile A evidence (JUnit XML + manifest + completeness verdict)
+        if: ${{ always() && steps.prelude.outputs.profile != 'light' }}
+        continue-on-error: true
+        timeout-minutes: 4
+        uses: actions/upload-artifact@v4
+        with:
+          name: profile-a-evidence
+          path: ${{ runner.temp }}/profile-a-evidence/
+          if-no-files-found: warn
+          overwrite: true
+
+  # The blocking guards of Profile A, in every mode (light included), next to
+  # the shards. The aggregator needs this job and requires its `success`
+  # (ADR C3a, #2987).
+  profile-a-guards:
+    name: Profile A guards
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
       - name: Profile A prelude
         id: prelude
         uses: ./.github/actions/profile-a-prelude
@@ -73,136 +259,6 @@ jobs:
             echo "Legacy path literals detected. Use VNX_STATE_DIR via vnx_paths."
             exit 1
           fi
-
-      - name: Run Profile A (scope-appropriate suite)
-        id: suite
-        env:
-          VNX_HOME: ${{ steps.prelude.outputs.vnx-home }}
-          VNX_DATA_DIR: ${{ steps.prelude.outputs.vnx-data-dir }}
-          CI_PROFILE: ${{ steps.prelude.outputs.profile }}
-          # D4: the way back to fully serial is the repository variable
-          # VNX_CI_XDIST=0. Unset (the normal state) is the two-phase xdist
-          # shape; nothing else changes.
-          VNX_CI_XDIST: ${{ vars.VNX_CI_XDIST }}
-          PROFILE_A_EVIDENCE: ${{ runner.temp }}/profile-a-evidence
-        run: |
-          set -euo pipefail
-          if [ "$CI_PROFILE" = "light" ]; then
-            # Light profile — docs-only PR (classify_ci_profile.py returned
-            # "light"). The doctor already ran in the prelude; add only the doc
-            # link/lint checks that actually exercise documentation, then stop.
-            # Kept deliberately small and proven rather than a broad "doc-ish"
-            # sweep whose coverage nobody can bound:
-            #   * test_docs_index.py           — DOCS_INDEX.md links resolve and
-            #                                    no stale unreachable docs bloat
-            #   * test_docs_archive.py         — docs/_archive integrity and the
-            #                                    ARCHIVED_MANIFEST matches disk
-            #   * test_subsystems_md_exists.py — docs/core/SUBSYSTEMS.md SSOT
-            #   * test_adr_numbers_unique.py   — a docs-only PR can add a new
-            #                                    ADR-*.md; this catches a
-            #                                    duplicate number on disk (B6)
-            # All four are stdlib-only (no DB, no heavy deps) and also run in
-            # the full sweep, so they stay green on main.
-            pytest -q \
-              "$GITHUB_WORKSPACE/tests/test_docs_index.py" \
-              "$GITHUB_WORKSPACE/tests/test_docs_archive.py" \
-              "$GITHUB_WORKSPACE/tests/test_subsystems_md_exists.py" \
-              "$GITHUB_WORKSPACE/tests/test_adr_numbers_unique.py" \
-              -p no:cacheprovider
-            exit 0
-          fi
-
-          # Heavy profile. The selection — the --ignore list from
-          # scripts/ci/test_exclusions.txt (each entry red on main, OI-906, with
-          # the OI tracking its repair), the -k quarantine and the per-test
-          # timeout — lives in one script the nightly serial truth calls too.
-          # No shared --basetemp: a suite-wide shared basetemp broke tmp_path
-          # fixtures (see memory: read-only test dirs poison every later test
-          # file). The sweep targets $GITHUB_WORKSPACE/tests — the real
-          # checkout — NOT $VNX_HOME/tests: the vendored tree is an install
-          # artefact with no .git, so tests that resolve their repo root from
-          # __file__ break there en masse (measured 2026-08-02: 222 failed vs 25
-          # on the real checkout).
-          bash "$GITHUB_WORKSPACE/scripts/ci/profile_a_pytest_args.sh" "$PROFILE_A_EVIDENCE/args"
-          if [ -f "$PROFILE_A_EVIDENCE/args/full.args" ]; then
-            # VNX_CI_XDIST=0: the serial whole-tree sweep, one phase. It writes
-            # the same JUnit XML and collection manifest as before.
-            echo "mode=serial" >> "$GITHUB_OUTPUT"
-            echo "serial_active=false" >> "$GITHUB_OUTPUT"
-            bash "$GITHUB_WORKSPACE/scripts/ci/profile_a_run_phase.sh" full "$PROFILE_A_EVIDENCE"
-            exit 0
-          fi
-          echo "mode=xdist" >> "$GITHUB_OUTPUT"
-          if [ -f "$PROFILE_A_EVIDENCE/args/serial.args" ]; then
-            echo "serial_active=true" >> "$GITHUB_OUTPUT"
-          else
-            # Empty serial list: the phase is inactive and needs no XML.
-            echo "serial_active=false" >> "$GITHUB_OUTPUT"
-            python3 "$GITHUB_WORKSPACE/scripts/ci/pytest_collection_manifest.py" inactive \
-              --phase serial --output "$PROFILE_A_EVIDENCE/manifest-serial.json"
-          fi
-
-      - name: Profile A serial phase (serial list, xdist off)
-        id: serial
-        if: ${{ !cancelled() && steps.suite.outputs.mode == 'xdist' && steps.suite.outputs.serial_active == 'true' }}
-        env:
-          VNX_HOME: ${{ steps.prelude.outputs.vnx-home }}
-          VNX_DATA_DIR: ${{ steps.prelude.outputs.vnx-data-dir }}
-          PROFILE_A_EVIDENCE: ${{ runner.temp }}/profile-a-evidence
-        run: bash "$GITHUB_WORKSPACE/scripts/ci/profile_a_run_phase.sh" serial "$PROFILE_A_EVIDENCE"
-
-      - name: Profile A parallel phase (the rest, under pytest-xdist)
-        id: parallel
-        if: ${{ !cancelled() && steps.suite.outputs.mode == 'xdist' }}
-        env:
-          VNX_HOME: ${{ steps.prelude.outputs.vnx-home }}
-          VNX_DATA_DIR: ${{ steps.prelude.outputs.vnx-data-dir }}
-          PROFILE_A_EVIDENCE: ${{ runner.temp }}/profile-a-evidence
-        run: bash "$GITHUB_WORKSPACE/scripts/ci/profile_a_run_phase.sh" parallel "$PROFILE_A_EVIDENCE"
-
-      # The required check of the two-phase shape: nothing may be dropped. It
-      # reads this run's own manifests and XMLs plus the recorded skip set, and
-      # it fails the job (no continue-on-error) on a collected test that did
-      # not run, a test run twice, a broken partition, a failed collection or a
-      # skip that is not in scripts/ci/xdist_expected_skips.txt.
-      - name: Check the xdist completeness (required)
-        id: completeness
-        if: ${{ !cancelled() && steps.suite.outputs.mode == 'xdist' && steps.parallel.outcome == 'success' && (steps.suite.outputs.serial_active != 'true' || steps.serial.outcome == 'success') }}
-        env:
-          VNX_HOME: ${{ steps.prelude.outputs.vnx-home }}
-          VNX_DATA_DIR: ${{ steps.prelude.outputs.vnx-data-dir }}
-          PROFILE_A_EVIDENCE: ${{ runner.temp }}/profile-a-evidence
-        run: |
-          set -euo pipefail
-          python3 "$GITHUB_WORKSPACE/scripts/ci/check_xdist_parity.py" completeness \
-            --candidate "$PROFILE_A_EVIDENCE" \
-            --constraints "$GITHUB_WORKSPACE/scripts/ci/profile_a_constraints.txt" \
-            --expected-skips "$GITHUB_WORKSPACE/scripts/ci/xdist_expected_skips.txt" \
-            --output "$PROFILE_A_EVIDENCE/xdist-completeness-verdict.json" \
-            --summary "${GITHUB_STEP_SUMMARY:-/dev/null}" \
-            --head-sha "${{ github.event.pull_request.head.sha || github.sha }}" \
-            --tested-sha "$GITHUB_SHA" \
-            --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT" \
-            --event "$GITHUB_EVENT_NAME" --ref "$GITHUB_REF_NAME"
-
-      # OI-1420: state how much of the tree the sweep skips, non-fatally.
-      - name: Test exclusions coverage summary
-        if: ${{ always() }}
-        continue-on-error: true
-        run: python3 "$GITHUB_WORKSPACE/scripts/ci/check_test_exclusions.py" "$GITHUB_WORKSPACE" --summary | tee -a "${GITHUB_STEP_SUMMARY:-/dev/null}"
-
-      # Evidence, also when the suite is red. Non-fatal: an artifact-service
-      # hiccup must not turn this required job red.
-      - name: Upload Profile A evidence (JUnit XML + manifest + completeness verdict)
-        if: ${{ always() && steps.prelude.outputs.profile != 'light' }}
-        continue-on-error: true
-        timeout-minutes: 5
-        uses: actions/upload-artifact@v4
-        with:
-          name: profile-a-evidence
-          path: ${{ runner.temp }}/profile-a-evidence/
-          if-no-files-found: warn
-          overwrite: true
 
       - name: Side-door exhaustiveness audit
         env:
@@ -314,6 +370,180 @@ jobs:
             "$GITHUB_WORKSPACE/tests/test_status_vocab_drift.py" \
             -p no:cacheprovider \
             --basetemp=/tmp/vnx_pytest_safe
+
+  # Shard k of 4: its share of the parallel phase under 4 xdist workers, shard
+  # 1 also the serial list. One anchored step list; k is the job id's suffix.
+  # Light: only the prelude, `success` with outputs.profile == light. Timeout:
+  # C5: 2 x the longest shard (763.6 s, 12.7 min) over the last 30 heavy runs
+  # since the shard form landed (to run 44713236371), rounded up: 26 min.
+  profile-a-shard-1:
+    name: Profile A shard (1/4)
+    if: ${{ !((vars.VNX_CI_XDIST || '1') == '0' || inputs.xdist_off) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 26
+    permissions: {contents: read, actions: read}
+    outputs:
+      profile: ${{ steps.prelude.outputs.profile }}
+    steps: &profile-a-shard-steps
+      # Full history: any shard can draw test_pre_merge_gate.py::TestCheckPRSize,
+      # which pins real commit SHAs (OI-838).
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Profile A prelude
+        id: prelude
+        uses: ./.github/actions/profile-a-prelude
+
+      # The newest green main run created before this run: one source for all
+      # shards. Three tries, 10 s apart; none is the hash split, with a reason.
+      - name: Select the duration source
+        if: ${{ steps.prelude.outputs.profile == 'heavy' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          src="$RUNNER_TEMP/shard-source.json"
+          for attempt in 1 2 3; do
+            if created="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" --jq .created_at)" && [ -n "$created" ]; then
+              python3 "$GITHUB_WORKSPACE/scripts/ci/test_shard_plan.py" select-source --repo "$GITHUB_REPOSITORY" \
+                --workflow vnx-ci.yml --branch main --before "$created" --artifact profile-a-evidence \
+                --dest "$RUNNER_TEMP/shard-source-$attempt" > "$src" \
+                || printf '{"run_id": null, "junit": [], "reason": "select-source exit %s"}\n' "$?" > "$src"
+            else
+              printf '{"run_id": null, "junit": [], "reason": "created_at of run %s unreadable"}\n' "$GITHUB_RUN_ID" > "$src"
+            fi
+            grep -q '"run_id": null' "$src" || break
+            if [ "$attempt" -lt 3 ]; then sleep 10; fi
+          done
+          cat "$src"
+
+      - name: Profile A shard selection
+        id: args
+        if: ${{ steps.prelude.outputs.profile == 'heavy' }}
+        env:
+          VNX_HOME: ${{ steps.prelude.outputs.vnx-home }}
+          VNX_DATA_DIR: ${{ steps.prelude.outputs.vnx-data-dir }}
+          VNX_CI_XDIST: ${{ vars.VNX_CI_XDIST }}
+          PROFILE_A_EVIDENCE: ${{ runner.temp }}/profile-a-evidence
+        run: |
+          set -euo pipefail
+          k="${GITHUB_JOB##*-}"
+          VNX_CI_SHARD="$k/4" VNX_CI_SHARD_SOURCE="$RUNNER_TEMP/shard-source.json" \
+            bash "$GITHUB_WORKSPACE/scripts/ci/profile_a_pytest_args.sh" "$PROFILE_A_EVIDENCE/args"
+          if [ -f "$PROFILE_A_EVIDENCE/args/serial.args" ]; then
+            echo "serial_active=true" >> "$GITHUB_OUTPUT"
+          elif [ "$k" = 1 ]; then
+            # Empty serial list: the phase is inactive and needs no XML.
+            python3 "$GITHUB_WORKSPACE/scripts/ci/pytest_collection_manifest.py" inactive \
+              --phase serial --output "$PROFILE_A_EVIDENCE/manifest-serial.json"
+          fi
+
+      - name: Profile A serial phase (shard 1, xdist off)
+        if: ${{ !cancelled() && steps.args.outputs.serial_active == 'true' }}
+        env:
+          VNX_HOME: ${{ steps.prelude.outputs.vnx-home }}
+          VNX_DATA_DIR: ${{ steps.prelude.outputs.vnx-data-dir }}
+          PROFILE_A_EVIDENCE: ${{ runner.temp }}/profile-a-evidence
+        run: bash "$GITHUB_WORKSPACE/scripts/ci/profile_a_run_phase.sh" serial "$PROFILE_A_EVIDENCE"
+
+      - name: Profile A shard phase (its share, under pytest-xdist)
+        if: ${{ !cancelled() && steps.args.outcome == 'success' }}
+        env:
+          VNX_HOME: ${{ steps.prelude.outputs.vnx-home }}
+          VNX_DATA_DIR: ${{ steps.prelude.outputs.vnx-data-dir }}
+          PROFILE_A_EVIDENCE: ${{ runner.temp }}/profile-a-evidence
+        run: bash "$GITHUB_WORKSPACE/scripts/ci/profile_a_run_phase.sh" shard "$PROFILE_A_EVIDENCE"
+
+      # Non-fatal: the aggregator names a missing artifact as missing evidence.
+      - name: Upload the shard evidence
+        if: ${{ always() && steps.prelude.outputs.profile == 'heavy' }}
+        continue-on-error: true
+        timeout-minutes: 5
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ github.job }}
+          path: ${{ runner.temp }}/profile-a-evidence/
+          if-no-files-found: warn
+          overwrite: true
+
+  profile-a-shard-2:
+    name: Profile A shard (2/4)
+    if: ${{ !((vars.VNX_CI_XDIST || '1') == '0' || inputs.xdist_off) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 26
+    permissions: {contents: read, actions: read}
+    outputs:
+      profile: ${{ steps.prelude.outputs.profile }}
+    steps: *profile-a-shard-steps
+
+  profile-a-shard-3:
+    name: Profile A shard (3/4)
+    if: ${{ !((vars.VNX_CI_XDIST || '1') == '0' || inputs.xdist_off) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 26
+    permissions: {contents: read, actions: read}
+    outputs:
+      profile: ${{ steps.prelude.outputs.profile }}
+    steps: *profile-a-shard-steps
+
+  profile-a-shard-4:
+    name: Profile A shard (4/4)
+    if: ${{ !((vars.VNX_CI_XDIST || '1') == '0' || inputs.xdist_off) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 26
+    permissions: {contents: read, actions: read}
+    outputs:
+      profile: ${{ steps.prelude.outputs.profile }}
+    steps: *profile-a-shard-steps
+
+  # ADR-074 besluit 3, 7c and 15: the saving of the impact selection is a wall
+  # clock, measured here by running only S on the same candidate as Profile A.
+  # It decides nothing: continue-on-error on the job and on the steps, scripts
+  # that exit 0, no `needs` in either direction and no entry in any required
+  # check list.
+  # Pull requests only: the conclusion of VNX CI on main paces the merge chain
+  # and this job ended 12 minutes after the last required job there (measured
+  # 13-11, run 43417417804). The shadow STEP in Profile A stays on every event.
+  impact-shadow:
+    name: Impact shadow (runs only S, never required)
+    if: ${{ github.event_name == 'pull_request' }}
+    runs-on: ubuntu-24.04
+    continue-on-error: true
+    # The Profile A bound: the job runs a subset, so it never needs more.
+    timeout-minutes: 38
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Profile A prelude
+        id: prelude
+        uses: ./.github/actions/profile-a-prelude
+
+      - name: Run only S and record the wall clock (never fails the job)
+        if: ${{ steps.prelude.outputs.profile != 'light' }}
+        continue-on-error: true
+        env:
+          VNX_HOME: ${{ steps.prelude.outputs.vnx-home }}
+          VNX_DATA_DIR: ${{ steps.prelude.outputs.vnx-data-dir }}
+          VNX_CI_XDIST: ${{ vars.VNX_CI_XDIST }}
+        run: bash "$GITHUB_WORKSPACE/scripts/ci/impact_shadow_job.sh" "$RUNNER_TEMP/impact-shadow-job"
+
+      - name: Upload the impact shadow job record
+        if: ${{ always() && steps.prelude.outputs.profile != 'light' }}
+        continue-on-error: true
+        timeout-minutes: 5
+        uses: actions/upload-artifact@v4
+        with:
+          name: impact-shadow-job
+          path: ${{ runner.temp }}/impact-shadow-job/
+          if-no-files-found: warn
+          overwrite: true
+
   trace-token-check:
     name: Trace Token Validation
     runs-on: ubuntu-24.04
@@ -439,7 +669,6 @@ jobs:
   profile-c:
     name: Profile C (adoption smoke tests)
     runs-on: ubuntu-24.04
-    needs: profile-a
     # See "Profile A" above: bounds a hung job to minutes, not GitHub's
     # 6-hour hard limit (measured baseline 16-21 min, 45 min ceiling).
     timeout-minutes: 45
@@ -496,7 +725,6 @@ jobs:
   profile-b:
     name: Profile B (snapshot integration)
     runs-on: ubuntu-24.04
-    needs: profile-a
     # See "Profile A" above: bounds a hung job to minutes, not GitHub's
     # 6-hour hard limit (measured baseline 16-21 min, 45 min ceiling).
     timeout-minutes: 45
@@ -523,32 +751,7 @@ jobs:
           rsync -a ./skills/ "$GITHUB_WORKSPACE/.claude/skills/"
 
       - name: Install ripgrep
-        run: |
-          set -euo pipefail
-          if command -v rg >/dev/null 2>&1; then
-            echo "ripgrep already present on the runner image, skipping download"
-            exit 0
-          fi
-          # Pinned release + sha256-verified static binary instead of apt-get
-          # (OI-1362): ripgrep ships on NO ubuntu runner image, so this skip-tak
-          # never fires, and apt-get against azure.archive.ubuntu.com stalls
-          # intermittently and hangs the job even with the timeout+retry from
-          # #1608 — measured 2026-08-18/19: run 32294142912 (PR #1609) and run
-          # 32291338049 (main) both died in this exact step with exit 124, on
-          # different jobs each time. x86_64-unknown-linux-musl is statically
-          # linked — no glibc dependency, so it runs unchanged across any
-          # runner base-image drift.
-          RG_VERSION="15.2.0"
-          RG_SHA256="33e15bcf1624b25cdd2a55813a47a2f95dbe126268203e76aa6a585d1e7b149c"
-          RG_ARCHIVE="ripgrep-${RG_VERSION}-x86_64-unknown-linux-musl.tar.gz"
-          RG_URL="https://github.com/BurntSushi/ripgrep/releases/download/${RG_VERSION}/${RG_ARCHIVE}"
-          RG_DIR="${RUNNER_TEMP:-/tmp}/ripgrep-install"
-          mkdir -p "$RG_DIR/bin"
-          curl -sSL --retry 3 --fail -o "$RG_DIR/$RG_ARCHIVE" "$RG_URL"
-          echo "${RG_SHA256}  ${RG_DIR}/${RG_ARCHIVE}" | sha256sum -c -
-          tar -xzf "$RG_DIR/$RG_ARCHIVE" -C "$RG_DIR"
-          install -m 755 "$RG_DIR/ripgrep-${RG_VERSION}-x86_64-unknown-linux-musl/rg" "$RG_DIR/bin/rg"
-          echo "$RG_DIR/bin" >> "$GITHUB_PATH"
+        run: bash scripts/ci/install_ripgrep.sh
 
       - name: Legacy path gate
         run: |
@@ -781,32 +984,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install ripgrep
-        run: |
-          set -euo pipefail
-          if command -v rg >/dev/null 2>&1; then
-            echo "ripgrep already present on the runner image, skipping download"
-            exit 0
-          fi
-          # Pinned release + sha256-verified static binary instead of apt-get
-          # (OI-1362): ripgrep ships on NO ubuntu runner image, so this skip-tak
-          # never fires, and apt-get against azure.archive.ubuntu.com stalls
-          # intermittently and hangs the job even with the timeout+retry from
-          # #1608 — measured 2026-08-18/19: run 32294142912 (PR #1609) and run
-          # 32291338049 (main) both died in this exact step with exit 124, on
-          # different jobs each time. x86_64-unknown-linux-musl is statically
-          # linked — no glibc dependency, so it runs unchanged across any
-          # runner base-image drift.
-          RG_VERSION="15.2.0"
-          RG_SHA256="33e15bcf1624b25cdd2a55813a47a2f95dbe126268203e76aa6a585d1e7b149c"
-          RG_ARCHIVE="ripgrep-${RG_VERSION}-x86_64-unknown-linux-musl.tar.gz"
-          RG_URL="https://github.com/BurntSushi/ripgrep/releases/download/${RG_VERSION}/${RG_ARCHIVE}"
-          RG_DIR="${RUNNER_TEMP:-/tmp}/ripgrep-install"
-          mkdir -p "$RG_DIR/bin"
-          curl -sSL --retry 3 --fail -o "$RG_DIR/$RG_ARCHIVE" "$RG_URL"
-          echo "${RG_SHA256}  ${RG_DIR}/${RG_ARCHIVE}" | sha256sum -c -
-          tar -xzf "$RG_DIR/$RG_ARCHIVE" -C "$RG_DIR"
-          install -m 755 "$RG_DIR/ripgrep-${RG_VERSION}-x86_64-unknown-linux-musl/rg" "$RG_DIR/bin/rg"
-          echo "$RG_DIR/bin" >> "$GITHUB_PATH"
+        run: bash scripts/ci/install_ripgrep.sh
 
       - name: Ban repo-local VNX_STATE_DIR pins
         run: |

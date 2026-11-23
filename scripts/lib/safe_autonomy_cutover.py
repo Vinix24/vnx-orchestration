@@ -7,7 +7,7 @@ and provenance enforcement. Provides prerequisite validation, rollback
 controls, and cutover status reporting.
 
 Feature flags controlled:
-  VNX_AUTONOMY_EVALUATION:     "0" = shadow, "1" = enforced
+  VNX_ENFORCEMENT_PROFILE:     shadow | enforced (autonomy evaluation)
   VNX_PROVENANCE_ENFORCEMENT:  "0" = shadow, "1" = enforced
 
 Governance invariants:
@@ -345,7 +345,7 @@ def _get_residual_risks(phase: str) -> List[Dict[str, str]]:
     if phase == PHASE_FULL_ENFORCEMENT:
         risks.append({
             "risk": "Enforcement may block legitimate actions if policy matrix is incomplete",
-            "mitigation": "Rollback to shadow mode via VNX_AUTONOMY_EVALUATION=0",
+            "mitigation": "Rollback to shadow mode via VNX_ENFORCEMENT_PROFILE=shadow",
             "owner": "Operator",
         })
 
@@ -412,7 +412,7 @@ def execute_cutover(
     """Record a cutover transition event.
 
     This does NOT set environment variables — the operator must set
-    VNX_AUTONOMY_EVALUATION and VNX_PROVENANCE_ENFORCEMENT externally.
+    VNX_ENFORCEMENT_PROFILE and VNX_PROVENANCE_ENFORCEMENT externally.
     This function records the governance event and returns instructions.
 
     Args:
@@ -506,7 +506,7 @@ def execute_rollback(
     )
 
     actions = [
-        "Set VNX_AUTONOMY_EVALUATION=0",
+        "Set VNX_ENFORCEMENT_PROFILE=shadow",
         "Set VNX_PROVENANCE_ENFORCEMENT=0",
         "Existing enriched receipts remain valid (backward-compatible)",
         "Policy evaluation events continue in advisory mode",
@@ -532,23 +532,23 @@ def _phase_to_flags(phase: str) -> Dict[str, str]:
     """Map a phase to the required environment variable settings."""
     return {
         PHASE_SHADOW: {
-            "VNX_AUTONOMY_EVALUATION": "0",
+            "VNX_ENFORCEMENT_PROFILE": "shadow",
             "VNX_PROVENANCE_ENFORCEMENT": "0",
         },
         PHASE_PROVENANCE_ONLY: {
-            "VNX_AUTONOMY_EVALUATION": "0",
+            "VNX_ENFORCEMENT_PROFILE": "shadow",
             "VNX_PROVENANCE_ENFORCEMENT": "1",
         },
         PHASE_FULL_ENFORCEMENT: {
-            "VNX_AUTONOMY_EVALUATION": "1",
+            "VNX_ENFORCEMENT_PROFILE": "enforced",
             "VNX_PROVENANCE_ENFORCEMENT": "1",
         },
         PHASE_ROLLBACK: {
-            "VNX_AUTONOMY_EVALUATION": "0",
+            "VNX_ENFORCEMENT_PROFILE": "shadow",
             "VNX_PROVENANCE_ENFORCEMENT": "0",
         },
     }.get(phase, {
-        "VNX_AUTONOMY_EVALUATION": "0",
+        "VNX_ENFORCEMENT_PROFILE": "shadow",
         "VNX_PROVENANCE_ENFORCEMENT": "0",
     })
 

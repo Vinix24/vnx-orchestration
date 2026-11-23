@@ -2,7 +2,13 @@
 """VNX CLI — governance-first multi-agent orchestration."""
 
 import argparse
+import functools
+import os
+import runpy
+import subprocess
 import sys
+import time
+from pathlib import Path
 
 from vnx_cli import __version__
 
@@ -511,7 +517,7 @@ def _register_dispatch_agent_subparser(subparsers: argparse.Action) -> None:
         "--model",
         default=None,
         metavar="MODEL",
-        help="model to use (default: sonnet, or the agent's config.yaml model when VNX_AGENT_FOLDERS is enabled)",
+        help="model to use (default: sonnet, or the agent's config.yaml model)",
     )
     dispatch_parser.add_argument(
         "--project-dir",
@@ -1016,9 +1022,8 @@ def _register_objective_set_verbs(subs: argparse.Action) -> None:
     p_autonomous.add_argument("eligible", choices=("true", "false"), metavar="ELIGIBLE")
 
 
-def _register_deliverable_verbs(subs: argparse.Action) -> None:
-    """Register the deliverable-domain verbs shared by `vnx horizon deliverable`
-    and the top-level `vnx deliverable` backward-compat alias."""
+def _register_deliverable_add_verb(subs: argparse.Action) -> None:
+    """`deliverable add`: plan a deliverable, optionally with its hard dependencies."""
     p_dadd = subs.add_parser("add", help="plan a deliverable (proposed dispatch)")
     _common_horizon_args(p_dadd)
     p_dadd.add_argument("--objective", required=True, metavar="TRACK_ID",
@@ -1042,6 +1047,15 @@ def _register_deliverable_verbs(subs: argparse.Action) -> None:
         help="optional comma-separated repo paths this deliverable will touch; a "
              "plan-gate run without --dispatch-paths reads them",
     )
+    p_dadd.add_argument("--depends-on", dest="depends_on", default=None, metavar="DLV1,DLV2",
+                        help="comma-separated deliverables this one depends on (hard); an unknown id "
+                             "or a cycle refuses the whole add (ADR-096)")
+
+
+def _register_deliverable_verbs(subs: argparse.Action) -> None:
+    """Register the deliverable-domain verbs shared by `vnx horizon deliverable`
+    and the top-level `vnx deliverable` backward-compat alias."""
+    _register_deliverable_add_verb(subs)
 
     _register_deliverable_list_verb(subs)
 
@@ -1112,6 +1126,33 @@ def _register_deliverable_retarget_verb(subs: argparse.Action) -> None:
     _common_horizon_args(p)
     p.add_argument("dispatch_id")
     p.add_argument("--reason", required=True, help="why it is not built (REQUIRED, in the audit event)")
+    _register_deliverable_dependency_verbs(subs)
+
+
+def _register_deliverable_dependency_verbs(subs: argparse.Action) -> None:
+    """`deliverable depend`, `undepend` and `deps`: order between deliverables (ADR-096)."""
+    p = subs.add_parser("depend", help="record that a deliverable depends on another (a cycle is refused)")
+    _common_horizon_args(p)
+    p.add_argument("dispatch_id")
+    p.add_argument("--on", required=True, metavar="DLV", help="the deliverable it depends on")
+    p.add_argument("--kind", choices=("hard", "soft"), default="hard", help="hard (default) or soft")
+    p = subs.add_parser("undepend", help="remove a dependency; the row stays with the reason")
+    _common_horizon_args(p)
+    p.add_argument("dispatch_id")
+    p.add_argument("--on", required=True, metavar="DLV", help="the deliverable it no longer depends on")
+    p.add_argument("--reason", required=True, help="why it is removed (REQUIRED, may not be empty)")
+    p = subs.add_parser("deps", help="dependencies of a deliverable, both directions, active and removed")
+    _common_horizon_args(p)
+    p.add_argument("dispatch_id")
+
+
+def _register_plan_gate_sign_verb(subs: argparse.Action) -> None:
+    """`plan-gate sign`: the operator signs the latest plan-gate pass of a track (OI-2849)."""
+    p_psign = subs.add_parser("sign", help="operator only: sign the latest plan-gate pass so a T0 may promote (ADR-056)")
+    _common_horizon_args(p_psign)
+    p_psign.add_argument("track_id")
+    p_psign.add_argument("--key", required=True, help="the operator's SSH private key path")
+    p_psign.add_argument("--identity", required=True, help="signer identity, as in allowed_signers")
 
 
 def _register_plan_gate_verbs(subs: argparse.Action) -> None:
@@ -1146,8 +1187,7 @@ def _register_plan_gate_verbs(subs: argparse.Action) -> None:
         type=int,
         default=None,
         help="per-seat deadline in seconds before a panelist times out and books a "
-             "fabricated abstention (OI-1068). Defaults to VNX_PLAN_GATE_SEAT_TIMEOUT "
-             "(default 900) — the same env-var-knob style as VNX_PANEL_RETRY.",
+             "fabricated abstention (OI-1068). Defaults to 900.",
     )
     p_prun.add_argument(
         "--dispatch-paths",
@@ -1254,7 +1294,7 @@ def _register_plan_gate_verbs(subs: argparse.Action) -> None:
         type=int,
         default=None,
         help="per-seat deadline in seconds before a panelist times out and books a "
-             "fabricated abstention (OI-1068). Defaults to VNX_PLAN_GATE_SEAT_TIMEOUT.",
+             "fabricated abstention (OI-1068). Defaults to 900.",
     )
     p_pbatch.add_argument(
         "--dispatch-paths",
@@ -1289,6 +1329,7 @@ def _register_horizon_subparser(subparsers: argparse.Action) -> None:
     horizon_subs = horizon_parser.add_subparsers(dest="horizon_verb", metavar="VERB")
     _register_objective_verbs(horizon_subs)
     _register_objective_queue_verb(horizon_subs)
+    _register_objective_plan_scope_verb(horizon_subs)
 
     dlv_parser = horizon_subs.add_parser(
         "deliverable", help="deliverable plane (proposed dispatches)"
@@ -1303,6 +1344,21 @@ def _register_horizon_subparser(subparsers: argparse.Action) -> None:
     pg_parser.add_argument("--project-dir", default=".", metavar="DIR")
     pg_subs = pg_parser.add_subparsers(dest="plan_gate_verb", metavar="VERB")
     _register_plan_gate_verbs(pg_subs)
+    _register_plan_gate_sign_verb(pg_subs)
+
+
+def _register_objective_plan_scope_verb(subs: argparse.Action) -> None:
+    """`plan-scope review`: clean up open OI-PLAN; flags mirror planning_cli's parser."""
+    p_review = subs.add_parser(
+        "plan-scope",
+        help="clean up open OI-PLAN: review proposes a scope per track, confirm needs --approval-id",
+    ).add_subparsers(dest="scope_action", metavar="ACTION", required=True).add_parser(
+        "review", help="list tracks with an open OI-PLAN and the proposed scope (read-only)",
+    )
+    _common_horizon_args(p_review)
+    p_review.add_argument("--confirm", default="", help="comma-separated tracks whose proposal to store")
+    p_review.add_argument("--confirm-all", action="store_true", help="confirm every track the review prints")
+    p_review.add_argument("--approval-id", default="", help="REQUIRED with --confirm/--confirm-all")
 
 
 def _register_objective_subparser(subparsers: argparse.Action) -> None:
@@ -1315,6 +1371,7 @@ def _register_objective_subparser(subparsers: argparse.Action) -> None:
     objective_subs = objective_parser.add_subparsers(dest="objective_verb", metavar="VERB")
     _register_objective_verbs(objective_subs)
     _register_objective_queue_verb(objective_subs)
+    _register_objective_plan_scope_verb(objective_subs)
 
 
 def _register_deliverable_subparser(subparsers: argparse.Action) -> None:
@@ -1411,6 +1468,63 @@ def _register_migrate_subparser(subparsers: argparse.Action) -> None:
         metavar="REASON",
         help="record why an unstamped (schema-v14) store belongs to --project-id",
     )
+
+
+def _register_learning_decide_rule(learning_subs: argparse.Action) -> None:
+    lr_decide = learning_subs.add_parser(
+        "decide-rule",
+        help=(
+            "record an operator decision on queued prevention rules as one bundle "
+            "(approved|rejected); writes a record with a minted approval_id"
+        ),
+    )
+    lr_decide.add_argument("--project-dir", default=".", metavar="DIR")
+    lr_decide.add_argument(
+        "--rule-id", dest="rule_ids", action="append", required=True, metavar="ID",
+        help="queued rule id (repeat for one bundle)",
+    )
+    lr_decide.add_argument(
+        "--decision", dest="decision", required=True, choices=["approved", "rejected"],
+        help="the decision to record",
+    )
+    lr_decide.add_argument("--reason", dest="reason", required=True, help="non-empty rationale")
+    lr_decide.add_argument("--by", dest="by", required=True, help="who decides")
+    lr_decide.add_argument(
+        "--effect-criterion", dest="effect_criterion", default=None,
+        help="how the effect is measured (REQUIRED with --decision approved)",
+    )
+    lr_decide.add_argument(
+        "--stop-condition", dest="stop_condition", default=None,
+        help="when the rule is switched off again (REQUIRED with --decision approved)",
+    )
+
+
+def _register_learning_operator_tier(learning_subs: argparse.Action) -> None:
+    _register_learning_decide_rule(learning_subs)
+    _register_learning_steering(learning_subs)
+    _register_learning_decide_steering(learning_subs)
+
+
+def _register_learning_decide_steering(learning_subs: argparse.Action) -> None:
+    lr_ds = learning_subs.add_parser(
+        "decide-steering",
+        help="record an operator decision on a steering proposal (approve|reject|apply); approve changes nothing by itself",
+        epilog="exit codes: 0 recorded, 1 unknown proposal id, 2 usage error or decision refused, 3 unreadable store",
+    )
+    lr_ds.add_argument("proposal_id", metavar="PROPOSAL_ID", help="id from `vnx learning steering proposals`")
+    lr_ds.add_argument("action", choices=["approve", "reject", "apply"])
+    lr_ds.add_argument("--project-dir", default=".", metavar="DIR")
+    lr_ds.add_argument("--approval-id", dest="approval_id", required=True, help="operator approval token (REQUIRED)")
+    lr_ds.add_argument("--reason", dest="reason", required=True, help="non-empty rationale (REQUIRED)")
+    lr_ds.add_argument("--applied-ref", dest="applied_ref", default="", help="PR number or commit (REQUIRED with apply)")
+
+
+def _register_learning_steering(learning_subs: argparse.Action) -> None:
+    lr_steer = learning_subs.add_parser(
+        "steering",
+        help="operator steering (ADR-072): `report`, `show --case` and `proposals [--status S] [--json]`",
+    )
+    lr_steer.add_argument("steering_args", nargs=argparse.REMAINDER, metavar="ARGS")
 
 
 def _register_learning_subparser(subparsers: argparse.Action) -> None:
@@ -1575,8 +1689,7 @@ def _register_learning_subparser(subparsers: argparse.Action) -> None:
     lr_dismiss.add_argument(
         "--reason",
         dest="reason",
-        default="",
-        required=True,
+        default="", required=True,
         help="non-empty rationale for the dismissal (REQUIRED)",
     )
     lr_dismiss.add_argument(
@@ -1586,6 +1699,7 @@ def _register_learning_subparser(subparsers: argparse.Action) -> None:
         choices=["success_patterns", "prevention_rules"],
         help="disambiguate when the same id appears in two tables",
     )
+    _register_learning_operator_tier(learning_subs)
 
 
 def _register_dream_subparser(subparsers: argparse.Action) -> None:
@@ -1626,6 +1740,47 @@ def _register_dream_subparser(subparsers: argparse.Action) -> None:
     dream_subs.add_parser(
         "uninstall-scheduler", help="remove nightly auto-dream scheduler"
     )
+
+
+def _register_daily_metrics_subparser(subparsers: argparse.Action) -> None:
+    """``vnx daily-metrics``: install the job, pass every other verb through.
+
+    Removal of the job follows as its own verb in a later change (PR-13b); this
+    text names no command that does not exist yet.
+
+    The handler is bound with ``set_defaults(func=...)`` instead of growing the
+    ``elif`` chain in ``_dispatch_command``: that function is already at the
+    70-line ratchet limit (``scripts/ci/check_function_size_ratchet.py``), and
+    ``main()`` runs a bound handler before the chain — the same route
+    ``pool`` takes.
+    """
+    daily_metrics_parser = subparsers.add_parser(
+        "daily-metrics",
+        help=(
+            "daily metrics: install the opt-in 04:10 job, every other "
+            "verb passes through to scripts/daily_metrics.py"
+        ),
+        description=(
+            "Daily metrics. `install --project-id ID` installs the opt-in "
+            "per-project launchd job (04:10 local). Removal of that job follows "
+            "as a verb in a later change. Every other verb (collect, daily, "
+            "propose, approve, verdict, report) is passed to "
+            "scripts/daily_metrics.py unchanged."
+        ),
+    )
+    daily_metrics_parser.add_argument(
+        "daily_metrics_args",
+        nargs=argparse.REMAINDER,
+        metavar="ARGS",
+        help="verb and its arguments, passed through unchanged",
+    )
+    daily_metrics_parser.set_defaults(func=_run_daily_metrics_command)
+
+
+def _run_daily_metrics_command(args: argparse.Namespace) -> int:
+    from vnx_cli.commands.daily_metrics import vnx_daily_metrics
+
+    return vnx_daily_metrics(args)
 
 
 def _register_attest_subparser(subparsers: argparse.Action) -> None:
@@ -1877,6 +2032,33 @@ def _dispatch_command(args: argparse.Namespace, parser: argparse.ArgumentParser)
         sys.exit(0)
 
 
+def _recorded(main):
+    """CLI ledger B4b (ADR-075 decision 7): ``main`` keeps its body; a finally records the call (see bin/vnx)."""
+    @functools.wraps(main)
+    def recorded() -> None:
+        started, exit_code = time.monotonic(), 1
+        try:
+            exit_code = main() or 0
+        except SystemExit as exc:
+            exit_code = exc.code if isinstance(exc.code, int) else int(exc.code is not None)
+            raise
+        finally:
+            try:
+                recorder = Path(__file__).resolve().parents[1] / "scripts" / "lib" / "cli_invocations.py"
+                if os.environ.get("VNX_CLI_RECORDED") != str(os.getppid()) and recorder.is_file():
+                    tty, ms = "1" if sys.stdin and sys.stdin.isatty() else "0", int((time.monotonic() - started) * 1000)
+                    subprocess.Popen([sys.executable, str(recorder), "record", str(exit_code), str(ms), tty, "--",
+                                      *sys.argv[1:]], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                     stderr=subprocess.DEVNULL, start_new_session=True, close_fds=True)
+            except Exception as exc:  # decision 7, recording never changes the command; the failure goes to B4b
+                try:
+                    runpy.run_path(str(recorder))["note_failure"]("launch", exc)
+                except Exception:  # vnx-silent-except: a broken recorder never reaches the command
+                    pass
+    return recorded
+
+
+@_recorded
 def main() -> None:
     # FIRST: honor a project's .vnx-version pin by re-exec'ing the pinned
     # central install (vnx_cli + engine stay version-consistent). No-op for
@@ -1912,6 +2094,7 @@ def main() -> None:
     _register_handoff_subparser(subparsers)
     _register_learning_subparser(subparsers)
     _register_dream_subparser(subparsers)
+    _register_daily_metrics_subparser(subparsers)
     _register_migrate_subparser(subparsers)
     _register_attest_subparser(subparsers)
     _register_horizon_subparser(subparsers)

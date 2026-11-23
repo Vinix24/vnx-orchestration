@@ -41,10 +41,10 @@ vnx dispatch <pending-id>          # the door; decides lane, runs phantom-guard
 
 ## Runbook: gate invocation
 
-Three gates decide what merges: codex + kimi (adversarial review) + deterministic CI.
+Three gates decide what merges: codex + deepseek (adversarial review, seat 2 on API credit since 2026-11-11) + deterministic CI.
 
 - Provider gates WRITE to the working tree. After a gate: stage the good changes, `git checkout --` any stray edits.
-- codex = strict diff-mode; kimi = synthesis/operational angle (proven 3x parallel).
+- codex = strict diff-mode; deepseek_gate (`deepseek-v4-pro`) = seat 2 of the default stack. kimi (synthesis/operational angle, proven 3x parallel) is an explicit choice only: the subscription is cancelled and no default names it.
 - Phantom-guard (`scripts/lib/phantom_guard.py`) rejects evidence-free GATE-GREEN receipts. Read-only review roles (`REVIEW_ROLES`) are exempt — a verdict, not a diff, is expected.
 - Required headless review gate is not complete until BOTH the result record and the normalized headless report exist.
 - Self-merge rule: allowed when local CI is green AND the codex-gate passed — but confirm the FULL GitHub CI is green first, not just the gate (a literal in a CHANGELOG once tripped the state-pin gate and broke main).

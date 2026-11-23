@@ -17,8 +17,6 @@
 > live rotation path shared none of its code. It was removed 2026-08-11
 > rather than left as a mechanism that reads as if it runs. The design
 > record lives in `docs/governance/decisions/ADR-002-f43-context-rotation-packaging.md`.
-> A companion planning note (`claudedocs/plans/t0-context-rotation-revival.md`)
-> is private and never shipped in the repo (`claudedocs/` is gitignored).
 > `tests/test_context_rotation.py::TestDeadRotationApiRemoved` keeps the
 > dead API from being quietly reintroduced.
 
@@ -33,11 +31,9 @@
 | `rotation_handoff_dir()` etc. | same | project_id+terminal-scoped path contract |
 | `handoff_reader.py` | `scripts/lib/handoff_reader.py` | parses `handoff.md` into a briefing |
 | `vnx handoff show` / `mark-ready` | `vnx_cli/commands/handoff.py` | CLI a resumed session runs to resume + ack |
-| `session_stop_rotation.py` | `scripts/hooks/session_stop_rotation.py` | Stop-hook safety net — writes the handoff, never spawns anything |
 
-The single switch is the env var **`VNX_T0_ROTATION`** (exactly `"1"` to
-enable the Stop-hook safety net; anything else, or unset, is a proven
-zero-side-effect no-op — not even a logs dir gets created).
+There is no Stop-hook safety net and no switch for one: T0 rotation runs through
+`scripts/t0_rotate_spawn.sh` and the `rotate` skill (`docs/operations/T0_CONTEXT_ROTATION.md`).
 
 ---
 
@@ -121,22 +117,6 @@ This is a **repo-level** contract — deliberately not the personal
 manual use; they are not part of this contract.
 
 ---
-
-## The safety-net hook: `session_stop_rotation.py`
-
-Wired under `Stop` in `.claude/settings.json`, **NO-OP unless
-`VNX_T0_ROTATION=1`**. When enabled, it does exactly one thing: ensure
-`handoff.md` exists (by calling `write_t0_handoff()`) whenever a T0 session
-stops. The Stop matcher is empty (fires for every session), so the hook
-verifies it IS a T0 session — env identity first, then the same cwd-based
-worker heuristic `stop_report_hook.sh` uses — before writing anything; a
-stopping T1/T2/T3 or dispatch worker can never clobber the T0 handoff. It
-makes no claim to spawn a successor: a shell `Stop` hook cannot launch an
-interactive Claude session.
-
-**Rollback**: unset `VNX_T0_ROTATION`. Zero code paths execute — the hook
-(and its settings.json wrapper) creates no directories and no log files
-when disabled.
 
 ---
 

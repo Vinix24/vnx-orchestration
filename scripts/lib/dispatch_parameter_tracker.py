@@ -371,11 +371,7 @@ class DispatchParameterTracker:
         insights: list[Insight] = []
 
         # Helper: avg metric for a filtered subset
-        def _avg(subset: list[dict], key: str) -> tuple[float, int]:
-            values = [r[key] for r in subset if r.get(key) is not None]
-            if not values:
-                return 0.0, 0
-            return round(statistics.mean(values), 2), len(values)
+        _avg = self._avg_metric
 
         # 1. instruction_chars split at 2000
         large = [r for r in rows if (r["instruction_chars"] or 0) > 2000]
@@ -480,6 +476,14 @@ class DispatchParameterTracker:
         # Sort by absolute effect size (largest first)
         insights.sort(key=lambda i: abs(i.value_a - i.value_b), reverse=True)
         return insights[:10]
+
+    @staticmethod
+    def _avg_metric(subset: list[dict], key: str) -> tuple[float, int]:
+        """Average of *key* over the rows that carry it, plus that row count."""
+        values = [r[key] for r in subset if r.get(key) is not None]
+        if not values:
+            return 0.0, 0
+        return round(statistics.mean(values), 2), len(values)
 
     def get_recommended_parameters(
         self, role: str = "", _task_type: str = ""

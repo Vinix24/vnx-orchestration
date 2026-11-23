@@ -58,7 +58,7 @@ class _FakePaths:
 
 
 @pytest.fixture
-def loop_env(tmp_path):
+def loop_env(tmp_path, approve_learning_persist):
     """Build a LearningLoop bound to a tmp state dir via a patched ensure_env."""
     state_dir = tmp_path / "vnx-data" / "vnx-dev" / "state"
     state_dir.mkdir(parents=True)
@@ -66,6 +66,7 @@ def loop_env(tmp_path):
     vnx_home.mkdir()
 
     fake = _FakePaths(state_dir, vnx_home)
+    approve_learning_persist(state_dir)
     with patch.object(ll, "ensure_env", return_value=fake):
         loop = ll.LearningLoop()
         yield loop, state_dir

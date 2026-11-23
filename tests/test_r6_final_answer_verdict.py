@@ -743,7 +743,7 @@ class TestOneTruthOnDisk:
         assert twice == once
         assert once.startswith(LANE_REPORT.rstrip("\n"))
 
-    def test_the_vertex_and_subprocess_strategies_never_read_a_final_answer(self, tmp_path):
+    def test_the_subprocess_strategy_never_read_a_final_answer(self, tmp_path):
         """No final_answer_dir, no fallback: the old no_verdict_block booking stands."""
         dispatch_id = "deepseek-gate-pr2066-1792100303"
         _write_archive(tmp_path, dispatch_id, _run_events(dispatch_id, _final_answer(PASS_BLOCK)))
@@ -770,7 +770,7 @@ def _panel_dispatcher(tmp_path, final_text, calls, *, report=PLAN_SEAT_REPORT, a
 
 
 def _one_seat_panel(tmp_path, dispatcher, monkeypatch):
-    monkeypatch.setenv("VNX_PANEL_RETRY", "0")
+    monkeypatch.setattr(pgp, "PANEL_RETRY_COUNT", 0)
     return pgp.run_panel(
         doc_text="## Problem\nx\n", track_id="trk", project_id="p1",
         panel=[{"label": "deepseek", "provider": "deepseek", "model_arg": "deepseek-flash"}],
@@ -1015,7 +1015,7 @@ def fake_claude(tmp_path, monkeypatch):
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
     monkeypatch.setenv("VNX_PROJECT_ROOT", str(checkout))
     monkeypatch.setenv("R6_FAKE_CLAUDE_SPEC", str(fake._spec))
-    monkeypatch.setenv("VNX_PANEL_RETRY", "0")
+    monkeypatch.setattr(pgp, "PANEL_RETRY_COUNT", 0)
     for key in ("VNX_TOTAL_DEADLINE", "VNX_CHUNK_TIMEOUT"):
         monkeypatch.delenv(key, raising=False)
     return fake
@@ -1195,7 +1195,9 @@ class TestEndOfRunArchive:
         assert not live.exists()
         # No scratch file of any name beside the archive, and the archive keeps
         # the live stream's mode, as archive()'s copy2 gives it (not mkstemp's 0600).
-        assert [p.name for p in dest.parent.iterdir()] == [dest.name]
+        assert sorted(p.name for p in dest.parent.iterdir()) == sorted(
+            [dest.name, event_store.ARCHIVE_LOCK_NAME]
+        )
         assert stat.S_IMODE(dest.stat().st_mode) == live_mode
         # A second call finds nothing of this dispatch left: idempotent.
         assert store.archive_completed_stream(TERMINAL, self.DID) is None
@@ -1288,12 +1290,12 @@ class TestEndOfRunArchive:
             def no_sync(_fd):
                 raise OSError(28, "No space left on device")
             monkeypatch.setattr(event_store.os, "fsync", no_sync)
-            expected = []
+            expected = [event_store.ARCHIVE_LOCK_NAME]
         else:
             # A directory where the archive file belongs: the move onto it fails.
             (archive_dir / f"{self.DID}.ndjson").mkdir(parents=True)
             (archive_dir / f"{self.DID}.ndjson" / "occupant").write_text("x\n")
-            expected = [f"{self.DID}.ndjson"]
+            expected = sorted([f"{self.DID}.ndjson", event_store.ARCHIVE_LOCK_NAME])
         store = event_store.EventStore(events_dir=events_dir)
         assert store.archive_completed_stream(TERMINAL, self.DID) is None
         assert sorted(p.name for p in archive_dir.iterdir()) == expected

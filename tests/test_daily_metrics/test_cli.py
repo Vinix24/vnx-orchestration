@@ -1,7 +1,7 @@
 """CLI subprocess tests for the daily-metrics track (PR-3b).
 
 Each test runs ``scripts/daily_metrics.py`` with ``--store``, ``--state-dir``
-and ``VNX_DAILY_METRICS_SOURCES_DIR`` pinned under ``tmp_path`` and every clock
+and the sources directory pinned under ``tmp_path`` and every clock
 fixed through ``--now``; no test touches the real central store.
 """
 
@@ -18,6 +18,8 @@ from pathlib import Path
 import pytest
 
 from daily_metrics import metric
+
+from .cli_boot import cli_command
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CLI = REPO_ROOT / "scripts" / "daily_metrics.py"
@@ -43,9 +45,8 @@ def _run_cli(sources_dir: Path, args: list[str]) -> subprocess.CompletedProcess:
     env = dict(os.environ)
     env.pop("VNX_PROJECT_ID", None)
     env.pop("PYTEST_CURRENT_TEST", None)
-    env["VNX_DAILY_METRICS_SOURCES_DIR"] = str(sources_dir)
     return subprocess.run(
-        [sys.executable, str(CLI), *args],
+        cli_command(sources_dir, args),
         env=env, capture_output=True, text=True, cwd=str(REPO_ROOT),
     )
 

@@ -50,8 +50,8 @@ def _default_data_dir() -> Path:
     when the canonical resolver returned None, which resolves the keystone
     (``~/.vnx-system/versions/<v>/.vnx-data``) in a central install — a
     read-only pinned version store the daemon then tried to write to. The
-    shared resolver honors a set ``VNX_DATA_DIR`` directly, falls back through
-    ``VNX_PROJECT_ID`` and the canonical resolver, and raises
+    shared resolver gives the receipts' answer (``vnx_paths.resolve_paths``,
+    OI-1276: ``VNX_DATA_DIR`` only with ``VNX_DATA_DIR_EXPLICIT=1``) and raises
     ``DataDirResolutionError`` naming the chain instead of returning a path
     under ``~/.vnx-system/versions/``.
     """
@@ -194,10 +194,9 @@ def _run_governance_pre_check(
         logger.debug("governance_enforcement.yaml not found — skipping pre-check")
         return False, [], None
 
-    mode = os.environ.get("VNX_GOVERNANCE_MODE", "") or None
     enforcer = GovernanceEnforcer()
     try:
-        enforcer.load_config(DEFAULT_CONFIG_PATH, mode_override=mode)
+        enforcer.load_config(DEFAULT_CONFIG_PATH)
     except Exception as exc:
         logger.warning("Failed to load governance config: %s — skipping pre-check", exc)
         return False, [], None
@@ -428,10 +427,10 @@ def _deliver(
     scripts_lib = _repo_root() / "scripts" / "lib"
     sys.path.insert(0, str(scripts_lib))
 
-    # worker-provider-kimi-flip (20260723): mirrors pool_worker_runner.py's VNX_DISPATCH_MODEL
+    # worker-provider-kimi-flip (20260723): mirrors pool_worker_runner.py's fixed
     # fallback, which stays kimi-k3. The registry default in vnx_workers.default.yaml is
     # claude/sonnet; the two are decided separately.
-    model = os.environ.get("VNX_DISPATCH_MODEL", "kimi-k3")
+    model = "kimi-k3"
 
     # Track effective lease target — updated if reroute + lease swap occurs
     eff_terminal = original_terminal if original_terminal is not None else meta.target_terminal
@@ -680,7 +679,12 @@ class DispatchDaemon:
             _release_lease(terminal, generation)
             self._processed.discard(dispatch_id)
             return
+        self._deliver_claimed(meta, dispatch_id, terminal, generation, active_path)
 
+    def _deliver_claimed(
+        self, meta: DispatchMeta, dispatch_id: str, terminal: str, generation: int, active_path: Path,
+    ) -> None:
+        """Enrich and deliver a dispatch that holds a lease and sits in active/."""
         # Enrich dispatch instruction before delivery (repo map + future layers)
         try:
             from dispatch_enricher import DispatchEnricher  # noqa: PLC0415
@@ -716,7 +720,15 @@ class DispatchDaemon:
             outcome = "failed"
         finally:
             elapsed = time.monotonic() - start_ts
+        self._finish_delivery(
+            meta, dispatch_id, active_path, outcome, elapsed, eff_terminal, eff_generation,
+        )
 
+    def _finish_delivery(
+        self, meta: DispatchMeta, dispatch_id: str, active_path: Path, outcome: str,
+        elapsed: float, eff_terminal: str, eff_generation: int,
+    ) -> None:
+        """Move, release the lease, write the audit record and log the outcome."""
         # Move active → completed on success. A failure is no outcome a T0
         # decided: the file stays in active/, where active_dispatch_janitor
         # reads its receipts and a T0 reject moves it to dead_letter/.

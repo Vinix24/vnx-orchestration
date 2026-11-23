@@ -711,6 +711,38 @@ def _review_cap_verdicts() -> TableInvariant:
     )
 
 
+# v38 (0038, schemas/migrations/0038_intelligence_injections_ab_arm.sql): ab_arm and ab_window
+# (TEXT, nullable: a row without them is "not assigned") and the index that starts with
+# project_id (ADR-007). The table stays conditional, as in v34.
+_V38_INJECTION_COLS = _cols(("ab_arm", "TEXT", False), ("ab_window", "TEXT", False))
+_V38_INJECTION_INDEX = IndexInvariant("idx_injection_window_arm", ("project_id", "ab_window", "ab_arm"))
+
+
+def _tables_v38(v37_tables: Tuple[TableInvariant, ...]) -> Tuple[TableInvariant, ...]:
+    return tuple(
+        replace(tbl, columns={**tbl.columns, **_V38_INJECTION_COLS},
+                indexes=(*tbl.indexes, _V38_INJECTION_INDEX))
+        if tbl.name == "intelligence_injections" else tbl
+        for tbl in v37_tables
+    )
+
+
+# v39 (0039, ADR-096, B1): order between deliverables, keyed per ADR-007 by
+# (project_id, deliverable_id, depends_on_id); 0039 creates it, so it is required at v39.
+def _deliverable_dependencies() -> TableInvariant:
+    return TableInvariant(
+        name="deliverable_dependencies",
+        columns=_cols(
+            ("project_id", "TEXT", True), ("deliverable_id", "TEXT", True),
+            ("depends_on_id", "TEXT", True), ("kind", "TEXT", True),
+            ("created_at", "TEXT", True), ("created_by", "TEXT", True),
+            ("removed_at", "TEXT", False), ("removed_reason", "TEXT", False),
+        ),
+        pk=("project_id", "deliverable_id", "depends_on_id"),
+        indexes=(IndexInvariant("idx_deliverable_dependencies_on", ("project_id", "depends_on_id")),),
+    )
+
+
 def _build_manifest() -> Dict[int, VersionManifest]:
     base_children_v24 = (_tph_v24(), _td_v24())
     manifest = {
@@ -775,6 +807,10 @@ def _build_manifest() -> Dict[int, VersionManifest]:
     manifest[36] = VersionManifest(36, manifest[35].tables, (_DELIVERABLES_VIEW_V36,))
     # v37 (0037): same tables, the deliverables view replaced again (done on a completed round).
     manifest[37] = VersionManifest(37, manifest[36].tables, (_DELIVERABLES_VIEW_V37,))
+    # v38 (0038): intelligence_injections carries the arm and the window it was served in.
+    manifest[38] = VersionManifest(38, _tables_v38(manifest[37].tables), manifest[37].views)
+    # v39 (0039): deliverable_dependencies, order between deliverables (ADR-096).
+    manifest[39] = VersionManifest(39, (*manifest[38].tables, _deliverable_dependencies()), manifest[38].views)
     return manifest
 
 

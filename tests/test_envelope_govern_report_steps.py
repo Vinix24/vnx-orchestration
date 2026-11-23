@@ -380,3 +380,33 @@ class TestBodyContractCheck:
         assert receipt_kwargs["warnings"] is None
         assert receipt_kwargs["status"] == "success"
         assert not _logs_matching(caplog, "VNX_CONTRACT_ENFORCE_VIOLATION")
+
+
+# ---------------------------------------------------------------------------
+# OI-3064 — a refire's stale report must not shadow this attempt's output
+# ---------------------------------------------------------------------------
+
+
+class TestRefireStaleReport:
+
+    def test_stale_invalid_report_does_not_make_a_valid_refire_contract_invalid(
+        self, spec, consumer_root,
+    ):
+        import os
+        stale = _write_invalid_report(spec.data_dir, spec.dispatch_id)
+        before = datetime(2026, 11, 6, 11, 0, 0).timestamp()  # earlier than start_time
+        os.utime(stale, (before, before))
+        result = _AdapterResult(
+            returncode=0, completion_text=_valid_body("Refire delivered"), status="success",
+        )
+
+        report_path, _receipt, mock_emit_receipt = _run_govern(spec, result, consumer_root)
+
+        assert "Refire delivered" in report_path.read_text(encoding="utf-8")
+        sidecar = report_path.parent / f"{spec.dispatch_id}.attempt-1.md"
+        assert "assembled prompt" in sidecar.read_text(encoding="utf-8")
+        call_kwargs = mock_emit_receipt.call_args.kwargs
+        assert call_kwargs["status"] == "success"
+        assert not any(
+            w["code"] == "report_contract_violated" for w in (call_kwargs["warnings"] or [])
+        )

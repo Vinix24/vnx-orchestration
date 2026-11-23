@@ -25,8 +25,7 @@ bytes must appear in the final body, and every item recorded in
 substring). Deterministic lane wrappers (permission preamble, report-contract
 directive, completion protocol, scope guard, trailer sentinel) are ADDITIONS layered
 on top of the enriched body — they never remove information, so containment is
-insensitive to them. They are enumerated in ``DEFAULT_WRAPPER_MARKERS`` so a future
-exact-reconstruction mode can account for them.
+insensitive to them.
 
 Fail-loud contract: when containment fails, ``injection_reconstructs`` lands False on
 the receipt AND an ERROR is logged (never silent). ``VNX_INJECTION_RECONSTRUCT_STRICT=1``
@@ -56,17 +55,6 @@ if _LIB_DIR not in sys.path:
 from atomic_io import atomic_write_json, atomic_write_text  # noqa: E402
 
 logger = logging.getLogger(__name__)
-
-# Deterministic lane wrappers layered ON TOP of the enriched body. Registered (not
-# gating) so a future exact-reconstruction mode can subtract them before diffing.
-DEFAULT_WRAPPER_MARKERS: tuple[str, ...] = (
-    "## Completion Protocol",            # tmux completion-protocol footer
-    "## Scope Guard",                    # tmux scope-note
-    "## Role",                           # legacy role header (fallback path)
-    "## Worker Preamble",                # legacy no-role preamble
-    "## Report Contract",                # report-body-contract directive heading
-    "<!-- VNX-END-OF-INSTRUCTION -->",   # trailer sentinel
-)
 
 _ENV_STRICT = "VNX_INJECTION_RECONSTRUCT_STRICT"
 
@@ -114,22 +102,6 @@ def _normalize_ws(text: str) -> str:
     containment check robust to that formatting without loosening what it proves.
     """
     return _WS_RE.sub(" ", text).strip()
-
-
-def strip_known_wrappers(text: str, markers: "tuple[str, ...]" = DEFAULT_WRAPPER_MARKERS) -> str:
-    """Return *text* with the deterministic wrapper sections elided.
-
-    Best-effort helper for callers that want the enriched-body-only view (the
-    containment check itself does not need it — it tolerates the wrappers). Only the
-    trailer sentinel and everything after the FIRST wrapper heading are removed, in
-    marker order of appearance, so the enriched prefix is preserved.
-    """
-    cut = len(text)
-    for marker in markers:
-        idx = text.find(marker)
-        if idx != -1:
-            cut = min(cut, idx)
-    return text[:cut].rstrip()
 
 
 # ---------------------------------------------------------------------------

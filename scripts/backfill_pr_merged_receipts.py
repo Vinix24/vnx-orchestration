@@ -45,7 +45,6 @@ from __future__ import annotations
 
 import argparse
 import datetime
-import fcntl
 import json
 import logging
 import os
@@ -63,6 +62,7 @@ sys.path.insert(0, str(LIB_DIR))
 sys.path.insert(0, str(SCRIPT_DIR))
 
 from vnx_paths import ensure_env
+from ndjson_hash_chain import ChainedLedgerRefused, unchained_write
 from governance_receipts import emit_governance_receipt
 from forge_gate_publisher import DOOR_CHECK_NAME
 from forge_protection_drift import ProtectionConfigError, fetch_project_yaml_from_ref, parse_protection_config
@@ -131,14 +131,9 @@ def _resolve_events_pr_merged_path() -> Path:
 
 
 def _append_locked(path: Path, record: Dict[str, Any]) -> None:
-    """Append a JSON record to an NDJSON file under an exclusive lock."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as fh:
-        fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
-        try:
-            fh.write(json.dumps(record, ensure_ascii=False) + "\n")
-        finally:
-            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+    """Append a JSON record under the ledger's one lock; ``ChainedLedgerRefused`` on a chained ledger."""
+    with unchained_write(path), path.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
 def _load_receipted_pr_numbers(
@@ -357,6 +352,8 @@ def backfill(
                 detail["action"] = "backfilled"
                 detail["register_ok"] = _emit_register_event(pr_number)
                 summary["backfilled"] += 1
+            except ChainedLedgerRefused:
+                raise  # the ledger refuses every PR alike: stop before the next one
             except Exception as exc:
                 detail["action"] = "error"
                 detail["error"] = str(exc)
@@ -1107,11 +1104,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     if args.reconcile_open_permits:
         return _main_reconcile(args)
 
-    summary = backfill(
-        limit=args.limit,
-        since=args.since,
-        dry_run=args.dry_run,
-    )
+    try:
+        summary = backfill(limit=args.limit, since=args.since, dry_run=args.dry_run)
+    except ChainedLedgerRefused as exc:
+        print(f"backfill_pr_merged_receipts: {exc}", file=sys.stderr)
+        return EXIT_ERROR
 
     if args.json:
         print(json.dumps(summary, indent=2))

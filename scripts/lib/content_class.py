@@ -28,7 +28,6 @@ from __future__ import annotations
 import codecs
 import json
 import logging
-import math
 import os
 import re
 import stat
@@ -39,13 +38,11 @@ from typing import Dict, FrozenSet, Iterable, List, Optional, Set, Tuple
 
 logger = logging.getLogger(__name__)
 
-BOUNDARY_ENV = "VNX_CONTENT_BOUNDARY_FILE"
 BOUNDARY_VERSION = 1
 PROJECT_MARKER = ".vnx-project-id"
 
 # Bounds on one marker read. The path comes from data (a transcript cwd, a dispatch), so the
 # read may land on a FIFO, a device or a file whose open never returns.
-MARKER_TIMEOUT_ENV = "VNX_MARKER_READ_TIMEOUT_SECONDS"
 MARKER_TIMEOUT_DEFAULT = 5.0
 MARKER_MAX_BYTES = 4096
 # Reader threads that timed out and are still blocked. At this many, no new read is started.
@@ -118,9 +115,6 @@ def _real(path: object) -> Path:
 
 
 def default_boundary_path() -> Path:
-    override = os.environ.get(BOUNDARY_ENV)
-    if override:
-        return Path(override).expanduser()
     return Path.home() / ".vnx" / "content_boundary.json"
 
 
@@ -231,20 +225,6 @@ _stuck_marker_dirs: Set[str] = set()
 _abandoned_readers = 0
 
 
-def marker_timeout() -> float:
-    """Seconds one marker read may take, from ``VNX_MARKER_READ_TIMEOUT_SECONDS``.
-
-    Unset, unparseable, not finite or not above zero gives the default of 5 seconds.
-    """
-    try:
-        value = float(os.environ.get(MARKER_TIMEOUT_ENV, "").strip())
-    except ValueError:
-        return MARKER_TIMEOUT_DEFAULT
-    if not math.isfinite(value) or value <= 0:
-        return MARKER_TIMEOUT_DEFAULT
-    return min(value, threading.TIMEOUT_MAX)
-
-
 def _first_line(data: bytes) -> _MarkerRead:
     """First line of what was read. Refuses bytes that are not UTF-8 and a line cut by the bound."""
     full = len(data) >= MARKER_MAX_BYTES
@@ -336,7 +316,7 @@ def _marker_id(path: Path) -> _Marker:
     An unreadable marker ends the walk at its directory: the id of a parent says nothing about
     a nearer marker that may name another project.
     """
-    timeout = marker_timeout()
+    timeout = MARKER_TIMEOUT_DEFAULT
     current = path
     while True:
         read = _read_marker_line(current, timeout)

@@ -429,7 +429,7 @@ class TestMcpServersAllowlistAdapterWiring:
         agents_dir = tmp_path / "agents" / "known-role-without-profile"
         agents_dir.mkdir(parents=True)
         (agents_dir / "CLAUDE.md").write_text("# known-role-without-profile\n")
-        global_config = tmp_path / "global.claude.json"
+        global_config = tmp_path / ".claude.json"
         global_config.write_text(json.dumps({
             "mcpServers": {
                 "notion": {"command": "npx", "args": ["-y", "notion-mcp"]},
@@ -438,7 +438,7 @@ class TestMcpServersAllowlistAdapterWiring:
         }))
         monkeypatch.setenv("VNX_WORKER_SCOPED", "1")
         monkeypatch.setenv("VNX_PROJECT_ROOT", str(tmp_path))
-        monkeypatch.setenv("VNX_GLOBAL_MCP_CONFIG_PATH", str(global_config))
+        monkeypatch.setenv("HOME", str(tmp_path))
         return tmp_path
 
     def test_role_mcp_servers_narrows_adapter_mcp_config(self, project_with_mcp_role):

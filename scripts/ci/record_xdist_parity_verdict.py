@@ -44,6 +44,9 @@ from check_xdist_parity import (COMPARE_STEP, RECORDED_STEPS, VERDICT_SCHEMA, re
 
 NOT_READ = "not_read"
 META_FIELDS = ("head_sha", "tested_sha", "run_id", "run_attempt", "event", "ref")
+# Fields a comparison verdict carries that the emergency verdict does not: the
+# record step is not told the candidate shape (``--candidate`` or ``--shard-dir``).
+OPTIONAL_VERDICT_FIELDS = ("candidate_shape", "shards")
 
 
 def read_parity_verdict(path: Path) -> dict | None:
@@ -64,7 +67,7 @@ def record_compare_outcome(verdict: dict, outcome: str) -> dict:
 
 
 def emergency_verdict(meta: dict, profile: str, steps: dict, upstream: dict) -> dict:
-    """Exit 2 with every field of a comparison verdict: nothing compared, nothing read, every step as it ended."""
+    """Exit 2 with every field of a comparison verdict but ``OPTIONAL_VERDICT_FIELDS``: nothing compared or read."""
     shadow = {"record": NOT_READ, "job_result": upstream.get("shadow") or None}
     reference = {"job_result": upstream.get("profile_a") or None, "result": NOT_READ, "exit": None, "duration_s": None}
     detail = (f"the parity script wrote no verdict (checkout {steps.get('checkout')}, "

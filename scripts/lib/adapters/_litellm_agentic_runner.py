@@ -309,6 +309,54 @@ def _read_payload() -> Optional[dict]:
         return None
 
 
+_NUDGE_MESSAGE = (
+    "You stopped without using the tools. Do not just describe the "
+    "solution — use write_file to create the required deliverable file(s) "
+    "now, then run the tests to verify your work. Continue."
+)
+
+
+def _request_problem(model: str, prompt: str, cwd_raw: str) -> Optional[str]:
+    """The first thing wrong with the request fields, or None when they are usable."""
+    if not model:
+        return "model field required"
+    if not prompt:
+        return "prompt field required"
+    if not cwd_raw or not Path(cwd_raw).is_dir():
+        return f"cwd must be an existing directory: {cwd_raw!r}"
+    return None
+
+
+def _assistant_entry(content: str, tool_calls: list) -> dict:
+    """The assistant history message for one turn, with its tool calls when it made any."""
+    entry: dict = {"role": "assistant", "content": content or None}
+    if tool_calls:
+        entry["tool_calls"] = [
+            {
+                "id": tc.id,
+                "type": "function",
+                "function": {"name": tc.function.name, "arguments": tc.function.arguments},
+            }
+            for tc in tool_calls
+        ]
+    return entry
+
+
+def _run_tool_calls(tool_calls: list, messages: list, cwd: Path, command_timeout: int) -> None:
+    """Execute each tool call, emit its events and append its result to the history."""
+    for tc in tool_calls:
+        name = tc.function.name
+        args = _parse_tool_arguments(tc.function.arguments)
+        _emit({"event_type": "tool_use", "name": name, "arguments": args})
+        result, is_error = _execute_tool(name, args, cwd, command_timeout)
+        _emit({"event_type": "tool_result", "name": name, "is_error": is_error,
+               "content": result[:2000]})
+        messages.append({
+            "role": "tool", "tool_call_id": tc.id, "name": name,
+            "content": result,
+        })
+
+
 def main() -> int:
     payload = _read_payload()
     if payload is None:
@@ -321,14 +369,9 @@ def main() -> int:
     max_tokens = int(payload.get("max_tokens") or _DEFAULT_MAX_TOKENS)
     command_timeout = int(payload.get("command_timeout") or _DEFAULT_COMMAND_TIMEOUT)
 
-    if not model:
-        _emit({"error_type": "runner_error", "message": "model field required"})
-        return _EXIT_ERR
-    if not prompt:
-        _emit({"error_type": "runner_error", "message": "prompt field required"})
-        return _EXIT_ERR
-    if not cwd_raw or not Path(cwd_raw).is_dir():
-        _emit({"error_type": "runner_error", "message": f"cwd must be an existing directory: {cwd_raw!r}"})
+    problem = _request_problem(model, prompt, cwd_raw)
+    if problem:
+        _emit({"error_type": "runner_error", "message": problem})
         return _EXIT_ERR
     cwd = Path(cwd_raw).resolve()
 
@@ -390,17 +433,7 @@ def main() -> int:
             _emit({"event_type": "text", "content": content})
 
         # Record the assistant turn (with any tool calls) so the model has history.
-        assistant_entry: dict = {"role": "assistant", "content": content or None}
-        if tool_calls:
-            assistant_entry["tool_calls"] = [
-                {
-                    "id": tc.id,
-                    "type": "function",
-                    "function": {"name": tc.function.name, "arguments": tc.function.arguments},
-                }
-                for tc in tool_calls
-            ]
-        messages.append(assistant_entry)
+        messages.append(_assistant_entry(content, tool_calls))
 
         if not tool_calls:
             # Model stopped without calling tools. GLM-5.2 especially tends to EXPLAIN
@@ -409,27 +442,13 @@ def main() -> int:
             # accepting a no-op exit; bounded so a genuinely-finished model still stops.
             if nudges_left > 0 and turn < max_turns - 1:
                 nudges_left -= 1
-                messages.append({"role": "user", "content": (
-                    "You stopped without using the tools. Do not just describe the "
-                    "solution — use write_file to create the required deliverable file(s) "
-                    "now, then run the tests to verify your work. Continue."
-                )})
+                messages.append({"role": "user", "content": _NUDGE_MESSAGE})
                 _emit({"event_type": "nudge", "remaining": nudges_left})
                 continue
             stop_reason = choice.finish_reason or "stop"
             break
 
-        for tc in tool_calls:
-            name = tc.function.name
-            args = _parse_tool_arguments(tc.function.arguments)
-            _emit({"event_type": "tool_use", "name": name, "arguments": args})
-            result, is_error = _execute_tool(name, args, cwd, command_timeout)
-            _emit({"event_type": "tool_result", "name": name, "is_error": is_error,
-                   "content": result[:2000]})
-            messages.append({
-                "role": "tool", "tool_call_id": tc.id, "name": name,
-                "content": result,
-            })
+        _run_tool_calls(tool_calls, messages, cwd, command_timeout)
 
     _emit({"event_type": "usage_complete", "usage": totals})
     _emit({"event_type": "complete", "turns": turns, "stop_reason": stop_reason})

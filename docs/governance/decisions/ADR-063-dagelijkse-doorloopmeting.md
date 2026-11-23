@@ -1,6 +1,6 @@
 # ADR-063 - De dagelijkse doorloopmeting: tien metriek-ids, onbekend is nooit 0, een afgeronde dag en een structurele goedkeuringspoort
 
-**Status:** Voorgesteld 09-11-2026 (T0, track `doorloop-en-effectiviteit-dagelijks`, rij PR-0); aangenomen zodra de T0 PR-0 merget.
+**Status:** Aangenomen 2026-11-09 (PR #2563, d6f1fbde2). Voorgesteld 09-11-2026 (T0, track `doorloop-en-effectiviteit-dagelijks`, rij PR-0).
 **Datum:** 2026-11-09
 **Besloten door:** de operator voor besluiten 1 tot en met 4 van de 1.9-sprint (07-11-2026, besluit 2 en 3 hieronder letterlijk); het plan `claudedocs/2026-11-07-naar-1-9/plannen/doorloop-en-effectiviteit-dagelijks.md` (revisie 2, 08-11-2026, plan-gate van 08-11 en de tiebreaker-voorwaarden) voor de besluiten 20 tot en met 29. ADR-063 was vrij op `origin/main` `1a7776a40` (09-11-2026): de hoogste is ADR-061 en ADR-062 is gereserveerd voor `rekenslot-per-machine`.
 **Cross-refs:** ADR-007 (samengestelde sleutel over `project_id`; hier niet van toepassing, zie §9), ADR-046 (één poortmotor), ADR-051 (een geplande taak volgt de pin), ADR-056 (zelfstandigheid als meetbaar begrip), ADR-061 (deur-afgedwongen: zijn D7-lezer vervangt op termijn de grootboekbron en zijn override-administratie de wachttijd).

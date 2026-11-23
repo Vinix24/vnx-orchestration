@@ -366,7 +366,7 @@ def test_fixup_feature_review_stack_matches_config_base_stack(roadmap_env, monke
 
     import config_registry
     expected_stack = config_registry.CONFIG_REGISTRY["VNX_DEFAULT_REVIEW_STACK"].default.split(",")
-    assert expected_stack == ["codex_gate", "kimi_gate"], (
+    assert expected_stack == ["codex_gate", "deepseek_gate"], (  # seat 2 since 2026-11-11
         "this test assumes the current registry default; if it changed, "
         f"update the expectation here too: {expected_stack}"
     )

@@ -1,1 +1,0 @@
-- The door reconciliation (`backfill_pr_merged_receipts.py --reconcile-open-permits`, also run by the `--all-projects` child) reads every open PR and revokes a stale or orphaned `vnx-gate/door` permit with a PATCH to failure through the publisher (deur D7c).

@@ -39,8 +39,6 @@ import merge_preflight_ci_check as mpci
 from merge_preflight_ci_check import (
     check_ci_run_for_head,
     DEFAULT_CI_WORKFLOW_NAME,
-    CI_WORKFLOW_NAME_ENV_VAR,
-    OVERRIDE_ENV_VAR,
 )
 
 
@@ -250,9 +248,9 @@ class TestCheckCIRunForHead:
         workflow_idx = gh_call_args.index("--workflow")
         assert gh_call_args[workflow_idx + 1] == "CI/CD Pipeline"
 
-    def test_env_workflow_name_override(self, tmp_path, monkeypatch):
-        """VNX_CI_WORKFLOW_NAME is used when no explicit argument is given."""
-        monkeypatch.setenv(CI_WORKFLOW_NAME_ENV_VAR, "CI/CD Pipeline")
+    def test_env_workflow_name_is_not_read(self, tmp_path, monkeypatch):
+        """The deleted VNX_CI_WORKFLOW_NAME no longer names the workflow (config-een-oppervlak N5)."""
+        monkeypatch.setenv("VNX_CI_WORKFLOW_NAME", "CI/CD Pipeline")
         sha = "l" * 40
         mocks = _subprocess_mocks(sha) + [_gh_run_output("success", sha)]
         with patch("merge_preflight_ci_check.subprocess.run", side_effect=mocks) as mock_run, \
@@ -261,7 +259,7 @@ class TestCheckCIRunForHead:
         assert result["verdict"] == "GO"
         gh_call_args = mock_run.call_args_list[2].args[0]
         workflow_idx = gh_call_args.index("--workflow")
-        assert gh_call_args[workflow_idx + 1] == "CI/CD Pipeline"
+        assert gh_call_args[workflow_idx + 1] == DEFAULT_CI_WORKFLOW_NAME
 
 
 class TestCommitScopedQuery:
@@ -504,26 +502,14 @@ class TestOverrideEscapeHatch:
         assert result["verdict"] == "NO-GO"
         assert "reden" in result["message"]
 
-    def test_override_env_var_with_reason(self, tmp_path, monkeypatch):
-        """VNX_MERGE_OVERRIDE_REASON with a reason -> visible GO override."""
-        monkeypatch.setenv(OVERRIDE_ENV_VAR, "operator-approved: manual verify")
-        with patch("merge_preflight_ci_check.subprocess.run") as mock_run, \
-             patch("merge_preflight_ci_check.shutil.which", return_value=GH_PRESENT):
+    @pytest.mark.parametrize("value", ["operator-approved: manual verify", ""])
+    def test_override_env_var_is_not_read(self, tmp_path, monkeypatch, value):
+        """The deleted VNX_MERGE_OVERRIDE_REASON overrides nothing: the normal check runs."""
+        monkeypatch.setenv("VNX_MERGE_OVERRIDE_REASON", value)
+        with patch("merge_preflight_ci_check.shutil.which", return_value=None) as which:
             result = check_ci_run_for_head(tmp_path)
-        assert result["verdict"] == "GO"
-        assert result["overridden"] is True
-        assert "operator-approved" in result["message"]
-        mock_run.assert_not_called()
-
-    def test_override_env_var_empty_is_refused(self, tmp_path, monkeypatch):
-        """An empty env value is an override attempt without a reason -> NO-GO."""
-        monkeypatch.setenv(OVERRIDE_ENV_VAR, "")
-        with patch("merge_preflight_ci_check.subprocess.run") as mock_run, \
-             patch("merge_preflight_ci_check.shutil.which", return_value=GH_PRESENT):
-            result = check_ci_run_for_head(tmp_path)
-        assert result["verdict"] == "NO-GO"
-        assert "reden" in result["message"]
-        mock_run.assert_not_called()
+        assert which.called
+        assert (result["verdict"], result["reason"], result["overridden"]) == ("NO-GO", "gh_missing", False)
 
 
 class TestCLI:
@@ -665,7 +651,6 @@ def _p3_scenarios():
 class TestReasonCodes:
     @pytest.mark.parametrize("expected,kwargs,which,effects", _p3_scenarios())
     def test_every_return_path_names_its_reason(self, tmp_path, monkeypatch, expected, kwargs, which, effects):
-        monkeypatch.delenv(OVERRIDE_ENV_VAR, raising=False)
         with patch("merge_preflight_ci_check.subprocess.run", side_effect=effects), \
              patch("merge_preflight_ci_check.shutil.which", return_value=which):
             result = check_ci_run_for_head(tmp_path, **kwargs)

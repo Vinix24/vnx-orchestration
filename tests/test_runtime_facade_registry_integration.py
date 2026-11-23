@@ -67,13 +67,13 @@ FOUR_WORKER_YAML = textwrap.dedent("""\
 CUSTOM_YAML = textwrap.dedent("""\
     schema_version: 1
     workers:
-      - terminal_id: A0
+      - terminal_id: T10
         role: orchestrator
         provider: claude
         model: opus
         pool_id: custom
         aliases: []
-      - terminal_id: A1
+      - terminal_id: T11
         role: backend-developer
         provider: claude
         model: sonnet
@@ -105,7 +105,7 @@ class TestCanonicalTerminals:
         with patch("worker_registry.WORKER_REGISTRY", reg):
             from worker_registry import list_workers
             ids = [w.terminal_id for w in list_workers()]
-        assert ids == ["A0", "A1"]
+        assert ids == ["T10", "T11"]
 
     def test_canonical_terminals_ordering_preserved(self):
         reg = _make_registry_from_yaml(FOUR_WORKER_YAML)

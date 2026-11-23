@@ -29,8 +29,9 @@ import logging
 import os
 import re
 import sys
+from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 # Ensure the sibling scripts/lib modules resolve even when a caller imports
 # governance_emit by path without scripts/lib already on sys.path.
@@ -55,6 +56,7 @@ from append_receipt_internals.validation import _validate_receipt
 from receipt_schema import DISPATCH_GOVERNED_EVENT_TYPE, RECEIPT_V2_EVENT_TYPE, ReceiptV2
 from report_body_contract import validate_body
 from token_harvest import CLAUDE_HARNESS_PROVIDERS
+import enforcement_profile
 
 logger = logging.getLogger(__name__)
 
@@ -291,10 +293,10 @@ def emit_dispatch_receipt(
     parent_dispatch: Optional[str] = None,
     task_class: Optional[str] = None,
     tier_from: Optional[str] = None,
-    tier_to: Optional[str] = None, permission_posture: Optional[str] = None,
+    tier_to: Optional[str] = None, permission_posture: Optional[str] = None, token_usage_normalized: Optional[Dict[str, Any]] = None,
     permission_profile: Optional[str] = None,
     permission_allow_pattern_count: Optional[int] = None, lifecycle_v3: bool = False,
-    model_resolved: Optional[str] = None, cost_ledger_run_ids: Optional[List[str]] = None,
+    model_resolved: Optional[str] = None, cost_ledger_run_ids: Optional[List[str]] = None, start_context_tokens: Optional[int] = None,
 ) -> Path:
     """Atomic-append to t0_receipts.ndjson via the shared append primitive
     (ADR-035 §7.1) — same lock file, hash-chain stamping, and validator Path 2
@@ -411,6 +413,11 @@ def emit_dispatch_receipt(
     the lane wrote for this dispatch before calling here; ``cost_usd`` and
     ``cost_source`` then come from those lines. Stamped only when provided.
 
+    ``token_usage_normalized`` / ``start_context_tokens``: the run's five ledger
+    token fields and the context a claude harness builder started with
+    (``receipt_token_fields``), beside the raw ``token_usage``. Stamped only
+    when not ``None``.
+
     ``lifecycle_v3``: ADR-054 — True when the lane holds a v3 ``Handover``, so the
     same 17-field record is written as ``dispatch_governed`` instead of
     ``task_complete``; a v3 dispatch then has no second end line.
@@ -422,46 +429,9 @@ def emit_dispatch_receipt(
     """
     _validate_provider(provider)
 
-    # dispatch-20260802-model-ssot-en-ketenlink: model identity is normalized to
-    # the canonical wave7_models.yaml key here, at the receipt boundary — the
-    # same model can no longer land in the ledger under several spellings
-    # (deepseek/deepseek-v4-pro vs deepseek-v4-pro, kimi-code/k3 vs kimi-k3,
-    # claude-sonnet-5 vs sonnet-5). Unmapped strings pass through unchanged and
-    # are caught by the fail-closed model validator downstream.
-    try:
-        from providers.model_normalizer import normalize_model_name  # noqa: PLC0415
-        model = normalize_model_name(model)
-        if model_resolved:
-            model_resolved = normalize_model_name(model_resolved)
-    except Exception:  # noqa: BLE001 — a normalizer failure must never block receipt emission
-        logger.debug("emit_dispatch_receipt: model normalization failed dispatch=%s", dispatch_id, exc_info=True)
-
-    # Chain-link fallback: the caller may not know the fields (the tmux worker
-    # path writes its own receipt via append_receipt_payload and inherits them
-    # from the door's env); the door exports them so every lane lands the same
-    # value. Explicit kwargs win over env.
-    parent_dispatch = parent_dispatch or os.environ.get("VNX_PARENT_DISPATCH") or None
-    task_class = task_class or os.environ.get("VNX_TASK_CLASS") or None
-    tier_from = tier_from or os.environ.get("VNX_TIER_FROM") or None
-    tier_to = tier_to or os.environ.get("VNX_TIER_TO") or None
-
-    # Receipt-quality PR-B1: backfill token_usage for the claude-harness lanes
-    # from the local Claude Code session transcript when the caller has nothing
-    # usable (no live usage API on the subscription lane). Only ever tightens
-    # the data — a caller-supplied real token_usage is never overwritten, and
-    # any harvest failure (no session_id, no transcript, non-harness providers)
-    # leaves token_usage exactly as passed in.
-    if provider in CLAUDE_HARNESS_PROVIDERS and session_id and (not token_usage or token_usage.get("unavailable")):
-        try:
-            from token_harvest import harvest_session_tokens  # noqa: PLC0415
-            harvested = harvest_session_tokens(session_id)
-            if harvested and not harvested.get("unavailable"):
-                token_usage = harvested
-        except Exception as exc:  # noqa: BLE001 — harvesting must never break receipt emission
-            logger.debug(
-                "emit_dispatch_receipt: token harvest failed for dispatch=%s session_id=%s: %s",
-                dispatch_id, session_id, exc,
-            )
+    model, model_resolved = _normalize_receipt_models(dispatch_id, model, model_resolved)
+    parent_dispatch, task_class, tier_from, tier_to = _chain_link_fields(parent_dispatch, task_class, tier_from, tier_to)
+    token_usage = _harvested_token_usage(dispatch_id, provider, session_id, token_usage)
 
     # Receipt-quality PR-B0: the v2 receipt shape is codified in
     # receipt_schema.ReceiptV2 — the contract validates receipt_kind
@@ -517,9 +487,76 @@ def emit_dispatch_receipt(
         permission_posture=permission_posture,
         permission_profile=permission_profile,
         permission_allow_pattern_count=permission_allow_pattern_count,
-        model_resolved=model_resolved or None, context_manifest=_context_manifest_stamp(dispatch_id, provider, session_id, state_dir),
+        model_resolved=model_resolved or None, context_manifest=_context_manifest_stamp(dispatch_id, provider, session_id, state_dir), token_usage_normalized=token_usage_normalized, start_context_tokens=start_context_tokens,
     ).to_dict()
 
+    receipt_path = _append_dispatch_receipt(receipt, state_dir, dispatch_id)
+    logger.info("governance_emit: receipt written dispatch=%s provider=%s status=%s", dispatch_id, provider, status)
+    return receipt_path
+
+
+def _normalize_receipt_models(
+    dispatch_id: str, model: str, model_resolved: Optional[str],
+) -> Tuple[str, Optional[str]]:
+    """``(model, model_resolved)`` normalized to the canonical key, or unchanged on a normalizer failure."""
+    # dispatch-20260802-model-ssot-en-ketenlink: model identity is normalized to
+    # the canonical wave7_models.yaml key here, at the receipt boundary — the
+    # same model can no longer land in the ledger under several spellings
+    # (deepseek/deepseek-v4-pro vs deepseek-v4-pro, kimi-code/k3 vs kimi-k3,
+    # claude-sonnet-5 vs sonnet-5). Unmapped strings pass through unchanged and
+    # are caught by the fail-closed model validator downstream.
+    try:
+        from providers.model_normalizer import normalize_model_name  # noqa: PLC0415
+        model = normalize_model_name(model)
+        if model_resolved:
+            model_resolved = normalize_model_name(model_resolved)
+    except Exception:  # noqa: BLE001 — a normalizer failure must never block receipt emission
+        logger.debug("emit_dispatch_receipt: model normalization failed dispatch=%s", dispatch_id, exc_info=True)
+    return model, model_resolved
+
+
+def _chain_link_fields(
+    parent_dispatch: Optional[str], task_class: Optional[str],
+    tier_from: Optional[str], tier_to: Optional[str],
+) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[str]]:
+    """The four chain-link fields, each falling back to the door's env when the caller has none."""
+    # Chain-link fallback: the caller may not know the fields (the tmux worker
+    # path writes its own receipt via append_receipt_payload and inherits them
+    # from the door's env); the door exports them so every lane lands the same
+    # value. Explicit kwargs win over env.
+    parent_dispatch = parent_dispatch or os.environ.get("VNX_PARENT_DISPATCH") or None
+    task_class = task_class or os.environ.get("VNX_TASK_CLASS") or None
+    tier_from = tier_from or os.environ.get("VNX_TIER_FROM") or None
+    tier_to = tier_to or os.environ.get("VNX_TIER_TO") or None
+    return parent_dispatch, task_class, tier_from, tier_to
+
+
+def _harvested_token_usage(
+    dispatch_id: str, provider: str, session_id: Optional[str], token_usage: Dict[str, int],
+) -> Dict[str, int]:
+    """``token_usage``, or the session transcript's usage for a claude-harness lane with nothing usable."""
+    # Receipt-quality PR-B1: backfill token_usage for the claude-harness lanes
+    # from the local Claude Code session transcript when the caller has nothing
+    # usable (no live usage API on the subscription lane). Only ever tightens
+    # the data — a caller-supplied real token_usage is never overwritten, and
+    # any harvest failure (no session_id, no transcript, non-harness providers)
+    # leaves token_usage exactly as passed in.
+    if provider in CLAUDE_HARNESS_PROVIDERS and session_id and (not token_usage or token_usage.get("unavailable")):
+        try:
+            from token_harvest import harvest_session_tokens  # noqa: PLC0415
+            harvested = harvest_session_tokens(session_id)
+            if harvested and not harvested.get("unavailable"):
+                token_usage = harvested
+        except Exception as exc:  # noqa: BLE001 — harvesting must never break receipt emission
+            logger.debug(
+                "emit_dispatch_receipt: token harvest failed for dispatch=%s session_id=%s: %s",
+                dispatch_id, session_id, exc,
+            )
+    return token_usage
+
+
+def _append_dispatch_receipt(receipt: Dict[str, Any], state_dir: Path, dispatch_id: str) -> Path:
+    """Append ``receipt`` via the shared locked primitive; ``RuntimeError`` on a write failure."""
     receipt_path = Path(state_dir) / "t0_receipts.ndjson"
     receipt_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -564,8 +601,6 @@ def emit_dispatch_receipt(
     # the store this receipt was appended to.
     if result.status == "appended":
         _update_confidence_from_receipt(receipt, state_dir=Path(state_dir))
-
-    logger.info("governance_emit: receipt written dispatch=%s provider=%s status=%s", dispatch_id, provider, status)
     return receipt_path
 
 
@@ -584,7 +619,7 @@ def _validate_report_via_shell(report_path: Path, dispatch_id: str) -> None:
         )
         if result.returncode != 0:
             msg = (result.stdout or result.stderr or "unknown error").strip()
-            if os.environ.get("VNX_SCHEMA_STRICT") == "1":
+            if enforcement_profile.enforced():
                 raise ValueError(f"schema validation failed (shell): {msg}")
             logger.warning(
                 "governance_emit: schema violation via shell (shadow-mode) dispatch=%s: %s",
@@ -599,7 +634,7 @@ def _validate_report_frontmatter(content: str, dispatch_id: str, report_path: Op
 
     Uses Python jsonschema when available (UnifiedReportValidator class), falls
     back to shell wrapper (verify_report_schema.sh) when jsonschema is missing.
-    Shadow-mode by default (log violations). Raises only when VNX_SCHEMA_STRICT=1.
+    Shadow-mode by default (log violations). Raises only when the enforcement profile is ``enforced``.
     """
     try:
         from unified_report_schema import UnifiedReportValidator, SchemaViolation
@@ -614,7 +649,7 @@ def _validate_report_frontmatter(content: str, dispatch_id: str, report_path: Op
     result = validator.validate(content)
     if not result.valid:
         violation_msg = result.errors[0] if result.errors else "unknown schema violation"
-        if os.environ.get("VNX_SCHEMA_STRICT") == "1":
+        if enforcement_profile.enforced():
             raise SchemaViolation(violation_msg)
         logger.warning(
             "governance_emit: schema violation (shadow-mode) dispatch=%s: %s",
@@ -849,6 +884,119 @@ def _lift_lane_log_for_report(
         return None
 
 
+def _report_predates_attempt(
+    report_path: Path, attempt_started_at: Union[datetime, int, float],
+) -> bool:
+    """True only when the report's mtime is positively before the attempt start.
+
+    A bad *attempt_started_at* type raises; an unreadable mtime is "not stale"
+    (the report is then handled by the pre-OI-3064 rules, never rotated blind).
+    """
+    if isinstance(attempt_started_at, datetime):
+        started = attempt_started_at.timestamp()
+    elif isinstance(attempt_started_at, (int, float)) and not isinstance(attempt_started_at, bool):
+        started = float(attempt_started_at)
+    else:
+        raise TypeError(
+            f"attempt_started_at must be a datetime or epoch seconds, got {attempt_started_at!r}"
+        )
+    try:
+        return report_path.stat().st_mtime < started
+    except OSError:
+        return False
+
+
+def _rotate_stale_report(report_path: Path, reports_dir: Path, dispatch_id: str) -> Optional[Path]:
+    """Move an earlier attempt's report to ``<id>.attempt-<n>.md`` (first free n).
+
+    ``os.link`` fails on an existing target, so an earlier sidecar is never
+    overwritten. Returns the sidecar, or None when the move failed (the caller
+    then keeps the report as-is).
+    """
+    n = 1
+    while True:
+        sidecar = reports_dir / f"{dispatch_id}.attempt-{n}.md"
+        try:
+            os.link(report_path, sidecar)
+        except FileExistsError:
+            n += 1
+            continue
+        except OSError as exc:
+            logger.warning(
+                "governance_emit: could not rotate stale report %s to %s (%s); keeping it",
+                report_path, sidecar, exc,
+            )
+            return None
+        break
+    try:
+        os.unlink(report_path)
+    except OSError as exc:
+        logger.warning(
+            "governance_emit: rotated stale report %s to %s but could not remove the original (%s)",
+            report_path, sidecar, exc,
+        )
+        return None
+    logger.info(
+        "governance_emit: rotated stale report from an earlier attempt dispatch=%s old=%s sidecar=%s",
+        dispatch_id, report_path, sidecar,
+    )
+    return sidecar
+
+
+def _rotation_blocks_emit(
+    report_path: Path, reports_dir: Path, dispatch_id: str,
+    overwrite: bool, attempt_started_at: Optional[Union[datetime, int, float]],
+) -> bool:
+    """OI-3064: rotate a report that is stale AND contract-invalid; True = keep it, stop.
+
+    Returns True only when a rotation was needed but failed (the caller then
+    returns the existing report). A stale report that passes the contract, one
+    that cannot be read (validity unknown), and every case without
+    *attempt_started_at* are left untouched: the pre-OI-3064 rules apply.
+    """
+    if overwrite or attempt_started_at is None or not report_path.exists():
+        return False
+    if not _report_predates_attempt(report_path, attempt_started_at):
+        return False
+    try:
+        existing = report_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False  # validity unknown: never rotate blind
+    if validate_body(existing).valid:
+        return False
+    return _rotate_stale_report(report_path, reports_dir, dispatch_id) is None
+
+
+def _warn_report_store_split_brain(report_path: Path, dispatch_id: str, data_dir: Path) -> None:
+    """OI-1635: before writing the generic wrapper, flag a real report in another store.
+
+    Only runs when nothing exists yet at *report_path*. The worker and this
+    emitter can disagree on "VNX_DATA_DIR" (see provider_dispatch._worker_role_env);
+    a hit means the central ledger is about to receive a narrative stand-in
+    while the actual work sits elsewhere, unlinked from the audit trail, so it
+    is logged as an error. The guard is advisory and never breaks report emit.
+    """
+    if report_path.exists():
+        return
+    try:
+        from data_dir_guard import check_report_store_split_brain
+        _orphan = check_report_store_split_brain(dispatch_id, data_dir)
+        if _orphan is not None:
+            logger.error(
+                "VNX_REPORT_STORE_SPLIT_BRAIN: dispatch=%s about to write the "
+                "generic wrapper at %s, but a worker report already exists at "
+                "%s — the worker and the governance emitter resolved the VNX "
+                "data dir to different stores; that richer report is orphaned "
+                "from the audit trail",
+                dispatch_id, report_path, _orphan,
+            )
+    except Exception as _split_exc:  # noqa: BLE001 — advisory guard must never break report emit
+        logger.debug(
+            "governance_emit: split-brain guard failed (non-fatal) dispatch=%s: %s",
+            dispatch_id, _split_exc,
+        )
+
+
 def emit_unified_report(
     dispatch_id: str,
     terminal_id: str,
@@ -865,11 +1013,17 @@ def emit_unified_report(
     preserve_partial: bool = False,
     model: Optional[str] = None,
     spawn_error: Optional[str] = None,
+    attempt_started_at: Optional[Union[datetime, int, float]] = None,
 ) -> Path:
     """Atomic write to unified_reports/<dispatch_id>.md. Returns path.
 
     Idempotent: returns the existing path without modifying it when the report
     already exists (worker may have written a richer report).
+
+    *attempt_started_at* (OI-3064): when THIS attempt began, a ``datetime`` or
+    epoch seconds. A stale and contract-invalid report (mtime before it) is
+    rotated to ``<id>.attempt-<n>.md`` and the fresh one takes its place; any
+    other existing report follows the rules here. Without it, nothing rotates.
 
     When *body_override* is provided, that exact markdown string is written as
     the report body instead of the generic ## Response wrapper.  The govern()
@@ -922,7 +1076,7 @@ def emit_unified_report(
 
     When *frontmatter* is provided, prepends a YAML frontmatter block and
     validates against unified_report_v1 schema.  Default is shadow-mode (log
-    violations, do not raise).  Set VNX_SCHEMA_STRICT=1 to raise on violation.
+    violations, do not raise).  The enforcement profile ``enforced`` raises on violation.
 
     Raises:
         RuntimeError: write failed
@@ -932,31 +1086,10 @@ def emit_unified_report(
 
     report_path = reports_dir / f"{dispatch_id}.md"
 
-    # OI-1635: nothing exists yet at report_path — about to write the generic
-    # completion-text wrapper below. Before doing that, check whether the
-    # worker's REAL report landed in a DIFFERENT known store (the worker and
-    # this emitter can disagree on "VNX_DATA_DIR" — see
-    # provider_dispatch._worker_role_env). A hit here means the central ledger
-    # is about to receive a narrative stand-in while the actual work sits
-    # elsewhere, unlinked from the audit trail — never silent about that.
-    if not report_path.exists():
-        try:
-            from data_dir_guard import check_report_store_split_brain
-            _orphan = check_report_store_split_brain(dispatch_id, data_dir)
-            if _orphan is not None:
-                logger.error(
-                    "VNX_REPORT_STORE_SPLIT_BRAIN: dispatch=%s about to write the "
-                    "generic wrapper at %s, but a worker report already exists at "
-                    "%s — the worker and the governance emitter resolved the VNX "
-                    "data dir to different stores; that richer report is orphaned "
-                    "from the audit trail",
-                    dispatch_id, report_path, _orphan,
-                )
-        except Exception as _split_exc:  # noqa: BLE001 — advisory guard must never break report emit
-            logger.debug(
-                "governance_emit: split-brain guard failed (non-fatal) dispatch=%s: %s",
-                dispatch_id, _split_exc,
-            )
+    _warn_report_store_split_brain(report_path, dispatch_id, data_dir)
+
+    if _rotation_blocks_emit(report_path, reports_dir, dispatch_id, overwrite, attempt_started_at):
+        return report_path
 
     if report_path.exists() and not overwrite:
         if preserve_partial:

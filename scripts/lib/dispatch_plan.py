@@ -15,7 +15,7 @@ import hashlib
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Mapping, Optional
+from typing import Any, Mapping, Optional
 
 from dispatch_spec import (
     DispatchPath,
@@ -123,6 +123,7 @@ class RuntimeSnapshot:
     task_class: Optional[str] = None
     tier_from: Optional[str] = None
     tier_to: Optional[str] = None
+    difficulty: Optional[Mapping[str, Any]] = None  # staged difficulty, copied from the spec
     # OI-943: worker-claude-override gate outcome, threaded from build_runtime_snapshot
     # so the door can persist target_slot + override reason onto the dispatch row.
     worker_claude_override_reason: Optional[str] = None
@@ -183,6 +184,7 @@ class ExecutionPlan:
     task_class: Optional[str] = None
     tier_from: Optional[str] = None
     tier_to: Optional[str] = None
+    difficulty: Optional[Mapping[str, Any]] = None  # advisory, NOT in digest()
     skill: Optional[str] = None         # RS-2: the verified skill slug carried to the prompt seam.
                                         # Only a slug resolve_skill_dir found reaches here. It IS in
                                         # digest(): a skill injects instructions, so a permit for one
@@ -316,13 +318,9 @@ def compile_plan(vspec: ValidatedSpec, snapshot: RuntimeSnapshot) -> ExecutionPl
     # only the SILENT default was the defect. snapshot.valid_roles=None (registry
     # not provided) skips — the door always passes a frozenset (possibly empty =
     # fail-closed, every role rejected).
-    if snapshot.valid_roles is not None and spec.role not in snapshot.valid_roles:
-        valid = ", ".join(sorted(snapshot.valid_roles))
-        return Reject(
-            "unknown-role",
-            f"role {spec.role!r} is not a known agent role; "
-            f"valid roles: {valid or '(none discovered — agents/ registry unavailable)'}",
-        )
+    role_reject = _role_reject(spec, snapshot)
+    if role_reject is not None:
+        return role_reject
 
     # OI-1756 — task_class closed-set check: an explicit task_class string not
     # present in routing_recommendations.yaml's routing_by_task used to reach
@@ -381,14 +379,7 @@ def compile_plan(vspec: ValidatedSpec, snapshot: RuntimeSnapshot) -> ExecutionPl
     # snapshot's claude_api_metered flag carries that measurement in so
     # compile_plan stays pure. A headless dispatch with no key of its own is
     # therefore "subscription", not "api_metered".
-    if is_claude_lane:
-        billing = "api_metered" if snapshot.claude_api_metered else "subscription"
-    elif provider == Provider.KIMI:
-        billing = "subscription"
-    elif provider == Provider.LOCAL_GEMMA:
-        billing = "local"
-    else:
-        billing = "provider_metered"
+    billing = _resolve_billing(provider, is_claude_lane, snapshot)
     fired.append("D2")
 
     # D4 — model tier; warn-only pins are NOT a Reject
@@ -406,32 +397,7 @@ def compile_plan(vspec: ValidatedSpec, snapshot: RuntimeSnapshot) -> ExecutionPl
     # default. A spec that names a kimi-branded model on the claude lane (e.g.
     # model=kimi-k3) still hard-rejects via kimi-via-cli-only / the registry gate
     # upstream, never a silent fallback.
-    target_slot = spec.target_slot
-    if is_claude_lane:
-        pin = snapshot.model_pins.get(target_slot)
-        pinned = pin.model if pin is not None else None
-        requested = spec.model
-        if pinned:
-            if pin.semantics == "default" and requested and requested != pinned:
-                # Default semantics: the caller's explicit model choice wins.
-                warnings.append(
-                    f"model-tier: requested {requested} over pinned {pinned}"
-                    f" for {target_slot} (default semantics — request honoured)"
-                )
-                model = requested
-            elif requested and requested != pinned:
-                # Floor semantics (or unrecognised — treat as floor): the pin wins.
-                warnings.append(
-                    f"model-tier: requested {requested}, pinned {pinned}"
-                    f" for {target_slot} (floor semantics — pin honoured)"
-                )
-                model = pinned
-            else:
-                model = pinned
-        else:
-            model = requested or "sonnet"
-    else:
-        model = spec.model or "default"
+    model = _resolve_model(spec, snapshot, is_claude_lane, warnings)
     fired.append("D4")
 
     # D5 — serialization class; the subscription is ONE account-wide resource,
@@ -475,15 +441,9 @@ def compile_plan(vspec: ValidatedSpec, snapshot: RuntimeSnapshot) -> ExecutionPl
 
     # D12 — target resolution; claude lane is leaseless (ephemeral), skip health checks.
     # The one target id is a per-run event-stream terminal (event_store, OI-1869).
-    if is_claude_lane:
-        target_id = HEADLESS_LANE_TERMINAL
-    else:
-        target_id = spec.target_id_override or spec.target_slot
-        health = snapshot.target_health.get(target_id)
-        if health != "healthy":
-            return Reject("R-6", f"target {target_id!r} is not healthy (status={health!r})")
-        if not snapshot.target_capable.get(target_id, True):
-            return Reject("R-5", f"target {target_id!r} is not capable for this dispatch")
+    target_id = _resolve_target(spec, snapshot, is_claude_lane)
+    if isinstance(target_id, Reject):
+        return target_id
     fired.append("D12")
 
     return ExecutionPlan(
@@ -515,8 +475,80 @@ def compile_plan(vspec: ValidatedSpec, snapshot: RuntimeSnapshot) -> ExecutionPl
         # continues and on which tier.
         parent_dispatch=snapshot.parent_dispatch,
         task_class=snapshot.task_class,
-        tier_from=snapshot.tier_from,
-        tier_to=snapshot.tier_to,
+        tier_from=snapshot.tier_from, tier_to=snapshot.tier_to,
+        difficulty=snapshot.difficulty,
         instruction_sha256=vspec.instruction_sha256,
         warnings=tuple(warnings),
     )
+
+
+def _role_reject(spec: DispatchSpec, snapshot: RuntimeSnapshot) -> Optional[Reject]:
+    """OI-921: a role outside ``snapshot.valid_roles`` (when provided) is a Reject."""
+    if snapshot.valid_roles is not None and spec.role not in snapshot.valid_roles:
+        valid = ", ".join(sorted(snapshot.valid_roles))
+        return Reject(
+            "unknown-role",
+            f"role {spec.role!r} is not a known agent role; "
+            f"valid roles: {valid or '(none discovered — agents/ registry unavailable)'}",
+        )
+    return None
+
+
+def _resolve_billing(provider: Provider, is_claude_lane: bool, snapshot: RuntimeSnapshot) -> str:
+    """D2: the billing label for the lane (see compile_plan's D2 comment)."""
+    if is_claude_lane:
+        billing = "api_metered" if snapshot.claude_api_metered else "subscription"
+    elif provider == Provider.KIMI:
+        billing = "subscription"
+    elif provider == Provider.LOCAL_GEMMA:
+        billing = "local"
+    else:
+        billing = "provider_metered"
+    return billing
+
+
+def _resolve_model(
+    spec: DispatchSpec, snapshot: RuntimeSnapshot, is_claude_lane: bool, warnings: list[str],
+) -> str:
+    """D4: the model tier, appending a model-tier warning when a pin and a request differ."""
+    target_slot = spec.target_slot
+    if is_claude_lane:
+        pin = snapshot.model_pins.get(target_slot)
+        pinned = pin.model if pin is not None else None
+        requested = spec.model
+        if pinned:
+            if pin.semantics == "default" and requested and requested != pinned:
+                # Default semantics: the caller's explicit model choice wins.
+                warnings.append(
+                    f"model-tier: requested {requested} over pinned {pinned}"
+                    f" for {target_slot} (default semantics — request honoured)"
+                )
+                model = requested
+            elif requested and requested != pinned:
+                # Floor semantics (or unrecognised — treat as floor): the pin wins.
+                warnings.append(
+                    f"model-tier: requested {requested}, pinned {pinned}"
+                    f" for {target_slot} (floor semantics — pin honoured)"
+                )
+                model = pinned
+            else:
+                model = pinned
+        else:
+            model = requested or "sonnet"
+    else:
+        model = spec.model or "default"
+    return model
+
+
+def _resolve_target(spec: DispatchSpec, snapshot: RuntimeSnapshot, is_claude_lane: bool) -> "str | Reject":
+    """D12: the target id; a provider-lane target must be healthy (R-6) and capable (R-5)."""
+    if is_claude_lane:
+        target_id = HEADLESS_LANE_TERMINAL
+    else:
+        target_id = spec.target_id_override or spec.target_slot
+        health = snapshot.target_health.get(target_id)
+        if health != "healthy":
+            return Reject("R-6", f"target {target_id!r} is not healthy (status={health!r})")
+        if not snapshot.target_capable.get(target_id, True):
+            return Reject("R-5", f"target {target_id!r} is not capable for this dispatch")
+    return target_id

@@ -149,7 +149,6 @@ def seed_done_track(
     """
     numbers = list(pr_numbers)
     monkeypatch.setenv("VNX_PROJECT_ID", CLOSURE_PROJECT_ID)
-    monkeypatch.setenv("VNX_RECONCILE_GIT", "0")
     build_tracks_db(state_dir)
     seed_track(state_dir, derived_status="done", pr_ref=",".join(f"#{n}" for n in numbers))
     if merged:

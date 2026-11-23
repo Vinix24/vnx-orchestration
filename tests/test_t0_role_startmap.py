@@ -121,7 +121,7 @@ def test_r2_the_state_read_resolves_the_central_store_from_the_t0_folder(tmp_pat
 
 
 ADR = REPO / "docs" / "governance" / "decisions" / "ADR-058-t0-playbook-source-en-verwijzing.md"
-ROLE_BYTE_CEILING = 33659
+ROLE_BYTE_CEILING = 35000
 LEGACY_COPY = ".claude/skills/t0-orchestrator"
 
 

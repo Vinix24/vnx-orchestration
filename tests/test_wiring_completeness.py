@@ -5,7 +5,7 @@ Verifies that all 4 modules identified in the audit are properly wired
 through at least one real call-path:
   1. PR-6.5d: auto_apply() runs from build_t0_state fallback path
   2. PR-D5-E: UnifiedReportValidator class is importable and usable from governance_emit
-  3. PR-D5-F: VNX_SCHEMA_STRICT toggle in emit_unified_report (shadow-mode + strict)
+  3. PR-D5-F: enforcement profile toggle in emit_unified_report (shadow-mode + strict)
   4. PR-SR-3: smart_router.route() is called from provider_dispatch --auto-route
 """
 
@@ -192,37 +192,37 @@ class TestUnifiedReportValidatorWiring:
 
 
 # ---------------------------------------------------------------------------
-# Test 3: PR-D5-F — VNX_SCHEMA_STRICT toggle in emit_unified_report
+# Test 3: PR-D5-F — enforcement profile toggle in emit_unified_report
 # ---------------------------------------------------------------------------
 
 class TestSchemaStrictToggle:
-    """Verify VNX_SCHEMA_STRICT controls raise vs shadow-mode behavior."""
+    """Verify the enforcement profile controls raise vs shadow-mode behavior."""
 
     def test_shadow_mode_logs_violation(self, tmp_path, caplog):
-        """Default (VNX_SCHEMA_STRICT unset): violations logged, not raised."""
+        """Profile shadow: violations logged, not raised."""
         import logging
 
         from governance_emit import _validate_report_frontmatter
 
         content = "---\nschema_version: 1\n---\n\n# Missing fields\n"
 
-        env_patch = {"VNX_SCHEMA_STRICT": ""}
+        env_patch = {"VNX_OVERRIDE_ENFORCEMENT_PROFILE": "shadow"}
         with patch.dict(os.environ, env_patch, clear=False):
-            os.environ.pop("VNX_SCHEMA_STRICT", None)
+            os.environ.pop("VNX_ENFORCEMENT_PROFILE", None)
             with caplog.at_level(logging.WARNING):
                 _validate_report_frontmatter(content, "test-shadow")
 
         assert any("schema violation (shadow-mode)" in r.message for r in caplog.records)
 
     def test_strict_mode_raises(self):
-        """VNX_SCHEMA_STRICT=1: violations raise SchemaViolation."""
+        """Profile enforced: violations raise SchemaViolation."""
         from unified_report_schema import SchemaViolation
 
         from governance_emit import _validate_report_frontmatter
 
         content = "---\nschema_version: 1\n---\n\n# Missing fields\n"
 
-        with patch.dict(os.environ, {"VNX_SCHEMA_STRICT": "1"}):
+        with patch.dict(os.environ, {"VNX_OVERRIDE_ENFORCEMENT_PROFILE": "enforced"}):
             with pytest.raises(SchemaViolation):
                 _validate_report_frontmatter(content, "test-strict")
 
@@ -350,45 +350,43 @@ class TestSmartRouterRouteWiring:
         assert record["chosen_route"]["model_id"] == "claude-opus-4-6"
 
     def test_provider_dispatch_auto_route_calls_smart_router_route(self, tmp_path):
-        """provider_dispatch main() with --auto-route calls smart_router.route()."""
-        from smart_router import RoutingResult, RouteDecision, RouteCandidate
+        """provider_dispatch main() with --auto-route runs smart_router.decide() and persists
+        the decision with write_route_decision() (explicit pair since PR-SR-3/4, 3b68cd3dc)."""
+        from smart_router import RouteDecision, RouteCandidate
 
-        mock_result = RoutingResult(
-            decision=RouteDecision(
-                task_class="01_code_generation",
-                primary=RouteCandidate(
-                    model_id="claude-sonnet-4-6",
-                    composite_score=8.0,
-                    avg_duration_seconds=500,
-                ),
-                fallback=None,
-                reason="test",
+        decision = RouteDecision(
+            task_class="01_code_generation",
+            primary=RouteCandidate(
+                model_id="claude-sonnet-4-6",
+                composite_score=8.0,
+                avg_duration_seconds=500,
             ),
-            provider="claude",
-            model="sonnet",
-            routed=True,
+            fallback=None,
+            reason="test",
         )
 
-        with patch("smart_router.route", return_value=mock_result) as mock_route:
+        with patch("smart_router.decide", return_value=decision) as mock_decide, \
+                patch("smart_router.write_route_decision") as mock_write:
             with patch.dict(os.environ, {"VNX_STATE_DIR": str(tmp_path)}):
                 import provider_dispatch as pd_mod
 
-                with patch.object(pd_mod, "_dispatch_claude", return_value=0):
-                    with patch("env_loader.load_env"):
-                        with patch("constraint_enforcer.enforce"):
-                            try:
-                                pd_mod.main([
-                                    "--provider", "claude",
-                                    "--terminal-id", "T1",
-                                    "--dispatch-id", "test-auto-001",
-                                    "--instruction", "implement feature X",
-                                    "--auto-route",
-                                ])
-                            except SystemExit:
-                                pass
+                with patch.object(pd_mod, "_dispatch_claude", return_value=0), \
+                        patch.object(pd_mod, "_resolve_state_dir", return_value=tmp_path), \
+                        patch("env_loader.load_env"), \
+                        patch("constraint_enforcer.enforce"):
+                    try:
+                        pd_mod.main([
+                            "--provider", "claude",
+                            "--terminal-id", "T1",
+                            "--dispatch-id", "test-auto-001",
+                            "--instruction", "implement feature X",
+                            "--auto-route",
+                        ])
+                    except SystemExit:
+                        pass
 
-            mock_route.assert_called_once()
-            call_kwargs = mock_route.call_args
-            assert "dispatch_id" in (call_kwargs.kwargs or {}) or len(call_kwargs.args) > 1
-            if call_kwargs.kwargs:
-                assert call_kwargs.kwargs["dispatch_id"] == "test-auto-001"
+            mock_decide.assert_called_once()
+            assert mock_decide.call_args.kwargs["instruction"] == "implement feature X"
+            mock_write.assert_called_once()
+            assert mock_write.call_args.args[0] == "test-auto-001"
+            assert mock_write.call_args.args[1] is decision

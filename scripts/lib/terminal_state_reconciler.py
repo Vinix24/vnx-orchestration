@@ -408,61 +408,10 @@ def reconcile_terminal_state(
 
     records: Dict[str, Dict[str, Any]] = {}
     for term in TERMINALS:
-        primary_record = (primary_doc or {}).get("terminals", {}).get(term, {})
-        receipt_record = by_terminal_receipt.get(term, {})
-        receipt_ts = receipt_record.get("_ts")
-
-        claimed_by = primary_record.get("claimed_by")
-        if (not claimed_by) and receipt_record.get("status") in {"working", "blocked"}:
-            claimed_by = receipt_record.get("dispatch_id") or receipt_record.get("task_id")
-        lease_expires_at = primary_record.get("lease_expires_at")
-        lease_expires_ts = _parse_iso(lease_expires_at)
-        claim_active = bool(claimed_by) and (lease_expires_ts is None or lease_expires_ts > now_utc)
-
-        base_last_activity = _parse_iso(primary_record.get("last_activity"))
-        tmux_last = _parse_iso((tmux_info.get(term) or {}).get("recent_log_activity"))
-        last_activity = _max_ts(base_last_activity, receipt_ts, tmux_last)
-
-        status = _status_from_signals(
-            str(primary_record.get("status") or "") or None,
-            receipt_record.get("status"),
-            claim_active,
-            tmux_info.get(term, {}),
-            process_health,
-            cfg.active_window_seconds,
+        records[term] = _reconcile_terminal_record(
+            term, primary_doc, primary_health, by_terminal_receipt.get(term, {}),
+            tmux_info, process_health, cfg, now_utc,
         )
-
-        source = "primary"
-        if not primary_doc or primary_health.get("stale"):
-            source = "fallback"
-        elif receipt_record or tmux_info.get(term):
-            source = "hybrid"
-
-        record = {
-            "terminal_id": term,
-            "status": status,
-            "claimed_by": claimed_by,
-            "claimed_at": primary_record.get("claimed_at"),
-            "lease_expires_at": lease_expires_at,
-            "last_activity": _iso(last_activity) or _iso(now_utc),
-            "version": int(primary_record.get("version", 1)) if isinstance(primary_record, dict) else 1,
-            "reconciled_source": source,
-        }
-
-        # Receipt completion/failure should clear stale claims. Explicit
-        # no_confirmation blocks keep ownership on the current dispatch.
-        if receipt_record.get("status") == "idle":
-            record["claimed_by"] = None
-            record["claimed_at"] = None
-            record["lease_expires_at"] = None
-
-        # Clear expired leases - if claim is not active, remove ownership
-        if not claim_active and claimed_by:
-            record["claimed_by"] = None
-            record["claimed_at"] = None
-            record["lease_expires_at"] = None
-
-        records[term] = record
 
     degraded_reasons: List[str] = []
     if primary_health.get("error"):
@@ -490,19 +439,91 @@ def reconcile_terminal_state(
     }
 
     if repair:
-        payload = {
-            "schema_version": SCHEMA_VERSION,
-            "terminals": {term: {k: v for k, v in rec.items() if k in {
-                "terminal_id",
-                "status",
-                "claimed_by",
-                "claimed_at",
-                "lease_expires_at",
-                "last_activity",
-                "version",
-            }} for term, rec in records.items()},
-        }
+        payload = _repair_payload(records)
         _atomic_write(primary_path, payload)
         result["repair_written"] = str(primary_path)
 
     return result
+
+
+def _reconcile_terminal_record(
+    term: str,
+    primary_doc: Optional[Dict[str, Any]],
+    primary_health: Dict[str, Any],
+    receipt_record: Dict[str, Any],
+    tmux_info: Dict[str, Dict[str, Any]],
+    process_health: Dict[str, Any],
+    cfg: ReconcilerConfig,
+    now_utc: datetime,
+) -> Dict[str, Any]:
+    """One terminal's reconciled record from primary, receipt and tmux evidence."""
+    primary_record = (primary_doc or {}).get("terminals", {}).get(term, {})
+    receipt_ts = receipt_record.get("_ts")
+
+    claimed_by = primary_record.get("claimed_by")
+    if (not claimed_by) and receipt_record.get("status") in {"working", "blocked"}:
+        claimed_by = receipt_record.get("dispatch_id") or receipt_record.get("task_id")
+    lease_expires_at = primary_record.get("lease_expires_at")
+    lease_expires_ts = _parse_iso(lease_expires_at)
+    claim_active = bool(claimed_by) and (lease_expires_ts is None or lease_expires_ts > now_utc)
+
+    base_last_activity = _parse_iso(primary_record.get("last_activity"))
+    tmux_last = _parse_iso((tmux_info.get(term) or {}).get("recent_log_activity"))
+    last_activity = _max_ts(base_last_activity, receipt_ts, tmux_last)
+
+    status = _status_from_signals(
+        str(primary_record.get("status") or "") or None,
+        receipt_record.get("status"),
+        claim_active,
+        tmux_info.get(term, {}),
+        process_health,
+        cfg.active_window_seconds,
+    )
+
+    source = "primary"
+    if not primary_doc or primary_health.get("stale"):
+        source = "fallback"
+    elif receipt_record or tmux_info.get(term):
+        source = "hybrid"
+
+    record = {
+        "terminal_id": term,
+        "status": status,
+        "claimed_by": claimed_by,
+        "claimed_at": primary_record.get("claimed_at"),
+        "lease_expires_at": lease_expires_at,
+        "last_activity": _iso(last_activity) or _iso(now_utc),
+        "version": int(primary_record.get("version", 1)) if isinstance(primary_record, dict) else 1,
+        "reconciled_source": source,
+    }
+
+    # Receipt completion/failure should clear stale claims. Explicit
+    # no_confirmation blocks keep ownership on the current dispatch.
+    if receipt_record.get("status") == "idle":
+        record["claimed_by"] = None
+        record["claimed_at"] = None
+        record["lease_expires_at"] = None
+
+    # Clear expired leases - if claim is not active, remove ownership
+    if not claim_active and claimed_by:
+        record["claimed_by"] = None
+        record["claimed_at"] = None
+        record["lease_expires_at"] = None
+
+    return record
+
+
+def _repair_payload(records: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+    """The terminal_state.json document that repair mode writes."""
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "terminals": {term: {k: v for k, v in rec.items() if k in {
+            "terminal_id",
+            "status",
+            "claimed_by",
+            "claimed_at",
+            "lease_expires_at",
+            "last_activity",
+            "version",
+        }} for term, rec in records.items()},
+    }

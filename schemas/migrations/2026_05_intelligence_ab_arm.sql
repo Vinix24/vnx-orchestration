@@ -1,3 +1,9 @@
+-- SUPERSEDED by 0038_intelligence_injections_ab_arm.sql (paired runner apply_0038.py), which adds
+-- ab_arm and ab_window under user_version 38. Kept as history; nothing here executes on a new store.
+-- Its down file (2026_05_intelligence_ab_arm_down.sql) is never run on a store with
+-- user_version >= 38: it deletes a v16 stamp that was never there and drops ab_arm under a v38 stamp.
+-- Use apply_0038.revert_migration instead.
+--
 -- Migration: A/B framework — ab_arm column on intelligence_injections
 -- Adds ab_arm TEXT column ('treatment'|'control') for A/B random-skip tracking.
 --

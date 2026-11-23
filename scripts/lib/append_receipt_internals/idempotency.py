@@ -77,16 +77,6 @@ IDEMPOTENCY_FIELDS = (
 _LIB_DIR = Path(__file__).resolve().parent.parent
 
 
-def _chain_receipts_enabled() -> bool:
-    """True when VNX_CHAIN_RECEIPTS opts the append path into hash-chaining.
-
-    Default OFF. Recognised truthy values: 1, true, yes, on (case-insensitive).
-    When OFF the append path is byte-for-byte unchanged.
-    """
-    value = os.environ.get("VNX_CHAIN_RECEIPTS", "")
-    return value.strip().lower() in ("1", "true", "yes", "on")
-
-
 _TORN_TAIL_WINDOW = 65536  # the chunk the closer reads backwards in; no size decides
 
 
@@ -146,22 +136,33 @@ def _close_a_torn_tail(receipt_path: Path) -> bool:
     return True
 
 
-def _last_hash_under_lock(receipt_path: Path) -> str:
-    """Inline tail-hash read for the chained append.
+def _last_hash_under_lock(receipt_path: Path) -> Optional[str]:
+    """The ``prev_hash`` this append stamps, or None when it stays unchained (ADR-083).
 
-    Returns the canonical hash of the file's last entry, or GENESIS_HASH for an
-    empty/missing ledger. MUST be called while holding the append lock — it is
-    the read half of the read-tail + stamp + write + cache-update critical
-    section. Deliberately inlined (not ``append_chained_entry``) so no second
-    file handle is opened outside the VNX lock (fork risk).
+    The ledger's tail decides (``ndjson_hash_chain.read_ledger_tail``), then the variable.
+    Links to the last parseable entry, past debris; ``GENESIS_HASH`` only for ``empty``.
+    ``ambiguous`` refuses. MUST be called while holding the append lock.
     """
     import sys as _sys
 
     if str(_LIB_DIR) not in _sys.path:
         _sys.path.insert(0, str(_LIB_DIR))
-    from ndjson_hash_chain import GENESIS_HASH, _read_last_hash
+    from ndjson_hash_chain import GENESIS_HASH, TAIL_AMBIGUOUS, append_chains, read_ledger_tail
 
-    return _read_last_hash(receipt_path) or GENESIS_HASH
+    try:
+        state, entry_hash = read_ledger_tail(receipt_path)
+    except OSError as exc:
+        raise AppendReceiptError(
+            "receipt_tail_unreadable", EXIT_IO_ERROR,
+            f"cannot read the ledger tail at {receipt_path}: {exc}") from exc
+    if state == TAIL_AMBIGUOUS:
+        raise AppendReceiptError(
+            "receipt_tail_ambiguous", EXIT_IO_ERROR,
+            f"refusing to append to {receipt_path}: over {_TORN_TAIL_WINDOW} bytes of tail debris "
+            "before any parseable entry, so whether it chains is undecidable (ADR-083)")
+    if not append_chains(state):
+        return None
+    return entry_hash or GENESIS_HASH
 
 
 def _fsync_receipt_append(fh: Any, *, context: str) -> None:
@@ -450,6 +451,10 @@ def _write_receipt_under_lock(
         with lock_path.open("a+", encoding="utf-8") as lock_handle:
             _take_the_append_lock(lock_handle, lock_path, lock_deadline)
 
+            # ADR-083: the tail decides whether this append chains. Read before the
+            # closer and every side effect, so a refused append leaves the ledger as it was.
+            prev_hash = _last_hash_under_lock(receipt_path)
+
             # A torn tail (a crash mid-append) would swallow this record: the
             # new line starts on its own line before anything is written.
             _close_a_torn_tail(receipt_path)
@@ -513,15 +518,9 @@ def _write_receipt_under_lock(
             # to it across the pre-write hook (OI-2470, OI-2452 side effects).
             _freeze_then_run_pre_write_hook(receipt, receipt_path, pre_write_hook)
 
-            # Hash-chain stamping (flag-gated). The read-tail + stamp happens
-            # here, INSIDE the LOCK_EX block and BEFORE the receipt write, so
-            # the read-tail + stamp + write + cache-update sequence is fully
-            # serialized under the one append lock. Without this serialization
-            # concurrent appends would read the same tail hash and fork the
-            # chain. When the flag is OFF this block is skipped entirely and the
-            # receipt is written byte-for-byte as before.
-            if _chain_receipts_enabled():
-                receipt["prev_hash"] = _last_hash_under_lock(receipt_path)
+            # Stamped from the tail read above, same LOCK_EX: no fork. None: byte-for-byte as before.
+            if prev_hash is not None:
+                receipt["prev_hash"] = prev_hash
 
             try:
                 with receipt_path.open("a", encoding="utf-8") as receipts_handle:

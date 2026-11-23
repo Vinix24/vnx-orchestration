@@ -78,8 +78,30 @@ def test_shell_critical_paths_no_true_suppression_and_structured_failures_presen
     receipt_processor = (SCRIPTS_DIR / "receipt_processor.sh").read_text(encoding="utf-8")
     t0_brief = (SCRIPTS_DIR / "generate_t0_brief.sh").read_text(encoding="utf-8")
 
-    assert "|| true" not in dispatcher
-    assert "|| true" not in receipt_processor
+    # dispatcher_minimal.sh keeps `|| true` only on four reviewed best-effort
+    # sites (release_terminal_claim, the `suggestion` grep, the rejected/ mv,
+    # extract_instruction_content). Any other `|| true` on a code line fails.
+    # Added by 1a0f6d036 / 60b66238e (#806) / 995a432c0 (OI-1904).
+    allowed_true_sites = (
+        'release_terminal_claim "$_DP_TERMINAL_ID" "$dispatch_id" || true',
+        "grep -o '\"suggestion\": \"[^\"]*\"' | cut -d'\"' -f4 || true",
+        'mv "$dispatch" "$REJECTED_DIR/" 2>/dev/null || true',
+        'extract_instruction_content "$dispatch" || true',
+    )
+    def unexpected_true(text: str, sites: tuple) -> list:
+        return [
+            line.strip()
+            for line in text.splitlines()
+            if not line.lstrip().startswith("#")
+            and "|| true" in line
+            and not any(site in line for site in sites)
+        ]
+
+    assert unexpected_true(dispatcher, allowed_true_sites) == []
+    # receipt_processor.sh: only the shutdown child-reap may swallow a failure.
+    assert unexpected_true(
+        receipt_processor, ("pkill -TERM -P $$ 2>/dev/null || true",)
+    ) == []
     assert "|| true" not in t0_brief
 
     assert "log_structured_failure" in dispatcher
@@ -88,8 +110,9 @@ def test_shell_critical_paths_no_true_suppression_and_structured_failures_presen
     assert "log_non_critical_warning" in t0_brief
 
     assert 'validation_result=$(python3 "$VNX_DIR/scripts/gather_intelligence.py" validate' in dispatcher
-    assert 'intel_result=$(python3 "$VNX_DIR/scripts/gather_intelligence.py" gather' in dispatcher
+    assert '_PD_INTEL_RESULT=$(python3 "$VNX_DIR/scripts/gather_intelligence.py" gather' in dispatcher
     assert "validation_rc=$?" in dispatcher
     assert "intel_rc=$?" in dispatcher
-    assert 'local dispatch_id="$7"' in dispatcher
-    assert 'generate_receipt_footer "$dispatch_file" "$track" "$phase" "$gate" "$task_id" "$cmd_id" "$dispatch_id"' in dispatcher
+    dispatch_create = (SCRIPTS_DIR / "lib" / "dispatch_create.sh").read_text(encoding="utf-8")
+    assert 'local dispatch_id="$7"' in dispatch_create
+    assert 'generate_receipt_footer "$dispatch_file" "$track" "$phase" "$gate" "$task_id" "$cmd_id" "$dispatch_id"' in dispatch_create

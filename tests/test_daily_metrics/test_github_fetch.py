@@ -47,7 +47,7 @@ WHOLE = [_row(1, "2026-11-09T01:00:00Z"), _row(2, "2026-11-09T05:00:00Z"),
          _row(3, "2026-11-09T17:00:00Z"), _row(4, "2026-11-09T21:00:00Z")]
 
 def test_a_full_page_is_halved_until_each_half_proves_the_coverage(gh, monkeypatch):
-    monkeypatch.setenv("VNX_DAILY_METRICS_GH_LIMIT", "4")
+    monkeypatch.setattr(gh, "LIMIT", 4)
 
     def respond(args):
         start, end = _span(args)
@@ -66,8 +66,8 @@ def _span_of(row):
     return datetime.fromisoformat(row["mergedAt"].replace("Z", "+00:00"))
 
 def test_a_page_that_stays_full_at_the_last_level_is_truncated(gh, monkeypatch):
-    monkeypatch.setenv("VNX_DAILY_METRICS_GH_LIMIT", "2")
-    monkeypatch.setenv("VNX_DAILY_METRICS_GH_MAX_DEPTH", "2")
+    monkeypatch.setattr(gh, "LIMIT", 2)
+    monkeypatch.setattr(gh, "MAX_DEPTH", 2)
 
     def respond(args):
         start, _ = _span(args)

@@ -156,24 +156,6 @@ def _rejected_at_epoch(value: Any) -> Optional[float]:
     return parsed.replace(tzinfo=timezone.utc).timestamp()
 
 
-def first_rejected_epoch(history: Iterable[Dict[str, Any]], dispatch_id: str, file_name: str,
-                         reason: str) -> Optional[float]:
-    """Epoch of the EARLIEST sighting of this exact refusal in *history*; None is no age."""
-    stamps = [_rejected_at_epoch(entry.get("first_rejected_at") or entry.get("rejected_at"))
-              for entry in history if (entry.get("dispatch_id"), entry.get("file"),
-                                       entry.get("reason")) == (dispatch_id, file_name, reason)]
-    return min((stamp for stamp in stamps if stamp is not None), default=None)
-
-
-def last_rejected_epoch(history: Iterable[Dict[str, Any]], dispatch_id: str, file_name: str,
-                        reason: str) -> Optional[float]:
-    """Epoch of the LATEST sighting of this exact refusal; None is no sighting."""
-    stamps = [_rejected_at_epoch(entry.get("rejected_at")) for entry in history
-              if (entry.get("dispatch_id"), entry.get("file"), entry.get("reason"))
-              == (dispatch_id, file_name, reason)]
-    return max((stamp for stamp in stamps if stamp is not None), default=None)
-
-
 def latest_rejected_entry(history: Iterable[Dict[str, Any]], dispatch_id: str, file_name: str,
                           reason: str) -> Optional[Dict[str, Any]]:
     """The NEWEST sighting of this exact refusal in *history*; None is no sighting."""

@@ -53,9 +53,35 @@ def _cmd_run(args) -> int:
     dry_run = getattr(args, "dry_run", False)
     root, db_path = _resolve_paths(project_dir)
     import consolidator  # type: ignore[import]
-    result = consolidator.run_dream_cycle(project_id, db_path, dry_run=dry_run)
+    try:
+        result = consolidator.run_dream_cycle(project_id, db_path, dry_run=dry_run)
+    finally:
+        if not dry_run:  # ADR-072 decision 17: after the consolidation, whether it succeeded, skipped or raised
+            _run_steering_step(project_dir)
     print(json.dumps(result, indent=2))
     return 0
+
+
+def _run_steering_step(project_dir: Path) -> None:
+    """The ``steering`` step: report plus staging. It never raises, never writes a dream event, never changes the exit code."""
+    import operator_steering_dream  # type: ignore[import]
+    state_dir = _resolve_data_root(project_dir) / "state"
+    operator_steering_dream.run_steering_step(state_dir)
+    _run_permission_chain(state_dir)
+
+
+def _run_permission_chain(state_dir: Path) -> None:
+    """The permission chain (scan, pair, build, persist) after the steering step; same rule: it never fails dream."""
+    try:
+        import permission_chain  # type: ignore[import]
+        import operator_steering_source as source  # type: ignore[import]
+        from vnx_paths import project_id_from_state_dir  # type: ignore[import]
+        project_id = project_id_from_state_dir(state_dir)
+        if not project_id:
+            raise ValueError("no project id in the state dir")
+        permission_chain.run_permission_chain(state_dir, project_id, source.DEFAULT_PROJECTS_ROOT)
+    except Exception as exc:  # vnx-silent-except: dream never fails on this step; the reason goes to stderr
+        print(f"permission chain: {type(exc).__name__}", file=sys.stderr)
 
 
 def _cmd_status(args) -> int:
@@ -93,11 +119,13 @@ def _cmd_status(args) -> int:
           f"{r['insights_input']}/{r['merged_count']}/{r['dropped_count']}/{r['flagged_count']}")
     print(f"  reviewed    : {bool(r['operator_reviewed'])}")
     import review_gate  # type: ignore[import]
-    pending = review_gate.list_pending_reviews(project_id, _resolve_data_root(project_dir))
+    pending, unreadable = review_gate.pending_review_queue(project_id, _resolve_data_root(project_dir))
     if pending:
         print(f"\n  Pending reviews ({len(pending)}):")
         for p in pending:
             print(f"    - {p['cycle_id']}")
+    if unreadable:
+        print(f"  Unreadable review files ({len(unreadable)}): {', '.join(unreadable)}")
     return 0
 
 

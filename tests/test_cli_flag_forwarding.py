@@ -265,7 +265,7 @@ def fake_manager(monkeypatch):
     fake.record_result.return_value = {"recorded": True}
     fake.status.return_value = {}
     monkeypatch.setattr(rgm, "ReviewGateManager", lambda: fake)
-    monkeypatch.setattr(rgm, "_compute_changed_files", lambda branch: ["a.py", "b.py"])
+    monkeypatch.setattr(rgm, "_compute_changed_files", lambda branch, **_kw: ["a.py", "b.py"])
     return fake
 
 

@@ -326,6 +326,7 @@ _OBJECTIVE_ARGV = {
     "set-lane-hint": ["delegate-track", "governed"],
     "set-horizon": ["delegate-track", "now"],
     "set-plan-scope": ["delegate-track", "light", "--reason", "parity check"],
+    "plan-scope": ["review"],
     "set-goal": ["delegate-track", "Delegate goal state"],
     "set-autonomous-promotion": ["delegate-track", "true"],
 }
@@ -337,12 +338,16 @@ _DELIVERABLE_ARGV = {
     "set": ["dlv-fake-id", "--task-class", "01_code_generation"],
     "retarget": ["dlv-fake-id", "--objective", "other-track", "--reason", "parity check"],
     "withdraw": ["dlv-fake-id", "--reason", "parity check"],
+    "depend": ["dlv-fake-id", "--on", "dlv-other"],
+    "undepend": ["dlv-fake-id", "--on", "dlv-other", "--reason", "parity check"],
+    "deps": ["dlv-fake-id"],
 }
 _PLAN_GATE_ARGV = {
     "seed": ["delegate-track"],
     "run": ["delegate-track", "--doc", "some/plan-doc.md"],
     "status": ["delegate-track"],
     "attest": ["delegate-track", "--reason", "operator override", "--approval-id", "token-xyz"],
+    "sign": ["delegate-track", "--key", "/nonexistent/k", "--identity", "op@example.invalid"],
     "missing-reasons": [],
     "backfill-reason": ["delegate-track", "--reason", "operator backfill", "--approval-id", "token-xyz"],
     "reblock": ["delegate-track", "--reason", "operator reblock", "--approval-id", "token-xyz"],

@@ -63,6 +63,20 @@ def _fake_gate_worktree(tmp_path, monkeypatch):
 
 
 @pytest.fixture
+def fixed_review_interpreter(monkeypatch):
+    """The once-per-run resolver answers a fixed {path, rule}, so no real probe starts while a test patches
+    ``gate_runner.subprocess.Popen`` / ``gate_runner.os.read`` around a full ``run()``."""
+    fixed = {"path": sys.executable, "rule": gate_runner.RULE_FABRIC_CHAIN}
+
+    def _fixed(request_payload, project_root):
+        request_payload["review_interpreter"] = dict(fixed)
+        return fixed["path"], fixed["rule"]
+
+    monkeypatch.setattr(gate_runner, "_run_interpreter", _fixed)
+    return fixed
+
+
+@pytest.fixture
 def gate_env(tmp_path, monkeypatch):
     """Set up VNX environment for gate runner tests."""
     project_root = tmp_path / "project"
@@ -113,6 +127,7 @@ def _make_request_payload(gate="gemini_review", pr_number=1, **overrides):
     return payload
 
 
+@pytest.mark.usefixtures("fixed_review_interpreter")
 class TestGateTransitionsToExecuting:
     """GATE-1, GATE-3: Gate request transitions to executing when runner starts."""
 
@@ -274,6 +289,7 @@ class TestGateNotExecutable:
         assert result_file.exists()
 
 
+@pytest.mark.usefixtures("fixed_review_interpreter")
 class TestTimeoutKill:
     """GATE-6, GATE-8: Gate killed after timeout produces failed result."""
 
@@ -331,13 +347,14 @@ class TestTimeoutKill:
         assert mock_killpg.called or mock_proc.kill.called
 
 
+@pytest.mark.usefixtures("fixed_review_interpreter")
 class TestStallDetection:
     """GATE-7, GATE-8: Gate killed after stall produces failed result."""
 
     def test_stall_kills_subprocess(self, gate_env, monkeypatch):
         monkeypatch.setattr("shutil.which", lambda b: "/usr/bin/fake")
         monkeypatch.setenv("VNX_CODEX_GATE_TIMEOUT", "300")
-        monkeypatch.setenv("VNX_CODEX_STALL_THRESHOLD", "2")
+        monkeypatch.setitem(sys.modules["headless_adapter"].GATE_STALL_DEFAULTS, "codex_gate", 2)
 
         runner = GateRunner(
             state_dir=gate_env["state_dir"],
@@ -386,6 +403,7 @@ class TestStallDetection:
         assert mock_killpg.called or mock_proc.kill.called
 
 
+@pytest.mark.usefixtures("fixed_review_interpreter")
 class TestExitNonzeroReasonDetail:
     """OI-1293: the exit_nonzero branch must not discard stdout/stderr.
 
@@ -600,6 +618,7 @@ class TestSkipRationaleAudit:
         assert len(lines) == 3
 
 
+@pytest.mark.usefixtures("fixed_review_interpreter")
 class TestArtifactAtomicity:
     """GATE-11: Artifact write is atomic — partial failure produces no result record."""
 
@@ -817,6 +836,7 @@ class TestRequestNormalization:
         assert record["gate"] == "codex_gate"
 
 
+@pytest.mark.usefixtures("fixed_review_interpreter")
 class TestCodexGateExecution:
     """Codex gate execution path with VNX_CODEX_HEADLESS_ENABLED=1."""
 
@@ -882,7 +902,7 @@ class TestCodexGateExecution:
         monkeypatch.setattr("shutil.which", lambda b: "/usr/bin/fake")
         monkeypatch.setenv("VNX_CODEX_HEADLESS_ENABLED", "1")
         monkeypatch.setenv("VNX_CODEX_GATE_TIMEOUT", "5")
-        monkeypatch.setenv("VNX_CODEX_STALL_THRESHOLD", "2")
+        monkeypatch.setitem(sys.modules["headless_adapter"].GATE_STALL_DEFAULTS, "codex_gate", 2)
 
         runner = GateRunner(
             state_dir=gate_env["state_dir"],
@@ -1019,15 +1039,9 @@ class TestGateTimeoutConfig:
         assert gate_stall_threshold("claude_github_optional") == 60
         assert gate_stall_threshold("ci_gate") == 30
 
-    def test_env_override_stall_threshold(self, monkeypatch):
+    def test_kimi_stall_threshold_is_the_fixed_default(self):
         from headless_adapter import gate_stall_threshold
-        monkeypatch.setenv("VNX_CODEX_STALL_THRESHOLD", "30")
-        assert gate_stall_threshold("codex_gate") == 30
-
-    def test_env_override_kimi_stall_threshold(self, monkeypatch):
-        from headless_adapter import gate_stall_threshold
-        monkeypatch.setenv("VNX_KIMI_STALL_THRESHOLD", "30")
-        assert gate_stall_threshold("kimi_gate") == 30
+        assert gate_stall_threshold("kimi_gate") == 300
 
     def test_unknown_gate_uses_defaults(self):
         from headless_adapter import gate_timeout, gate_stall_threshold
@@ -1035,6 +1049,7 @@ class TestGateTimeoutConfig:
         assert gate_stall_threshold("unknown_gate") == 60
 
 
+@pytest.mark.usefixtures("fixed_review_interpreter")
 class TestGateWorktreeCheckout:
     """OI-708: codex_gate/gemini_review subprocess must run with cwd at an
     isolated worktree checked out from origin/<branch>, never the
@@ -1484,7 +1499,7 @@ class TestHarnessLaneDelegation:
 
         assert len(calls) == 1
         assert calls[0]["provider"] == "deepseek-harness"
-        assert calls[0]["model"] == "deepseek-flash"
+        assert calls[0]["model"] == "deepseek-v4-pro"
         instruction = calls[0]["instruction"]
         assert "BEGIN PR DIFF: UNTRUSTED DATA" in instruction
         assert TRUNCATION_NOTICE in instruction
@@ -1493,16 +1508,16 @@ class TestHarnessLaneDelegation:
 
         result_file = gate_env["results_dir"] / "pr-3-deepseek_gate.json"
         saved = json.loads(result_file.read_text(encoding="utf-8"))
-        assert saved["model"] == "deepseek-flash"
+        assert saved["model"] == "deepseek-v4-pro"
         depth = saved["execution_depth"]
         assert depth["diff_truncated"] is True
         assert depth["diff_limit"] == deepseek_cap
         assert depth["diff_chars"] == len(big_diff.strip())
 
-    def test_deepseek_gate_default_model_is_flash_and_env_override_wins(
+    def test_deepseek_gate_default_model_is_v4_pro_and_env_override_wins(
         self, gate_env, monkeypatch,
     ):
-        """OI-1939: default ``deepseek-flash``; ``VNX_DEEPSEEK_GATE_MODEL`` still wins,
+        """Default ``deepseek-v4-pro`` since 2026-11-11; ``VNX_DEEPSEEK_GATE_MODEL`` still wins,
         in the dispatcher call and in the saved record."""
         report_text = (
             "Reviewed the diff.\nRan the tests.\nNo blocking findings.\n\n"
@@ -1513,7 +1528,7 @@ class TestHarnessLaneDelegation:
         monkeypatch.setattr(
             GateRunner, "_fetch_gh_pr_diff", staticmethod(lambda pr: "diff --git a/x b/x\n+x = 1\n"),
         )
-        for pr, env_value, expected in ((4, None, "deepseek-flash"), (5, "deepseek-v4-pro", "deepseek-v4-pro")):
+        for pr, env_value, expected in ((4, None, "deepseek-v4-pro"), (5, "deepseek-flash", "deepseek-flash")):
             factory, calls = self._fake_dispatcher(report_text)
             monkeypatch.setattr("plan_gate_panel._make_default_dispatcher", factory)
             if env_value is None:
@@ -1806,3 +1821,109 @@ class TestHarnessLaneDelegation:
         assert saved["status"] == "unavailable"
 
         assert len(calls) == 1
+
+
+class TestReviewInterpreterResolvedOncePerRun:
+    """reviews-zonder-uitkomst D1 r3: one resolution per run, before the prompt, from the gate's repository."""
+
+    @staticmethod
+    def _run_codex(gate_env, monkeypatch, tmp_path, kept=None):
+        import subprocess as _sp
+
+        root = gate_env["project_root"]
+        _sp.run(["git", "init", "-q", str(root)], check=True)
+        venv_python = root / ".venv" / "bin" / "python"
+        venv_python.parent.mkdir(parents=True)
+        venv_python.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        venv_python.chmod(0o755)
+        worktree = root / ".vnx-data" / "worktrees" / "gate-codex_gate-1-abcd"
+        worktree.mkdir(parents=True)
+        outside = tmp_path / "elsewhere"
+        outside.mkdir()
+        monkeypatch.chdir(outside)  # the runner's cwd is outside the project
+        monkeypatch.delenv("VNX_REVIEW_PYTHON", raising=False)
+        monkeypatch.setenv("VNX_CODEX_HEADLESS_ENABLED", "1")
+        monkeypatch.setattr("shutil.which", lambda b: "/usr/bin/fake")
+        monkeypatch.setattr(gate_runner, "_project_config_value", lambda key, project_id: "")
+        monkeypatch.setattr(gate_runner, "_project_review_python", lambda project_id: "", raising=False)
+        monkeypatch.setattr(GateRunner, "_fetch_gh_pr_diff",
+                            staticmethod(lambda n: "diff --git a/x.py b/x.py\n+++ b/x.py\n+print(1)\n"))
+        gate_runner.resolve_review_interpreter.cache_clear()
+        probed = []
+        real_resolve = gate_runner.resolve_review_interpreter_with_rule
+        monkeypatch.setattr(gate_runner, "resolve_review_interpreter_with_rule",
+                            lambda **kw: probed.append(kw) or real_resolve(**kw))
+        real_read = os.read
+
+        proc = MagicMock()
+        out_fd, err_fd = 10_000, 10_001  # no real pipe of this process can get these (10/11 can, on Linux)
+        proc.stdout.fileno.return_value, proc.stderr.fileno.return_value = out_fd, err_fd
+        proc.poll.return_value, proc.returncode, proc.pid = 0, 0, 77777
+        reads = [0]
+
+        def mock_os_read(fd, size):
+            if fd not in (out_fd, err_fd):  # a real Popen of the resolver's probes reads its own exec pipe
+                return real_read(fd, size)
+            reads[0] += 1
+            return CODEX_VERDICT_STREAM if fd == out_fd and reads[0] == 1 else b""
+
+        payload = _make_request_payload(gate="codex_gate", report_path=str(gate_env["reports_dir"] / "r.md"), prompt="")
+        payload.update({"review_interpreter": kept} if kept else {})  # what an earlier run left behind
+        runner = GateRunner(state_dir=gate_env["state_dir"], reports_dir=gate_env["reports_dir"], project_root=root)
+        with patch("gate_runner.create_gate_worktree", return_value=worktree), \
+             patch("gate_runner.remove_gate_worktree"), \
+             patch("gate_runner.subprocess.Popen", return_value=proc), \
+             patch("gate_runner.select.select", return_value=([], [], [])), \
+             patch("gate_runner.os.read", side_effect=mock_os_read), \
+             patch("gate_runner.os.getpgid", return_value=77777):
+            result = runner.run(gate="codex_gate", request_payload=payload, pr_number=1)
+        return result, payload, proc.stdin.write.call_args.args[0].decode(), probed, venv_python
+
+    def test_prompt_and_record_name_the_same_interpreter_and_rule(self, gate_env, monkeypatch, tmp_path):
+        result, payload, prompt, _probed, venv_python = self._run_codex(gate_env, monkeypatch, tmp_path)
+
+        assert result["status"] == "completed"
+        assert payload["review_interpreter"] == {"path": str(venv_python), "rule": 2}
+        assert f"{venv_python} -m pytest" in prompt
+        assert gate_runner._RULE_TEXT[2] in prompt
+
+    def test_a_full_codex_run_resolves_the_interpreter_once(self, gate_env, monkeypatch, tmp_path):
+        _result, _payload, _prompt, probed, _venv_python = self._run_codex(gate_env, monkeypatch, tmp_path)
+
+        assert len(probed) == 1
+
+    def test_an_earlier_runs_interpreter_on_the_request_is_resolved_again(self, gate_env, monkeypatch, tmp_path):
+        result, payload, prompt, probed, venv_python = self._run_codex(
+            gate_env, monkeypatch, tmp_path, kept={"path": None, "rule": 3})
+
+        assert len(probed) == 1 and payload["review_interpreter"] == {"path": str(venv_python), "rule": 2}
+        assert f"{venv_python} -m pytest" in prompt
+
+
+class TestRuleOneByProvenance:
+    """reviews-zonder-uitkomst D1 r6: rule 1 is the project's row or the override, by source, not by value."""
+
+    @staticmethod
+    def _wire(monkeypatch, tmp_path, row, root):
+        for py in [tmp_path / "py"] + ([root / ".venv" / "bin" / "python"] if root else []):
+            py.parent.mkdir(parents=True, exist_ok=True)
+            py.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            py.chmod(0o755)
+        shim = str(tmp_path / "py")
+        monkeypatch.setattr("config_runtime.autowire", lambda *a, **kw: True)
+        monkeypatch.setattr("config_registry._db_resolver", lambda pid, key: shim if row == "row" else None)
+        monkeypatch.setattr(gate_runner, "_project_root_of", lambda directory: root and str(root))
+        monkeypatch.setenv("VNX_REVIEW_PYTHON", shim)
+        if row == "override":
+            monkeypatch.setenv("VNX_OVERRIDE_REVIEW_PYTHON", shim)
+        gate_runner.resolve_review_interpreter.cache_clear()
+        return shim
+
+    @pytest.mark.parametrize("via", ["row", "override"])
+    def test_project_config_naming_the_env_interpreter_is_still_rule_1(self, via, monkeypatch, tmp_path):
+        shim = self._wire(monkeypatch, tmp_path, via, tmp_path / "project")
+        assert gate_runner.resolve_review_interpreter_with_rule() == (shim, 1)
+
+    def test_only_the_env_naming_it_is_rule_3(self, monkeypatch, tmp_path):
+        shim = self._wire(monkeypatch, tmp_path, None, None)
+        assert gate_runner.resolve_review_interpreter_with_rule() == (shim, 3)

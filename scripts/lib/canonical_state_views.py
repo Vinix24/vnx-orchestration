@@ -246,15 +246,8 @@ def build_terminal_snapshot(
             if age_seconds is None or age_seconds > stale_after_seconds:
                 stale_terminals.add(terminal)
         if stale_terminals:
-            reconcile = reconcile_terminal_state(
-                state_root,
-                config=ReconcilerConfig(
-                    stale_after_seconds=stale_after_seconds,
-                    receipt_scan_lines=receipt_scan_lines,
-                    active_window_seconds=active_window_seconds,
-                    allow_tmux_probe=allow_tmux_probe,
-                ),
-                repair=False,
+            reconcile = _reconcile_snapshot(
+                state_root, stale_after_seconds, receipt_scan_lines, active_window_seconds, allow_tmux_probe
             )
             reconciled_records = dict((reconcile.get("terminals") or {}))
             tmux_runtime = dict((reconcile.get("evidence") or {}).get("tmux") or {})
@@ -262,15 +255,8 @@ def build_terminal_snapshot(
             degraded_reasons = [str(item) for item in (reconcile.get("degraded_reasons") or []) if item]
             degraded_reasons.append("terminal_state_per_terminal_stale")
     else:
-        reconcile = reconcile_terminal_state(
-            state_root,
-            config=ReconcilerConfig(
-                stale_after_seconds=stale_after_seconds,
-                receipt_scan_lines=receipt_scan_lines,
-                active_window_seconds=active_window_seconds,
-                allow_tmux_probe=allow_tmux_probe,
-            ),
-            repair=False,
+        reconcile = _reconcile_snapshot(
+            state_root, stale_after_seconds, receipt_scan_lines, active_window_seconds, allow_tmux_probe
         )
         raw_records = dict((reconcile.get("terminals") or {}))
         tmux_runtime = dict((reconcile.get("evidence") or {}).get("tmux") or {})
@@ -282,17 +268,9 @@ def build_terminal_snapshot(
     terminals: Dict[str, Dict[str, Any]] = {}
     for terminal in TERMINALS:
         record = raw_records.get(terminal) or {}
-        override_source = False
-        if terminal in stale_terminals and reconciled_records.get(terminal):
-            reconciled = reconciled_records.get(terminal) or {}
-            reconciled_status = _normalize_status(reconciled.get("status"))
-            primary_status = _normalize_status(record.get("status"))
-            # Prevent stale idle terminals from being promoted to working from
-            # tmux/runtime noise alone. Require an explicit claim/dispatch hint.
-            has_claim_signal = bool(reconciled.get("claimed_by")) or bool(progress_dispatch_map.get(terminal))
-            if (reconciled_status in {"working", "blocked"} and has_claim_signal) or primary_status in {"unknown"}:
-                record = reconciled
-                override_source = True
+        record, override_source = _select_stale_record(
+            terminal, record, stale_terminals, reconciled_records, progress_dispatch_map
+        )
         normalized_status = _normalize_status(record.get("status"))
         last_update = str(record.get("last_activity") or "never")
         claimed_by = record.get("claimed_by")
@@ -330,20 +308,9 @@ def build_terminal_snapshot(
             ),
         }
 
-        # Compute attention state
-        ctx_usage, ctx_ts = _load_context_pressure(state_root, terminal)
-        attention_state = _compute_terminal_attention(
-            terminal=terminal,
-            status=normalized_status,
-            last_update=last_update,
-            status_age_seconds=_status_age_seconds(last_update),
-            context_usage_pct=ctx_usage,
-            context_ts=ctx_ts,
-            stale_after_seconds=stale_after_seconds,
+        _add_snapshot_attention(
+            terminals[terminal], state_root, terminal, normalized_status, last_update, stale_after_seconds
         )
-        terminals[terminal]["needs_human"] = attention_state["needs_human"]
-        terminals[terminal]["attention"] = attention_state["attention"]
-        terminals[terminal]["context_usage_pct"] = ctx_usage
 
     return {
         "generated_at": _now_iso(),
@@ -355,6 +322,60 @@ def build_terminal_snapshot(
         "degraded_reasons": degraded_reasons,
         "terminals": terminals,
     }
+
+
+def _reconcile_snapshot(
+    state_root: Path, stale_after_seconds: int, receipt_scan_lines: int,
+    active_window_seconds: int, allow_tmux_probe: bool,
+) -> Dict[str, Any]:
+    return reconcile_terminal_state(
+        state_root,
+        config=ReconcilerConfig(
+            stale_after_seconds=stale_after_seconds,
+            receipt_scan_lines=receipt_scan_lines,
+            active_window_seconds=active_window_seconds,
+            allow_tmux_probe=allow_tmux_probe,
+        ),
+        repair=False,
+    )
+
+
+def _select_stale_record(
+    terminal: str, record: Dict[str, Any], stale_terminals: set[str],
+    reconciled_records: Dict[str, Dict[str, Any]], progress_dispatch_map: Dict[str, str],
+) -> Tuple[Dict[str, Any], bool]:
+    """(record, override_source): the reconciler's record replaces a stale terminal's on a signal."""
+    if not (terminal in stale_terminals and reconciled_records.get(terminal)):
+        return record, False
+    reconciled = reconciled_records.get(terminal) or {}
+    reconciled_status = _normalize_status(reconciled.get("status"))
+    primary_status = _normalize_status(record.get("status"))
+    # Prevent stale idle terminals from being promoted to working from
+    # tmux/runtime noise alone. Require an explicit claim/dispatch hint.
+    has_claim_signal = bool(reconciled.get("claimed_by")) or bool(progress_dispatch_map.get(terminal))
+    if (reconciled_status in {"working", "blocked"} and has_claim_signal) or primary_status in {"unknown"}:
+        return reconciled, True
+    return record, False
+
+
+def _add_snapshot_attention(
+    entry: Dict[str, Any], state_root: Path, terminal: str,
+    normalized_status: str, last_update: str, stale_after_seconds: int,
+) -> None:
+    """Compute attention state and add it to the terminal's snapshot entry."""
+    ctx_usage, ctx_ts = _load_context_pressure(state_root, terminal)
+    attention_state = _compute_terminal_attention(
+        terminal=terminal,
+        status=normalized_status,
+        last_update=last_update,
+        status_age_seconds=_status_age_seconds(last_update),
+        context_usage_pct=ctx_usage,
+        context_ts=ctx_ts,
+        stale_after_seconds=stale_after_seconds,
+    )
+    entry["needs_human"] = attention_state["needs_human"]
+    entry["attention"] = attention_state["attention"]
+    entry["context_usage_pct"] = ctx_usage
 
 
 def _dashboard_terminals(snapshot: Dict[str, Any], state_dir: Path | None = None) -> Dict[str, Any]:

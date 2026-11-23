@@ -230,7 +230,7 @@ Every non-successful run MUST be classified into exactly one failure class. Thes
 | `success` | `SUCCESS` | Exit code 0, output persisted | N/A | None |
 | `tool_failure` | `TOOL_FAIL` | Exit code != 0, stderr indicates tool/API error | Yes (with backoff) | Check tool availability, retry |
 | `infra_failure` | `INFRA_FAIL` | Binary not found, permission denied, disk full, OOM | Yes (after fix) | Fix infrastructure, retry |
-| `timeout` | `TIMEOUT` | Subprocess exceeded `VNX_HEADLESS_TIMEOUT` | Yes (with longer timeout) | Review timeout config, check prompt complexity |
+| `timeout` | `TIMEOUT` | Subprocess exceeded the headless timeout (600 s) | Yes | Check prompt complexity |
 | `no_output_hang` | `NO_OUTPUT` | Process alive but no output for > threshold | Yes (after investigation) | Inspect prompt, check upstream dependencies |
 | `interrupted` | `INTERRUPTED` | SIGINT, SIGTERM, SIGHUP received | Yes | Check what sent the signal, retry |
 | `prompt_error` | `PROMPT_ERR` | Exit code != 0, stderr indicates prompt/input issue | No (needs prompt fix) | Fix prompt or dispatch bundle |
@@ -282,7 +282,7 @@ Each failure classification MUST record:
     "stderr_tail": "<last 500 chars of stderr>",
     "classification_reason": "subprocess.TimeoutExpired after 600s",
     "retryable": True,
-    "operator_hint": "Consider increasing VNX_HEADLESS_TIMEOUT or simplifying the prompt"
+    "operator_hint": "Simplify the prompt or split the task"
 }
 ```
 

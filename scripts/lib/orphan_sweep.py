@@ -140,6 +140,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
 
+from lib_module import load_lib_module
 from ledger_attempt_state import (KIND_ENDED, KIND_LIVE, KIND_UNKNOWN, LEDGER_FILENAME,
                                   AttemptVerdict, attempt_verdict, read_ledger)
 
@@ -764,25 +765,10 @@ def sweep(
         :class:`OrphanSweepResult` — per-object failures are recorded in
         ``errors`` and never abort the run.
     """
-    import crash_recovery_sweep
+    crash_recovery_sweep = load_lib_module("crash_recovery_sweep")
 
     root = _resolve_repo_root(repo_root)
-    data_dir_explicit = data_dir is not None
-    central_resolve_error: "str | None" = None
-    if not data_dir_explicit:
-        # Neither data_dir nor (necessarily) state_dir was given — the CLI's
-        # real no-flags invocation. Resolve BOTH via the fabric's canonical
-        # resolver so the register/receipts/active-manifest reads land on the
-        # CENTRAL store, never a repo-local `.vnx-data/` that may not exist
-        # or may simply never have heard of this project's dispatches.
-        data_dir, central_state_dir, central_resolve_error = _resolve_central_paths(root)
-        if state_dir is None:
-            state_dir = central_state_dir
-    elif state_dir is None:
-        # data_dir given explicitly, state_dir not — derive under it
-        # (unchanged operator/test override path; explicit data_dir always
-        # wins over central resolution).
-        state_dir = data_dir / "state"
+    data_dir, state_dir, central_resolve_error = _sweep_resolve_stores(root, data_dir, state_dir)
     pid_fn = pid_alive if pid_alive is not None else crash_recovery_sweep.is_pid_alive
     list_fn = list_sessions if list_sessions is not None else _real_list_sessions
     probe_fn = probe_liveness if probe_liveness is not None else (
@@ -848,113 +834,18 @@ def sweep(
     # OR it is the protected invoking dispatch.
     surviving_ids: set[str] = set(protected)
 
-    sessions = list_fn()
-    listing_unmeasurable = sessions is None
-    if listing_unmeasurable:
-        sessions = []
-        result.errors.append({
-            "kind": "tmux",
-            "error": (
-                "tmux session listing was not measurable this run (tmux "
-                "missing, the runner raised, or an unrecognized non-zero "
-                "exit) — worktree reap skipped entirely so 'cannot measure' "
-                "is never read as 'zero sessions'"
-            ),
-        })
-        logger.warning(
-            "orphan_sweep: tmux session listing unmeasurable — skipping "
-            "worktree reap this run (fail-open)"
-        )
-
-    for name in sorted(sessions):
-        m = _SESSION_RE.match(name)
-        if not m:
-            continue
-        sid = m.group("id")
-        result.tmux_sessions_scanned.append(name)
-        if sid in protected:
-            result.tmux_skipped_protected.append(name)
-            logger.info("orphan_sweep: SKIP tmux %s — protected dispatch", name)
-            continue
-        verdict = probe_fn(name)
-
-        if verdict is True:
-            # Provably alive: a candidate for the kind-1b completed-dispatch
-            # conjunction (OI-1353) — never evaluated for verdict is None
-            # (liveness itself unmeasurable), since that would stack one
-            # unmeasurable signal on top of another.
-            is_orphan, reason = _evaluate_completed_orphan(
-                name, sid,
-                worktrees_dir=worktrees_dir,
-                register_known_ids=register_known_ids,
-                register_completed_ids=register_completed_ids,
-                receipts_index=receipts_index,
-                capture_pane=capture_fn,
-                other_project_state_dirs=other_project_state_dirs,
-                cross_project_cache=cross_project_cache,
-                cross_project_errors=result.errors,
-                ledger=ledger,
-            )
-            entry = {"session": name, "dispatch_id": sid, "reason": reason}
-            if is_orphan:
-                if dry_run:
-                    result.tmux_completed_orphans_killed.append(entry)
-                    surviving_ids.add(sid)  # session would still exist during dry-run
-                    logger.info(
-                        "orphan_sweep: DRY-RUN would kill completed-orphan tmux "
-                        "session %s (%s)", name, reason,
-                    )
-                    continue
-                try:
-                    killed = kill_fn(name)
-                except Exception as exc:
-                    killed = False
-                    result.errors.append(
-                        {"kind": "tmux_completed", "session": name, "error": str(exc)}
-                    )
-                if killed:
-                    result.tmux_completed_orphans_killed.append(entry)
-                    logger.info(
-                        "orphan_sweep: killed completed-orphan tmux session %s (%s)",
-                        name, reason,
-                    )
-                    continue
-                surviving_ids.add(sid)  # still exists -> keep its worktree
-                result.tmux_skipped_alive.append(name)
-                result.tmux_completed_orphans_preserved.append(
-                    {**entry, "reason": "kill_failed"}
-                )
-                logger.warning(
-                    "orphan_sweep: kill failed for completed-orphan %s; leaving session",
-                    name,
-                )
-                continue
-            result.tmux_completed_orphans_preserved.append(entry)
-
-        if verdict is not False:
-            # Alive (True, conjunction unmet) or unmeasurable (None): never
-            # kill what we cannot prove is dead.
-            surviving_ids.add(sid)
-            result.tmux_skipped_alive.append(name)
-            continue
-        # Provably dead pane.
-        if dry_run:
-            result.tmux_killed.append(name)
-            surviving_ids.add(sid)  # session would still exist during dry-run
-            logger.info("orphan_sweep: DRY-RUN would kill tmux session %s", name)
-            continue
-        try:
-            killed = kill_fn(name)
-        except Exception as exc:
-            killed = False
-            result.errors.append({"kind": "tmux", "session": name, "error": str(exc)})
-        if killed:
-            result.tmux_killed.append(name)
-            logger.info("orphan_sweep: killed dead tmux session %s", name)
-        else:
-            surviving_ids.add(sid)  # still exists -> keep its worktree
-            result.tmux_skipped_alive.append(name)
-            logger.warning("orphan_sweep: kill failed for %s; leaving session", name)
+    sessions, listing_unmeasurable = _sweep_list_sessions(list_fn, result)
+    evidence = {  # the keyword arguments of _evaluate_completed_orphan (kind 1b)
+        "worktrees_dir": worktrees_dir, "register_known_ids": register_known_ids,
+        "register_completed_ids": register_completed_ids, "receipts_index": receipts_index,
+        "capture_pane": capture_fn, "other_project_state_dirs": other_project_state_dirs,
+        "cross_project_cache": cross_project_cache, "cross_project_errors": result.errors,
+        "ledger": ledger,
+    }
+    _sweep_tmux_sessions(
+        sessions, result=result, protected=protected, surviving_ids=surviving_ids,
+        probe_fn=probe_fn, kill_fn=kill_fn, dry_run=dry_run, evidence=evidence,
+    )
 
     # ── kind 2: worktrees whose tmux session is gone ─────────────────────────
     _sweep_orphan_worktrees(
@@ -981,6 +872,167 @@ def sweep(
         ledger=ledger.records,
     )
     _absorb_active(result, active)
+    _log_sweep_summary(result)
+    return result
+
+
+def _sweep_resolve_stores(
+    root: Path, data_dir: Optional[Path], state_dir: Optional[Path],
+) -> "tuple[Optional[Path], Optional[Path], str | None]":
+    """``sweep``'s data_dir/state_dir resolution: explicit values win, else central."""
+    central_resolve_error: "str | None" = None
+    if data_dir is None:
+        # Neither data_dir nor (necessarily) state_dir was given — the CLI's
+        # real no-flags invocation. Resolve BOTH via the fabric's canonical
+        # resolver so the register/receipts/active-manifest reads land on the
+        # CENTRAL store, never a repo-local `.vnx-data/` that may not exist
+        # or may simply never have heard of this project's dispatches.
+        data_dir, central_state_dir, central_resolve_error = _resolve_central_paths(root)
+        if state_dir is None:
+            state_dir = central_state_dir
+    elif state_dir is None:
+        # data_dir given explicitly, state_dir not — derive under it
+        # (unchanged operator/test override path; explicit data_dir always
+        # wins over central resolution).
+        state_dir = data_dir / "state"
+    return data_dir, state_dir, central_resolve_error
+
+
+def _sweep_list_sessions(
+    list_fn: Callable[[], "list[str] | None"], result: "OrphanSweepResult",
+) -> "tuple[list[str], bool]":
+    """Kind 1's session listing; ``None`` (unmeasurable) is recorded, never read as zero."""
+    sessions = list_fn()
+    listing_unmeasurable = sessions is None
+    if listing_unmeasurable:
+        sessions = []
+        result.errors.append({
+            "kind": "tmux",
+            "error": (
+                "tmux session listing was not measurable this run (tmux "
+                "missing, the runner raised, or an unrecognized non-zero "
+                "exit) — worktree reap skipped entirely so 'cannot measure' "
+                "is never read as 'zero sessions'"
+            ),
+        })
+        logger.warning(
+            "orphan_sweep: tmux session listing unmeasurable — skipping "
+            "worktree reap this run (fail-open)"
+        )
+    return sessions, listing_unmeasurable
+
+
+def _sweep_tmux_sessions(
+    sessions: "list[str]",
+    *,
+    result: "OrphanSweepResult",
+    protected: "set[str]",
+    surviving_ids: "set[str]",
+    probe_fn: Callable[[str], "bool | None"],
+    kill_fn: Callable[[str], bool],
+    dry_run: bool,
+    evidence: dict,
+) -> None:
+    """Kind 1 + 1b over the listed sessions; ``evidence`` feeds ``_evaluate_completed_orphan``."""
+    for name in sorted(sessions):
+        m = _SESSION_RE.match(name)
+        if not m:
+            continue
+        sid = m.group("id")
+        result.tmux_sessions_scanned.append(name)
+        if sid in protected:
+            result.tmux_skipped_protected.append(name)
+            logger.info("orphan_sweep: SKIP tmux %s — protected dispatch", name)
+            continue
+        verdict = probe_fn(name)
+
+        if verdict is True and _sweep_completed_candidate(
+            name, sid, result=result, surviving_ids=surviving_ids,
+            kill_fn=kill_fn, dry_run=dry_run, evidence=evidence,
+        ):
+            continue
+        if verdict is not False:
+            # Alive (True, conjunction unmet) or unmeasurable (None): never
+            # kill what we cannot prove is dead.
+            surviving_ids.add(sid)
+            result.tmux_skipped_alive.append(name)
+            continue
+        # Provably dead pane.
+        if dry_run:
+            result.tmux_killed.append(name)
+            surviving_ids.add(sid)  # session would still exist during dry-run
+            logger.info("orphan_sweep: DRY-RUN would kill tmux session %s", name)
+            continue
+        try:
+            killed = kill_fn(name)
+        except Exception as exc:
+            killed = False
+            result.errors.append({"kind": "tmux", "session": name, "error": str(exc)})
+        if killed:
+            result.tmux_killed.append(name)
+            logger.info("orphan_sweep: killed dead tmux session %s", name)
+        else:
+            surviving_ids.add(sid)  # still exists -> keep its worktree
+            result.tmux_skipped_alive.append(name)
+            logger.warning("orphan_sweep: kill failed for %s; leaving session", name)
+
+
+def _sweep_completed_candidate(
+    name: str,
+    sid: str,
+    *,
+    result: "OrphanSweepResult",
+    surviving_ids: "set[str]",
+    kill_fn: Callable[[str], bool],
+    dry_run: bool,
+    evidence: dict,
+) -> bool:
+    """Kind 1b for a provably alive session; True when the session is fully handled."""
+    # Provably alive: a candidate for the kind-1b completed-dispatch
+    # conjunction (OI-1353) — never evaluated for verdict is None
+    # (liveness itself unmeasurable), since that would stack one
+    # unmeasurable signal on top of another.
+    is_orphan, reason = _evaluate_completed_orphan(name, sid, **evidence)
+    entry = {"session": name, "dispatch_id": sid, "reason": reason}
+    if is_orphan:
+        if dry_run:
+            result.tmux_completed_orphans_killed.append(entry)
+            surviving_ids.add(sid)  # session would still exist during dry-run
+            logger.info(
+                "orphan_sweep: DRY-RUN would kill completed-orphan tmux "
+                "session %s (%s)", name, reason,
+            )
+            return True
+        try:
+            killed = kill_fn(name)
+        except Exception as exc:
+            killed = False
+            result.errors.append(
+                {"kind": "tmux_completed", "session": name, "error": str(exc)}
+            )
+        if killed:
+            result.tmux_completed_orphans_killed.append(entry)
+            logger.info(
+                "orphan_sweep: killed completed-orphan tmux session %s (%s)",
+                name, reason,
+            )
+            return True
+        surviving_ids.add(sid)  # still exists -> keep its worktree
+        result.tmux_skipped_alive.append(name)
+        result.tmux_completed_orphans_preserved.append(
+            {**entry, "reason": "kill_failed"}
+        )
+        logger.warning(
+            "orphan_sweep: kill failed for completed-orphan %s; leaving session",
+            name,
+        )
+        return True
+    result.tmux_completed_orphans_preserved.append(entry)
+    return False
+
+
+def _log_sweep_summary(result: "OrphanSweepResult") -> None:
+    """The one ``complete`` log line a sweep run ends with."""
     logger.info(
         "orphan_sweep: complete — tmux killed=%d skipped=%d protected=%d "
         "completed_orphans_killed=%d completed_orphans_preserved=%d; "
@@ -995,7 +1047,6 @@ def sweep(
         len(result.active_recovered), result.active_scanned, result.active_capped,
         result.active_v3, result.dry_run, len(result.errors),
     )
-    return result
 
 
 def _sweep_orphan_worktrees(

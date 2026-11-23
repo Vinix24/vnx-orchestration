@@ -264,6 +264,7 @@ def deliver_with_recovery(
     pr_id: str | None = None,
     mandate_id: str | None = None,
     skill: str | None = None,
+    parent_dispatch: str | None = None,
 ) -> bool:
     """Deliver while suppressing shared preparation in benchmark equal-context mode."""
     kwargs = {
@@ -284,6 +285,7 @@ def deliver_with_recovery(
         # too (a pool worker that claimed a staged spec knows the skill). None =
         # no skill, the pre-RS-4 prompt unchanged.
         "skill": skill,
+        "parent_dispatch": parent_dispatch,
     }
     if not _bench_equal_context_enabled():
         return _deliver_with_recovery(
@@ -665,7 +667,7 @@ if __name__ == "__main__":
             sys.exit(1)
         _ctx = _dm.DispatchContext(
             project_id=_project_id,
-            session_id=getattr(args, "session_id", None) or os.environ.get("VNX_SESSION_ID"),
+            session_id=getattr(args, "session_id", None),
             task_class=getattr(args, "task_class", None) or None,
             dispatch_id=args.dispatch_id,
         )

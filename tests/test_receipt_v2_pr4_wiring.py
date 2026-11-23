@@ -415,7 +415,12 @@ def test_t24_envelope_subpath_verification_from_report(tmp_path):
 
     codex_result = SimpleNamespace(
         returncode=0,
-        completion_text="Implemented the feature.\n\n## Validation\n\n12 tests passed, 0 failed\n",
+        completion_text=(
+            "## Summary\n\nImplemented the feature end to end and covered it with twelve passing tests.\n\n"
+            "## Changes\n\n- feature module\n\n"
+            "## Verification\n\n12 tests passed, 0 failed\n\n"
+            "## Open Items\n\nNone\n"
+        ),
         timed_out=False,
         stopped_early=False,
         token_usage={"input_tokens": 100, "output_tokens": 50},
@@ -441,7 +446,7 @@ def test_t24_envelope_subpath_verification_from_report(tmp_path):
 
     report_path = data_dir / "unified_reports" / "t24-envelope.md"
     assert report_path.exists()
-    assert "## Validation" in report_path.read_text()
+    assert "## Verification" in report_path.read_text()
 
     line = _read_lines(state_dir / "t0_receipts.ndjson")[-1]
     assert line["verification"]["method"] == "pytest"

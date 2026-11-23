@@ -303,7 +303,11 @@ class GovernanceEnforcer:
     # ------------------------------------------------------------------
 
     def check(self, name: str, context: Dict[str, Any]) -> EnforcementResult:
-        """Run a single named check and return its result."""
+        """Run a single named check and return its result.
+
+        A check configured at level >= 1 with no ``_check_<name>`` method fails closed
+        (``passed=False``, named in the message) and goes through the normal override rule.
+        """
         cfg = self._checks.get(name)
         if cfg is None:
             return EnforcementResult(
@@ -327,18 +331,18 @@ class GovernanceEnforcer:
         fn_name = f"_check_{name}"
         fn = getattr(self, fn_name, None)
         if fn is None:
+            # Fail closed: a configured check with no implementation is not a pass (OI-2758).
             result = EnforcementResult(
                 check_name=name,
                 level=cfg.level,
-                passed=True,
-                message=f"No implementation for '{name}' — skipped",
+                passed=False,
+                message=f"no implementation for '{name}': unknown check, refused (OI-2758)",
                 override_key=f"VNX_OVERRIDE_{name.upper()}",
             )
-            return result
+        else:
+            result = fn(cfg, context)
 
-        result = fn(cfg, context)
-
-        # Override logic
+        # Override logic (shared by real failures and the unknown-check refusal)
         if not result.passed:
             override_key = f"VNX_OVERRIDE_{name.upper()}"
             override_reason = os.environ.get(override_key, "").strip()
@@ -602,6 +606,12 @@ class GovernanceEnforcer:
     def _check_codex_gate_required(self, cfg: CheckConfig, ctx: Dict[str, Any]) -> EnforcementResult:
         """Codex gate result must exist with non-empty contract_hash."""
         return self._check_review_gate_required(cfg, ctx, "codex_gate")
+
+    def _check_deepseek_gate_required(self, cfg: CheckConfig, ctx: Dict[str, Any]) -> EnforcementResult:
+        """Seat 2 since 2026-11-11 (Kimi cancelled), read like the kimi seat below. That
+        one stays: without it :meth:`check` would refuse a consumer's ``kimi_gate_required``
+        as an unknown check (OI-2758)."""
+        return self._check_review_gate_required(cfg, ctx, "deepseek_gate")
 
     def _check_kimi_gate_required(self, cfg: CheckConfig, ctx: Dict[str, Any]) -> EnforcementResult:
         """Kimi gate result must exist with non-empty contract_hash (or its

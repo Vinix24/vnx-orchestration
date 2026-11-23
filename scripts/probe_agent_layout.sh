@@ -189,7 +189,7 @@ cell_B() {
 }
 write_probe_settings() {
   cat >"$1" <<JSON
-{"hooks":{"PreToolUse":[{"matcher":"Write|Edit|MultiEdit|Bash","hooks":[{"type":"command","command":"$REPO_ROOT/scripts/hooks/pretooluse_worker_scope_enforce.sh","timeout":5}]}]}}
+{"hooks":{"PreToolUse":[{"matcher":"Write|Edit|MultiEdit|NotebookEdit|Bash","hooks":[{"type":"command","command":"$REPO_ROOT/scripts/hooks/pretooluse_worker_scope_enforce.sh","timeout":5}]}]}}
 JSON
 }
 # cell_write <cell> <dispatch-paths> <allowed-rel> <denied-rel-or-abs>: H1/H2.

@@ -25,7 +25,7 @@ import argparse
 import os
 import json
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, Any, List, Tuple
 from collections import defaultdict
@@ -182,7 +182,7 @@ def generate_lessons_learned(days: int, intelligence_file: Path) -> List[Dict[st
         if data["count"] >= 3:  # Only create lessons for recurring issues
             lesson = {
                 "lesson_id": f"LESSON-{len(lessons) + 1:03d}",
-                "timestamp": datetime.utcnow().isoformat() + "Z",  # FIX: Use UTC, not local time
+                "timestamp": datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z",  # FIX: Use UTC, not local time
                 "category": category,
                 "severity": data["severity"],
                 "observation": f"Category '{category}' occurred {data['count']} times across terminals {', '.join(data['terminals'])}",

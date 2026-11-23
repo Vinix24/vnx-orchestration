@@ -23,6 +23,12 @@ sys.path.insert(0, str(LIB_DIR))
 import state_rebuild_trigger as srt
 
 
+@pytest.fixture(autouse=True)
+def _trigger_switch_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    """tests/conftest.py sets VNX_STATE_REBUILD_TRIGGER=0 for the suite; these tests prove the spawn."""
+    monkeypatch.delenv("VNX_STATE_REBUILD_TRIGGER", raising=False)
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -493,3 +499,240 @@ def test_critical_event_waits_for_lock(tmp_path: Path) -> None:
         f"expected both to fire, got {results}"
     )
     assert len(fired) == 2, f"expected 2 Popen calls, got {len(fired)}"
+
+
+# ---------------------------------------------------------------------------
+# Off switch: VNX_STATE_REBUILD_TRIGGER=0 (the suite-wide default in conftest)
+# ---------------------------------------------------------------------------
+
+def test_switch_zero_returns_false_and_never_spawns(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("VNX_STATE_REBUILD_TRIGGER", "0")
+    with mock.patch.object(srt, "_resolve_state_dir", return_value=tmp_path), \
+         mock.patch("state_rebuild_trigger.subprocess.Popen") as mock_p:
+        for event_type in ("", "task_complete", "dispatch_finished"):
+            assert srt.maybe_trigger_state_rebuild(event_type=event_type) is False
+    mock_p.assert_not_called()
+    assert not (tmp_path / ".last_state_rebuild_ts").exists()
+
+
+@pytest.mark.parametrize("value", ["", "1", "false", "00", " 0", "off"])
+def test_any_other_switch_value_keeps_the_spawn(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, value: str) -> None:
+    monkeypatch.setenv("VNX_STATE_REBUILD_TRIGGER", value)
+    with mock.patch.object(srt, "_resolve_state_dir", return_value=tmp_path), \
+         mock.patch("state_rebuild_trigger.subprocess.Popen", return_value=_mock_popen()) as mock_p:
+        assert srt.maybe_trigger_state_rebuild(event_type="task_complete") is True
+    mock_p.assert_called_once()
+
+
+def test_a_cli_child_inherits_the_switch_and_starts_no_rebuild(tmp_path: Path) -> None:
+    """A subprocess is not reached by an in-process monkeypatch; the env var is."""
+    import os
+    import subprocess as sp
+    code = (
+        "import sys, subprocess\n"
+        "sys.path.insert(0, %r)\n"
+        "import state_rebuild_trigger as srt\n"
+        "real = subprocess.Popen\n"
+        "calls = []\n"
+        "def spy(*a, **k):\n"
+        "    calls.append(a)\n"
+        "    return real(['true'])\n"
+        "srt.subprocess.Popen = spy\n"
+        "srt._resolve_state_dir = lambda: __import__('pathlib').Path(%r)\n"
+        "ok = srt.maybe_trigger_state_rebuild(event_type='dispatch_finished')\n"
+        "print(ok, len(calls))\n"
+    ) % (str(Path(__file__).resolve().parents[1] / "scripts" / "lib"), str(tmp_path))
+    env = {**os.environ, "VNX_STATE_REBUILD_TRIGGER": "0"}
+    out = sp.run([sys.executable, "-c", code], env=env, capture_output=True, text=True, timeout=60)
+    assert out.returncode == 0, out.stderr
+    assert out.stdout.split() == ["False", "0"]
+    env.pop("VNX_STATE_REBUILD_TRIGGER")
+    out = sp.run([sys.executable, "-c", code], env=env, capture_output=True, text=True, timeout=60)
+    assert out.returncode == 0, out.stderr
+    assert out.stdout.split() == ["True", "1"]
+
+
+# ---------------------------------------------------------------------------
+# Interpreter pin (OI-3060): never the bare python3 on PATH
+# ---------------------------------------------------------------------------
+
+HELPER = REPO_ROOT / "scripts" / "hooks" / "lib_hook_python.sh"
+
+
+def _fake_python(path: Path) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    path.chmod(0o755)
+    return path
+
+
+@pytest.fixture
+def clean_interp_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    monkeypatch.delenv("VNX_PYTHON", raising=False)
+    monkeypatch.setenv("VNX_HOOK_PINNED_PYTHON", str(tmp_path / "no-such-python"))
+    root = tmp_path / "root"
+    root.mkdir()
+    monkeypatch.setattr(srt, "_REPO_ROOT", root)
+    return root
+
+
+def _bash_resolver(root: Path) -> str:
+    out = subprocess.run(
+        ["bash", "-c", f'source "{HELPER}"; vnx_hook_python "{root}"'],
+        capture_output=True, text=True, check=True,
+    )
+    return out.stdout.strip()
+
+
+def _popen_argv0(tmp_path: Path) -> str:
+    with mock.patch.object(srt, "_resolve_state_dir", return_value=tmp_path / "state"), \
+         mock.patch("state_rebuild_trigger.subprocess.Popen", return_value=_mock_popen()) as mock_p:
+        assert srt.maybe_trigger_state_rebuild() is True
+    return mock_p.call_args.args[0][0]
+
+
+def test_interpreter_falls_back_to_sys_executable_never_bare_python3(
+    tmp_path: Path, clean_interp_env: Path
+) -> None:
+    argv0 = _popen_argv0(tmp_path)
+    assert argv0 == sys.executable
+    assert argv0 != "python3"
+
+
+def test_interpreter_uses_repo_venv(tmp_path: Path, clean_interp_env: Path) -> None:
+    venv = _fake_python(clean_interp_env / ".venv" / "bin" / "python")
+    assert _popen_argv0(tmp_path) == str(venv)
+    assert _bash_resolver(clean_interp_env) == str(venv)
+
+
+def test_interpreter_vnx_python_wins_over_venv(
+    tmp_path: Path, clean_interp_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _fake_python(clean_interp_env / ".venv" / "bin" / "python")
+    override = _fake_python(tmp_path / "other" / "py")
+    monkeypatch.setenv("VNX_PYTHON", str(override))
+    assert _popen_argv0(tmp_path) == str(override)
+    assert _bash_resolver(clean_interp_env) == str(override)
+
+
+def test_interpreter_vnx_python_directory_is_ignored(
+    tmp_path: Path, clean_interp_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("VNX_PYTHON", str(tmp_path))
+    assert _popen_argv0(tmp_path) == sys.executable
+
+
+def test_interpreter_pinned_python_used_when_no_venv(
+    tmp_path: Path, clean_interp_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pinned = _fake_python(tmp_path / "pinned" / "python3.12")
+    monkeypatch.setenv("VNX_HOOK_PINNED_PYTHON", str(pinned))
+    assert _popen_argv0(tmp_path) == str(pinned)
+    assert _bash_resolver(clean_interp_env) == str(pinned)
+
+
+# ---------------------------------------------------------------------------
+# OI-3056: CLI --event / --wait, real CLI process against a stub builder
+# ---------------------------------------------------------------------------
+
+import os
+import shutil
+
+
+def _cli_engine(tmp_path: Path, builder: str) -> Path:
+    """A throwaway engine tree: the real trigger CLI plus a stub builder."""
+    engine = tmp_path / "engine"
+    (engine / "scripts" / "lib").mkdir(parents=True)
+    shutil.copy(LIB_DIR / "state_rebuild_trigger.py", engine / "scripts" / "lib")
+    shutil.copy(LIB_DIR / "event_outcome_semantics.py", engine / "scripts" / "lib")
+    (engine / "scripts" / "build_t0_state.py").write_text(builder, encoding="utf-8")
+    return engine
+
+
+def _cli(engine: Path, data: Path, *args: str) -> subprocess.CompletedProcess:
+    env = {k: v for k, v in os.environ.items() if not k.startswith("VNX_")}
+    env.update({"VNX_STATE_DIR": str(data / "state"), "VNX_PYTHON": sys.executable})
+    return subprocess.run(
+        [sys.executable, str(engine / "scripts" / "lib" / "state_rebuild_trigger.py"), *args],
+        capture_output=True, text=True, env=env, stdin=subprocess.DEVNULL, timeout=60,
+    )
+
+
+def test_session_start_is_not_a_critical_event() -> None:
+    assert "session_start" not in srt.CRITICAL_EVENTS
+
+
+def test_session_start_event_is_throttled_within_30_seconds(tmp_path: Path) -> None:
+    with mock.patch.object(srt, "_resolve_state_dir", return_value=tmp_path), \
+         mock.patch("state_rebuild_trigger.subprocess.Popen", return_value=_mock_popen()) as mock_p:
+        first = srt.maybe_trigger_state_rebuild(event_type="session_start")
+        second = srt.maybe_trigger_state_rebuild(event_type="session_start")
+    assert first is True
+    assert second is False
+    mock_p.assert_called_once()
+
+
+def test_cli_wait_logs_a_failed_build(tmp_path: Path) -> None:
+    engine = _cli_engine(tmp_path, "raise SystemExit(2)\n")
+    data = tmp_path / "data"
+    r = _cli(engine, data, "--event", "session_start", "--wait")
+    assert r.returncode == 0, r.stderr
+    text = (data / "logs" / "build_t0_state.err").read_text(encoding="utf-8")
+    assert "rc=2" in text
+    assert "failed build, t0_state.json not refreshed" in text
+
+
+def test_cli_wait_logs_degraded_health_as_built(tmp_path: Path) -> None:
+    engine = _cli_engine(tmp_path, "raise SystemExit(1)\n")
+    data = tmp_path / "data"
+    r = _cli(engine, data, "--event", "session_start", "--wait")
+    assert r.returncode == 0, r.stderr
+    text = (data / "logs" / "build_t0_state.err").read_text(encoding="utf-8")
+    assert "rc=1" in text
+    assert "built, t0_state.json refreshed, system_health degraded/failed" in text
+    assert "failed build" not in text
+
+
+def test_cli_wait_logs_nothing_for_a_good_build(tmp_path: Path) -> None:
+    engine = _cli_engine(tmp_path, "pass\n")
+    data = tmp_path / "data"
+    r = _cli(engine, data, "--wait")
+    assert r.returncode == 0, r.stderr
+    assert not (data / "logs" / "build_t0_state.err").exists()
+
+
+def test_cli_session_start_twice_starts_one_build(tmp_path: Path) -> None:
+    engine = _cli_engine(
+        tmp_path,
+        "import os\nopen(os.environ['VNX_STATE_DIR'] + '/runs', 'a').write('x')\n",
+    )
+    data = tmp_path / "data"
+    _cli(engine, data, "--event", "session_start", "--wait")
+    _cli(engine, data, "--event", "session_start", "--wait")
+    assert (data / "state" / "runs").read_text(encoding="utf-8") == "x"
+
+
+def test_cli_without_wait_returns_before_the_build_ends(tmp_path: Path) -> None:
+    engine = _cli_engine(
+        tmp_path,
+        "import os, time\ntime.sleep(4)\nopen(os.environ['VNX_STATE_DIR'] + '/done', 'w').write('x')\n",
+    )
+    data = tmp_path / "data"
+    started = time.monotonic()
+    r = _cli(engine, data)
+    elapsed = time.monotonic() - started
+    assert r.returncode == 0, r.stderr
+    assert elapsed < 3.0, f"CLI waited {elapsed:.2f}s without --wait"
+    assert not (data / "state" / "done").exists()
+    # The detached build still finishes on its own.
+    deadline = time.monotonic() + 20
+    while time.monotonic() < deadline and not (data / "state" / "done").exists():
+        time.sleep(0.05)
+    assert (data / "state" / "done").exists()
+
+
+def test_cli_rejects_an_unknown_flag(tmp_path: Path) -> None:
+    engine = _cli_engine(tmp_path, "pass\n")
+    r = _cli(engine, tmp_path / "data", "--bogus")
+    assert r.returncode != 0

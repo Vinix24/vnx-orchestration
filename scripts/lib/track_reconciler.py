@@ -25,7 +25,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import re
 import sqlite3
 import subprocess
@@ -287,8 +286,7 @@ def _load_merged_pr_numbers(
     Sources (all optional; errors silently ignored):
       1. {state_dir}/../events/pr_merged.ndjson  — ADR-005 event ledger
       2. {state_dir}/t0_receipts.ndjson           — receipt log
-      3. git/GitHub via ``gh`` (DEFAULT-ON since OI-1155; opt out with
-         ``VNX_RECONCILE_GIT=0``) — cache-first (10-min TTL), silent-on-failure.
+      3. git/GitHub via ``gh`` (always on since OI-1155) — cache-first (10-min TTL), silent-on-failure.
          Closes the gap where a PR merged via raw ``gh pr merge`` emits no local
          ``pr_merged`` receipt, so a merged track would otherwise stay ``queued``
          forever (the git-reality drift). Measured 2026-08-15: sources 1-2 both
@@ -335,18 +333,14 @@ def _load_merged_pr_numbers(
         except OSError:
             pass
 
-    # Source 3 (network, DEFAULT-ON since OI-1155): git/GitHub merge state via gh,
+    # Source 3 (network, always on since OI-1155): git/GitHub merge state via gh,
     # cache-first + silent-on-failure. This is the ONLY source that sees a PR
     # merged via a bare ``gh pr merge`` (no local pr_merged receipt is written),
     # so it must run by default or such merged tracks never derive 'done'.
-    # Explicit opt-out for offline / deterministic callers: VNX_RECONCILE_GIT=0
-    # (also 'false'/'no'/'off').
-    _git_flag = os.environ.get("VNX_RECONCILE_GIT", "").strip().lower()
-    if _git_flag not in ("0", "false", "no", "off"):
-        gh_cwd = Path(repo_root) if repo_root is not None else _git_toplevel(Path.cwd())
-        merged |= _load_merged_prs_from_gh(
-            state_path, cwd=str(gh_cwd) if gh_cwd is not None else None
-        )
+    gh_cwd = Path(repo_root) if repo_root is not None else _git_toplevel(Path.cwd())
+    merged |= _load_merged_prs_from_gh(
+        state_path, cwd=str(gh_cwd) if gh_cwd is not None else None
+    )
 
     return frozenset(merged)
 
@@ -663,7 +657,7 @@ def reconcile_track(
           ``gh pr view`` sweep) MUST pass the UNION of its gh-confirmed numbers
           and the locally-loaded set here. Otherwise reconcile_track falls back
           to _load_merged_pr_numbers, whose gh source (source 3) is default-ON
-          since OI-1155 (opt out with VNX_RECONCILE_GIT=0) — so a track the
+          since OI-1155 — so a track the
           caller just confirmed merged via gh would re-derive as 'queued' from
           the weaker local sources, and no close path could close it. The caller
           performs the union (gh evidence is additive: it never replaces local
@@ -870,6 +864,35 @@ def _deliverable_stubs(
         f"AND state NOT IN ({','.join('?' * len(terminal))})",
         (track_id, project_id, *terminal),
     ).fetchall()
+
+
+OPEN_DELIVERABLE_STATES = ("proposed", "ready", "failed", "failed_delivery", "timed_out")
+IN_FLIGHT_STATES = ("claimed", "delivering", "accepted", "running")
+
+
+def open_deliverable_counts(
+    conn: sqlite3.Connection, track_id: str, project_id: str
+) -> Dict[str, int]:
+    """Count a track's unfinished work per state (OI-2904); empty means nothing open.
+
+    Deliverable rows (output_ref set) in proposed/ready/failed/failed_delivery/
+    timed_out, plus ANY dispatch of the track that is in flight. Raises
+    sqlite3.Error on an unreadable DB: the caller must not read that as empty.
+    """
+    states = (*OPEN_DELIVERABLE_STATES, *IN_FLIGHT_STATES)
+    rows = conn.execute(
+        "SELECT state, (output_ref IS NOT NULL AND output_ref != '') AS is_deliverable, "
+        "COUNT(*) AS c FROM dispatches "
+        "WHERE track = ? AND project_id = ? "
+        f"AND state IN ({','.join('?' * len(states))}) "
+        "GROUP BY state, (output_ref IS NOT NULL AND output_ref != '')",
+        (track_id, project_id, *states),
+    ).fetchall()
+    out: Dict[str, int] = {}
+    for r in rows:
+        if r["state"] in IN_FLIGHT_STATES or r["is_deliverable"]:
+            out[r["state"]] = out.get(r["state"], 0) + r["c"]
+    return out
 
 
 def _real_dispatches_terminal(

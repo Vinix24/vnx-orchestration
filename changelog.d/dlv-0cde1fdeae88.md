@@ -1,0 +1,1 @@
+- A blocking check may now run in a job that the required check `Profile A (doctor + core tests)` depends on (`needs`) and whose `success` it requires; ADR-085 widens the "same job" wording of ADR-053, which stays frozen (pr-ci-onder-zes-minuten C3a).

@@ -27,7 +27,7 @@ When Codex is unavailable (`VNX_CODEX_HEADLESS_ENABLED=0` or `codex` not in PATH
 
 **Defect 3: Stall Without Timeout**
 
-A review CLI can stall on stdout flush (OI-048, first measured on the Gemini CLI, since retired as a reviewer). A stalled gate produces no output, no error, and no timeout — it hangs indefinitely. The `headless_adapter.py` defines `HeadlessTimeoutError` and `headless_timeout()` (default 600s), but these apply to the general headless adapter, not to review gate execution specifically. No gate-type-specific timeout or stall detection exists.
+A review CLI can stall on stdout flush (OI-048, first measured on the Gemini CLI, since retired as a reviewer). A stalled gate produces no output, no error, and no timeout — it hangs indefinitely. The `headless_adapter.py` bounds its subprocess with `headless_timeout()` (default 600s) and, when that expires, records the run as timed out in its result instead of raising, but this applies to the general headless adapter, not to review gate execution specifically. No gate-type-specific timeout or stall detection exists.
 
 ### 1.2 The Fix
 
@@ -192,13 +192,13 @@ A stall is when the subprocess is alive but producing no output. This is distinc
 
 | Gate Type | Stall Threshold | Env Override |
 |-----------|----------------|--------------|
-| `codex_gate` | 120s | `VNX_CODEX_STALL_THRESHOLD` |
+| `codex_gate` | 300s | none (fixed; the env override was deleted under ADR-087) |
 | `claude_github_optional` | 60s | `VNX_CLAUDE_GITHUB_STALL_THRESHOLD` |
 | `kimi_gate` | No stall detection | n/a |
 | `glm_gate` | No stall detection | n/a |
 | `deepseek_gate` | No stall detection | n/a |
 
-**Added 2026-09-28**: `kimi_gate`/`glm_gate`/`deepseek_gate` run through `_run_harness_lane_path` (`scripts/gate_runner.py:505-549`), a governed dispatch call (`plan_gate_panel._make_default_dispatcher`) bounded only by the harness-lane timeout above — it is not a locally spawned, polled subprocess, so there is no output stream for this runner to watch and no stall threshold to apply. Stall detection (`_run_with_stall_detection` / `_poll_io`, `scripts/gate_runner.py:864-926`) only runs inside `_run_subprocess_path` (`scripts/gate_runner.py:410-453`), which harness-lane gates never reach. `headless_adapter.gate_stall_threshold()` (`scripts/lib/headless_adapter.py:91-106,122-132`) does carry a `kimi_gate` entry (300s default, `VNX_KIMI_STALL_THRESHOLD` override) for the same reason the timeout entry above is dead: it is only consulted by `_run_subprocess_path`.
+**Added 2026-09-28**: `kimi_gate`/`glm_gate`/`deepseek_gate` run through `_run_harness_lane_path` (`scripts/gate_runner.py:505-549`), a governed dispatch call (`plan_gate_panel._make_default_dispatcher`) bounded only by the harness-lane timeout above — it is not a locally spawned, polled subprocess, so there is no output stream for this runner to watch and no stall threshold to apply. Stall detection (`_run_with_stall_detection` / `_poll_io`, `scripts/gate_runner.py:864-926`) only runs inside `_run_subprocess_path` (`scripts/gate_runner.py:410-453`), which harness-lane gates never reach. `headless_adapter.gate_stall_threshold()` (`scripts/lib/headless_adapter.py:91-105,121-131`) does carry a `kimi_gate` entry (300s default, `VNX_KIMI_STALL_THRESHOLD` override) for the same reason the timeout entry above is dead: it is only consulted by `_run_subprocess_path`.
 
 ### 4.3 Timeout/Stall Failure Record
 

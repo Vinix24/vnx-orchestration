@@ -21,7 +21,7 @@ Version: 2.0
 import sys
 import json
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List, Any
 from collections import defaultdict, deque, Counter
@@ -185,7 +185,7 @@ class T0IntelligenceAggregator:
 
         # Add timestamp if missing
         if 'timestamp' not in event:
-            event['timestamp'] = datetime.utcnow().isoformat() + 'Z'
+            event['timestamp'] = datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + 'Z'
 
         # Add event_id if missing
         if 'event_id' not in event:
@@ -215,7 +215,7 @@ class T0IntelligenceAggregator:
 
         snapshot = {
             "event_type": "t0_intelligence_snapshot",
-            "timestamp": datetime.utcnow().isoformat() + 'Z',
+            "timestamp": datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + 'Z',
             "summary": summary,
             "last_events": recent_events,
 
@@ -261,7 +261,7 @@ class T0IntelligenceAggregator:
             return self._empty_summary()
 
         # Time window
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
         one_hour_ago = now - timedelta(hours=1)
 
         # Filter recent events
@@ -394,7 +394,7 @@ class T0IntelligenceAggregator:
                 continue
 
         # Fallback to current time
-        return datetime.utcnow()
+        return datetime.now(timezone.utc).replace(tzinfo=None)
 
     def _write_rolling_window(self, snapshot: Dict[str, Any]) -> None:
         """Write rolling window of events plus snapshot"""
@@ -509,7 +509,7 @@ class T0IntelligenceAggregator:
                     'error_count': len(recent_errors),
                     'pattern': event.get('event_type'),
                     'message': f"Terminal {terminal} has {len(recent_errors)} errors in 10 minutes",
-                    'timestamp': datetime.utcnow().isoformat() + 'Z'
+                    'timestamp': datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + 'Z'
                 }
                 self.correlation_warnings.append(warning)
 
@@ -524,7 +524,7 @@ class T0IntelligenceAggregator:
                     'terminal': terminal,
                     'blocked_seconds': blocked_duration,
                     'message': f"Terminal {terminal} blocked for {blocked_duration}s",
-                    'timestamp': datetime.utcnow().isoformat() + 'Z'
+                    'timestamp': datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + 'Z'
                 }
                 self.correlation_warnings.append(warning)
 
@@ -620,7 +620,7 @@ class T0IntelligenceAggregator:
             return False
         try:
             event_time = self._parse_timestamp(timestamp)
-            cutoff = datetime.utcnow() - timedelta(minutes=minutes)
+            cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(minutes=minutes)
             return event_time > cutoff
         except:
             return False
@@ -641,7 +641,7 @@ class T0IntelligenceAggregator:
 
         if blocked_start:
             start_time = self._parse_timestamp(blocked_start)
-            duration = (datetime.utcnow() - start_time).total_seconds()
+            duration = (datetime.now(timezone.utc).replace(tzinfo=None) - start_time).total_seconds()
             return int(duration)
         return 0
 

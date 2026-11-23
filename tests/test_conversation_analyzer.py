@@ -1372,7 +1372,7 @@ class TestApplySuggestedEdits:
         assert _parse_ids("a,b") == []
 
     def test_accept_edits(self):
-        """Accepted edits have status changed to accepted."""
+        """An edit without a guarded target is not staged: accept refuses it and it stays pending (D3c)."""
         data = {
             "generated_at": "2026-03-03T00:00:00Z",
             "edits": [
@@ -1384,9 +1384,9 @@ class TestApplySuggestedEdits:
             with patch("apply_suggested_edits.STATE_DIR", Path(_mock_state_dir)):
                 from apply_suggested_edits import PENDING_PATH as PP
                 PP.write_text(json.dumps(data), encoding="utf-8")
-                cmd_accept("1")
+                assert cmd_accept("1") == 1
                 result = json.loads(PP.read_text(encoding="utf-8"))
-                assert result["edits"][0]["status"] == "accepted"
+                assert result["edits"][0]["status"] == "pending"
                 assert result["edits"][1]["status"] == "pending"
 
     def test_reject_edits_with_reason(self):

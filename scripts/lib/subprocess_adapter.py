@@ -581,17 +581,7 @@ class SubprocessAdapter:
         # rather than subprocess.PIPE prevents pipe-buffer-deadlock when the
         # worker emits >64KB of stderr output (H1 fix).  The file is opened
         # before Popen so we can record the path and surface it for diagnostics.
-        stderr_log_path = self._resolve_stderr_log_path(terminal_id, dispatch_id)
-        try:
-            stderr_log_path.parent.mkdir(parents=True, exist_ok=True)
-            stderr_file = open(stderr_log_path, "ab")  # noqa: WPS515 — kept open for Popen
-        except OSError as exc:
-            logger.warning(
-                "subprocess_adapter: cannot open stderr log %s (%s); falling back to DEVNULL",
-                stderr_log_path, exc,
-            )
-            stderr_file = None
-        self._stderr_logfiles[terminal_id] = stderr_log_path
+        stderr_file = self._open_stderr_log(terminal_id, dispatch_id)
 
         popen_kwargs: Dict[str, Any] = {
             "stdout": subprocess.PIPE,
@@ -629,6 +619,50 @@ class SubprocessAdapter:
         # Replace any prior process tracking (stop old one first).
         # Use SIGTERM then SIGKILL fallback so a non-responsive prior process
         # can't linger as an orphan after we drop the tracking reference.
+        self._stop_prior_process(terminal_id)
+
+        self._processes[terminal_id] = process
+        self._dispatch_ids[terminal_id] = dispatch_id
+
+        # OI-877: record the worker's process group so teardown can find
+        # dispatch processes that escape the worktree (their repo-root
+        # resolves to the main checkout).  Only when the worker runs inside an
+        # isolated dispatch worktree — that is the case whose teardown path
+        # (remove_dispatch_worktree) reads the registry.  The worker runs with
+        # preexec_fn=os.setsid, so its PGID == its PID.  Best-effort: a failed
+        # record degrades to worktree-scan-only teardown.
+        self._record_worktree_pgid(dispatch_id, cwd, process)
+
+        # Archive previous dispatch events, then clear for new dispatch. On a
+        # per-run terminal (plan-gate, OI-2115) the dispatch id names this run's
+        # own stream, so a seat starting never archives or clears another seat's.
+        self._reset_event_stream(terminal_id, dispatch_id)
+
+        return DeliveryResult(
+            success=True,
+            terminal_id=terminal_id,
+            dispatch_id=dispatch_id,
+            pane_id=None,
+            path_used="subprocess",
+        )
+
+    def _open_stderr_log(self, terminal_id: str, dispatch_id: str):
+        """Open the dispatch's append-mode stderr logfile (H1 fix); None on OSError."""
+        stderr_log_path = self._resolve_stderr_log_path(terminal_id, dispatch_id)
+        try:
+            stderr_log_path.parent.mkdir(parents=True, exist_ok=True)
+            stderr_file = open(stderr_log_path, "ab")  # noqa: WPS515 — kept open for Popen
+        except OSError as exc:
+            logger.warning(
+                "subprocess_adapter: cannot open stderr log %s (%s); falling back to DEVNULL",
+                stderr_log_path, exc,
+            )
+            stderr_file = None
+        self._stderr_logfiles[terminal_id] = stderr_log_path
+        return stderr_file
+
+    def _stop_prior_process(self, terminal_id: str) -> None:
+        """SIGTERM, then SIGKILL, a still-running prior process of ``terminal_id``."""
         if terminal_id in self._processes:
             old = self._processes[terminal_id]
             if old.poll() is None:
@@ -645,16 +679,9 @@ class SubprocessAdapter:
                 except (OSError, ProcessLookupError):
                     pass
 
-        self._processes[terminal_id] = process
-        self._dispatch_ids[terminal_id] = dispatch_id
-
-        # OI-877: record the worker's process group so teardown can find
-        # dispatch processes that escape the worktree (their repo-root
-        # resolves to the main checkout).  Only when the worker runs inside an
-        # isolated dispatch worktree — that is the case whose teardown path
-        # (remove_dispatch_worktree) reads the registry.  The worker runs with
-        # preexec_fn=os.setsid, so its PGID == its PID.  Best-effort: a failed
-        # record degrades to worktree-scan-only teardown.
+    @staticmethod
+    def _record_worktree_pgid(dispatch_id: str, cwd: Optional[Any], process: Any) -> None:
+        """OI-877: best-effort record of a dispatch-worktree worker's process group."""
         if dispatch_id and cwd is not None:
             try:
                 _wt = Path(cwd).resolve()
@@ -679,22 +706,13 @@ class SubprocessAdapter:
                     _rec_exc,
                 )
 
-        # Archive previous dispatch events, then clear for new dispatch. On a
-        # per-run terminal (plan-gate, OI-2115) the dispatch id names this run's
-        # own stream, so a seat starting never archives or clears another seat's.
+    def _reset_event_stream(self, terminal_id: str, dispatch_id: str) -> None:
+        """Archive the previous dispatch's events, then clear for this dispatch."""
         es = self._get_event_store()
         if es is not None:
             last = es.last_event(terminal_id, dispatch_id=dispatch_id)
             prev_dispatch_id = last.get("dispatch_id") if last else None
             es.clear(terminal_id, archive_dispatch_id=prev_dispatch_id or None, dispatch_id=dispatch_id)
-
-        return DeliveryResult(
-            success=True,
-            terminal_id=terminal_id,
-            dispatch_id=dispatch_id,
-            pane_id=None,
-            path_used="subprocess",
-        )
 
     # ------------------------------------------------------------------
     # Stream event parsing & normalization
@@ -1095,6 +1113,12 @@ class SubprocessAdapter:
     # Auto-Report Pipeline Trigger
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _auto_report_enabled() -> bool:
+        import config_runtime
+
+        return config_runtime.get_bool("VNX_AUTO_REPORT")
+
     def trigger_report_pipeline(
         self,
         terminal_id: str,
@@ -1116,7 +1140,7 @@ class SubprocessAdapter:
 
         Non-blocking — does not invoke any subprocess or LLM.
         """
-        if os.environ.get("VNX_AUTO_REPORT", "0") != "1":
+        if not self._auto_report_enabled():
             return False
 
         terminal_map = {"T1": "A", "T2": "B", "T3": "C"}

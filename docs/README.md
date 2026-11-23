@@ -1,60 +1,40 @@
 # VNX Documentation
 
-**Status**: Active
-**Last Updated**: 2026-10-18
-**Owner**: VNX Maintainer
-**Purpose**: Describe how VNX documentation is organized and where to find the current source of truth.
+`DOCS_INDEX.md` is the index of every active doc and the one place to start.
+[docs/DOCS_INDEX.md](DOCS_INDEX.md)
 
----
+## Writing
 
-## Start Here
+I wrote the architecture down as I built it. The full series is on [vincentvandeth.nl](https://vincentvandeth.nl). Start here.
 
-Use `DOCS_INDEX.md` for the canonical "one place to look" navigation.
+**Governance and trust**
+- [Glass-box governance for multi-agent AI](https://vincentvandeth.nl/blog/glass-box-governance-multi-agent-ai)
+- [Governance scoring: agent trust and autonomy](https://vincentvandeth.nl/blog/governance-scoring-agent-trust-autonomy)
+- [Autonomous agents do not exist](https://vincentvandeth.nl/blog/autonome-ai-agents-bestaan-niet) (Dutch)
+- [ISA 62443: AI governance and industrial safety](https://vincentvandeth.nl/blog/isa-62443-ai-governance-industrial-safety)
 
-**Most Used**:
-- Index: `DOCS_INDEX.md`
-- Architecture: `core/00_VNX_ARCHITECTURE.md`
-- Quickstart: `QUICKSTART.md`
-- Getting started: `core/00_GETTING_STARTED.md`
-- Dispatch workflow: `DISPATCH_GUIDE.md`
-- Monitoring: `operations/README.md`
-- Scripts: `SCRIPTS_INDEX.md`
-- Product modes: `contracts/PRODUCTIZATION_CONTRACT.md`
-- Roadmap: the tracks database — `vnx horizon queue` for live state (ADR-047); architecture principles and wave history: `manifesto/ROADMAP.md`
+**Receipts, audit, traceability**
+- [The NDJSON receipt ledger for AI audit trails](https://vincentvandeth.nl/blog/ndjson-receipt-ledger-ai-audit-trail)
+- [Traceability architecture: the AI decision receipt](https://vincentvandeth.nl/blog/traceability-architecture-ai-decision-receipt)
+- [The external watcher pattern for AI agent observation](https://vincentvandeth.nl/blog/external-watcher-pattern-ai-agent-observation)
 
-## Directory Overview
+**Orchestration architecture**
+- [What is AI orchestration: terminal dispatch](https://vincentvandeth.nl/blog/wat-is-ai-orchestration-terminal-dispatch) (Dutch)
+- [Architecture beats models in AI agent dispatches](https://vincentvandeth.nl/blog/architecture-beats-models-ai-agent-dispatches)
+- [Multi-model AI orchestration from a single terminal](https://vincentvandeth.nl/blog/multi-model-ai-orchestration-single-terminal)
+- [Why no subagents in AI orchestration](https://vincentvandeth.nl/blog/waarom-geen-subagents-ai-orchestration) (Dutch)
+- [Routing is not orchestration](https://vincentvandeth.nl/blog/routing-not-orchestration-openclaw-governance)
 
-| Directory | Purpose |
-|-----------|---------|
-| `core/` | System architecture, file formats, technical references, and core contracts |
-| `contracts/` | Feature-level and platform contracts that govern runtime behavior |
-| `operations/` | Monitoring, multi-model usage, receipts, rollback, and runtime operations |
-| `intelligence/` | Public intelligence reference docs such as tag taxonomy and cost tracking |
-| `manifesto/` | Public narrative docs: architecture story, roadmap, limitations, open method |
-| `onboarding/` | New-user orientation and first-run setup guidance |
-| `examples/` | Example orchestration flows for coding, research, and content work |
-| `applications/` | Domain mappings for the governance mechanism (coding agents, finance) |
-| `gates/` | Reference docs for individual review/quality gates (e.g. the wiring gate) |
-| `guides/` | How-to guides for extending VNX (e.g. creating a new agent role) |
-| `governance/` | ADRs (`decisions/`) and governance mechanism docs (attestation, key provisioning) |
-| `compliance/` | Third-party audit and compliance evidence |
-| `_archive/` | Historical or superseded docs kept for reference only |
+**Cost, context, production**
+- [The real cost of AI agents in production](https://vincentvandeth.nl/blog/real-cost-ai-agents-production)
+- [Zero-LLM context injection with VNX intelligence](https://vincentvandeth.nl/blog/zero-llm-context-injection-vnx-intelligence)
+- [Context rotation at scale](https://vincentvandeth.nl/blog/context-rotation-scale-vnx-implementation)
+- [Async quality gates for AI agent workflows](https://vincentvandeth.nl/blog/async-quality-gates-ai-agent-workflows)
 
-## Documentation Rules (Source of Truth)
+## Context rotation for any Claude Code session
 
-- One active doc per topic; overlapping/older docs are archived.
-- Active docs use a consistent header:
-  - `**Status**: Active | Draft | Deprecated`
-  - `**Last Updated**: YYYY-MM-DD`
-  - `**Owner**: Team/Role`
-  - `**Purpose**: one line`
-- Private planning, business strategy, and internal research do not live in this repo.
-- Do not delete content unless it is duplicated in the canonical doc or moved to the private BUSINESS workspace.
-- Every active doc must be listed in `DOCS_INDEX.md`.
+`packages/claude-code-toolkit/context-rotation/` is a Claude Code plugin, separate from the VNX runtime and released in the public toolkit repository ([Vinix24/claude-code-toolkit](https://github.com/Vinix24/claude-code-toolkit)). It measures how full the context is, asks Claude for a handover note at set points, checks that note, and gives it to the fresh session after `/clear`. Install, settings and the hook layout are in the [plugin README](../packages/claude-code-toolkit/context-rotation/README.md). The T0 rotation VNX enforces for its own orchestrator is a different mechanism: [T0_CONTEXT_ROTATION.md](operations/T0_CONTEXT_ROTATION.md).
 
-## Archive
+## Compared to dmux
 
-Historical and superseded docs live in `_archive/`.
-
-- Archive only docs that still have traceability value.
-- If a document is private rather than merely historical, move it out of the repo instead of archiving it here.
+The closest spiritual cousin is [dmux](https://github.com/standardagents/dmux), which also pairs tmux with per-pane git worktrees. My choices differ on ephemeral-per-dispatch workers instead of long-lived panes, NDJSON receipts instead of interactive merge as the main record, and a teardown classifier that preserves dirty or pushed work instead of treating cleanup as one state.

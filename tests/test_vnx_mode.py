@@ -29,8 +29,6 @@ from vnx_mode import (
     check_command_allowed,
     get_available_commands,
     get_mode_description,
-    is_feature_enabled,
-    check_mode_feature_enabled,
 )
 
 
@@ -278,6 +276,13 @@ class TestCommandGating:
         write_mode(VNXMode.STARTER, str(data_dir))
         check_command_allowed("preflight")  # Should not raise
 
+    def test_main_window_allowed_in_starter_and_operator(self):
+        """`vnx main-window` is a read-only probe: it must sit in the shared
+        tier so the mode gate never refuses it as an unknown name."""
+        assert "main-window" in TIER_STARTER_OPERATOR
+        for mode in VNXMode:
+            check_command_allowed("main-window", mode)  # Should not raise
+
     def test_starter_blocks_operator_commands(self, data_dir):
         for cmd in TIER_OPERATOR_ONLY:
             with pytest.raises(ModeGateError) as exc:
@@ -319,31 +324,6 @@ class TestAvailableCommands:
         cmds = get_available_commands(None)
         assert TIER_UNIVERSAL <= cmds
         assert TIER_OPERATOR_ONLY <= cmds
-
-
-# ---------------------------------------------------------------------------
-# Feature flags
-# ---------------------------------------------------------------------------
-
-class TestFeatureFlags:
-    def test_starter_enabled_by_default(self):
-        os.environ.pop("VNX_STARTER_MODE_ENABLED", None)
-        assert check_mode_feature_enabled(VNXMode.STARTER) is True
-
-    def test_starter_disabled_by_flag(self):
-        os.environ["VNX_STARTER_MODE_ENABLED"] = "0"
-        assert check_mode_feature_enabled(VNXMode.STARTER) is False
-        os.environ.pop("VNX_STARTER_MODE_ENABLED")
-
-    def test_operator_always_enabled(self):
-        assert check_mode_feature_enabled(VNXMode.OPERATOR) is True
-
-    def test_mode_gating_flag(self):
-        os.environ.pop("VNX_MODE_GATING_ENABLED", None)
-        assert is_feature_enabled("VNX_MODE_GATING_ENABLED") is True
-        os.environ["VNX_MODE_GATING_ENABLED"] = "0"
-        assert is_feature_enabled("VNX_MODE_GATING_ENABLED") is False
-        os.environ.pop("VNX_MODE_GATING_ENABLED")
 
 
 # ---------------------------------------------------------------------------

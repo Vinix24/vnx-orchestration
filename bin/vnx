@@ -323,11 +323,13 @@ Commands:
   release publish|verify  Publish a tag as an immutable version / verify it against its tag
   preflight [--project <id>] [--json]  Measure rollout readiness against the pinned
                      release (read-only; exit 1 blocking, 2 unmeasurable)
+  rework-attribution run|install|uninstall|status  Nightly rework attribution job (05:30 launchd; install --dry-run prints the plist)
   patch-agent-files  Insert/update VNX marked block in CLAUDE.md / AGENTS.md
   suggest <sub>      Human-in-the-loop system tuning (review/accept/reject/apply/history)
                        review --weekly  Aggregate last 7d suggestions by target file
   insights           Read-only dispatch parameter + behavioral intelligence signals
                        --json           Machine-readable JSON output
+  daily-metrics <verb> [args]  Daily metrics pass-through; install manages the opt-in 04:10 job
 
 Intelligence commands (git-tracked project knowledge):
   intelligence-export  Export SQLite + state to canonical .vnx-intelligence/ (NDJSON)
@@ -335,6 +337,10 @@ Intelligence commands (git-tracked project knowledge):
   analyze-sessions     Mine Claude Code session logs → session_analytics DB
                        Options: --dry-run, --max-sessions N, --deep-budget N,
                                 --project-filter STR, --terminal-filter T0..T3
+  dream <run|status|review|history|install-scheduler|uninstall-scheduler>
+                       Auto-dream memory consolidation (ADR-019); run takes --dry-run, review --approve|--reject
+  learning <run|status|review|...>  Operator-gated proposal tier for the self-learning loop
+                       run [--from-history] queues proposals; status counts pending; review shows them
 
 Worktree commands:
   new-worktree <name>  Create fully bootstrapped feature worktree (one command)
@@ -365,6 +371,23 @@ Provider switch (turn model providers on and off, ~/.vnx/providers.json):
   providers check <identifier>       Exit 0 when allowed, 4 when switched off (for shell callers)
   providers usage [--json]           Usage and balance of every provider (read-only, no model call)
 
+Config (config-een-oppervlak):
+  config list [--project-id X] [--json]      Every registry key with value, source layer, scope, type and allowed values
+  config get <KEY> | explain <KEY>           One key's value and source | all five layers in chain order and the winner
+  config get --raw <KEY> [<KEY>...]          One line per key for bash (exit 0 ok, 2 unknown key, 3 storage layer unreadable)
+  config set <KEY> <VALUE> --reason "<why>" [--global] [--approval-id ID]
+  config unset <KEY> --reason "<why>" [--global] [--approval-id ID]
+                                             Operator mode only: project row, or the global file with --global;
+                                             audited with the reason (exit 2 unknown key, 3 store unreadable, 4 refused)
+
+Main window (read-only probe, ADR-073):
+  main-window status [--json]        The merges since the last green heavy main run and GO/NO-GO for one more (exit 0 GO, 1 NO-GO, 2 could not run)
+
+Memory ledger (ADR-078):
+  memory bind --dir <path>           Bind one memory folder under ~/.claude/projects/ (operator only)
+  memory scan                        Observe the bound folders into state/memory_ledger.ndjson (hashes and labels, never note text)
+  memory doctor [--json]             Propose memory fixes (invalid_at candidates, warnings) into state/memory_doctor.json
+
 Gate commands (pre-merge verification):
   gate-check --pr <ID>  Run deterministic pre-merge gate checks (GO/HOLD verdict)
   pr-ready <N> [<N>..]  Merge readiness: required contexts + gate evidence on the
@@ -375,10 +398,16 @@ Gate commands (pre-merge verification):
   gate-reanchor --pr <N> --gate <G>
                         Move an existing gate verdict onto the PR's current head when
                         the reviewed input is provably identical (read-only; --apply writes)
+  review delta-compare --since <time|Nd> [--planted <manifest>]
+                        The shadow delta against the full codex round, per pair (DR-5)
   review rounds open --pr <N> --reason "..."
                         Open PR N, reviewed before the round ledger, as the operator:
                         an attested line in review_gates/rounds.ndjson plus a receipt;
                         the B3 cap starts at zero there; idempotent
+  impact collect|backtest|report [--since <date|Nd>]
+                        The impact shadow ledger (state/impact_shadow.ndjson) from the CI artifacts,
+                        and its report: misses, reduced share, wall clock (ADR-074; report is read-only);
+                        backtest rebuilds S for old pull_request runs from their Profile A evidence
   roadmap <sub>       Roadmap orchestration and auto-next feature loading
   context-manifest    Read the context-manifest sidecar per provider (read-only)
                         Options: --json, --by provider, --state-dir <dir>
@@ -386,6 +415,7 @@ Gate commands (pre-merge verification):
 Planning commands (strategic-layer read surface):
   horizon <verb>     Planning layer: objectives, deliverables, plan-gate
                         (canonical spelling; objective is a backward-compat alias)
+  horizon plan-gate sign <track> --key <k> --identity <id>  Operator only: sign the latest plan-gate pass (ADR-056)
   objective list      List objectives (tracks) grouped by horizon (now/next/later)
                         Options: --horizon, --phase, --json
   objective show <id> Show one objective: phase/horizon/deps/pr_ref
@@ -394,6 +424,11 @@ Planning commands (strategic-layer read surface):
   objective drift     Advisory: report tracks whose declared phase != derived status
   objective close <id> Close-the-loop: advance declared phase to a terminal derived
                         status (human-gated: dry-run default; --apply --approval-id to write)
+  queue-status        Queued deliverables per track: state, delivering PR, dependencies
+                        (same as objective queue; options: --objective <id>, --all, --json)
+  deliverable add|list|promote|close|set|depend|undepend|deps  Deliverables of a track (proposed dispatch rows)
+                        add --objective <id> --output-kind <kind> --title "..."; list [--objective <id>] [--json]
+                        promote <dispatch_id> is the human gate; close <dispatch_id> --evidence <pr>
 
 Process commands (visibility and control):
   status             Show terminal health, dispatch queue, and gate results
@@ -409,12 +444,25 @@ Process commands (visibility and control):
   restart <process>  Restart a managed VNX process
   jump <terminal>    Switch tmux focus to T0/T1/T2/T3 pane
   jump --attention   Jump to highest-priority terminal needing attention
+  slot doctor        Check the host capacity slot store (exit 0 valid, 78 invalid store, policy or state)
+  slot run <profile> --project-id <id> -- <cmd>
+                     Run <cmd> in its own session under a slot lease; exits with the command's code
+  slot acquire <profile> --project-id <id> --owner-pid <pid>
+                     Take a lease for an existing process; prints lease-id:token
+  slot release <lease-id:token>  Release a lease (frees it once the owner's work is gone)
+                     (slot exit codes: 0 done, 75 capacity refusal after the wait, 78 invalid)
+  inbox [--json] [--present]  Operator queue: open points to answer; also ask, answer, push-due
+                     (exit 0 done, 2 refused, 78 ledger unreadable)
+  morning-round agenda --project-id <id> [--json]  Morning agenda: open decisions and proposals to discuss (read-only)
+  morning-round tick [--project-id <id>] [--dry-run]  Start the morning round per project (idempotent per day)
+  morning-round stop [--project-id <id>] --reason decided|deadline  End the round once per project and day
 
 Dispatch commands (one-liner delivery):
   dispatch <file.md>              Auto-detect terminal and deliver dispatch
   dispatch <file.md> --terminal T1  Override terminal
   dispatch <file.md> --model opus   Override model
   dispatch <file.md> --dry-run      Preview without delivering
+  staging-list [--json]           List staged spec bundles (pending/<id>/dispatch-spec.json), oldest first
 
 Gate commands (pre-merge verification):
   gate <pr>                Run all required gates (from governance_enforcement.yaml)
@@ -427,6 +475,8 @@ Snapshot commands (W0):
   restore <tarball>         Restore .vnx-data/ from snapshot tarball
                             Options: --target <path>, --force
   quiesce-check [<path>]    Verify project is safe to migrate (read-only)
+  migrate [--project-dir DIR]  Apply runtime DB migrations (tracks, pool, dispatch tables)
+                            Option: --relocate-legacy --legacy-path DIR --project-id ID
 
 Runtime commands:
   pause [reason]     Gracefully stop dispatcher + receipt_processor + queue_watcher
@@ -443,6 +493,8 @@ Project registry:
 Shell helper:
   install-shell-helper    Add vnx() function to shell RC (~/.zshrc or ~/.bashrc)
                      Options: --print, --uninstall, --shell bash|zsh
+  install-git-hooks  Install VNX git hooks (prepare-commit-msg, commit-msg, pre-push) for trace token enforcement
+  uninstall-git-hooks  Remove the VNX git hooks and restore backed-up originals
 
   setup              One-command project setup (init + doctor + register)
                      Options: --starter (default), --operator, --skip-doctor
@@ -873,14 +925,8 @@ print(f'[init] Mode set: $mode_flag')
 # ── Mode gating ──────────────────────────────────────────────────────────
 # PR-2: Check if a command is allowed in the current mode.
 # Uses Python vnx_mode.py for mode detection and command tier enforcement.
-# Disabled when VNX_MODE_GATING_ENABLED=0 (rollback control).
 _check_mode_gate() {
   local cmd="$1"
-
-  # Rollback control: disable gating entirely
-  if [ "${VNX_MODE_GATING_ENABLED:-1}" = "0" ]; then
-    return 0
-  fi
 
   # Skip gating for init, setup, help (always allowed)
   case "$cmd" in
@@ -2679,13 +2725,22 @@ main() {
       "$VNX_PYTHON" "$VNX_HOME/scripts/pr_queue_manager.py" staging-list "$@"
       ;;
     queue-status)
-      "$VNX_PYTHON" "$VNX_HOME/scripts/pr_queue_manager.py" queue-status "$@"
+      "$VNX_PYTHON" "$VNX_HOME/scripts/planning_cli.py" horizon queue "$@"
       ;;
     objective)
       "$VNX_PYTHON" "$VNX_HOME/scripts/planning_cli.py" objective "$@"
       ;;
     horizon)
-      "$VNX_PYTHON" "$VNX_HOME/scripts/planning_cli.py" horizon "$@"
+      case "${1:-}" in
+        plan-gate|deliverable)
+          horizon_verb="$1"
+          shift
+          "$VNX_PYTHON" "$VNX_HOME/scripts/planning_cli.py" "$horizon_verb" "$@"
+          ;;
+        *)
+          "$VNX_PYTHON" "$VNX_HOME/scripts/planning_cli.py" horizon "$@"
+          ;;
+      esac
       ;;
     deliverable)
       "$VNX_PYTHON" "$VNX_HOME/scripts/planning_cli.py" deliverable "$@"
@@ -2702,17 +2757,38 @@ main() {
     pr-ready)
       "$VNX_PYTHON" "$VNX_HOME/scripts/pr_ready.py" "$@"
       ;;
+    slot)
+      PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" exec "$VNX_PYTHON" "$VNX_HOME/scripts/slot_cli.py" "$@"
+      ;;
+    inbox)
+      PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" exec "$VNX_PYTHON" "$VNX_HOME/scripts/inbox_cli.py" "$@"
+      ;;
     providers)
       PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" exec "$VNX_PYTHON" "$VNX_HOME/scripts/providers_cli.py" "$@"
       ;;
     gate-profile)
       PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" exec "$VNX_PYTHON" "$VNX_HOME/scripts/gate_profile_cli.py" "$@"
       ;;
+    config)
+      PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" exec "$VNX_PYTHON" "$VNX_HOME/scripts/config_cli.py" "$@"
+      ;;
+    morning-round)
+      PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" exec "$VNX_PYTHON" "$VNX_HOME/scripts/morning_round_cli.py" "$@"
+      ;;
+    main-window)
+      PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" exec "$VNX_PYTHON" "$VNX_HOME/scripts/main_window_cli.py" "$@"
+      ;;
+    memory)
+      PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" exec "$VNX_PYTHON" "$VNX_HOME/scripts/memory_cli.py" "$@"
+      ;;
     gate-reanchor)
       "$VNX_PYTHON" "$VNX_HOME/scripts/gate_reanchor_cli.py" "$@"
       ;;
     review)
       "$VNX_PYTHON" "$VNX_HOME/scripts/review_rounds_cli.py" "$@"
+      ;;
+    impact)
+      "$VNX_PYTHON" "$VNX_HOME/scripts/impact_cli.py" "$@"
       ;;
     dispatch)
       cmd_dispatch "$@"
@@ -2777,6 +2853,15 @@ main() {
     dream)
       PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" exec "$VNX_PYTHON" -m vnx_cli.main dream "$@"
       ;;
+    daily-metrics)
+      PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" exec "$VNX_PYTHON" -m vnx_cli.main daily-metrics "$@"
+      ;;
+    rework-attribution)
+      PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" exec "$VNX_PYTHON" -m vnx_cli.commands.rework_attribution "$@"
+      ;;
+    learning)
+      PYTHONPATH="$VNX_HOME:$VNX_HOME/scripts/lib:${PYTHONPATH:-}" exec "$VNX_PYTHON" -m vnx_cli.main learning "$@"
+      ;;
     context-manifest)
       PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" exec "$VNX_PYTHON" "$VNX_HOME/scripts/context_manifest_report.py" "$@"
       ;;
@@ -2797,4 +2882,13 @@ main() {
   esac
 }
 
-main "$@"
+# CLI ledger B4b (ADR-075 decisions 7, 10): main runs in a subshell so exec branches return here; cli_invocations.py
+# then writes one line, detached, into the store this call resolved (VNX_STATE_DIR), exit code and output unchanged.
+# The door (`dispatch`) stays out, its process tree unchanged; VNX_CLI_RECORDED=$$ stops vnx_cli.main recording twice.
+if [ "${1:-help}" = dispatch ]; then main "$@"; exit $?; fi
+_vnx_t0="${EPOCHREALTIME:-}" _vnx_ms=- _vnx_tty=0; [ -t 0 ] && _vnx_tty=1; export VNX_CLI_RECORDED="$$"
+set +e; (set -e; main "$@"); _vnx_rc=$?; set -e
+[ -n "$_vnx_t0" ] && _vnx_ms=$(( (${EPOCHREALTIME//[!0-9]/} - ${_vnx_t0//[!0-9]/}) / 1000 ))
+("$VNX_PYTHON" "$VNX_HOME/scripts/lib/cli_invocations.py" record "$_vnx_rc" "$_vnx_ms" "$_vnx_tty" -- "$@" \
+  </dev/null >/dev/null 2>&1 &) >/dev/null 2>&1 || true
+exit "$_vnx_rc"

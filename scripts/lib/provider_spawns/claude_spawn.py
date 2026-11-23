@@ -76,7 +76,7 @@ def _switch_family(
     """The family the provider switch decides this spawn on, or None: no redirect is claude.
 
     ``base_url_family`` is the family a harness lane names for its own redirect: the decision is
-    on that family, whatever host the redirect points at (an operator's ``VNX_GLM_PROXY_URL`` on
+    on that family, whatever host the redirect points at (a proxy URL on
     any host or port). Without one, an ``ANTHROPIC_BASE_URL`` in the env the child receives is
     mapped by host, an OpenRouter host to the maker of ``model``. A host the map does not know
     raises ``ProviderDisabledError`` with the host decision (``unknown-identifier``); a label
@@ -363,90 +363,42 @@ def spawn_claude(
             total_deadline=total_deadline,
         ):
             events_written += 1
-
-            # Accumulate incremental text output for completion_text.
-            if event.type == "text":
-                chunk = (event.data or {}).get("text", "") if isinstance(event.data, dict) else ""
-                if chunk:
-                    text_parts.append(chunk)
-
-            # The init event carries the model the CLI actually resolved the
-            # requested alias to. First one wins; absent means no field.
-            if event.type == "init" and model_resolved is None and isinstance(event.data, dict):
-                _init_model = event.data.get("model")
-                if isinstance(_init_model, str) and _init_model.strip():
-                    model_resolved = _init_model.strip()
-
-            # Capture final result event (agent_message + metadata + usage).
-            if event.type == "result":
-                completion = dict(event.data) if isinstance(event.data, dict) else {}
-                _raw_usage = completion.get("usage") if completion else None
-                if isinstance(_raw_usage, dict) and _raw_usage:
-                    token_usage = _raw_usage
+            model_resolved, completion, token_usage = _absorb_event(
+                event, text_parts, model_resolved, completion, token_usage,
+            )
 
             # Tick health monitor; run stuck-event logging at threshold.
             if health_monitor is not None:
-                health_monitor.update(event)
-                if HealthStatus is not None:
-                    now = time.monotonic()
-                    if now - last_stuck_log >= SLOW_THRESHOLD:
-                        h = health_monitor.health_status()
-                        if h.status == HealthStatus.STUCK:
-                            health_monitor.log_stuck_event()
-                            last_stuck_log = now
+                last_stuck_log = _tick_health(
+                    health_monitor, event, HealthStatus, SLOW_THRESHOLD, last_stuck_log,
+                )
 
             # Optional secondary event_writer (for future provider parity).
             if event_writer is not None:
-                try:
-                    event_writer(
-                        terminal_id,
-                        {"type": event.type, "data": event.data},
-                        dispatch_id=dispatch_id,
-                    )
-                except Exception as _exc:
-                    logger.debug("spawn_claude: event_writer raised: %s", _exc)
+                _forward_event(event_writer, terminal_id, event, dispatch_id)
 
             # Per-event callback — return False to stop stream (e.g. rotation).
-            if on_event is not None:
-                should_continue = on_event(event)
-                if should_continue is False:
-                    stopped_early = True
-                    try:
-                        adapter.stop(terminal_id)
-                    except Exception as _exc:
-                        logger.debug(
-                            "spawn_claude: adapter.stop() after on_event=False failed: %s",
-                            _exc,
-                        )
-                    break
+            if on_event is not None and _on_event_stops(on_event, event, adapter, terminal_id):
+                stopped_early = True
+                break
 
     except (subprocess.SubprocessError, json.JSONDecodeError, OSError) as e:
-        logger.error(
-            "spawn_claude: stream read failure for dispatch=%s terminal=%s: %s",
-            dispatch_id,
-            terminal_id,
-            e,
-        )
-        # Fail closed: stop subprocess + return non-zero immediately.
-        try:
-            adapter.stop(terminal_id)
-        except Exception as _stop_exc:
-            logger.debug(
-                "spawn_claude: adapter.stop() in error handler raised: %s", _stop_exc
-            )
-        obs = adapter.observe(terminal_id)
-        _rc = obs.transport_state.get("returncode") or 1
-        return ClaudeSpawnResult(
-            returncode=_rc,
-            completion={},
-            events_written=events_written,
-            session_id=adapter.get_session_id(terminal_id),
-            timed_out=False,
-            error=str(e),
-            completion_text="".join(text_parts),
-            model_resolved=model_resolved,
+        return _stream_failure_result(
+            adapter, dispatch_id, terminal_id, e, events_written, text_parts, model_resolved,
         )
 
+    return _final_result(
+        adapter, terminal_id, completion, events_written, stopped_early, token_usage,
+        text_parts, model_resolved,
+    )
+
+
+def _final_result(
+    adapter: SubprocessAdapter, terminal_id: str, completion: Dict[str, Any], events_written: int,
+    stopped_early: bool, token_usage: Optional[Dict[str, Any]], text_parts: List[str],
+    model_resolved: Optional[str],
+) -> ClaudeSpawnResult:
+    """The result of a stream that ended normally (or by on_event); returncode falls back to 1."""
     obs = adapter.observe(terminal_id)
     returncode: Optional[int] = obs.transport_state.get("returncode")
     if returncode is None:
@@ -467,4 +419,91 @@ def spawn_claude(
         completion_text=completion_text,
         model_resolved=model_resolved,
         _adapter=adapter,
+    )
+
+
+def _absorb_event(
+    event: Any, text_parts: List[str], model_resolved: Optional[str],
+    completion: Dict[str, Any], token_usage: Optional[Dict[str, Any]],
+) -> tuple:
+    """Fold one stream event into (model_resolved, completion, token_usage); text into text_parts."""
+    # Accumulate incremental text output for completion_text.
+    if event.type == "text":
+        chunk = (event.data or {}).get("text", "") if isinstance(event.data, dict) else ""
+        if chunk:
+            text_parts.append(chunk)
+
+    # The init event carries the model the CLI actually resolved the
+    # requested alias to. First one wins; absent means no field.
+    if event.type == "init" and model_resolved is None and isinstance(event.data, dict):
+        _init_model = event.data.get("model")
+        if isinstance(_init_model, str) and _init_model.strip():
+            model_resolved = _init_model.strip()
+
+    # Capture final result event (agent_message + metadata + usage).
+    if event.type == "result":
+        completion = dict(event.data) if isinstance(event.data, dict) else {}
+        _raw_usage = completion.get("usage") if completion else None
+        if isinstance(_raw_usage, dict) and _raw_usage:
+            token_usage = _raw_usage
+    return model_resolved, completion, token_usage
+
+
+def _tick_health(
+    health_monitor: Any, event: Any, HealthStatus: Any, SLOW_THRESHOLD: float, last_stuck_log: float,
+) -> float:
+    """``health_monitor.update(event)`` plus stuck-event logging at threshold; the new last_stuck_log."""
+    health_monitor.update(event)
+    if HealthStatus is not None:
+        now = time.monotonic()
+        if now - last_stuck_log >= SLOW_THRESHOLD:
+            h = health_monitor.health_status()
+            if h.status == HealthStatus.STUCK:
+                health_monitor.log_stuck_event()
+                last_stuck_log = now
+    return last_stuck_log
+
+
+def _forward_event(event_writer: Callable[..., None], terminal_id: str, event: Any, dispatch_id: str) -> None:
+    """Hand one event to the secondary ``event_writer``; a raising writer is logged, never fatal."""
+    try:
+        event_writer(terminal_id, {"type": event.type, "data": event.data}, dispatch_id=dispatch_id)
+    except Exception as _exc:
+        logger.debug("spawn_claude: event_writer raised: %s", _exc)
+
+
+def _on_event_stops(
+    on_event: Callable[[Any], Optional[bool]], event: Any, adapter: SubprocessAdapter, terminal_id: str,
+) -> bool:
+    """True when ``on_event`` returned False: the adapter is stopped and the stream must end."""
+    should_continue = on_event(event)
+    if should_continue is False:
+        try:
+            adapter.stop(terminal_id)
+        except Exception as _exc:
+            logger.debug("spawn_claude: adapter.stop() after on_event=False failed: %s", _exc)
+        return True
+    return False
+
+
+def _stream_failure_result(
+    adapter: SubprocessAdapter, dispatch_id: str, terminal_id: str, e: BaseException,
+    events_written: int, text_parts: List[str], model_resolved: Optional[str],
+) -> ClaudeSpawnResult:
+    """Fail closed on a stream read failure: stop the subprocess and return non-zero."""
+    logger.error(
+        "spawn_claude: stream read failure for dispatch=%s terminal=%s: %s",
+        dispatch_id, terminal_id, e,
+    )
+    # Fail closed: stop subprocess + return non-zero immediately.
+    try:
+        adapter.stop(terminal_id)
+    except Exception as _stop_exc:
+        logger.debug("spawn_claude: adapter.stop() in error handler raised: %s", _stop_exc)
+    obs = adapter.observe(terminal_id)
+    _rc = obs.transport_state.get("returncode") or 1
+    return ClaudeSpawnResult(
+        returncode=_rc, completion={}, events_written=events_written,
+        session_id=adapter.get_session_id(terminal_id), timed_out=False, error=str(e),
+        completion_text="".join(text_parts), model_resolved=model_resolved,
     )

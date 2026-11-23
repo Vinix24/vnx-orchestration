@@ -31,6 +31,12 @@ import build_t0_state as bts
 import state_rebuild_trigger as srt
 
 
+@pytest.fixture(autouse=True)
+def _trigger_switch_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    """tests/conftest.py sets VNX_STATE_REBUILD_TRIGGER=0 for the suite; these tests prove the spawn."""
+    monkeypatch.delenv("VNX_STATE_REBUILD_TRIGGER", raising=False)
+
+
 def _minimal_receipt(event_type: str = "task_complete", dispatch_id: str = "DISP-001") -> dict:
     return {
         "timestamp": "2026-04-28T10:00:00Z",

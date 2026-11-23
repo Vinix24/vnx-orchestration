@@ -9,7 +9,7 @@ import argparse
 import json
 import sqlite3
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -44,27 +44,7 @@ DB_PATH = Path(PATHS["VNX_STATE_DIR"]) / "quality_intelligence.db"
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Log dispatch metadata to DB")
-    parser.add_argument("--dispatch-id", required=True)
-    parser.add_argument("--terminal", required=True)
-    parser.add_argument("--track", required=True)
-    parser.add_argument("--role", default="")
-    parser.add_argument("--skill-name", default="")
-    parser.add_argument("--gate", default="")
-    parser.add_argument("--provider", default="",
-                        help="Provider that executed this dispatch (claude/codex/gemini/kimi/litellm:*). "
-                             "Leave empty to preserve any existing provider value.")
-    parser.add_argument("--model", default="",
-                        help="AI model used (e.g. claude-sonnet-4-6, codex, kimi)")
-    parser.add_argument("--cognition", default="normal")
-    parser.add_argument("--priority", default="P1")
-    parser.add_argument("--pr-id", default="")
-    parser.add_argument("--pattern-count", type=int, default=0)
-    parser.add_argument("--prevention-rule-count", type=int, default=0)
-    parser.add_argument("--intelligence-json", default="")
-    parser.add_argument("--instruction-char-count", type=int, default=0)
-    parser.add_argument("--context-file-count", type=int, default=0)
-    parser.add_argument("--target-open-items", default="", help="JSON array or comma-separated OI-IDs targeted by this dispatch")
+    parser = _build_parser()
     args = parser.parse_args()
 
     # Normalize target_open_items to JSON array string
@@ -103,7 +83,43 @@ def main():
                 file=sys.stderr,
             )
             return 1
-    now_iso = datetime.utcnow().isoformat()
+    now_iso = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
+    _upsert_dispatch_row(cur, args, has_project, project_id_val, now_iso)
+    _stamp_provider_model(conn, cur, args, has_project, project_id_val)
+
+    conn.commit()
+    conn.close()
+    print(f"Logged dispatch metadata: {args.dispatch_id}")
+    return 0
+
+
+def _build_parser():
+    parser = argparse.ArgumentParser(description="Log dispatch metadata to DB")
+    parser.add_argument("--dispatch-id", required=True)
+    parser.add_argument("--terminal", required=True)
+    parser.add_argument("--track", required=True)
+    parser.add_argument("--role", default="")
+    parser.add_argument("--skill-name", default="")
+    parser.add_argument("--gate", default="")
+    parser.add_argument("--provider", default="",
+                        help="Provider that executed this dispatch (claude/codex/gemini/kimi/litellm:*). "
+                             "Leave empty to preserve any existing provider value.")
+    parser.add_argument("--model", default="",
+                        help="AI model used (e.g. claude-sonnet-4-6, codex, kimi)")
+    parser.add_argument("--cognition", default="normal")
+    parser.add_argument("--priority", default="P1")
+    parser.add_argument("--pr-id", default="")
+    parser.add_argument("--pattern-count", type=int, default=0)
+    parser.add_argument("--prevention-rule-count", type=int, default=0)
+    parser.add_argument("--intelligence-json", default="")
+    parser.add_argument("--instruction-char-count", type=int, default=0)
+    parser.add_argument("--context-file-count", type=int, default=0)
+    parser.add_argument("--target-open-items", default="", help="JSON array or comma-separated OI-IDs targeted by this dispatch")
+    return parser
+
+
+def _upsert_dispatch_row(cur, args, has_project, project_id_val, now_iso):
+    """INSERT OR IGNORE the dispatch row, then UPDATE its dispatch fields."""
     _dispatch_vals = (
         _normalize_role(args.role),
         args.skill_name or None,
@@ -118,7 +134,6 @@ def main():
         args.context_file_count,
         args.target_open_items,
     )
-
     if has_project:
         cur.execute("""
             INSERT OR IGNORE INTO dispatch_metadata (
@@ -169,6 +184,10 @@ def main():
             args.terminal, args.track, *_dispatch_vals,
             args.dispatch_id,
         ))
+
+
+def _stamp_provider_model(conn, cur, args, has_project, project_id_val):
+    """Fill provider/model where NULL, when given and the column exists."""
     # Stamp provider + model (provider/model-aware self-learning). Guarded: columns
     # land via migration v21/v23 (GAP 2); older DBs simply skip them. COALESCE keeps
     # any real value already stamped by provider_dispatch; only fills NULL.
@@ -196,11 +215,6 @@ def main():
                 "UPDATE dispatch_metadata SET model = COALESCE(model, ?) WHERE dispatch_id = ?",
                 (args.model, args.dispatch_id),
             )
-
-    conn.commit()
-    conn.close()
-    print(f"Logged dispatch metadata: {args.dispatch_id}")
-    return 0
 
 
 if __name__ == "__main__":

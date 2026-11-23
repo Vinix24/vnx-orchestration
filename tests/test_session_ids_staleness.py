@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import io
 import json
-import select
+import os
 import sys
 import time
 from pathlib import Path
@@ -152,34 +152,28 @@ class TestSessionIdsRefresh:
             list(adapter.read_events("T1"))
         assert adapter.get_session_id("T1") == "sess-first"
 
-        # Second dispatch via read_events_with_timeout — we need to mock select()
-        second_lines = [_init_line("sess-second"), _result_line()]
-        proc = _fake_process(second_lines)
-        # Make stdout return lines one-by-one via readline
-        buf = io.BytesIO(b"".join(second_lines))
-        proc.stdout = buf
-        proc.stdout.fileno = lambda: 999  # dummy fd for select mock
-        adapter._processes["T1"] = proc
-        adapter._timed_out.discard("T1")
+        # Second dispatch via read_events_with_timeout. The reader now select()s on the
+        # stdout fd and os.read()s raw chunks, so feed it a real pipe.
+        rfd, wfd = os.pipe()
+        try:
+            os.write(wfd, b"".join([_init_line("sess-second"), _result_line()]))
+            os.close(wfd)
+            wfd = None
+            proc = MagicMock()
+            proc.stdout = MagicMock()
+            proc.stdout.fileno.return_value = rfd
+            proc.poll.return_value = 0
+            proc.wait.return_value = 0
+            proc.returncode = 0
+            adapter._processes["T1"] = proc
+            adapter._timed_out.discard("T1")
 
-        # Patch select to always report ready, and readline to consume buf
-        with patch("subprocess_adapter.select") as mock_select, \
-             patch.object(adapter, "_get_event_store", return_value=None):
-            call_count = [0]
-            def fake_select(rlist, wlist, xlist, timeout):
-                call_count[0] += 1
-                line = buf.readline()
-                if not line:
-                    return [], [], []
-                buf.seek(buf.tell() - len(line))  # put it back
-                return [999], [], []
-
-            # Use real BytesIO readline by routing through the buffer
-            buf2 = io.BytesIO(b"".join(second_lines))
-            proc.stdout.readline = buf2.readline
-            mock_select.select = lambda *a, **kw: ([999], [], [])
-
-            list(adapter.read_events_with_timeout("T1", chunk_timeout=10, total_deadline=30))
+            with patch.object(adapter, "_get_event_store", return_value=None):
+                list(adapter.read_events_with_timeout("T1", chunk_timeout=10, total_deadline=30))
+        finally:
+            if wfd is not None:
+                os.close(wfd)
+            os.close(rfd)
 
         assert adapter.get_session_id("T1") == "sess-second", (
             "read_events_with_timeout did not refresh session_id — "

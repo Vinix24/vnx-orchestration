@@ -44,7 +44,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts" / "lib"))
 
-from dispatch_cli import run_dispatch  # noqa: E402
+from dispatch_cli import run_dispatch, _check_stop_conditions_verdict  # noqa: E402
 from stop_conditions import CheckStatus, StopConditionResult  # noqa: E402
 
 
@@ -124,7 +124,10 @@ def test_triggered_stop_condition_blocks_fire(tmp_path, monkeypatch, capsys):
     )
     # a real fire hitting a blocking-eligible trigger must persist halt.json
     # exactly once, via an explicit write_halt_file() call
-    mock_write_halt.assert_called_once_with(state_dir, fake_results)
+    mock_write_halt.assert_called_once_with(
+        state_dir, fake_results, scoped_out=[],
+        scope={"providers": ["claude", "codex", "codex_cli"], "gates": ["codex_gate"]},
+    )
     err = capsys.readouterr().err
     assert "stop-conditions-triggered" in err
     assert "provider_exhausted" in err
@@ -573,3 +576,68 @@ def test_8b_repeated_gate_failure_on_the_dispatchs_own_gate_still_blocks(tmp_pat
 
     assert rc == 1, "a repeated failure on the dispatch's own gate must still block"
     mock_execute.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# reviews-zonder-uitkomst D6: halt.json names a scoped-out check as
+# scoped_out, never as a cause (triggered).
+# ---------------------------------------------------------------------------
+
+def test_halt_json_lists_scoped_out_check_separately_from_triggered(tmp_path, monkeypatch):
+    data_dir, spec_file = _make_bundle(
+        tmp_path, staging_id="20260917-staging-d6-a", dispatch_id="20260917-d6-a",
+        provider="kimi", gate="glm_gate",
+    )
+    monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
+    monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+    state_dir = data_dir / "state"
+    _write_kimi_exhausted_ledger(state_dir)  # blocks: the dispatch's own provider
+    _write_repeated_gate_results(state_dir / "review_gates" / "results", "codex_gate")  # other gate
+    _neutralize_gh(monkeypatch)
+
+    with patch("dispatch_cli._execute_claude_headless", return_value=0):
+        rc = run_dispatch(spec_file)
+
+    assert rc == 1
+    payload = json.loads((state_dir / "halt.json").read_text())
+    assert [t["check_id"] for t in payload["triggered"]] == ["provider_exhausted"]
+    assert [t["check_id"] for t in payload["scoped_out"]] == ["repeated_gate_failure_cause"]
+    assert "glm_gate" in payload["scoped_out"][0]["scope"]["gates"]
+    by_id = {c["check_id"]: c for c in payload["all_checks"]}
+    assert by_id["repeated_gate_failure_cause"]["scope"] == "scoped_out"
+    assert "scope" not in by_id["provider_exhausted"]
+    assert len(payload["all_checks"]) == 5
+
+
+def test_only_scoped_out_triggers_write_no_halt_json(tmp_path, monkeypatch):
+    data_dir, spec_file = _make_bundle(
+        tmp_path, staging_id="20260917-staging-d6-b", dispatch_id="20260917-d6-b",
+        provider="claude", gate="glm_gate",
+    )
+    monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
+    monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+    state_dir = data_dir / "state"
+    _write_repeated_gate_results(state_dir / "review_gates" / "results", "codex_gate")
+    _neutralize_gh(monkeypatch)
+
+    with patch("dispatch_cli._execute_claude_headless", return_value=0):
+        rc = run_dispatch(spec_file)
+
+    assert rc == 0
+    assert not (state_dir / "halt.json").exists()
+
+
+def test_unscoped_dispatch_keeps_every_trigger_in_triggered(tmp_path, monkeypatch):
+    fake_results = [
+        _result("provider_exhausted", CheckStatus.TRIGGERED, "p"),
+        _result("repeated_gate_failure_cause", CheckStatus.TRIGGERED, "g"),
+    ]
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    with patch("stop_conditions.run_all_checks", return_value=fake_results):
+        verdict = _check_stop_conditions_verdict(state_dir=state_dir)
+    assert verdict is not None
+    payload = json.loads((state_dir / "halt.json").read_text())
+    assert [t["check_id"] for t in payload["triggered"]] == ["provider_exhausted", "repeated_gate_failure_cause"]
+    assert payload["scoped_out"] == []
+    assert all("scope" not in c for c in payload["all_checks"])

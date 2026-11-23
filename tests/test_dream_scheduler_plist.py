@@ -170,3 +170,43 @@ class TestRenderedCronLinux:
         assert str(log_dir / "cron.out.log") in line
         assert "2>&1" in line
         assert log_dir.is_dir(), "log dir must be created at install time"
+
+
+def _launch_agents(tmp_path: Path) -> Path:
+    return tmp_path / "Library" / "LaunchAgents"
+
+
+class TestWatchPlist:
+    """com.vnx.dream-watch (ADR-066): the recurring probe, written beside the auto-dream plist."""
+
+    def test_watch_plist_is_written_and_valid(self, tmp_path):
+        _install_macos(tmp_path)
+        watch = _launch_agents(tmp_path) / "com.vnx.dream-watch.plist"
+        assert watch.exists()
+        text = watch.read_text(encoding="utf-8")
+        assert "dream_liveness_probe.py" in text and "--append" in text
+        assert "<key>Hour</key>\n        <integer>4</integer>" in text
+        plist = plistlib.loads(watch.read_bytes())
+        assert plist["Label"] == "com.vnx.dream-watch"
+        assert plist["ProgramArguments"][-3:] == ["--project-id", PROJECT_ID, "--append"]
+        assert plist["StartCalendarInterval"] == {"Hour": 4, "Minute": 0}
+        assert Path(plist["ProgramArguments"][1]).name == "dream_liveness_probe.py"
+        assert plist["StandardOutPath"].startswith(str(tmp_path / ".vnx-data" / PROJECT_ID / "events" / "dream"))
+
+    def test_watch_plist_is_loaded_through_launchctl(self, tmp_path):
+        _, _, calls = _install_macos(tmp_path)
+        loads = [c.args[0] for c in calls if "load" in c.args[0]]
+        assert any(c[-1].endswith("com.vnx.dream-watch.plist") for c in loads)
+
+    def test_uninstall_removes_both_plists_and_nothing_else(self, tmp_path):
+        _install_macos(tmp_path)
+        other = _launch_agents(tmp_path) / "com.other.job.plist"
+        other.write_text("keep", encoding="utf-8")
+        ok = MagicMock(returncode=0, stderr="", stdout="")
+        with (
+            patch("scheduler.platform.system", return_value="Darwin"),
+            patch("scheduler.Path.home", return_value=tmp_path),
+            patch("scheduler.subprocess.run", return_value=ok),
+        ):
+            scheduler.uninstall_scheduler()
+        assert sorted(p.name for p in _launch_agents(tmp_path).iterdir()) == ["com.other.job.plist"]

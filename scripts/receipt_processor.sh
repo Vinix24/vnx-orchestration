@@ -29,6 +29,13 @@ STATE_DIR="$VNX_STATE_DIR"
 SCRIPTS_DIR="$VNX_BASE/scripts"
 APPEND_RECEIPT_SCRIPT="$SCRIPTS_DIR/append_receipt.py"
 
+# Interpreter for the converter scan (OI-2975): the bare python3 can lack PyYAML.
+# Resolved once, rooted at the engine root, by the shared fabric helper.
+# shellcheck source-path=SCRIPTDIR
+# shellcheck source=hooks/lib_hook_python.sh
+source "$SCRIPT_DIR/hooks/lib_hook_python.sh"
+RP_PYTHON="$(vnx_hook_python "$VNX_BASE")"
+
 # PHASE 1C: Singleton enforcement - prevent duplicate processes
 # shellcheck source-path=SCRIPTDIR
 # shellcheck source=singleton_enforcer.sh
@@ -67,16 +74,6 @@ PID_FILE="$VNX_PIDS_DIR/receipt_processor.pid"
 RECEIPTS_PENDING_DIR="${VNX_DATA_DIR}/receipts/pending"
 RECEIPTS_PROCESSED_DIR="${VNX_DATA_DIR}/receipts/processed"
 RECEIPT_RETRY_INTERVAL="${VNX_RECEIPT_RETRY_INTERVAL:-10}"  # seconds between pending retry sweeps
-# VNX_RECEIPT_T0_PUSH=0 (default, ADR-035 §5.3/§9 PR-8) suppresses the pane
-# push entirely — ndjson append + outbox processing still happen (audit trail
-# intact), only the pane notification is skipped. T0 reads open_outcomes
-# instead (scripts/receipt_query.py open-outcomes, DISPATCH_RULES.md §13). 1
-# re-enables the legacy tmux paste as a transition escape hatch.
-# Read directly (no indirection var) by rp_delivery.sh at delivery time.
-# VNX_RECEIPT_DIGEST_THRESHOLD=5 (default) — once more than this many distinct
-# dispatch_ids are stacked in receipts/pending/, the retry sweep sends ONE
-# digest paste instead of N individual ones. Read directly by
-# rp_delivery.sh's _retry_pending_receipts(). (OI-654)
 
 # Cross-platform SHA-256 helper (Linux: sha256sum, macOS: shasum -a 256)
 _SHA256_FALLBACK_WARN=""
@@ -391,7 +388,7 @@ _ppr_collect_pending() {
 # built. Best-effort: a beacon-write failure never aborts the scan.
 _run_receipt_converter_scan() {
     local _converter_stderr _converter_rc
-    _converter_stderr="$(python3 "$SCRIPTS_DIR/lib/report_to_receipt_converter.py" \
+    _converter_stderr="$("$RP_PYTHON" "$SCRIPTS_DIR/lib/report_to_receipt_converter.py" \
         --state-dir "$STATE_DIR" \
         "$UNIFIED_REPORTS" "$HEADLESS_REPORTS" 2>&1 >/dev/null)"
     _converter_rc=$?
@@ -403,7 +400,7 @@ _run_receipt_converter_scan() {
     if [ "$_converter_rc" -ne 0 ]; then
         log "ERROR" "report_to_receipt_converter scan FAILED non-fatal, processor continues (exit $_converter_rc)"
     fi
-    printf '%s' "$_converter_stderr" | python3 "$SCRIPTS_DIR/lib/receipt_conversion_rejection_beacon.py" \
+    printf '%s' "$_converter_stderr" | "$RP_PYTHON" "$SCRIPTS_DIR/lib/receipt_conversion_rejection_beacon.py" \
         --state-dir "$STATE_DIR" 2>>"$PROCESSING_LOG" \
         || log "WARN" "Failed to record receipt-conversion-rejection beacon (non-fatal)"
     return 0

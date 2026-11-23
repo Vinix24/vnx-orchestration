@@ -106,6 +106,13 @@ external ones), then exits 0 — it evaluates, locks and releases nothing. A
 failed ``git worktree list`` exits 2 with git's own stderr and prints no
 inventory at all.
 
+With ``--apply``, after its own work, the sweep also compresses the plain
+event archives of its store older than ``DEFAULT_COMPRESS_DAYS``
+(14 days) through ``event_archive_compress`` with the automatic budgets
+(ADR-081 decision 7). That round is fail-open: an exception from it writes one
+line to stderr (the job's log) and changes neither the exit code nor the
+worktree work; a divergent plain/gz pair is logged by path and kept.
+
 Exit 0 on a normal run (this is a maintenance report, not a CI gate) unless
 argument/repo resolution fails or the worktree inventory cannot be read (a
 ``git worktree list`` failure exits 2 — "cannot measure" is never "nothing to
@@ -927,7 +934,52 @@ def main(argv: list[str] | None = None) -> int:
             safe_count = sum(1 for e in report if e["safe_to_release"])
             print(f"cleanup_reviewed_worktrees: {safe_count} van {len(report)} zijn SAFE_TO_RELEASE (dry-run — geen --apply meegegeven)")
 
+    if args.apply:
+        compress_event_archive(repo_root)
     return 0
+
+
+def _archive_dirs_inside(archive: Path) -> list:
+    """Real directories under *archive*; a symlink or a directory resolving outside it is logged and skipped."""
+    if not archive.is_dir():
+        return []
+    root, dirs = archive.resolve(), []
+    for entry in sorted(archive.iterdir()):
+        if entry.is_symlink() or not entry.resolve().is_relative_to(root):
+            print(f"cleanup_reviewed_worktrees: archiefmap overgeslagen: {entry} -> {entry.resolve()}", file=sys.stderr)
+        elif entry.is_dir():
+            dirs.append(entry)
+    return dirs
+
+
+def compress_event_archive(repo_root: Path) -> None:
+    """The daily archive round of ADR-081, fail-open: it never raises and never
+    changes the sweep's exit code. Every outcome is one or more stderr lines."""
+    try:
+        import vnx_paths
+        from event_archive_compress import DIVERGENT, compress_archive_round, symlinked_root
+        from vnx_data_footprint_probe import compress_days
+
+        store_root = vnx_paths.resolve_data_root(repo_root)
+        archive = store_root / "events" / "archive"
+        link = symlinked_root(store_root, archive)
+        if link is not None:
+            print(f"cleanup_reviewed_worktrees: archiefwortel geweigerd: {link} -> {link.resolve()}", file=sys.stderr)
+            return
+        dirs = _archive_dirs_inside(archive)
+        result = compress_archive_round(dirs, compress_days())
+    except Exception as exc:  # vnx-silent-except: fail-open by ADR-081, the failure is logged by type and message
+        print(f"cleanup_reviewed_worktrees: archiefcompressie mislukt: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return
+    summary = result.summary()
+    print(
+        f"cleanup_reviewed_worktrees: archiefcompressie {summary['counts']} gestopt={summary['stopped']} "
+        f"gelezen={result.bytes_read} voor={summary['bytes_before']} na={summary['bytes_after']}",
+        file=sys.stderr,
+    )
+    for entry in result.files:
+        if entry.outcome == DIVERGENT:
+            print(f"cleanup_reviewed_worktrees: divergent paar blijft staan: {entry.path} {entry.gz_path}", file=sys.stderr)
 
 
 def _report_entry(wt: Candidate, verdict: Verdict) -> WorktreeReportEntry:

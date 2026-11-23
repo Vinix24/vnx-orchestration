@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.vnx.dream-watch</string>
+    <!-- ADR-066: the recurring liveness probe, one hour after the dream
+         window opens (auto-dream runs at 03:00). It writes one NDJSON line
+         and the dream_liveness beacon, nothing else. -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>{{ python_bin }}</string>
+        <string>{{ probe_path }}</string>
+        <string>--project-id</string>
+        <string>{{ project_id }}</string>
+        <string>--append</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>VNX_CANONICAL_ROOT</key>
+        <string>{{ project_root }}</string>
+        <key>PATH</key>
+        <string>{{ path_env }}</string>
+    </dict>
+    <key>WorkingDirectory</key>
+    <string>{{ project_root }}</string>
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>4</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>{{ log_dir }}/watch.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>{{ log_dir }}/watch.err.log</string>
+</dict>
+</plist>

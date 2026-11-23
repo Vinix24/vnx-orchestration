@@ -60,6 +60,13 @@ Schema 2.2 change (D5 fabric-state-herstel, live work):
     ``conflicts/`` directory that exists but cannot be listed is not zero:
     its count is ``null`` with a ``*_unmeasured_reason`` and it degrades
     system_health, so the dispatch guard reads WAIT, never GO.
+  - t0_index.json schema ``t0_index/1.6`` (permissieblokkades-leren L6) adds ``permission_proposals``: the open
+    proposals and notifications of the proposal store, at most 5 plus ``more``; an unreadable store is
+    ``available: false`` with a reason.
+  - t0_index.json schema ``t0_index/1.5`` (besluitenregister B4) adds ``besluiten`` (counts, ids; titles in the state).
+  - t0_index.json schema ``t0_index/1.4`` (operator-vragen-tot-antwoord Q5) adds
+    ``operator_inbox``: the open points of the operator queue, at most 5 plus
+    ``more``. Building it never writes a ``presented`` line.
   - t0_index.json schema ``t0_index/1.3`` makes ``queue.open_prs`` nullable: ``null``
     plus a top-level ``pr_queue_unavailable`` (the reason) when the open-PR read
     failed, instead of ``0``. The key is absent when the read succeeded. The
@@ -117,9 +124,23 @@ log = logging.getLogger(__name__)
 
 _SCRIPT_DIR = Path(__file__).resolve().parent
 _LIB_DIR = _SCRIPT_DIR / "lib"
-if str(_LIB_DIR) not in sys.path:
-    sys.path.insert(0, str(_LIB_DIR))
 
+
+def _prefer_lib_path() -> None:
+    """Put scripts/lib at sys.path[0], also when PYTHONPATH already listed it.
+
+    Run as a script, sys.path[0] is scripts/, where daily_metrics.py shadows the
+    scripts/lib/daily_metrics package unless scripts/lib comes first.
+    """
+    lib = str(_LIB_DIR)
+    while lib in sys.path:
+        sys.path.remove(lib)
+    sys.path.insert(0, lib)
+
+
+_prefer_lib_path()
+
+from config_runtime import central_db_flag as _central_db_flag  # noqa: E402
 from health_status import worst_status  # noqa: E402
 from event_outcome_semantics import COMPLETION_EVENT_TYPES  # noqa: E402
 from vnx_paths import ensure_env, project_id_from_state_dir  # noqa: E402
@@ -235,7 +256,7 @@ def _central_state_dir_for(state_dir: Path) -> Optional[Path]:
     - central state dir does not exist on filesystem
     - central == primary (P5 cutover guard — skip double-read)
     """
-    if os.environ.get("VNX_USE_CENTRAL_DB") != "1":
+    if _central_db_flag() != "1":
         return None
     if resolve_central_data_dir is None:
         return None
@@ -293,6 +314,102 @@ def _count_pending_dispatches(directory: Path) -> int:
         or (entry.is_dir() and (entry / "dispatch-spec.json").is_file())
     }
     return len(ids)
+
+
+_STALE_STAGED_DEFAULT_MINUTES = 30
+_STALE_STAGED_MAX_ITEMS = 10
+
+
+def _stale_staged_threshold() -> Tuple[int, Optional[str]]:
+    """(minutes, note): the staleness threshold is the constant, and there is never a note."""
+    return _STALE_STAGED_DEFAULT_MINUTES, None
+
+
+def _receipt_dispatch_ids(receipts_path: Path) -> set:
+    """Dispatch ids named by any receipt line; raises OSError when unreadable."""
+    if not receipts_path.exists():
+        return set()
+    ids: set = set()
+    for line in receipts_path.read_text(encoding="utf-8", errors="ignore").splitlines():
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue  # vnx-silent-except: a torn line names no dispatch; the file read itself is what must not fail
+        if isinstance(rec, dict) and rec.get("dispatch_id"):
+            ids.add(str(rec["dispatch_id"]))
+    return ids
+
+
+def _has_dispatch_worktree(dispatch_id: str, project_root: Path, state_dir: Path) -> bool:
+    """A dispatch worktree dir or its occupancy claim exists (as _build_live_work resolves it)."""
+    from dispatch_worktree_isolation import (
+        _dispatch_worktree_dir, _sanitize_dispatch_id, claims_dir_for_state_dir,
+    )
+    claim = claims_dir_for_state_dir(state_dir) / f"{_sanitize_dispatch_id(dispatch_id)}.json"
+    return _dispatch_worktree_dir(project_root, dispatch_id).exists() or claim.exists()
+
+
+def _build_stale_staged(
+    dispatch_dir: Path,
+    state_dir: Path,
+    project_root: Optional[Path] = None,
+    now: Optional[datetime] = None,
+) -> Dict[str, Any]:
+    """Staged bundles older than the threshold with no receipt and no worktree (OI-1553).
+
+    A failed read gives ``available: False`` with a reason, never an empty list.
+    """
+    minutes, note = _stale_staged_threshold()
+    _central = _central_state_dir_for(state_dir)
+    receipts_path = (_central if _central is not None else state_dir) / "t0_receipts.ndjson"
+    pending = dispatch_dir / "pending"
+    actual_now = (now if now is not None else _now_utc()).timestamp()
+    try:
+        if project_root is None:
+            from dispatch_worktree_isolation import resolve_consumer_project_root
+            project_root = resolve_consumer_project_root()
+        receipted = _receipt_dispatch_ids(receipts_path)
+        found: List[Tuple[float, str]] = []
+        for entry in (sorted(pending.iterdir()) if pending.is_dir() else []):
+            spec = entry / "dispatch-spec.json"
+            if not (entry.is_dir() and spec.is_file()):
+                continue
+            age = (actual_now - spec.stat().st_mtime) / 60.0
+            if (
+                age >= minutes
+                and entry.name not in receipted
+                and not _has_dispatch_worktree(entry.name, project_root, state_dir)
+            ):
+                found.append((age, entry.name))
+    except Exception as exc:  # vnx-silent-except: surfaced as available:false with the reason
+        log.warning("stale_staged unreadable: %s", exc)
+        return {"available": False, "reason": f"{type(exc).__name__}: {exc}", "threshold_minutes": minutes}
+    found.sort(reverse=True)
+    out: Dict[str, Any] = {
+        "available": True,
+        "threshold_minutes": minutes,
+        "count": len(found),
+        "items": [
+            {"dispatch_id": did, "age_minutes": int(age)}
+            for age, did in found[:_STALE_STAGED_MAX_ITEMS]
+        ],
+        "more": max(0, len(found) - _STALE_STAGED_MAX_ITEMS),
+    }
+    if note:
+        out["threshold_note"] = note
+    return out
+
+
+def _stale_staged_index_summary(section: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    if not isinstance(section, dict) or section.get("available") is not True:
+        reason = section.get("reason") if isinstance(section, dict) else None
+        return {"available": False, "reason": reason or "not measured"}
+    items = section.get("items") or []
+    return {
+        "available": True,
+        "count": section.get("count", 0),
+        "oldest_id": items[0]["dispatch_id"] if items else None,
+    }
 
 
 def _measure_queue_count(
@@ -800,59 +917,26 @@ def _build_dream_reviews(state_dir: Path, project_id: str) -> Dict[str, Any]:
       - ``oldest_age_seconds``: age of the oldest waiting review, or None
         when the queue is empty.
       - ``pending_reviews``: per-cycle summary (cycle_id, input_count,
-        created_at, age_seconds).
+        created_at, age_seconds, created_at_source).
+      - ``unreadable_count``: review files that did not parse; a zero queue
+        only counts as measured while this is 0.
     """
     empty: Dict[str, Any] = {
         "available": False,
         "pending_count": 0,
         "oldest_age_seconds": None,
+        "unreadable_count": 0,
         "pending_reviews": [],
     }
     pid = (project_id or "").strip()
     if not pid:
         return empty
     try:
-        if str(_SCRIPT_DIR) not in sys.path:
-            sys.path.insert(0, str(_SCRIPT_DIR))
-        from dream.review_gate import list_pending_reviews
+        _prefer_lib_path()
+        from dream_liveness import read_reviews
+        return read_reviews(_resolve_dream_data_root(state_dir), pid, now=_now_utc())
     except Exception:
         return empty
-    try:
-        pending = list_pending_reviews(pid, _resolve_dream_data_root(state_dir)) or []
-    except Exception:
-        return empty
-    if not pending:
-        return {**empty, "available": True}
-
-    now = _now_utc()
-    reviews: List[Dict[str, Any]] = []
-    oldest_age: Optional[float] = None
-    for r in pending:
-        created_raw = (r.get("created_at") or "").strip()
-        age: Optional[float] = None
-        if created_raw:
-            try:
-                dt = datetime.fromisoformat(created_raw.replace("Z", "+00:00"))
-                if dt.tzinfo is None:
-                    dt = dt.replace(tzinfo=timezone.utc)
-                age = max(0.0, (now - dt).total_seconds())
-            except ValueError:
-                age = None
-        reviews.append({
-            "cycle_id": r.get("cycle_id"),
-            "input_count": r.get("input_count"),
-            "created_at": created_raw,
-            "age_seconds": age,
-        })
-        if age is not None and (oldest_age is None or age > oldest_age):
-            oldest_age = age
-
-    return {
-        "available": True,
-        "pending_count": len(reviews),
-        "oldest_age_seconds": oldest_age,
-        "pending_reviews": reviews,
-    }
 
 
 # ---------------------------------------------------------------------------
@@ -892,7 +976,7 @@ def _collect_open_items_central(project_id: str) -> Dict[str, Any]:
 
 
 def _collect_open_items(project_id: str, state_dir: Path) -> Dict[str, Any]:
-    flag = os.environ.get("VNX_USE_CENTRAL_DB", "")
+    flag = _central_db_flag()
     if flag == "":
         return _collect_open_items_per_project(project_id, state_dir)
     if flag == "1":
@@ -1278,6 +1362,15 @@ def _build_open_outcomes(state_dir: Path, project_id: str) -> Dict[str, Any]:
 
 
 _INDEX_OPEN_OUTCOME_REASON_MAX = 60
+
+
+def _permission_open_view(state_dir: Path, project_id: str) -> Dict[str, Any]:
+    """Open permission proposals plus notifications, read only (permissieblokkades-leren L6)."""
+    try:
+        import permission_chain  # type: ignore[import]
+        return permission_chain.open_view(state_dir, project_id)
+    except Exception as exc:  # vnx-silent-except: a bad section must not break the build; it says why
+        return {"available": False, "reason": f"{type(exc).__name__}: {exc}"[:200]}
 
 
 def _open_outcomes_index_summary(oo: Optional[Dict[str, Any]]) -> Dict[str, Any]:
@@ -1960,10 +2053,7 @@ def _build_system_health(
     # R6.1: DB health (locked/malformed) takes precedence over other signals.
     if db_health in ("failed", "degraded"):
         status = db_health
-    elif (
-        not (state_dir / "terminal_state.json").exists()
-        and not (state_dir / "t0_receipts.ndjson").exists()
-    ):
+    elif not (state_dir / "t0_receipts.ndjson").exists():
         status = "degraded"
     else:
         status = "healthy"
@@ -2555,8 +2645,7 @@ def _reconcile_tracks_fresh(
     marker.update(_autoclose_health(store))
     t0 = time.monotonic()
     try:
-        if str(_LIB_DIR) not in sys.path:
-            sys.path.insert(0, str(_LIB_DIR))
+        _prefer_lib_path()
         from track_reconciler import reconcile_all_tracks
 
         results = reconcile_all_tracks(store, pid, repo_root=_PROJECT_ROOT)
@@ -2663,6 +2752,96 @@ def _lifecycle_count_index_summary(state_dir: Path) -> Dict[str, Any]:
             "counted_at": details.get("counted_at")}
 
 
+def _memory_ledger_counts(state_dir: Path, now: datetime) -> Dict[str, int]:
+    """Notes in the ledger's last state and how many are out of force (M3's rule)."""
+    import memory_ledger as ml
+    from operator_memory_indexer import OperatorMemory, filter_valid_memories
+
+    last: Dict[Tuple[str, str], dict] = {}
+    for rec in ml.read_ledger(state_dir / ml.LEDGER_FILE)[0]:
+        if rec["event"] in ml._STATE_EVENTS:
+            last[(rec["source"], rec["note"])] = rec  # later lines win
+    live = [r for r in last.values() if r["event"] != "removed"]
+    mems = [
+        OperatorMemory(
+            name=r["note"], description="", type="", file_path=Path(r["note"]), body="",
+            tags=frozenset(), referenced_files=frozenset(), valid_from=r["valid_from"],
+            invalid_at=r["invalid_at"], superseded_by=r["superseded_by"],
+        )
+        for r in live
+    ]
+    return {"notes": len(live), "out_of_force": len(live) - len(filter_valid_memories(mems, now))}
+
+
+def _build_memory_ledger(state_dir: Path) -> Dict[str, Any]:
+    """ADR-078 section 7: scan within 2 s; a failure becomes status=error, never a raise."""
+    try:
+        import memory_ledger as ml
+
+        res = ml.scan(state_dir, budget=2.0)
+        block: Dict[str, Any] = {"status": res["status"], "reason": res["reason"]}
+        if res["status"] == "unbound":
+            return block
+        counts = _memory_ledger_counts(state_dir, _now_utc())
+        block.update(
+            notes=counts["notes"], written=res["written"], unknown=res["unreadable"],
+            out_of_force=counts["out_of_force"],
+        )
+        return block
+    except Exception as exc:  # ADR-078 section 7: an error never breaks SessionStart
+        # reason = class + message only; the message of a scan error holds no note text
+        return {"status": "error", "reason": f"{type(exc).__name__}: {exc}"[:200]}
+
+
+def _build_operator_inbox(project_id: str, state_dir: Path) -> Dict[str, Any]:
+    """ADR-076 besluit 10 and its 2026-11-22 amendment: the open points from the summary the ledger writer keeps.
+
+    This process runs no reader and writes nothing. A stale or missing summary is never ok and never zero;
+    an error becomes status=error, never a raise."""
+    try:
+        import operator_queue as oq
+        import operator_queue_inbox as inbox
+
+        got = oq.read_inbox_summary(project_id, state_dir=state_dir)
+        summary = got["summary"]
+        base = {"as_of": summary["generated_at"] if summary else None, "freshness": got["freshness"],
+                "open_total": None, "more": None, "points": []}
+        if got["freshness"] != "current":
+            return {"status": "unknown", "reason": got["reason"], **base}
+        if summary["status"] != "ok":
+            return {"status": "unknown", "reason": summary["reason"], **base}
+        now = datetime.now(timezone.utc)
+        points = [{"point_id": p["point_id"], "vraag": p["vraag"], "presented": p["presented"],
+                   "kopieerblok": p["kopieerblok"],
+                   "age": inbox._age(int((now - oq.parse_ts(p["asked_at"])).total_seconds()))}
+                  for p in summary["points"]]
+        return {**base, "status": "ok", "reason": None, "open_total": summary["open_total"],
+                "more": summary["more"], "points": points}
+    except Exception as exc:  # vnx-silent-except: reported as status=error in the block itself
+        return {"status": "error", "reason": f"{type(exc).__name__}: {exc}"[:200]}
+
+
+def _besluiten_logdir() -> Path:
+    """The register folder: <project root>/daily-log."""
+    return _PROJECT_ROOT / "daily-log"
+
+
+def _build_besluiten(project_id: str, state_dir: Path) -> Dict[str, Any]:
+    """besluitenregister B4: the register block, read-only; an error becomes status=error, never a raise."""
+    try:
+        import besluiten_adapter
+        return besluiten_adapter.state_block(project_id, _besluiten_logdir(), state_dir=state_dir)
+    except Exception as exc:  # vnx-silent-except: reported as status=error in the block itself
+        return {"status": "error", "reason": f"{type(exc).__name__}: {exc}"[:200]}
+
+
+def _besluiten_index(block: Any) -> Dict[str, Any]:
+    if not isinstance(block, dict) or not block:
+        return {"status": "error", "reason": "besluiten missing from the state"}
+    import besluiten_adapter
+    return besluiten_adapter.compact(block)
+
+
 def build_t0_state(
     state_dir: Path,
     dispatch_dir: Path,
@@ -2692,6 +2871,7 @@ def build_t0_state(
     track_freshness = _reconcile_tracks_fresh(state_dir, project_id, store=tracks_store)
 
     queues = _build_queues(dispatch_dir, state_dir)
+    stale_staged = _build_stale_staged(dispatch_dir, state_dir)  # OI-1553
     tracks = _build_tracks(state_dir)
     dream_reviews = _build_dream_reviews(state_dir, project_id)  # auto-dream cycles awaiting T0 review (OI-896)
     contract_invalid = _build_contract_invalid_summary(state_dir)  # contract_invalid receipt counters (OI-1638)
@@ -2706,6 +2886,10 @@ def build_t0_state(
     strategic_state_heavy = _build_strategic_state_heavy(state_dir)
     lifecycle_sweep = _lifecycle_sweep_section(state_dir)
     lifecycle_count = _lifecycle_count_index_summary(state_dir)
+    memory_ledger = _build_memory_ledger(state_dir)  # geheugen-in-de-store M4
+    operator_inbox = _build_operator_inbox(project_id, state_dir)  # operator-vragen-tot-antwoord Q5
+    besluiten = _build_besluiten(project_id, state_dir)  # besluitenregister B4
+    permission_proposals = _permission_open_view(state_dir, project_id)  # permissieblokkades-leren L6
     elapsed = time.monotonic() - start
     system_health = _build_system_health(
         state_dir, db_ok, db_health=db_health,
@@ -2719,6 +2903,7 @@ def build_t0_state(
         "generated_at": _now_iso(),
         # staleness_seconds removed (R6.4): call compute_staleness_seconds() at read time
         "queues": queues,
+        "stale_staged": stale_staged,
         "tracks": tracks,
         "track_freshness": track_freshness,
         "dream_reviews": dream_reviews,
@@ -2728,12 +2913,16 @@ def build_t0_state(
         "live_work": live_work,
         "recent_receipts": recent_receipts,
         "open_outcomes": open_outcomes,
+        "permission_proposals": permission_proposals,
         "git_context": git_context,
         "system_health": system_health,
         "pr_queue": pr_queue,
         "strategic_state": strategic_state,
         "lifecycle_sweep": lifecycle_sweep,
         "lifecycle_count": lifecycle_count,
+        "memory_ledger": memory_ledger,
+        "operator_inbox": operator_inbox,
+        "besluiten": besluiten,
         "_strategic_state_heavy": strategic_state_heavy,
         "_build_seconds": round(elapsed, 2),
     }
@@ -2889,7 +3078,7 @@ def _build_t0_index(state: Dict[str, Any]) -> Dict[str, Any]:
     pr_queue = state.get("pr_queue") or {}
     pr_unavailable = pr_queue.get("available") is False
     index = {
-        "schema": "t0_index/1.3",
+        "schema": "t0_index/1.6",
         "timestamp": state.get("generated_at", ""),
         "git_branch": git_ctx.get("branch", ""),
         "git_head": raw_head[:7],
@@ -2901,6 +3090,7 @@ def _build_t0_index(state: Dict[str, Any]) -> Dict[str, Any]:
             "blocking_open_items": open_items.get("blocker_count", 0),
         },
         "live_work": _live_work_index_summary(state.get("live_work")),
+        "stale_staged": _stale_staged_index_summary(state.get("stale_staged")),
         "recent_receipts": (state.get("recent_receipts") or [])[:3],
         # D4b: what a T0 still has to decide on; replaces the receipt pull cursor
         "open_outcomes": _open_outcomes_index_summary(state.get("open_outcomes")),
@@ -2909,6 +3099,11 @@ def _build_t0_index(state: Dict[str, Any]) -> Dict[str, Any]:
         "contract_invalid": _contract_invalid_index_summary(state.get("contract_invalid")),
         "lifecycle": state.get("lifecycle_count") or {},
         "last_rebuild_seconds": state.get("_build_seconds"),
+        "operator_inbox": state.get("operator_inbox")
+        or {"status": "error", "reason": "operator_inbox missing from the state"},
+        "besluiten": _besluiten_index(state.get("besluiten")),
+        "permission_proposals": state.get("permission_proposals")
+        or {"available": False, "reason": "permission_proposals missing from the state"},
     }
     if pr_unavailable:
         index["pr_queue_unavailable"] = pr_queue.get("reason") or "unknown"
@@ -2976,21 +3171,17 @@ def _write_detail_files(state: Dict[str, Any], detail_dir: Path) -> Dict[str, st
 # GC: retention sweep for t0_detail snapshots (W-UX-4)
 # ---------------------------------------------------------------------------
 
-def _gc_t0_detail(detail_dir: Path) -> int:
-    """Prune t0_detail/*.json files older than VNX_T0_DETAIL_RETENTION_DAYS days.
+_T0_DETAIL_RETENTION_DAYS = 14
 
-    Env-var VNX_T0_DETAIL_RETENTION_DAYS (default 14). Set to 0 to disable GC.
+
+def _gc_t0_detail(detail_dir: Path) -> int:
+    """Prune t0_detail/*.json files older than _T0_DETAIL_RETENTION_DAYS (14) days.
+
     Only touches *.json files inside detail_dir — never t0_state.json or t0_index.json.
     Idempotent: a second call after files are already pruned deletes nothing more.
     Returns the count of files deleted.
     """
-    try:
-        retention_days = int(os.environ.get("VNX_T0_DETAIL_RETENTION_DAYS", "14"))
-    except (ValueError, TypeError):
-        retention_days = 14
-
-    if retention_days == 0:
-        return 0
+    retention_days = _T0_DETAIL_RETENTION_DAYS
 
     if not detail_dir.is_dir():
         return 0
@@ -3115,6 +3306,7 @@ def _write_all_state_outputs(
     effective_root = project_root if project_root is not None else _PROJECT_ROOT
     try:
         sys.path.insert(0, str(effective_root / "scripts"))
+        _prefer_lib_path()
         from build_project_status import write_project_status
         write_project_status(state_dir)
     except Exception as exc:
@@ -3125,8 +3317,7 @@ def _write_all_state_outputs(
 def _emit_build_signal(output_path: Path, elapsed: float) -> None:
     """Emit state mutation event (best-effort)."""
     try:
-        if str(_LIB_DIR) not in sys.path:
-            sys.path.insert(0, str(_LIB_DIR))
+        _prefer_lib_path()
         from state_mutation import emit_state_mutation
         size_bytes = output_path.stat().st_size if output_path.exists() else 0
         emit_state_mutation(

@@ -599,7 +599,10 @@ def test_closure_judges_a_signal_receipt_by_its_own_rule_while_the_key_is_off(tm
 
     checks = _closure(store, _signal_record(store, ["codex_gate"]))
 
-    assert checks == {"seat_codex_gate": "PASS", "review_seats_not_required": "PASS"}
+    assert checks == {
+        "seat_codex_gate": "PASS", "review_seats_not_required": "PASS",
+        "gate_codex_gate_request_record": "PASS",  # OI-1438: legacy record, no execution_id
+    }
     assert rse.active_seat_rule().rule == rse.RISK_SEAT_RULE
 
 
@@ -615,7 +618,10 @@ def test_closure_judges_a_risk_receipt_by_its_own_rule_while_the_key_is_on(tmp_p
     }
     checks = _closure(store, record)
 
-    assert checks == {"seat_codex_gate": "PASS", "review_seats_not_required": "PASS"}
+    assert checks == {
+        "seat_codex_gate": "PASS", "review_seats_not_required": "PASS",
+        "gate_codex_gate_request_record": "PASS",  # OI-1438: legacy record, no execution_id
+    }
     assert rse.active_seat_rule().rule == rse.SIGNAL_SEAT_RULE
 
 

@@ -54,7 +54,6 @@ logging.basicConfig(
     datefmt='%H:%M:%S'
 )
 logger = logging.getLogger(__name__)
-ROLLBACK_ENV_FLAG = "VNX_STATE_SIMPLIFICATION_ROLLBACK"
 
 
 def _end_line_gate_result(receipt: Dict, gate: str) -> Optional[Dict]:
@@ -76,23 +75,9 @@ def _end_line_gate_result(receipt: Dict, gate: str) -> Optional[Dict]:
     }
 
 
-def _env_flag(name: str) -> Optional[bool]:
-    value = os.environ.get(name)
-    if value is None:
-        return None
-    return value.strip().lower() in {"1", "true", "yes", "on"}
-
-
-def _rollback_mode_enabled() -> bool:
-    rollback = _env_flag(ROLLBACK_ENV_FLAG)
-    if rollback is None:
-        rollback = _env_flag("VNX_STATE_DUAL_WRITE_LEGACY")
-    return bool(rollback)
-
-
 class GovernanceDigestRunner:
     """Periodic governance digest builder — writes governance_digest.json every ``interval`` seconds.
-    Reads F18 extractors. Interval from VNX_DIGEST_INTERVAL env var (default 300 s).
+    Reads F18 extractors. Interval is 300 s.
     """
 
     OUTPUT_FILENAME = "governance_digest.json"
@@ -106,12 +91,8 @@ class GovernanceDigestRunner:
 
     @classmethod
     def from_env(cls, state_dir: Path) -> "GovernanceDigestRunner":
-        """Construct runner reading interval from VNX_DIGEST_INTERVAL (default 300)."""
-        try:
-            interval = int(os.environ.get("VNX_DIGEST_INTERVAL", "300"))
-        except (ValueError, TypeError):
-            interval = 300
-        return cls(state_dir, interval)
+        """Construct runner with the fixed 300 s interval."""
+        return cls(state_dir, 300)
 
     def should_run(self) -> bool:
         """Return True if the interval has elapsed since the last run."""
@@ -309,19 +290,10 @@ class IntelligenceDaemon:
         self.vnx_dir = Path(paths["VNX_HOME"])
         self.state_dir = Path(paths["VNX_STATE_DIR"]).expanduser().resolve()
         self.legacy_state_dir = (self.vnx_dir / "state").resolve()
-        self.rollback_mode = _rollback_mode_enabled()
-        self.dashboard_write_enabled = os.getenv("VNX_INTELLIGENCE_DASHBOARD_WRITE", "0") == "1"
-        self.refresh_daily = os.getenv("VNX_DAILY_INTEL_REFRESH", "1") == "1"
+        self.dashboard_write_enabled = False
+        self.refresh_daily = True
 
         self.compat_state_dirs: List[Path] = [self.state_dir]
-        if self.rollback_mode:
-            for state_dir in [self.legacy_state_dir, self.project_root / ".vnx-data" / "state"]:
-                if state_dir not in self.compat_state_dirs:
-                    self.compat_state_dirs.append(state_dir)
-            logger.warning(
-                "[CUTOVER] Rollback mode enabled (%s=1). Legacy state reads and mirror writes are active.",
-                ROLLBACK_ENV_FLAG,
-            )
 
         # Intelligence components
         self.gatherer = T0IntelligenceGatherer()
@@ -351,7 +323,7 @@ class IntelligenceDaemon:
         self.dashboard_builder = DashboardBuilder(
             state_dir=self.state_dir,
             legacy_state_dir=self.legacy_state_dir,
-            rollback_mode=self.rollback_mode,
+            rollback_mode=False,
             dashboard_write_enabled=self.dashboard_write_enabled,
             pr_discovery=self.pr_discovery,
             find_state_file=self._find_state_file,
@@ -372,7 +344,7 @@ class IntelligenceDaemon:
         signal.signal(signal.SIGTERM, self._signal_handler)
         signal.signal(signal.SIGINT, self._signal_handler)
 
-        logger.info("Intelligence Daemon initialized (rollback_mode=%s)", self.rollback_mode)
+        logger.info("Intelligence Daemon initialized")
 
     def _find_state_file(self, filename: str) -> Optional[Path]:
         """Find a state file from canonical root, with optional rollback compatibility."""
@@ -513,7 +485,7 @@ class IntelligenceDaemon:
                 if self.should_run_daily_hygiene():
                     self.daily_hygiene()
 
-                # Governance digest (every VNX_DIGEST_INTERVAL seconds, default 5 min)
+                # Governance digest (every 300 seconds)
                 if self.digest_runner.should_run():
                     self.digest_runner.run_once()
 

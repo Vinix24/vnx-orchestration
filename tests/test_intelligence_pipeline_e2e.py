@@ -148,10 +148,15 @@ def test_env(tmp_path, monkeypatch):
 
 class _LoopContext:
     """Holds a LearningLoop with ensure_env permanently mocked."""
+    approve = None  # the approval fixture of the running test, set by _persist_mode
+
     def __init__(self, env):
         self._patcher = patch("learning_loop.ensure_env", return_value=env)
         self._patcher.start()
         from learning_loop import LearningLoop
+        shadow = LearningLoop(persist=False)  # approve exactly what the persist loop will write
+        shadow.persist_to_intelligence_db()
+        _LoopContext.approve(env["VNX_STATE_DIR"], shadow.shadow["persist_preview"]["proposal_id"])
         self.loop = LearningLoop()
 
     def close(self):
@@ -253,9 +258,9 @@ class TestLearningLoopPopulatesDB:
 
 
 class TestApprovedRulesIngest:
-    """Test that ingest_approved_rules() writes approved rules to prevention_rules."""
+    """Test that ingest_approved_rules() writes no rule the store has no decision for."""
 
-    def test_approved_rules_ingested(self, test_env):
+    def test_hand_approved_rules_are_not_ingested(self, test_env):
         env, db_path, state_dir, _ = test_env
 
         # Write pending_rules.json with approved entries
@@ -285,23 +290,17 @@ class TestApprovedRulesIngest:
         loop = _make_loop(env)
         loop.ingest_approved_rules()
 
-        # Verify only approved rule was inserted
+        # No row: the store's record has no approval (tests/test_ingest_activation_and_deactivation.py)
         conn = sqlite3.connect(str(db_path))
         conn.row_factory = sqlite3.Row
         rows = conn.execute("SELECT * FROM prevention_rules").fetchall()
         conn.close()
 
-        assert len(rows) == 1
-        row = dict(rows[0])
-        assert row["tag_combination"] == "T2"
-        assert row["recommendation"] == "Increase timeout to 120s for T2 tasks"
-        assert row["confidence"] == 0.7
+        assert rows == []
 
-        # Verify JSON was updated
+        # Verify JSON was left as it was
         updated = json.loads(pending_path.read_text())
-        approved_rule = [r for r in updated["pending_rules"] if r["id"] == "rule-abc123"][0]
-        assert approved_rule["status"] == "ingested"
-        assert "ingested_at" in approved_rule
+        assert [r["status"] for r in updated["pending_rules"]] == ["approved", "pending"]
 
     def test_no_pending_file_is_noop(self, test_env):
         env, db_path, state_dir, _ = test_env
@@ -497,6 +496,7 @@ class TestSelectorReadsLearningLoopPatterns:
 
 
 @pytest.fixture(autouse=True)
-def _persist_mode(monkeypatch):
+def _persist_mode(monkeypatch, approve_learning_persist):
     """These tests cover what the loop persists; shadow mode (the default) persists nothing."""
     monkeypatch.setenv("VNX_LEARNING_LOOP_PERSIST", "1")
+    _LoopContext.approve = approve_learning_persist

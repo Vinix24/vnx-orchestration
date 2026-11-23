@@ -239,6 +239,9 @@ def _drift_safe_effective_branch(
     Returns ``(effective_branch, is_drift)``:
     - ``(branch, False)``  — *current* is empty or already equals *branch*: no
       substitution needed.
+    - ``(branch, False)``  — *current* is ``HEAD``: a detached worktree has no
+      branch name at all (OI-2716), so it never stands in for the dispatch
+      branch; the expected ``dispatch/<id>`` branch is the target.
     - ``(branch, True)``   — *current* names a DIFFERENT dispatch's branch
       (cross-dispatch drift) — the caller must treat this as a safety concern
       and never redirect enforcement onto it.
@@ -248,7 +251,7 @@ def _drift_safe_effective_branch(
       prescribe its own branch name, and the worker then pushes THAT branch,
       not ``dispatch/<id>`` — *current* is where any push actually landed.
     """
-    if not current or current == branch:
+    if not current or current == branch or current == "HEAD":
         return branch, False
     drift = _DISPATCH_BRANCH_RE.match(current)
     expected_ids = {dispatch_id}
@@ -432,7 +435,26 @@ def classify_path(
         return "committed"
 
     remote_sha = remote_output.split()[0]
-    return "pushed" if remote_sha == local_sha else "committed"
+    return "pushed" if (remote_sha == local_sha or _detached_head_on_origin(wt, current, effective_branch)) else "committed"
+
+
+def _detached_head_on_origin(wt: "Path | str", current: str, branch: str) -> bool:
+    """OI-2716: True only for a detached HEAD that ``origin/<branch>``, fetched
+    fresh, already contains (the builder pushed it, then origin moved on)."""
+    if current != "HEAD":
+        return False
+    try:
+        fetch = _run(
+            ["git", "-C", str(wt), "fetch", "origin",
+             f"+refs/heads/{branch}:refs/remotes/origin/{branch}"],
+            timeout=30,
+        )
+        if fetch.returncode != 0:
+            return False
+        anc = _run(["git", "-C", str(wt), "merge-base", "--is-ancestor", "HEAD", f"origin/{branch}"])
+    except Exception:  # vnx-silent-except: no proof origin holds HEAD, so the caller keeps 'committed'
+        return False
+    return anc.returncode == 0
 
 
 def _remove_worktree_with_fallback(root: Path, wt: Path) -> list[str]:

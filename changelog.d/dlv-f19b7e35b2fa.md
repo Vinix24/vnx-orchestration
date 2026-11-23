@@ -1,1 +1,0 @@
-- The Claude skill destination `.claude/skills/<slug>/SKILL.md` is now ignored by git (skilldisc R2): the authored source of a new skill is `skills/<slug>/SKILL.md`, and the generated copy can no longer land in a commit. The 27 already tracked `SKILL.md` files there stay tracked.

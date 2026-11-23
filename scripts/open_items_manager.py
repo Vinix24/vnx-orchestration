@@ -31,13 +31,10 @@ VNX_ROOT = Path(_PATHS["VNX_HOME"]).expanduser().resolve()
 # when open_items_manager is invoked from a different project directory
 # (e.g. mission-control, SEOcrawler, sales-copilot).
 STATE_DIR = resolve_data_root(Path.cwd()) / "state"
-LEGACY_STATE_DIR = (VNX_ROOT / "state").resolve()
 OPEN_ITEMS_FILE = STATE_DIR / "open_items.json"
 DIGEST_FILE = STATE_DIR / "open_items_digest.json"
 MARKDOWN_FILE = STATE_DIR / "open_items.md"
 AUDIT_LOG = STATE_DIR / "open_items_audit.jsonl"
-LEGACY_OPEN_ITEMS_FILE = LEGACY_STATE_DIR / "open_items.json"
-ROLLBACK_ENV_FLAG = "VNX_STATE_SIMPLIFICATION_ROLLBACK"
 
 # Type definitions
 SeverityLevel = Literal["blocker", "warn", "info"]
@@ -103,20 +100,6 @@ def _validate_title_not_acceptance_criterion(title: str,
         raise ValueError(_REJECTION_MESSAGE)
 
 
-def _env_flag(name: str) -> Optional[bool]:
-    value = os.environ.get(name)
-    if value is None:
-        return None
-    return value.strip().lower() in {"1", "true", "yes", "on"}
-
-
-def _rollback_mode_enabled() -> bool:
-    rollback = _env_flag(ROLLBACK_ENV_FLAG)
-    if rollback is None:
-        rollback = _env_flag("VNX_STATE_DUAL_WRITE_LEGACY")
-    return bool(rollback)
-
-
 @contextmanager
 def _with_items_lock():
     """Acquire exclusive lock on open_items.lock for read-modify-write safety."""
@@ -147,8 +130,6 @@ def read_items(state_dir: Path) -> dict:
 def load_items() -> dict:
     """Load open items database"""
     source = OPEN_ITEMS_FILE
-    if not source.exists() and _rollback_mode_enabled():
-        source = LEGACY_OPEN_ITEMS_FILE
     if not source.exists():
         return {"schema_version": "1.0", "items": [], "next_id": 1}
 
@@ -1018,12 +999,13 @@ def count_items_closed_by_dispatch(dispatch_id: str) -> int:
 
 
 def main():
-    if _rollback_mode_enabled():
-        print(
-            "[CUTOVER] WARNING: rollback mode enabled "
-            f"({ROLLBACK_ENV_FLAG}=1). Legacy open-items fallback reads are active."
-        )
+    parser = _build_parser()
+    args = parser.parse_args()
+    return _route_command(parser, args)
 
+
+def _build_parser() -> argparse.ArgumentParser:
+    """The ``open_items_manager`` CLI parser (all subcommands)."""
     parser = argparse.ArgumentParser(description="Open Items Manager")
     subparsers = parser.add_subparsers(dest='command', help='Commands')
 
@@ -1085,6 +1067,12 @@ def main():
     amend_parser.add_argument('--reason', required=True, help='Why this item is being amended (recorded in the audit trail)')
     amend_parser.add_argument('--dispatch-id', dest='dispatch_id', default=None, help='Dispatch ID performing the amendment')
 
+    _add_triage_subparsers(subparsers)
+    return parser
+
+
+def _add_triage_subparsers(subparsers) -> None:
+    """Add digest, rescan, defer-pattern and wontfix-pattern to *subparsers*."""
     # Digest command
     digest_parser = subparsers.add_parser('digest', help='Generate digest')
     digest_parser.add_argument('--last', type=int, default=20,
@@ -1147,8 +1135,9 @@ def main():
         help='Apply mutation (omit for dry-run preview)'
     )
 
-    args = parser.parse_args()
 
+def _route_command(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    """Run the handler for ``args.command``; returns the exit code of :func:`main`."""
     if not args.command:
         parser.print_help()
         return 1

@@ -24,6 +24,8 @@ _ARCHIVE_REASON_MAP: dict[str, str] = {
     "archived": "merged_into_other",
 }
 
+_SAFE_TABLE_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
 # Only alphanumerics, hyphens, underscores, and dots — no slashes or dot-dot segments.
 _SAFE_CYCLE_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 
@@ -47,6 +49,39 @@ def _atomic_write_json(path: Path, obj: dict) -> None:
         except OSError:
             pass
         raise
+
+
+def _invalidate_source_row(
+    conn: sqlite3.Connection, table: str, pattern_id: Any, project_id: str,
+    now_iso: str, reason: str,
+) -> None:
+    """Set ``valid_until`` (and ``invalidation_reason`` where present) on the source row.
+
+    Runs in the caller's transaction. An unsafe table name, a table without ``valid_until``
+    and a missing source row each raise ``ValueError``: the whole approval aborts. A row
+    already invalidated keeps its first ``valid_until`` and reason.
+    """
+    if not _SAFE_TABLE_RE.match(table or ""):
+        raise ValueError(f"Invalid original_table for pattern {pattern_id!r}: {table!r}")
+    columns = {row[1] for row in conn.execute(f'PRAGMA table_info("{table}")')}
+    if "valid_until" not in columns:
+        raise ValueError(
+            f"Cannot invalidate {table}#{pattern_id}: table has no valid_until column"
+        )
+    sets = ["valid_until = COALESCE(valid_until, ?)"]
+    params: list[Any] = [now_iso]
+    if "invalidation_reason" in columns:
+        sets.append("invalidation_reason = COALESCE(invalidation_reason, ?)")
+        params.append(reason)
+    cur = conn.execute(
+        f'UPDATE "{table}" SET {", ".join(sets)} WHERE id = ? AND project_id = ?',
+        (*params, pattern_id, project_id),
+    )
+    if cur.rowcount != 1:
+        raise ValueError(
+            f"Source row {table}#{pattern_id} not found for project {project_id!r}"
+            f" (matched {cur.rowcount})"
+        )
 
 
 def _emit_review_event(event: dict[str, Any], data_root: Path) -> None:
@@ -85,9 +120,11 @@ def _load_review(state_dir: Path, cycle_id: str, project_id: str) -> dict:
 def _file_created_iso(path: Path) -> str | None:
     """ISO-8601 UTC timestamp of when the pending-review file was written.
 
-    The pending-review.json carries no timestamp field (consolidator.py writes
-    cycle_id/project_id/consolidation only), so the review age is the file's
-    mtime — the moment the cycle completed and started waiting for T0.
+    The pending-review.json carries a ``created_at`` field that the consolidator
+    stamps (``_write_pending_review``). This helper does not read it: it returns the
+    file's mtime, the moment the cycle completed and started waiting for T0.
+    ``dream_liveness`` reads ``created_at`` from the content first and falls back to
+    the mtime.
     """
     try:
         return datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc).isoformat()
@@ -95,27 +132,48 @@ def _file_created_iso(path: Path) -> str | None:
         return None
 
 
-def list_pending_reviews(project_id: str, data_root: Path | None = None) -> list[dict]:
-    """Return pending dream cycles awaiting operator review.
+def pending_review_queue(
+    project_id: str, data_root: Path | None = None
+) -> tuple[list[dict], list[str]]:
+    """Return ``(pending, unreadable)`` for the dream review queue (ADR-066).
 
-    Each returned dict is the pending-review payload plus an additive
-    ``created_at`` key (UTC ISO from the file mtime) so readers can report the
+    ``pending`` holds the pending-review payloads for ``project_id``, each plus an
+    additive ``created_at`` key (UTC ISO from the file mtime, which replaces the
+    ``created_at`` the consolidator wrote into the file) so readers can report the
     age of the oldest waiting review without re-globbing the state dir.
+    ``unreadable`` holds the sorted file NAMES (never content) of every
+    ``*-pending-review.json`` that does not parse, is not a JSON object or cannot be
+    read: such a file is counted, not skipped, because a cycle may be waiting in it.
     """
     dr = _resolve_data_root(data_root)
     state_dir = dr / "state" / "dream"
     if not state_dir.is_dir():
-        return []
-    results = []
+        return [], []
+    results: list[dict] = []
+    unreadable: list[str] = []
     for path in sorted(state_dir.glob("*-pending-review.json")):
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
+        except (ValueError, OSError):  # JSONDecodeError and UnicodeDecodeError are ValueErrors
+            unreadable.append(path.name)
+            continue
+        if not isinstance(data, dict):
+            unreadable.append(path.name)
             continue
         if data.get("project_id") == project_id and data.get("requires_operator_review"):
             data["created_at"] = _file_created_iso(path)
             results.append(data)
-    return results
+    return results, sorted(unreadable)
+
+
+def list_pending_reviews(project_id: str, data_root: Path | None = None) -> list[dict]:
+    """Return pending dream cycles awaiting operator review.
+
+    It drops unreadable review files from its list; ``pending_review_queue`` names
+    them (ADR-066). Each dict is the pending-review payload plus an additive
+    ``created_at`` key (see ``pending_review_queue``).
+    """
+    return pending_review_queue(project_id, data_root)[0]
 
 
 def approve_cycle(
@@ -123,7 +181,7 @@ def approve_cycle(
 ) -> None:
     """Apply consolidation to DB; emit NDJSON event first (ADR-005).
 
-    Archive inserts and the status UPDATE are one atomic unit: if any insert
+    Archive inserts, the source-row invalidation and the status UPDATE are one atomic unit: if any insert
     fails the exception propagates, conn.commit() is never called, and the
     pending-review.json is not modified — cycle stays awaiting review.
     """
@@ -145,6 +203,7 @@ def approve_cycle(
         dr,
     )
 
+    now_iso = datetime.now(timezone.utc).isoformat()
     conn = sqlite3.connect(str(db_path))
     try:
         for action_key, archive_reason in _ARCHIVE_REASON_MAP.items():
@@ -161,10 +220,13 @@ def approve_cycle(
                     " VALUES (?, ?, ?, ?, ?)",
                     (cycle_id, project_id, pattern_id, table, archive_reason),
                 )
+                # Same transaction: the next cycle no longer reads the source row.
+                _invalidate_source_row(
+                    conn, table, pattern_id, project_id, now_iso, archive_reason)
         conn.execute(
             "UPDATE dream_cycles SET status='reviewed', operator_reviewed=1, completed_at=?"
             " WHERE cycle_id=? AND project_id=?",
-            (datetime.now(timezone.utc).isoformat(), cycle_id, project_id),
+            (now_iso, cycle_id, project_id),
         )
         conn.commit()
     finally:

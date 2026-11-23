@@ -314,7 +314,7 @@ Reconciliation reads all canonical surfaces (C-1 through C-5) and regenerates th
 | After receipt processing | Yes | P-2, P-3 (queue and progress for completed PR/track) |
 | Before PR closure | Yes | Full (all projections) |
 | Before feature closure | Yes | Full (all projections) |
-| On `vnx reconcile` command | Yes | Full (all projections) |
+| On `python3 scripts/reconcile_queue_state.py --repair` (operator run) | Yes | Full (all projections) |
 | Periodic (reconciler timer) | Recommended | Full (all projections), every 60 seconds during active execution |
 
 ### 8.4 Reconciliation Failure

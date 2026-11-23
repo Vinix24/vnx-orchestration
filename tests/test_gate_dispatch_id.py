@@ -249,7 +249,7 @@ class TestRequestHandlerDispatchId:
                 dispatch_id=dispatch_id,
             )
 
-        req_file = manager_env["requests_dir"] / "pr-8-claude_github_optional.json"
+        req_file = manager_env["requests_dir"] / "8-claude_github_optional-contract.json"
         assert req_file.exists()
         payload = json.loads(req_file.read_text())
         assert payload["dispatch_id"] == dispatch_id

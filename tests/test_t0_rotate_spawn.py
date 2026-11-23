@@ -1060,43 +1060,6 @@ def test_b6_missing_vnx_data_link_still_starts_in_the_t0_folder(rig):
     assert "WARNING" not in proc.stderr
 
 
-@pytest.mark.parametrize("tmux_global, process, expect_t0", [
-    ("root", None, False),
-    ("unset", "root", False),
-    ("removed", "root", False),
-    ("root", "t0", False),
-    ("t0", "root", True),
-    ("unset", None, True),
-])
-def test_b7_the_switch_prefers_the_tmux_global(rig, tmux_global, process, expect_t0):
-    t0 = _t0_folder(rig)
-    _handoff(rig, HANDOFF_BASE)
-    extra = {"STUB_TMUX_GLOBAL": tmux_global, "STUB_OLD_PANE_PATH": str(t0)}
-    if process is not None:
-        extra["VNX_T0_ROTATE_START_DIR"] = process
-    proc = _spawn(rig, env_extra=extra)
-    assert proc.returncode == 0, proc.stderr
-    assert _new_window_dir(rig) == (str(t0) if expect_t0 else str(rig["project"].resolve()))
-    assert "WARNING" not in proc.stderr
-
-
-@pytest.mark.parametrize("tmux_global, process", [("bogus", None), ("unset", "bogus"), ("t0", "bogus")])
-def test_b7_an_invalid_switch_value_is_refused_before_a_window_opens(rig, tmux_global, process):
-    _t0_folder(rig)
-    _handoff(rig, HANDOFF_BASE)
-    extra = {"STUB_TMUX_GLOBAL": tmux_global}
-    if process is not None:
-        extra["VNX_T0_ROTATE_START_DIR"] = process
-    proc = _spawn(rig, env_extra=extra)
-    if (tmux_global, process) == ("t0", "bogus"):
-        # a set global wins, so the bad process value is never consulted
-        assert proc.returncode == 0, proc.stderr
-        return
-    assert proc.returncode == 2
-    assert "bogus" in proc.stderr and "'t0'" in proc.stderr and "'root'" in proc.stderr
-    assert not any(c[0] == "new-window" for c in _calls(rig))
-
-
 def test_b8_a_successor_in_the_wrong_folder_is_closed_and_nothing_is_typed(rig):
     t0 = _t0_folder(rig)
     _handoff(rig, HANDOFF_BASE)

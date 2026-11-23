@@ -1,0 +1,43 @@
+# The contract C3 of pr-ci-onder-zes-minuten has to meet (plan.md § "C3: de omzetting").
+# Job ids are placeholders: C3 has not chosen them, the helper finds jobs by name.
+name: VNX CI
+x-shard: &shard
+  runs-on: ubuntu-24.04
+  timeout-minutes: 26
+jobs:
+  shard-1:
+    <<: *shard
+    name: Profile A shard (1/4)
+    steps: [{uses: ./.github/actions/profile-a-prelude}, {name: Profile A shard run, run: bash scripts/ci/profile_a_run_phase.sh shard 1 4}]
+  shard-2:
+    <<: *shard
+    name: Profile A shard (2/4)
+    steps: [{uses: ./.github/actions/profile-a-prelude}, {name: Profile A shard run, run: bash scripts/ci/profile_a_run_phase.sh shard 2 4}]
+  shard-3:
+    <<: *shard
+    name: Profile A shard (3/4)
+    steps: [{uses: ./.github/actions/profile-a-prelude}, {name: Profile A shard run, run: bash scripts/ci/profile_a_run_phase.sh shard 3 4}]
+  shard-4:
+    <<: *shard
+    name: Profile A shard (4/4)
+    steps: [{uses: ./.github/actions/profile-a-prelude}, {name: Profile A shard run, run: bash scripts/ci/profile_a_run_phase.sh shard 4 4}]
+  guards:
+    name: Profile A guards
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Side-door exhaustiveness audit
+        run: |
+          set -euo pipefail
+          python3 scripts/lib/dispatch_sidedoor_audit.py
+  aggregate:
+    name: Profile A (doctor + core tests)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 80
+    needs: [shard-1, shard-2, shard-3, shard-4, guards]
+    if: always()
+    steps:
+      - name: Check the xdist completeness (required)
+        run: |
+          set -euo pipefail
+          python3 scripts/ci/check_xdist_parity.py completeness

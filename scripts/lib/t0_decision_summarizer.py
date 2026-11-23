@@ -289,37 +289,6 @@ def _rotate_if_needed(log_file: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Assembler integration — query interface for context assembly
-# ---------------------------------------------------------------------------
-
-
-def load_recent_decisions(
-    log_file: Path | None = None,
-    limit: int = 5,
-) -> list[dict[str, Any]]:
-    """Return the N most recent decision records from the log.
-
-    Used by context assemblers to include recent T0 decision history
-    in T0 session prompts. Returns an empty list if the log doesn't exist.
-    """
-    path = log_file or DEFAULT_DECISION_LOG
-    if not path.exists():
-        return []
-
-    records: list[dict[str, Any]] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            records.append(json.loads(line))
-        except json.JSONDecodeError:
-            continue
-
-    return records[-limit:] if len(records) > limit else records
-
-
-# ---------------------------------------------------------------------------
 # CLI entry point
 # ---------------------------------------------------------------------------
 

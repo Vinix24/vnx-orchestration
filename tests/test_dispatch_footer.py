@@ -64,12 +64,6 @@ class TestLoadFooterTemplate:
         default = load_footer_template()
         assert normal == default
 
-    def test_env_var_overrides_mode(self, monkeypatch):
-        monkeypatch.setenv("VNX_DISPATCH_FOOTER_MODE", "autonomous")
-        content = load_footer_template("normal")  # env var takes precedence over arg
-        autonomous_direct = load_footer_template.__wrapped__("autonomous") if hasattr(load_footer_template, "__wrapped__") else None
-        assert content, "Should return non-empty content when env var is set"
-
     def test_missing_template_returns_empty(self, tmp_path, monkeypatch):
         monkeypatch.setattr(
             "dispatch_footer._resolve_templates_dir",
@@ -121,10 +115,9 @@ class TestAppendDispatchFooter:
         result = append_dispatch_footer(instruction)
         assert result == instruction
 
-    def test_env_var_mode_selection(self, monkeypatch):
-        monkeypatch.setenv("VNX_DISPATCH_FOOTER_MODE", "autonomous")
+    def test_mode_argument_selection(self):
         instruction = "Do the task."
-        result = append_dispatch_footer(instruction)
+        result = append_dispatch_footer(instruction, mode="autonomous")
         assert _FOOTER_SENTINEL in result
 
     def test_dispatch_format_built_instruction_ends_with_footer(self):

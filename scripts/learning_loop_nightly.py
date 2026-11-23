@@ -6,14 +6,20 @@ the cycle is a shadow run: it computes patterns and proposals, writes one report
 (``learning_loop_shadow_report.json``) and persists nothing. Every run, also a
 failed one, writes ``learning_loop_nightly_beacon.json`` under the state dir.
 
+A refused cycle (ledger verdict refused) is recorded as ``status=refused`` with its ``reason``
+(a degraded one carries its reason too); ``vnx doctor`` warns on both.
+
 Exit code: 0 on a finished run, 1 when the run failed (the beacon then says
 ``status=failed`` and carries the reason).
 """
 from __future__ import annotations
 
+import importlib.util
 import sys
 import traceback
+from datetime import datetime, timezone
 from pathlib import Path
+from types import ModuleType
 from typing import Any, Dict, Optional
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -33,6 +39,19 @@ from vnx_paths import (  # noqa: E402
     refuse_real_central_store_write_under_test_runner,
     resolve_project_id,
 )
+
+
+STATUS_REFUSED = "refused"
+_PASSTHROUGH_STATUSES = ("dormant", "degraded", STATUS_REFUSED)
+_REASON_STATUSES = ("degraded", STATUS_REFUSED)
+
+
+def _status_and_reason(report: Dict[str, Any]) -> tuple:
+    """Beacon status and reason of a cycle report; the reason only for refused and degraded."""
+    run_status = report.get("status")
+    status = run_status if run_status in _PASSTHROUGH_STATUSES else STATUS_OK
+    reason = report.get("reason") if status in _REASON_STATUSES else None
+    return status, (None if reason is None else str(reason))
 
 
 def _counts(report: Dict[str, Any]) -> Dict[str, int]:
@@ -55,6 +74,43 @@ def _counts(report: Dict[str, Any]) -> Dict[str, int]:
     }
 
 
+def _capture_audit_lib() -> ModuleType:
+    """The audit lib by file path: ``scripts/capture_audit.py`` has the same module name."""
+    lib_file = SCRIPT_DIR / "lib" / "capture_audit.py"
+    for loaded in list(sys.modules.values()):
+        if Path(getattr(loaded, "__file__", None) or "").resolve() == lib_file:
+            return loaded
+    name = "capture_audit" if "capture_audit" not in sys.modules else "capture_audit_lib"
+    spec = importlib.util.spec_from_file_location(name, lib_file)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module  # registered before it runs: dataclasses looks its module up there
+    try:
+        spec.loader.exec_module(module)
+    except BaseException:
+        del sys.modules[name]
+        raise
+    return module
+
+
+def _add_capture_audit(state_dir: Path, beacon: Dict[str, Any]) -> None:
+    """Run the capture audit for the beacon, whatever the loop did. ``duplicate_capture_open`` stays
+    None (no measurement, never zero) on any failure, which lands in ``capture_audit_error`` and
+    never in the loop status. Set outside ``_counts`` so a None is not passed through ``int()``."""
+    counts = beacon.setdefault("counts", {})
+    counts["duplicate_capture_open"] = None
+    counts["capture_audit_bins"] = {}
+    try:
+        lib = _capture_audit_lib()
+        window = lib.parse_window(None, None, chain_until=lib.previous_chain_until(state_dir),
+                                  now=datetime.now(timezone.utc))
+        audit = lib.build_audit(state_dir, window)
+    except Exception as exc:  # the audit must never break the nightly run; the beacon records why
+        beacon["capture_audit_error"] = f"{type(exc).__name__}: {exc}"
+        return
+    counts["duplicate_capture_open"] = audit["open_pairs"]
+    counts["capture_audit_bins"] = {name: row["state"] for name, row in audit["bins"].items()}
+
+
 def run_phase(state_dir: Optional[Path] = None) -> int:
     from learning_loop import LearningLoop, persist_enabled, resolve_receipt_cutoff
 
@@ -69,6 +125,7 @@ def run_phase(state_dir: Optional[Path] = None) -> int:
         "counts": {},
         "status": STATUS_FAILED,
         "error": None,
+        "reason": None,
     }
     if state_dir is None:
         state_dir = Path(ensure_env()["VNX_STATE_DIR"]).expanduser().resolve()
@@ -80,8 +137,7 @@ def run_phase(state_dir: Optional[Path] = None) -> int:
         report = LearningLoop().daily_learning_cycle()
         beacon["counts"] = _counts(report)
         beacon["cutoff"] = report.get("cutoff", beacon["cutoff"])
-        run_status = report.get("status")
-        beacon["status"] = run_status if run_status in ("dormant", "degraded") else STATUS_OK
+        beacon["status"], beacon["reason"] = _status_and_reason(report)
         if beacon["mode"] == "shadow":
             path = shadow_report_path(state_dir)
             atomic_write_json(path, {"generated_at": utc_now_iso(), "report": report})
@@ -92,6 +148,7 @@ def run_phase(state_dir: Optional[Path] = None) -> int:
         beacon["error"] = f"{type(exc).__name__}: {exc}"
         traceback.print_exc()
     finally:
+        _add_capture_audit(state_dir, beacon)
         beacon["finished_at"] = utc_now_iso()
         write_beacon(state_dir, beacon)
 

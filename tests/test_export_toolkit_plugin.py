@@ -108,6 +108,7 @@ def target(tmp_path):
     tgt = tmp_path / "toolkit"
     tgt.mkdir()
     git(tgt, "init", "-q", "-b", "main")
+    git(tgt, "remote", "add", "origin", "https://github.com/toolkit-owner/claude-code-toolkit.git")
     write(tgt, "README.md", TOOLKIT_README)
     write(tgt, "timekeeper/tk.txt", "tk\n")
     write(tgt, "docs/keep.md", "keep\n")
@@ -116,7 +117,7 @@ def target(tmp_path):
     return tgt
 
 
-def export(source, target, sha=None, tag="context-rotation-v0.1.0", env=None, plugin=None):
+def export(source, target, sha=None, tag="context-rotation-v0.1.0", env=None, plugin=None, owner=None):
     """Run the script with sh from PATH, and a TMPDIR of the test's own."""
     sha = sha or git(source, "rev-parse", "HEAD")
     scratch = Path(target).parent / "scratch"
@@ -124,7 +125,7 @@ def export(source, target, sha=None, tag="context-rotation-v0.1.0", env=None, pl
     run_env = {**SCRIPT_ENV, "TMPDIR": str(scratch), **(env or {})}
     return subprocess.run(
         ["sh", str(SCRIPT), "--source", str(source), "--commit", sha, "--target", str(target), "--tag", tag,
-         *(["--plugin", plugin] if plugin else [])],
+         *(["--plugin", plugin] if plugin else []), *(["--owner", owner] if owner else [])],
         env=run_env, capture_output=True, text=True,
     )
 
@@ -253,7 +254,7 @@ def test_export_into_a_fresh_empty_repo_creates_readme_and_marketplace(source, t
     fresh.mkdir()
     git(fresh, "init", "-q", "-b", "main")
     git(fresh, "commit", "-q", "--allow-empty", "-m", "init")
-    result = export(source, fresh)
+    result = export(source, fresh, owner="acme")
     assert result.returncode == 0, result.stderr
     assert marketplace(fresh)["plugins"] == [EXPORTED_ENTRY]
     readme = blob(fresh, "README.md")
@@ -1073,7 +1074,7 @@ def test_leak_on_an_existing_export_branch_leaves_its_tip(source, target):
 def test_script_never_pushes_or_tags(source, target):
     assert export(source, target).returncode == 0
     assert git(target, "tag") == ""
-    assert git(target, "remote") == ""
+    assert git(target, "remote") == "origin"  # the fixture's own remote; the script adds none
 
 
 def test_script_lives_outside_the_wheel():
@@ -1197,3 +1198,81 @@ def test_the_real_meter_has_what_the_export_needs():
     manifest = json.loads((REAL_METER / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))
     assert manifest["name"] == "context-meter" and manifest["description"]
     assert (REAL_METER / "tests" / "test_isolation.py").is_file()
+
+
+# --- OI-2154: a committed build artefact is refused, the scan reads every published file
+
+
+@pytest.mark.parametrize("rel,text", [
+    ("hooks/__pycache__/identity.txt", "%s\n" % LEAK),
+    ("hooks/run.cpython-312.pyc", "compiled\n"),
+    ("hooks/run.pyo", "optimised\n"),
+    (".pytest_cache/v/cache/lastfailed", "{}\n"),
+])
+def test_a_committed_build_artefact_is_refused_and_named(source, target, rel, text):
+    commit_source(source, files={rel: text})
+    sha = git(source, "rev-parse", "HEAD")
+    before = checkout_state(target)
+    refs = branch_tips(target)
+    result = export(source, target)
+    assert result.returncode != 0, result.stdout
+    assert "build artefact in the export source at %s: %s/%s" % (sha, OWNED, rel) in result.stderr
+    assert BRANCH not in branches(target)
+    assert branch_tips(target) == refs
+    assert checkout_state(target) == before
+
+
+def test_every_build_artefact_is_named_in_one_refusal(source, target):
+    commit_source(source, files={"a/__pycache__/x.txt": "x\n", "b.pyc": "y\n"})
+    result = export(source, target)
+    assert result.returncode != 0
+    assert "%s/a/__pycache__/x.txt" % OWNED in result.stderr and "%s/b.pyc" % OWNED in result.stderr
+
+
+def test_a_blob_that_is_not_utf8_is_still_scanned(source, target):
+    base = Path(source) / OWNED
+    path = base / "hooks" / "binary.txt"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"\xff\xfe bad byte then " + LEAK.encode() + b"\n")
+    commit_source(source)
+    result = export(source, target)
+    assert result.returncode == 1, result.stdout
+    assert "hooks/binary.txt:1" in result.stderr
+    assert BRANCH not in branches(target)
+
+
+# --- AG-4: the marketplace owner comes from the target's origin or --owner, never a fixed name
+
+
+def _fresh_target(tmp_path, origin=None):
+    fresh = tmp_path / "fresh"
+    fresh.mkdir()
+    git(fresh, "init", "-q", "-b", "main")
+    git(fresh, "commit", "-q", "--allow-empty", "-m", "init")
+    if origin:
+        git(fresh, "remote", "add", "origin", origin)
+    return fresh
+
+
+@pytest.mark.parametrize("origin", ["git@github.com:other-owner/x.git", "https://github.com/other-owner/x.git"])
+def test_new_marketplace_owner_is_the_owner_of_origin(source, tmp_path, origin):
+    fresh = _fresh_target(tmp_path, origin)
+    result = export(source, fresh)
+    assert result.returncode == 0, result.stderr
+    assert marketplace(fresh)["owner"] == {"name": "other-owner"}
+
+
+def test_owner_option_overrides_origin(source, tmp_path):
+    fresh = _fresh_target(tmp_path, "git@github.com:other-owner/x.git")
+    result = export(source, fresh, owner="acme")
+    assert result.returncode == 0, result.stderr
+    assert marketplace(fresh)["owner"] == {"name": "acme"}
+
+
+def test_new_marketplace_without_origin_or_owner_refuses_naming_the_option(source, tmp_path):
+    fresh = _fresh_target(tmp_path)
+    before = branches(fresh)
+    result = export(source, fresh)
+    assert result.returncode != 0
+    assert "--owner" in result.stderr
+    assert branches(fresh) == before

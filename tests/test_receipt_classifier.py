@@ -215,22 +215,36 @@ def test_provider_haiku_invokes_correct_cli(env_state, monkeypatch):
 
 
 def test_provider_ollama_invokes_correct_cli(env_state, monkeypatch):
+    """Ollama is called over its HTTP API (00f2d70fd), with the configured model."""
     monkeypatch.setenv("VNX_RECEIPT_CLASSIFIER_ENABLED", "1")
     monkeypatch.setenv("VNX_RECEIPT_CLASSIFIER_PROVIDER", "ollama")
     monkeypatch.setenv("VNX_OLLAMA_MODEL", "llama3.1:8b")
 
     captured = {}
 
-    def fake_run(cmd, **kwargs):
-        captured["cmd"] = cmd
-        return subprocess.CompletedProcess(
-            args=cmd, returncode=0, stdout='{"impact_class":"trivial","suggested_edit":null}', stderr=""
-        )
+    class _Resp:
+        def __enter__(self):
+            return self
 
-    with patch("classifier_providers.ollama_provider.subprocess.run", side_effect=fake_run):
+        def __exit__(self, *exc):
+            return False
+
+        def read(self):
+            return json.dumps(
+                {"response": '{"impact_class":"trivial","suggested_edit":null}'}
+            ).encode("utf-8")
+
+    def fake_urlopen(req, timeout=None):
+        captured["url"] = req.full_url
+        captured["body"] = json.loads(req.data.decode("utf-8"))
+        return _Resp()
+
+    with patch("classifier_providers.ollama_provider.urllib.request.urlopen", side_effect=fake_urlopen):
         result = rc.classify_receipt(_make_receipt())
     assert result["status"] == "ok"
-    assert captured["cmd"] == ["ollama", "run", "llama3.1:8b"]
+    assert captured["url"].endswith("/api/generate")
+    assert captured["body"]["model"] == "llama3.1:8b"
+    assert captured["body"]["stream"] is False
 
 
 # ----------------------------------------------------------------------

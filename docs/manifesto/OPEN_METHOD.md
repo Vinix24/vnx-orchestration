@@ -35,7 +35,7 @@ I started with Claude Opus as T0 and the hook-based write isolation kept it that
 
 ## Current State & The Road Ahead
 
-*(Written February 2026 — describes the terminal-grid state at that point; the current default lane runs ephemeral per-dispatch workers instead, see `HEADLESS_TRANSITION.md`.)*
+*(Written February 2026 — describes the terminal-grid state at that point; the current default lane runs ephemeral per-dispatch workers instead, see `docs/core/PROVIDER_LANES.md`.)*
 
 The current implementation runs in my daily workflow, orchestrating 3-4 terminals (Claude Code + Codex) with graceful recovery from crashes via ledger replay. It's not a "zero-downtime production" system; it's a working prototype that I trust enough to build real software with.
 
@@ -43,7 +43,7 @@ The current implementation runs in my daily workflow, orchestrating 3-4 terminal
 
 VNX started life inside a private product repository. When the architecture matured, I split it into its own Git repository. That means the **public history begins at the separation point**, and earlier work is represented as a **squashed baseline**. This is deliberate: it keeps the product repo private while still exposing the architecture and current implementation clearly.
 
-For a reader-friendly chronology of the technical evolution, see `EVOLUTION_TIMELINE.md`.
+For a reader-friendly chronology of the technical evolution, see `CHANGELOG.md` and `docs/core/00_VNX_ARCHITECTURE.md`.
 
 For broader adoption, this architecture would benefit from a memory-safe implementation (Rust or Go). The current Python/Bash prototype proves the concepts; a production-grade CLI would require careful engineering.
 

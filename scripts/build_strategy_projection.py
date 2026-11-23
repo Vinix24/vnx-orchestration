@@ -175,13 +175,7 @@ def build_projection(
 
     Returns a ``Roadmap`` instance (not a dict). Does NOT write to disk.
     """
-    from strategy.roadmap import (
-        WAVE_STATUSES,
-        RISK_CLASSES,
-        Phase,
-        Roadmap,
-        Wave,
-    )
+    from strategy.roadmap import Roadmap, Wave
 
     root = _load_root_roadmap(root_roadmap_path)
     features: list[dict] = root.get("features") or []
@@ -203,66 +197,97 @@ def build_projection(
             )
             continue
         feature_ids.add(fid)
-
-        raw_status = str(feature.get("status", "planned"))
-        status = _map_status(raw_status)
-        if status not in WAVE_STATUSES:
-            status = "planned"
-
-        milestone = feature.get("milestone")
-        phase_id = _resolve_phase_id(milestone)
-        phase_ids_seen.add(phase_id)
-
-        risk_class = str(feature.get("risk_class", "low"))
-        if risk_class not in RISK_CLASSES:
-            risk_class = "low"
-
-        depends_on: list[str] = [
-            str(d) for d in (feature.get("depends_on") or []) if d
-        ]
-
-        review_stack: list[str] = [
-            str(r) for r in (feature.get("review_stack") or []) if r
-        ]
-
-        # Optional fields
-        branch_name = feature.get("branch_name")
-        branch_name = str(branch_name) if branch_name else None
-
-        plan_path = feature.get("plan_path")
-        plan_path = str(plan_path) if plan_path else None
-
-        notes = feature.get("notes")
-        notes = str(notes).strip() if notes else None
-
-        pr_number = None
-        pr_queue = feature.get("pr_queue") or []
-        if pr_queue:
-            for pq in pr_queue:
-                pr_id = pq.get("pr_id") or ""
-                if pr_id.startswith("#"):
-                    try:
-                        pr_number = int(pr_id.lstrip("#"))
-                    except (ValueError, TypeError):
-                        pass
-                    break
-
-        wave = Wave(
-            wave_id=fid,
-            title=str(feature.get("title", fid)),
-            phase_id=phase_id,
-            status=status,
-            risk_class=risk_class,
-            depends_on=depends_on,
-            review_stack=review_stack,
-            branch_name=branch_name,
-            plan_path=plan_path,
-            notes=notes,
-            pr_number=pr_number,
-        )
+        wave = _feature_to_wave(feature, fid)
+        phase_ids_seen.add(wave.phase_id)
         waves.append(wave)
 
-    # --- Validate depends_on references ---
+    _warn_dangling_depends_on(waves, feature_ids)
+    _sort_waves_by_dependency(waves)
+    phases = _build_phases(waves, phase_ids_seen)
+    completed_history = _build_completed_history(waves, generated_at)
+
+    return Roadmap(
+        schema_version=1,
+        roadmap_id=roadmap_id,
+        title=title,
+        generated_at=generated_at,
+        phases=phases,
+        waves=waves,
+        operator_decisions=[],
+        completed_history=completed_history,
+        notes={
+            "source": str(root_roadmap_path),
+            "generator": "scripts/build_strategy_projection.py",
+            "warning": (
+                "Generated projection of the imported file. Edit that file or the "
+                "tracks DB, not this file."
+            ),
+        },
+    )
+
+
+def _feature_to_wave(feature: dict, fid: str):
+    from strategy.roadmap import WAVE_STATUSES, RISK_CLASSES, Wave
+
+    raw_status = str(feature.get("status", "planned"))
+    status = _map_status(raw_status)
+    if status not in WAVE_STATUSES:
+        status = "planned"
+
+    milestone = feature.get("milestone")
+    phase_id = _resolve_phase_id(milestone)
+
+    risk_class = str(feature.get("risk_class", "low"))
+    if risk_class not in RISK_CLASSES:
+        risk_class = "low"
+
+    depends_on: list[str] = [
+        str(d) for d in (feature.get("depends_on") or []) if d
+    ]
+
+    review_stack: list[str] = [
+        str(r) for r in (feature.get("review_stack") or []) if r
+    ]
+
+    # Optional fields
+    branch_name = feature.get("branch_name")
+    branch_name = str(branch_name) if branch_name else None
+
+    plan_path = feature.get("plan_path")
+    plan_path = str(plan_path) if plan_path else None
+
+    notes = feature.get("notes")
+    notes = str(notes).strip() if notes else None
+
+    pr_number = None
+    pr_queue = feature.get("pr_queue") or []
+    if pr_queue:
+        for pq in pr_queue:
+            pr_id = pq.get("pr_id") or ""
+            if pr_id.startswith("#"):
+                try:
+                    pr_number = int(pr_id.lstrip("#"))
+                except (ValueError, TypeError):
+                    pass
+                break
+
+    wave = Wave(
+        wave_id=fid,
+        title=str(feature.get("title", fid)),
+        phase_id=phase_id,
+        status=status,
+        risk_class=risk_class,
+        depends_on=depends_on,
+        review_stack=review_stack,
+        branch_name=branch_name,
+        plan_path=plan_path,
+        notes=notes,
+        pr_number=pr_number,
+    )
+    return wave
+
+
+def _warn_dangling_depends_on(waves: list, feature_ids: set[str]) -> None:
     for w in waves:
         for dep in w.depends_on:
             if dep not in feature_ids:
@@ -273,6 +298,8 @@ def build_projection(
                     file=sys.stderr,
                 )
 
+
+def _sort_waves_by_dependency(waves: list) -> None:
     # --- Reorder waves for dependency-aware next_actionable_wave ---
     # ``next_actionable_wave()`` returns the first planned wave in list
     # order whose deps are all completed. Sort so zero-dep planned waves
@@ -305,7 +332,10 @@ def build_projection(
 
     waves.sort(key=_dep_sort_key)
 
-    # --- Build phases ---
+
+def _build_phases(waves: list, phase_ids_seen: set[int]) -> list:
+    from strategy.roadmap import Phase
+
     phases: list[Phase] = []
     for pid in sorted(phase_ids_seen):
         phase_wave_ids = [w.wave_id for w in waves if w.phase_id == pid]
@@ -314,8 +344,10 @@ def build_projection(
             title=_PHASE_TITLES.get(pid, f"Phase {pid}"),
             waves=phase_wave_ids,
         ))
+    return phases
 
-    # --- Build completed_history from completed waves ---
+
+def _build_completed_history(waves: list, generated_at: str) -> list[dict]:
     completed_history: list[dict] = []
     for w in waves:
         if w.status == "completed":
@@ -327,25 +359,7 @@ def build_projection(
             if w.pr_number:
                 entry["pr"] = f"#{w.pr_number}"
             completed_history.append(entry)
-
-    return Roadmap(
-        schema_version=1,
-        roadmap_id=roadmap_id,
-        title=title,
-        generated_at=generated_at,
-        phases=phases,
-        waves=waves,
-        operator_decisions=[],
-        completed_history=completed_history,
-        notes={
-            "source": str(root_roadmap_path),
-            "generator": "scripts/build_strategy_projection.py",
-            "warning": (
-                "Generated projection of the imported file. Edit that file or the "
-                "tracks DB, not this file."
-            ),
-        },
-    )
+    return completed_history
 
 
 # ---------------------------------------------------------------------------

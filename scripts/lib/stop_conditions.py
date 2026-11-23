@@ -59,12 +59,13 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, FrozenSet, List, Optional, Set, Tuple
+from typing import Any, Dict, FrozenSet, List, Optional, Sequence, Set, Tuple
 
 _HERE = Path(__file__).resolve().parent
 if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))
 
+import main_window  # noqa: E402
 from project_root import resolve_project_root  # noqa: E402
 from event_outcome_semantics import COMPLETION_EVENT_TYPES  # noqa: E402
 from ledger_end_line import DISPATCH_FINISHED_EVENT_TYPE, end_status  # noqa: E402
@@ -77,6 +78,13 @@ from receipt_verdict import HARD_FAILURE_STATUSES, SUCCESS_STATUSES  # noqa: E40
 # so importing it keeps this module's standalone-importable contract intact —
 # importing gate_recorder (which pulls the whole receipt stack) would not.
 from failure_classification import GATE_QUOTA_REFUSAL_REASON as QUOTA_REFUSAL_REASON  # noqa: E402
+# The prefix of the one synthetic blocking entry gate_artifacts adds to a
+# rejection with no blocking finding (OI-1938). Imported, never copied: the
+# literal lives in failure_classification, and gate_artifacts imports it from
+# there too. Importing it from gate_artifacts would pull gate_recorder and yaml
+# and break this module's standalone-importable contract.
+from failure_classification import VERDICT_ENTRY_PREFIX  # noqa: E402
+from failure_classification import VERDICT_WITHOUT_FINDINGS  # noqa: E402
 
 try:
     from failure_classification import FAILURE_CLASSES as _KNOWN_FAILURE_CLASSES
@@ -253,10 +261,21 @@ def _capture(
 
 # ── Check 1: E1 — main-branch CI conclusion ─────────────────────────────────
 
-DEFAULT_CI_WORKFLOW_NAME = "VNX CI"
-CI_WORKFLOW_NAME_ENV_VAR = "VNX_CI_WORKFLOW_NAME"
-DEFAULT_MAIN_BRANCH = "main"
-GH_RUN_LIST_TIMEOUT = 15
+DEFAULT_MAIN_BRANCH = main_window.DEFAULT_MAIN_BRANCH
+
+
+def _red_window_message(window: "main_window.MainWindow", workflow: str, branch: str) -> str:
+    red = window.first_red
+    origin = (
+        f"PR #{red.pr_number}, dispatch {red.dispatch_id}"
+        if red.mapping == main_window.MAPPING_RECEIPT
+        else "no_receipt"
+    )
+    return (
+        f"{workflow} rood in het venster op '{branch}' (E1: main branch broken after merge). "
+        f"Vermoedelijke oorzaak, niet bewezen: {red.sha} run {red.run_id} ({origin}); "
+        f"het venster telt {len(window.entries)} merge(s) sinds de groene basis {window.base_sha}"
+    )
 
 
 def check_main_ci_red(
@@ -265,16 +284,20 @@ def check_main_ci_red(
     branch: str = DEFAULT_MAIN_BRANCH,
     workflow_name: Optional[str] = None,
     gh_bin: str = "gh",
+    state_dir: Optional[Path] = None,
+    now: Optional[datetime] = None,
 ) -> StopConditionResult:
     """E1: main branch broken after merge.
 
-    Measures the VNX CI workflow conclusion of the most recent run on
-    ``branch`` (default: main). A still-running latest run (in_progress /
-    queued) is UNMEASURABLE — "not yet known", never read as clear or
-    triggered.
+    Reads the window on ``branch`` (the merges since the last green VNX CI
+    run, see ``main_window``). A red run anywhere in the window is TRIGGERED, and
+    so is a named NO-GO entry (``stale_run``, ``no_run``, a cancelled or timed-out
+    run, an unknown conclusion), with its reason. A window with a run that is
+    still running is UNMEASURABLE ("not yet known"), as is anything the reader
+    could not measure.
     """
     check_id = "main_ci_red"
-    resolved_workflow = workflow_name or os.environ.get(CI_WORKFLOW_NAME_ENV_VAR) or DEFAULT_CI_WORKFLOW_NAME
+    resolved_workflow = main_window.resolve_ci_workflow_name(workflow_name)
     root = Path(project_root) if project_root is not None else _default_project_root()
     if root is None:
         return _unmeasurable(check_id, "kon project-root niet resolven: main-CI-status niet meetbaar")
@@ -282,59 +305,32 @@ def check_main_ci_red(
     if shutil.which(gh_bin) is None:
         return _unmeasurable(check_id, "gh CLI niet beschikbaar: main-CI-status niet meetbaar", workflow=resolved_workflow)
 
-    result, err = _capture(
-        [
-            gh_bin, "run", "list",
-            "--branch", branch,
-            "--workflow", resolved_workflow,
-            "--limit", "1",
-            "--json", "conclusion,status,headSha,createdAt,databaseId",
-        ],
-        timeout=GH_RUN_LIST_TIMEOUT,
-        cwd=str(root),
+    window = main_window.read_window(
+        root, state_dir=state_dir, branch=branch, workflow_name=resolved_workflow, gh_bin=gh_bin, now=now
     )
-    if err == "missing":
-        return _unmeasurable(check_id, "gh CLI niet beschikbaar: main-CI-status niet meetbaar", workflow=resolved_workflow)
-    if err == "timeout":
-        return _unmeasurable(check_id, f"gh run list liep vast voor workflow '{resolved_workflow}'", workflow=resolved_workflow, branch=branch)
-    if result is None or result.returncode != 0:
-        stderr = (result.stderr if result else "").strip()
+    evidence = dict(workflow=resolved_workflow, branch=branch, window=window.to_dict())
+    if window.verdict == main_window.VERDICT_RED:
+        return _triggered(check_id, _red_window_message(window, resolved_workflow, branch), **evidence)
+    if window.verdict == main_window.VERDICT_NOGO:
+        nogo = window.first_nogo
+        return _triggered(
+            check_id,
+            f"{resolved_workflow} op '{branch}': {nogo.reason} voor {nogo.sha} (run {nogo.run_id}); "
+            f"het venster telt {len(window.entries)} merge(s) sinds de groene basis {window.base_sha}",
+            **evidence,
+        )
+    if window.verdict == main_window.VERDICT_RUNNING:
         return _unmeasurable(
             check_id,
-            f"gh run list faalde voor workflow '{resolved_workflow}' op branch '{branch}'"
-            + (f" ({stderr[:200]})" if stderr else ""),
-            workflow=resolved_workflow,
-            branch=branch,
+            f"{resolved_workflow} draait nog voor een merge in het venster op '{branch}': conclusie nog niet bekend",
+            **evidence,
         )
-
-    try:
-        runs = json.loads(result.stdout)
-    except json.JSONDecodeError:
-        return _unmeasurable(check_id, f"gh-uitvoer niet te parsen voor workflow '{resolved_workflow}'", workflow=resolved_workflow, branch=branch)
-
-    if not runs:
-        return _unmeasurable(check_id, f"geen VNX CI-run gevonden op branch '{branch}'", workflow=resolved_workflow, branch=branch)
-
-    run = runs[0]
-    status = run.get("status") or ""
-    if status in ("in_progress", "queued"):
-        return _unmeasurable(
-            check_id,
-            f"{resolved_workflow} draait nog op '{branch}' (status={status}): conclusie nog niet bekend",
-            workflow=resolved_workflow, branch=branch, run=run,
-        )
-
-    conclusion = run.get("conclusion") or ""
-    if not conclusion:
-        return _unmeasurable(check_id, f"run afgerond zonder conclusion-veld op '{branch}'", workflow=resolved_workflow, branch=branch, run=run)
-
-    if conclusion == "success":
-        return _clear(check_id, f"{resolved_workflow} geslaagd op '{branch}'", workflow=resolved_workflow, branch=branch, run=run)
-
-    return _triggered(
+    if window.verdict == main_window.VERDICT_GREEN:
+        return _clear(check_id, f"{resolved_workflow} geslaagd op '{branch}': het venster is leeg", **evidence)
+    return _unmeasurable(
         check_id,
-        f"{resolved_workflow} conclusion='{conclusion}' op '{branch}' (E1: main branch broken after merge)",
-        workflow=resolved_workflow, branch=branch, run=run,
+        f"main-CI-venster niet meetbaar voor workflow '{resolved_workflow}' op '{branch}': {window.reason}",
+        **evidence,
     )
 
 
@@ -342,6 +338,23 @@ def check_main_ci_red(
 
 GH_AUTH_TIMEOUT = 10
 GH_RATE_LIMIT_TIMEOUT = 10
+
+
+def check_morning_pause(
+    state_dir: Optional[Path] = None, *, now: Optional[datetime] = None,
+    get: Optional[Any] = None,
+) -> StopConditionResult:
+    """ADR-095: TRIGGERED while the morning pause holds, CLEAR otherwise (off by default, then nothing else is read)."""
+    import morning_pause_gate as gate
+    from vnx_paths import project_id_from_state_dir
+
+    project_id = (project_id_from_state_dir(state_dir) or None) if state_dir is not None else None
+    verdict = gate.morning_pause_verdict(
+        project_id, now or datetime.now(timezone.utc), state_dir=state_dir, get=get)
+    evidence = {"reason": verdict.reason, "day": verdict.day, "project_id": project_id}
+    if verdict.paused:
+        return _triggered("morning_pause", f"morning round: pause active ({verdict.reason})", **evidence)
+    return _clear("morning_pause", f"morning round: no pause ({verdict.reason})", **evidence)
 
 
 def check_gh_auth_dead(*, gh_bin: str = "gh") -> StopConditionResult:
@@ -448,6 +461,38 @@ def _tail_lines(path: Path, max_lines: int) -> List[str]:
 
 DEFAULT_RECEIPT_TAIL_LINES = 5000
 DEFAULT_EXHAUSTION_THRESHOLD = 3
+
+# OI-1800: the dispatch-id prefixes of the panel lane (deliberation panel,
+# plan-gate seats, plan-gate tiebreak). A receipt carries no explicit lane-of-
+# origin field: ``lane`` is the transport (claude_headless, absent on provider
+# lines) and ``role`` is not exclusive (plan-reviewer also rides on kimi-gate-,
+# glm-gate- and test-govern- ids, measured 2026-11-14), so the id prefix is
+# the only label. Minted at:
+#   panel-          scripts/lib/deliberation_panel.py:510 (diverge), :702/:725/:748
+#                   (contrarian/verify/synth); scripts/lib/panel_leg_cost.py:65/:70
+#   plan-gate-      scripts/lib/plan_gate_panel.py:2354
+#   plan-tiebreak-  scripts/lib/plan_gate_tiebreaker.py:1107; scripts/planning_cli.py:4606
+PANEL_LANE_DISPATCH_PREFIXES: Tuple[str, ...] = ("panel-", "plan-gate-", "plan-tiebreak-")
+
+
+def is_panel_lane_dispatch(dispatch_id: Any) -> bool:
+    """Was ``dispatch_id`` minted by the panel lane? A non-string or empty id is not."""
+    return isinstance(dispatch_id, str) and dispatch_id.strip().startswith(PANEL_LANE_DISPATCH_PREFIXES)
+
+
+def _drop_panel_lane(
+    by_provider: Dict[str, List[Dict[str, Any]]],
+) -> Tuple[Dict[str, List[Dict[str, Any]]], Dict[str, int]]:
+    """Split panel-lane attempts out of ``by_provider``: (kept, excluded count per provider)."""
+    kept: Dict[str, List[Dict[str, Any]]] = {}
+    excluded: Dict[str, int] = {}
+    for provider, records in by_provider.items():
+        rest = [r for r in records if not is_panel_lane_dispatch(r.get("dispatch_id"))]
+        if len(rest) != len(records):
+            excluded[provider] = len(records) - len(rest)
+        if rest:
+            kept[provider] = rest
+    return kept, excluded
 
 
 def _attempt_identity(record: Dict[str, Any]) -> Optional[Tuple[str, str, int, str]]:
@@ -571,6 +616,7 @@ def check_provider_exhausted(
     providers: Optional[List[str]] = None,
     threshold: int = DEFAULT_EXHAUSTION_THRESHOLD,
     tail_lines: int = DEFAULT_RECEIPT_TAIL_LINES,
+    exclude_panel_lane: bool = False,
 ) -> StopConditionResult:
     """A provider/lane refuses structurally (example live on the ledger since
     2026-09-03: kimi's weekly quota, HTTP 403 access_terminated_error).
@@ -602,6 +648,13 @@ def check_provider_exhausted(
     practical effect is fewer false UNMEASURABLE verdicts (more real
     attempts are now recognized) without weakening the TRIGGERED condition,
     which still requires the failure_class itself to be exhaustion-specific.
+
+    ``exclude_panel_lane`` (OI-1800, operator decision 2026-11-14): attempts
+    whose dispatch id carries a PANEL_LANE_DISPATCH_PREFIXES prefix leave the
+    window, so dead panel or plan-gate seats cannot halt a build or gate
+    dispatch on a healthy build lane. The count left out per provider is on
+    ``evidence["panel_lane_excluded"]``. False (the default) counts every
+    attempt: a panel dispatch itself, and a caller without a dispatch.
     """
     check_id = "provider_exhausted"
     if receipts_path is not None:
@@ -621,9 +674,15 @@ def check_provider_exhausted(
         return _unmeasurable(check_id, f"receipts-bestand niet leesbaar: {exc}")
 
     by_provider = _provider_attempts(lines, providers)
+    excluded: Dict[str, int] = {}
+    if exclude_panel_lane:
+        by_provider, excluded = _drop_panel_lane(by_provider)
 
     if not by_provider:
-        return _unmeasurable(check_id, f"geen bruikbare provider-attempts gevonden in laatste {tail_lines} regels")
+        return _unmeasurable(
+            check_id, f"geen bruikbare provider-attempts gevonden in laatste {tail_lines} regels",
+            panel_lane_excluded=excluded,
+        )
 
     sub_results: List[StopConditionResult] = []
     for provider, records in by_provider.items():
@@ -647,7 +706,9 @@ def check_provider_exhausted(
                 _clear(sub_id, f"laatste {threshold} attempts voor '{provider}' niet allemaal exhaustion-failures", provider=provider, window=window)
             )
 
-    return _combine(check_id, sub_results, sub_key="per_provider")
+    result = _combine(check_id, sub_results, sub_key="per_provider")
+    result.evidence["panel_lane_excluded"] = excluded
+    return result
 
 
 # ── Check 4: E6 — repeated gate-failure cause ───────────────────────────────
@@ -684,7 +745,33 @@ _UNBUILT_GATE_REASONS = frozenset({"gate_runner_missing"})
 # it is still reported loudly (a non-triggering notice, never a silent skip).
 _EXTERNAL_TRANSIENT_GATE_REASONS = frozenset({QUOTA_REFUSAL_REASON})
 
+# A rejection that carries no finding at all (ADR-080 besluit 4) is booked as
+# ``unavailable`` with this reason. It is no verdict, so it is no recurring
+# cause either: excluded from the streak (it neither counts toward it nor
+# breaks it) and reported loudly in its own bucket.
+_VERDICT_WITHOUT_FINDINGS_REASONS = frozenset({VERDICT_WITHOUT_FINDINGS})
+
 DEFAULT_REPEAT_THRESHOLD = 3
+
+
+def _is_synthetic_verdict_entry(finding: Any) -> bool:
+    """True only for a dict whose message positively starts with the prefix."""
+    if not isinstance(finding, dict):
+        return False
+    message = finding.get("message")
+    return isinstance(message, str) and message.startswith(VERDICT_ENTRY_PREFIX)
+
+
+def _file_causes(findings: Any) -> Set[str]:
+    """``file:<path>`` for every finding with a usable ``file_path``."""
+    if not isinstance(findings, list):
+        return set()
+    causes: Set[str] = set()
+    for finding in findings:
+        path = finding.get("file_path") if isinstance(finding, dict) else None
+        if isinstance(path, str) and path.strip():
+            causes.add(f"file:{path.strip()}")
+    return causes
 
 
 def _gate_result_cause(record: Dict[str, Any]) -> Optional[FrozenSet[str]]:
@@ -703,6 +790,13 @@ def _gate_result_cause(record: Dict[str, Any]) -> Optional[FrozenSet[str]]:
         time; OI-2074). A blocking finding without a usable ``file_path``
         contributes the legacy ``blocking_findings`` cause, so a run that
         names no file can still trip E6.
+      - the same completed run whose ONLY blocking entries are the synthetic
+        ``failure_classification.VERDICT_ENTRY_PREFIX`` entry (a ``fail`` verdict with
+        advisory findings only, OI-1938). That entry names no file and is
+        identical on every such PR, so it is no cause. The cause is then the
+        set of ``file:<file_path>`` of the record's ADVISORY findings that
+        carry a usable path. Without any, the legacy ``blocking_findings``
+        cause stays.
     """
     status = record.get("status")
     if status in _INFRA_FAIL_STATUSES:
@@ -712,6 +806,10 @@ def _gate_result_cause(record: Dict[str, Any]) -> Optional[FrozenSet[str]]:
         findings = record.get("blocking_findings")
         if not findings:
             return None
+        if all(_is_synthetic_verdict_entry(f) for f in findings):
+            advisory_causes = _file_causes(record.get("advisory_findings"))
+            if advisory_causes:
+                return frozenset(advisory_causes)
         causes = set()
         for finding in findings:
             path = finding.get("file_path") if isinstance(finding, dict) else None
@@ -724,10 +822,12 @@ def _gate_result_cause(record: Dict[str, Any]) -> Optional[FrozenSet[str]]:
 
 
 def _classify_gate_record(record: Dict[str, Any]) -> Tuple[str, Optional[FrozenSet[str]]]:
-    """Bucket one review_gates result for E6: ``unbuilt``, ``exhausted`` or ``counted``.
+    """Bucket one review_gates result for E6: ``unbuilt``, ``exhausted``,
+    ``no_verdict`` or ``counted``.
 
     _gate_result_cause reports what the record honestly says, for any
-    infra-fail reason alike. The POLICY choice of which causes count toward a
+    infra-fail reason alike (for an advisory-only rejection that is the
+    advisory files, not the synthetic verdict entry). The POLICY choice of which causes count toward a
     repeating-failure streak belongs here, not in that helper. Two causes are
     excluded, for opposite reasons, and each keeps its OWN bucket so the two
     stay distinguishable in the output:
@@ -737,7 +837,10 @@ def _classify_gate_record(record: Dict[str, Any]) -> Tuple[str, Optional[FrozenS
         ITSELF, usually at a date the provider states out loud
         (D-gate-quota-105245). Halting on it stays broken for exactly as long
         as the provider's window lasts.
-    Both are reported as loud, non-triggering notices — excluded from the
+      - verdict_without_findings: a rejection with zero findings is no
+        verdict and no recurring cause (ADR-080 besluit 4); bucket
+        ``no_verdict``.
+    All three are reported as loud, non-triggering notices — excluded from the
     streak, never silently dropped.
     """
     cause = _gate_result_cause(record)
@@ -750,6 +853,8 @@ def _classify_gate_record(record: Dict[str, Any]) -> Tuple[str, Optional[FrozenS
         return "unbuilt", cause
     if cause_reason in _EXTERNAL_TRANSIENT_GATE_REASONS:
         return "exhausted", cause
+    if cause_reason in _VERDICT_WITHOUT_FINDINGS_REASONS:
+        return "no_verdict", cause
     return "counted", cause
 
 
@@ -787,6 +892,7 @@ def _excluded_gate_notices(
     check_id: str,
     unbuilt_gate_records: Dict[str, List[Tuple[datetime, Any]]],
     exhausted_gate_records: Dict[str, List[Tuple[datetime, Any]]],
+    no_verdict_gate_records: Optional[Dict[str, List[Tuple[datetime, Any]]]] = None,
 ) -> List[StopConditionResult]:
     """Loud, non-triggering notices for the records kept out of the streak.
 
@@ -797,6 +903,8 @@ def _excluded_gate_notices(
     (VNX_REVIEW_GATE_TAKEOVER_CHAIN), not a stop condition. Both are
     _unmeasurable-shaped, a status that can never tip _combine's verdict to
     TRIGGERED, so each is a loud non-event, never a silent one or a halt.
+    A third bucket, ``no_verdict`` (reason ``verdict_without_findings``), is a
+    rejection that named nothing: no verdict, so no recurring cause.
     """
     notices: List[StopConditionResult] = []
     for gate, records in unbuilt_gate_records.items():
@@ -820,6 +928,18 @@ def _excluded_gate_notices(
                 f"(reason:{QUOTA_REFUSAL_REASON}, {len(records)}x gezien, meest recente PR #{newest_pr}) "
                 f"— externe, tijdelijke oorzaak, telt niet mee als systemische herhaling",
                 gate=gate, reason=QUOTA_REFUSAL_REASON, count=len(records), newest_pr=newest_pr,
+            )
+        )
+    for gate, records in (no_verdict_gate_records or {}).items():
+        records.sort(key=lambda r: r[0])
+        newest_pr = records[-1][1]
+        notices.append(
+            _unmeasurable(
+                f"{check_id}:{VERDICT_WITHOUT_FINDINGS}:{gate}",
+                f"gate '{gate}' wees af zonder bevinding "
+                f"(reason:{VERDICT_WITHOUT_FINDINGS}, {len(records)}x gezien, meest recente PR #{newest_pr}) "
+                f"— geen uitkomst en geen terugkerende oorzaak, telt niet mee in de reeks",
+                gate=gate, reason=VERDICT_WITHOUT_FINDINGS, count=len(records), newest_pr=newest_pr,
             )
         )
     return notices
@@ -868,6 +988,7 @@ def check_repeated_gate_failure_cause(
     by_gate: Dict[str, List[Tuple[datetime, Any, Optional[FrozenSet[str]]]]] = {}
     unbuilt_gate_records: Dict[str, List[Tuple[datetime, Any]]] = {}
     exhausted_gate_records: Dict[str, List[Tuple[datetime, Any]]] = {}
+    no_verdict_gate_records: Dict[str, List[Tuple[datetime, Any]]] = {}
     for fp in files:
         try:
             d = json.loads(fp.read_text(encoding="utf-8"))
@@ -886,16 +1007,18 @@ def check_repeated_gate_failure_cause(
             unbuilt_gate_records.setdefault(gate, []).append((ts, d.get("pr_number")))
         elif bucket == "exhausted":
             exhausted_gate_records.setdefault(gate, []).append((ts, d.get("pr_number")))
+        elif bucket == "no_verdict":
+            no_verdict_gate_records.setdefault(gate, []).append((ts, d.get("pr_number")))
         else:
             by_gate.setdefault(gate, []).append((ts, d.get("pr_number"), cause))
 
-    if not by_gate and not unbuilt_gate_records and not exhausted_gate_records:
+    if not by_gate and not unbuilt_gate_records and not exhausted_gate_records and not no_verdict_gate_records:
         return _unmeasurable(check_id, "geen bruikbare gate-resultaten met geldige recorded_at gevonden")
 
     sub_results: List[StopConditionResult] = [
         _gate_window_result(check_id, gate, entries, n) for gate, entries in by_gate.items()
     ]
-    sub_results.extend(_excluded_gate_notices(check_id, unbuilt_gate_records, exhausted_gate_records))
+    sub_results.extend(_excluded_gate_notices(check_id, unbuilt_gate_records, exhausted_gate_records, no_verdict_gate_records))
     return _combine(check_id, sub_results, sub_key="per_gate")
 
 
@@ -996,6 +1119,7 @@ ALL_CHECK_IDS = (
     "gh_auth_dead",
     "provider_exhausted",
     "repeated_gate_failure_cause",
+    "morning_pause",
 )
 
 
@@ -1004,9 +1128,11 @@ def run_all_checks(
     state_dir: Optional[Path] = None,
     project_root: Optional[Path] = None,
     write_halt: bool = True,
+    exclude_panel_lane: bool = False,
 ) -> List[StopConditionResult]:
     """Run all four stop-condition checks. When any is TRIGGERED and
     ``write_halt`` is true, write/overwrite ``halt.json`` in ``state_dir``.
+    ``exclude_panel_lane`` is passed to check_provider_exhausted (OI-1800).
 
     Never raises: each check function is itself fail-closed-to-unmeasurable,
     never fail-open-to-clear. When the state dir cannot be resolved at all
@@ -1027,17 +1153,20 @@ def run_all_checks(
     resolved_root = Path(project_root) if project_root is not None else _default_project_root()
 
     if resolved_state_dir is not None:
-        provider_result = check_provider_exhausted(resolved_state_dir / "t0_receipts.ndjson")
+        provider_result = check_provider_exhausted(
+            resolved_state_dir / "t0_receipts.ndjson", exclude_panel_lane=exclude_panel_lane,
+        )
         gate_result = check_repeated_gate_failure_cause(resolved_state_dir / "review_gates" / "results")
     else:
         provider_result = _unmeasurable("provider_exhausted", "state-dir niet resolvbaar: geen locatie voor t0_receipts.ndjson")
         gate_result = _unmeasurable("repeated_gate_failure_cause", "state-dir niet resolvbaar: geen locatie voor review_gates/results")
 
     results = [
-        check_main_ci_red(resolved_root),
+        check_main_ci_red(resolved_root, state_dir=resolved_state_dir),
         check_gh_auth_dead(),
         provider_result,
         gate_result,
+        check_morning_pause(resolved_state_dir),
     ]
 
     if write_halt and resolved_state_dir is not None and any(r.status == CheckStatus.TRIGGERED for r in results):
@@ -1046,22 +1175,42 @@ def run_all_checks(
     return results
 
 
-def write_halt_file(state_dir: Path, results: List[StopConditionResult]) -> Path:
+def write_halt_file(
+    state_dir: Path,
+    results: List[StopConditionResult],
+    *,
+    scoped_out: Sequence[StopConditionResult] = (),
+    scope: Optional[Dict[str, Any]] = None,
+) -> Path:
     """Write ``halt.json`` atomically (tmp file + os.replace via atomic_io).
 
     This module only ever WRITES halt.json on a trigger — it never clears an
     existing one. Recovery (deciding the operator has addressed the halt and
     the chain may resume) is a deliberate, separate action, not something a
     measurement pass should do implicitly.
+
+    ``scoped_out`` holds TRIGGERED results the door measured as provably
+    unrelated to the dispatch (they never block). They are NOT listed in
+    ``triggered``; they get their own ``scoped_out`` list (with the ``scope``
+    they were measured against) and are marked ``"scope": "scoped_out"`` in
+    ``all_checks``. ``CheckStatus`` is deliberately unchanged.
     """
     from atomic_io import atomic_write_json
 
     state_dir = Path(state_dir)
     halt_path = state_dir / HALT_FILENAME
+    scoped_ids = {id(r) for r in scoped_out}
+    all_checks = []
+    for r in results:
+        entry = r.to_dict()
+        if id(r) in scoped_ids:
+            entry["scope"] = "scoped_out"
+        all_checks.append(entry)
     payload = {
         "halted_at": _utc_now_iso(),
-        "triggered": [r.to_dict() for r in results if r.status == CheckStatus.TRIGGERED],
-        "all_checks": [r.to_dict() for r in results],
+        "triggered": [r.to_dict() for r in results if r.status == CheckStatus.TRIGGERED and id(r) not in scoped_ids],
+        "scoped_out": [{**r.to_dict(), "scope": dict(scope or {})} for r in scoped_out],
+        "all_checks": all_checks,
     }
     atomic_write_json(halt_path, payload)
     return halt_path

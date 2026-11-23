@@ -1,1 +1,0 @@
-- Recommendation dispatch metrics treat an empty window as unknown: every metric is `None` instead of `0.0`, and a before/after window comparison with a missing side is `insufficient_data` rather than a delta against 0 (doorloop PR-10, dlv-1df6c9ea4824).

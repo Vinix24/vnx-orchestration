@@ -305,8 +305,13 @@ class TestTheBookedRecordDoesNotContradictTheGuard:
         """The guard trims and lowercases the value before it checks it. The
         register event was derived from the raw value, so ``" FAIL "`` passed the
         guard as a fail and was registered as ``gate_passed``.
+
+        D5 (ADR-080 besluit 1): a fail with zero findings is booked
+        ``unavailable`` and registers nothing, so the padded fail carries one
+        advisory finding here; with it the run stays a decided fail (OI-1938).
         """
-        stdout = _codex_ndjson('{"verdict": " FAIL ", "findings": [], "residual_risk": null}')
+        finding = '{"severity": "low", "file": "scripts/a.py", "line": 1, "summary": "a nit"}'
+        stdout = _codex_ndjson('{"verdict": " FAIL ", "findings": [%s], "residual_risk": null}' % finding)
         assert extract_verdict_block(stdout).get("verdict") == " FAIL "
 
         result = _book(env, stdout)

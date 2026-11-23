@@ -113,31 +113,6 @@ def test_intelligence_health_writes_canonical_only_by_default(tmp_path, monkeypa
     assert second_ts >= first_ts
 
 
-def test_intelligence_health_mirrors_legacy_in_rollback_mode(tmp_path, monkeypatch):
-    vnx_home = tmp_path / "vnx-home"
-    state_dir = tmp_path / "data" / "state"
-    vnx_home.mkdir(parents=True, exist_ok=True)
-    state_dir.mkdir(parents=True, exist_ok=True)
-
-    monkeypatch.setenv("VNX_HOME", str(vnx_home))
-    monkeypatch.setenv("VNX_DATA_DIR", str(tmp_path / "data"))
-    monkeypatch.setenv("VNX_STATE_DIR", str(state_dir))
-    monkeypatch.setenv("PROJECT_ROOT", str(tmp_path))
-    monkeypatch.setenv("VNX_STATE_SIMPLIFICATION_ROLLBACK", "1")
-
-    daemon_mod = _load_daemon_module()
-    daemon = daemon_mod.IntelligenceDaemon()
-    daemon.health_status["patterns_available"] = 5
-    daemon.health_status["status"] = "healthy"
-    daemon.write_intelligence_health()
-
-    canonical = state_dir / "intelligence_health.json"
-    legacy = vnx_home / "state" / "intelligence_health.json"
-
-    assert canonical.exists()
-    assert legacy.exists()
-
-
 def test_dashboard_sync_write_is_opt_in_for_single_writer(tmp_path, monkeypatch):
     vnx_home = tmp_path / "vnx-home"
     canonical_state = tmp_path / "data" / "state"
@@ -166,48 +141,13 @@ def test_dashboard_sync_write_is_opt_in_for_single_writer(tmp_path, monkeypatch)
     daemon.write_health_status()
     assert not dashboard.exists()
 
-    monkeypatch.setenv("VNX_INTELLIGENCE_DASHBOARD_WRITE", "1")
-    daemon_mod = _load_daemon_module()
-    daemon = daemon_mod.IntelligenceDaemon()
-    daemon.health_status["status"] = "healthy"
+    daemon.dashboard_builder.dashboard_write_enabled = True
     daemon.write_health_status()
 
     assert dashboard.exists()
     payload = json.loads(dashboard.read_text(encoding="utf-8"))
     assert payload.get("pr_queue", {}).get("total_prs", 0) >= 1
     assert payload.get("intelligence_daemon", {}).get("status") == "healthy"
-
-
-def test_dashboard_reads_legacy_brief_only_in_rollback_mode(tmp_path, monkeypatch):
-    vnx_home = tmp_path / "vnx-home"
-    canonical_state = tmp_path / "data" / "state"
-    legacy_state = vnx_home / "state"
-    vnx_home.mkdir(parents=True, exist_ok=True)
-    canonical_state.mkdir(parents=True, exist_ok=True)
-    legacy_state.mkdir(parents=True, exist_ok=True)
-
-    monkeypatch.setenv("VNX_HOME", str(vnx_home))
-    monkeypatch.setenv("VNX_DATA_DIR", str(tmp_path / "data"))
-    monkeypatch.setenv("VNX_STATE_DIR", str(canonical_state))
-    monkeypatch.setenv("PROJECT_ROOT", str(tmp_path))
-    monkeypatch.setenv("VNX_INTELLIGENCE_DASHBOARD_WRITE", "1")
-    monkeypatch.setenv("VNX_STATE_SIMPLIFICATION_ROLLBACK", "1")
-
-    brief = {
-        "terminals": {"T1": {"status": "working", "track": "A", "current_task": "task-legacy", "ready": True}},
-        "tracks": {"A": {"current_gate": "gate_pr1_init", "status": "working"}},
-        "recent_receipts": [],
-        "queues": {},
-    }
-    (legacy_state / "t0_brief.json").write_text(json.dumps(brief), encoding="utf-8")
-
-    daemon_mod = _load_daemon_module()
-    daemon = daemon_mod.IntelligenceDaemon()
-    daemon.health_status["status"] = "healthy"
-    daemon.write_health_status()
-
-    payload = json.loads((canonical_state / "dashboard_status.json").read_text(encoding="utf-8"))
-    assert payload.get("pr_queue", {}).get("total_prs", 0) >= 1
 
 
 def test_stub_modules_cleaned_up_after_load_daemon_module(tmp_path, monkeypatch):

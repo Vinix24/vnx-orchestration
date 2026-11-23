@@ -4,7 +4,7 @@ Covers:
   - Evasion #1 closed: ALLOWLIST_PATTERN removed; provider_dispatch.py + claude -p → block
   - Clean governed wrapper invocations still allow in shadow mode
   - Shadow evasion: lane-script direct / python -m / python -c → allow+log in default mode
-  - Enforce mode (VNX_HOOK_ENFORCE=1): shadow evasions → block
+  - Enforce mode (profile enforced): shadow evasions → block
   - Hard-block rules unchanged in both modes
   - Benign commands unchanged
   - Telemetry: shadow/block → one ndjson line; failure → fail-open
@@ -42,7 +42,7 @@ import pretooluse_spawn_detector as det  # noqa: E402
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _classify(cmd: str, enforce: bool = False) -> str:
-    env = {"VNX_HOOK_ENFORCE": "1" if enforce else "0"}
+    env = {"VNX_OVERRIDE_ENFORCEMENT_PROFILE": "enforced" if enforce else "shadow"}
     with mock.patch.dict(os.environ, env):
         return det.classify(cmd)
 
@@ -55,7 +55,7 @@ def _run_main(cmd: str, tmp_path: Path, enforce: bool = False) -> tuple[str, lis
     env = {
         "VNX_DATA_DIR": str(data_dir),
         "VNX_DATA_DIR_EXPLICIT": "1",
-        "VNX_HOOK_ENFORCE": "1" if enforce else "0",
+        "VNX_OVERRIDE_ENFORCEMENT_PROFILE": "enforced" if enforce else "shadow",
     }
     captured = io.StringIO()
     with mock.patch.dict(os.environ, env):
@@ -79,7 +79,7 @@ def _run_main_raw(raw_stdin: str, tmp_path: Path, enforce: bool = False) -> str:
     env = {
         "VNX_DATA_DIR": str(data_dir),
         "VNX_DATA_DIR_EXPLICIT": "1",
-        "VNX_HOOK_ENFORCE": "1" if enforce else "0",
+        "VNX_OVERRIDE_ENFORCEMENT_PROFILE": "enforced" if enforce else "shadow",
     }
     captured = io.StringIO()
     with mock.patch.dict(os.environ, env):
@@ -255,7 +255,7 @@ class TestEvasion1Closed:
         assert _classify(cmd) == "block"
 
     def test_clean_provider_dispatch_allows_shadow_mode(self):
-        # shadow rule matches but VNX_HOOK_ENFORCE=0 → decision is still "allow"
+        # shadow rule matches but the profile is shadow → decision is still "allow"
         cmd = "python3 scripts/lib/provider_dispatch.py --provider codex --dispatch-id test-123"
         assert _classify(cmd, enforce=False) == "allow"
 
@@ -267,7 +267,7 @@ class TestEvasion1Closed:
 # ── Hard-block rules: unchanged in both modes ─────────────────────────────────
 
 class TestHardBlocksUnchanged:
-    """Existing blocking rules must block regardless of VNX_HOOK_ENFORCE."""
+    """Existing blocking rules must block regardless of the enforcement profile."""
 
     @pytest.mark.parametrize("enforce", [False, True])
     def test_claude_p_blocks(self, enforce):
@@ -485,7 +485,7 @@ class TestTelemetry:
         captured = io.StringIO()
         with mock.patch("pretooluse_spawn_detector.project_root") as mock_pr:
             mock_pr.resolve_data_dir.side_effect = OSError("disk full")
-            with mock.patch.dict(os.environ, {"VNX_HOOK_ENFORCE": "0"}):
+            with mock.patch.dict(os.environ, {"VNX_OVERRIDE_ENFORCEMENT_PROFILE": "shadow"}):
                 with mock.patch("sys.stdin", io.StringIO(payload)):
                     with mock.patch("sys.stdout", captured):
                         det.main()
@@ -586,7 +586,7 @@ BENIGN_PROVIDER_ALLOW_CASES = [
     "codex --help",
 ]
 
-# Shadow invocation forms: allow+log by default, block under VNX_HOOK_ENFORCE=1.
+# Shadow invocation forms: allow+log by default, block under the profile enforced.
 SHADOW_CASES = [
     "python -mprovider_dispatch",
     "python -c'import provider_dispatch'",
@@ -812,3 +812,15 @@ class TestFP2LaterArgNotExecutedScript:
 
     def test_python_script_first_positional_shadow_allows(self):
         assert _classify("python provider_dispatch.py", enforce=False) == "allow"
+
+
+def test_hook_reader_raising_reads_enforced(monkeypatch, capsys):
+    import enforcement_profile as ep
+
+    def _boom():
+        raise RuntimeError("profile reader broken")
+    monkeypatch.setattr(ep, "enforced", _boom)
+    assert det.classify("python -m provider_dispatch") == "block"
+    assert "ERROR" in capsys.readouterr().err
+    monkeypatch.setenv("VNX_OVERRIDE_ENFORCEMENT_PROFILE", "shadow")
+    assert det.classify("claude -p 'x'") == "block"  # a hard block never reads the profile

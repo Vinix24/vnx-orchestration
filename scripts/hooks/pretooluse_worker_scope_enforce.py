@@ -5,8 +5,8 @@ Dispatch 20260724-worker-scope-enforce-hook. Fine-grained enforcement layer on
 top of the coarse ADR-012 ``--allowedTools``/``--disallowedTools`` launch-time
 posture: enforces ``match_bash_deny`` and ``match_file_write_scope`` from the
 worker permission SSOT (``.vnx/worker_permissions.yaml`` via
-``scripts/lib/worker_permissions.py``) on every Bash / Write / Edit / MultiEdit
-tool call. Reuses the existing matchers verbatim — no reimplementation of
+``scripts/lib/worker_permissions.py``) on every Bash / Write / Edit / MultiEdit /
+NotebookEdit tool call. Reuses the existing matchers verbatim — no reimplementation of
 matching logic.
 
 OI-1196: the file_write_scope check additionally narrows to this dispatch's
@@ -123,7 +123,26 @@ try:
 except Exception:  # noqa: BLE001 - hook must never crash the tool call on import
     _DEPS_AVAILABLE = False
 
-_WRITE_LIKE_TOOLS = frozenset({"Write", "Edit", "MultiEdit"})
+# Write-like tool -> the tool_input key that carries its target path (OI-2649:
+# NotebookEdit names its target ``notebook_path``, not ``file_path``).
+_WRITE_PATH_KEY = {
+    "Write": "file_path",
+    "Edit": "file_path",
+    "MultiEdit": "file_path",
+    "NotebookEdit": "notebook_path",
+}
+_WRITE_LIKE_TOOLS = frozenset(_WRITE_PATH_KEY)
+
+# Decision for every tool that is neither Bash nor write-like (OI-2649: named,
+# not changed). Task/Agent: allowed HERE because the subagent spawn is decided by
+# the separate pretooluse_block_subagent hook (.claude/settings.json matcher
+# "Agent|Task"); this hook is not proven to see a subagent's own tool calls.
+# mcp__*: allowed here; the headless lane's scope args pass an empty
+# --mcp-config with --strict-mcp-config unless the dispatch sets requires_mcp.
+_ALLOWED_NON_WRITE_TOOLS_REASON = (
+    "Task/Agent and mcp__* tools are decided elsewhere (subagent guard hook, "
+    "launch-time MCP scoping); this hook only gates Bash and write-like tools"
+)
 
 
 def _relative_to_cwd(file_path: str, cwd: str) -> str:
@@ -252,7 +271,7 @@ def evaluate(payload: dict) -> "tuple[str, str | None]":
         # code-worker fallback can write, so it would widen a read-only role:
         # block every Bash call and write-like tool instead. Letting this reach
         # main()'s fail-open catch would be an implicit allow. Read-only tools
-        # (everything but Bash/Write/Edit/MultiEdit) stay allowed.
+        # (everything but Bash and the write-like tools) stay allowed.
         return _refused_decision(tool_name, exc.reason, role)
     except Exception as exc:  # fail CLOSED on policy resolution only
         # Any other failure while resolving the policy is an unproven policy,
@@ -274,7 +293,7 @@ def evaluate(payload: dict) -> "tuple[str, str | None]":
         return "allow", None
 
     if tool_name in _WRITE_LIKE_TOOLS:
-        file_path = tool_input.get("file_path")
+        file_path = tool_input.get(_WRITE_PATH_KEY[tool_name])
         if not isinstance(file_path, str) or not file_path:
             return "allow", None
         # Report obligation: a worker must always be able to write its
@@ -300,6 +319,7 @@ def evaluate(payload: dict) -> "tuple[str, str | None]":
             )
         return "allow", None
 
+    # _ALLOWED_NON_WRITE_TOOLS_REASON: every other tool stays allowed.
     return "allow", None
 
 

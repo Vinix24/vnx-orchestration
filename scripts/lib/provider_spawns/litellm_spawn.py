@@ -48,7 +48,7 @@ if _LIB_DIR not in sys.path:
 
 from _streaming_drainer import StreamingDrainerMixin, coerce_chunk_stall  # noqa: E402
 from adapters._litellm_runner import _PROVIDER_KEY_REQS  # noqa: E402
-from canonical_event import CanonicalEvent  # noqa: E402
+from canonical_event import VALID_EVENT_TYPES, CanonicalEvent  # noqa: E402
 from env_scrub_patterns import DEFAULT_SCRUB_KEY_PATTERNS, scrub_env  # noqa: E402
 import provider_switch  # scripts/lib, added to the path above
 
@@ -585,19 +585,9 @@ def spawn_litellm(
     tool_call_shape triggers pre-spawn validation for format mismatch detection.
     sub_provider and lane are propagated to audit events per ADR-016.
     """
-    try:
-        chunk_timeout = float(os.environ.get("VNX_LITELLM_STALL_THRESHOLD", chunk_timeout))
-    except (TypeError, ValueError):
-        pass
-    try:
-        total_deadline = float(os.environ.get("VNX_LITELLM_TIMEOUT", total_deadline))
-    except (TypeError, ValueError):
-        pass
     # OI-903: scale the stall timeout with the total deadline so a long deadline
-    # stays the binding constraint. Skipped when VNX_LITELLM_STALL_THRESHOLD is set
-    # explicitly — env overrides retain precedence.
-    if "VNX_LITELLM_STALL_THRESHOLD" not in os.environ:
-        chunk_timeout = coerce_chunk_stall(chunk_timeout, total_deadline)
+    # stays the binding constraint.
+    chunk_timeout = coerce_chunk_stall(chunk_timeout, total_deadline)
 
     try:
         _validate_tool_shape(prompt, tool_call_shape)
@@ -640,11 +630,11 @@ def spawn_litellm(
 _AGENTIC_RUNNER_PATH = Path(__file__).resolve().parents[1] / "adapters" / "_litellm_agentic_runner.py"
 
 
-def _agentic_int_env(name: str, default: int) -> int:
-    try:
-        return int(os.environ.get(name, default))
-    except (TypeError, ValueError):
-        return default
+# Limits of one agentic run when the caller passes none.
+AGENTIC_MAX_TURNS = 30
+AGENTIC_MAX_TOKENS = 8192
+AGENTIC_COMMAND_TIMEOUT_S = 120
+AGENTIC_TOTAL_DEADLINE_S = 1800.0
 
 
 def spawn_litellm_agentic(
@@ -676,11 +666,11 @@ def spawn_litellm_agentic(
     Returns the same LiteLLMSpawnResult shape so callers (_emit_governance,
     frontmatter token_usage) need no special-casing.
     """
-    max_turns = max_turns or _agentic_int_env("VNX_LITELLM_AGENTIC_MAX_TURNS", 30)
-    max_tokens = max_tokens or _agentic_int_env("VNX_LITELLM_AGENTIC_MAX_TOKENS", 8192)
-    command_timeout = command_timeout or _agentic_int_env("VNX_LITELLM_AGENTIC_CMD_TIMEOUT", 120)
+    max_turns = max_turns or AGENTIC_MAX_TURNS
+    max_tokens = max_tokens or AGENTIC_MAX_TOKENS
+    command_timeout = command_timeout or AGENTIC_COMMAND_TIMEOUT_S
     if total_deadline is None:
-        total_deadline = float(_agentic_int_env("VNX_LITELLM_AGENTIC_DEADLINE", 1800))
+        total_deadline = AGENTIC_TOTAL_DEADLINE_S
 
     model = model or _default_litellm_model(sub_provider)
 
@@ -726,11 +716,47 @@ def spawn_litellm_agentic(
         stdout_b, _stderr_b = proc.communicate()
         timed_out = True
 
+    text = stdout_b.decode("utf-8", "replace") if stdout_b else ""
+    completion_parts, token_usage, error, events_written, ew_failures = _parse_agentic_events(
+        text, event_writer, dispatch_id, terminal_id, sub_provider, lane,
+    )
+
+    try:
+        proc.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+    rc = proc.returncode if proc.returncode is not None else 1
+    if error and rc == 0:
+        rc = 1
+
+    return LiteLLMSpawnResult(
+        returncode=rc,
+        completion_text="".join(completion_parts),
+        events_written=events_written,
+        session_id=None,
+        timed_out=timed_out,
+        stopped_early=False,
+        event_writer_failures=ew_failures,
+        error=error,
+        token_usage=token_usage,
+    )
+
+
+def _parse_agentic_events(
+    text: str, event_writer: Optional[Callable[..., None]], dispatch_id: str, terminal_id: str,
+    sub_provider: Optional[str], lane: Optional[str],
+) -> tuple:
+    """Parse the agentic runner's stdout lines and forward each event to ``event_writer``.
+
+    Returns ``(completion_parts, token_usage, error, events_written, ew_failures)``.
+    """
     completion_parts: list = []
     token_usage: Optional[Dict[str, Any]] = None
     error: Optional[str] = None
     events_written = 0
     ew_failures = 0
+    warned_types: set = set()
 
     def _canon(etype: str, data: dict) -> CanonicalEvent:
         return CanonicalEvent(
@@ -744,7 +770,6 @@ def spawn_litellm_agentic(
             provider_meta={"lane": lane} if lane is not None else {},
         )
 
-    text = stdout_b.decode("utf-8", "replace") if stdout_b else ""
     for line in text.splitlines():
         line = line.strip()
         if not line:
@@ -774,7 +799,17 @@ def spawn_litellm_agentic(
                     }
                 canonical = _canon("usage_complete", {"usage": evt.get("usage") or {}})
             else:
-                canonical = _canon(etype, {k: v for k, v in evt.items() if k != "event_type"})
+                data = {k: v for k, v in evt.items() if k != "event_type"}
+                if etype not in VALID_EVENT_TYPES:
+                    if etype not in warned_types:
+                        warned_types.add(etype)
+                        logger.warning(
+                            "spawn_litellm_agentic: unknown runner event type %r mapped to info (dispatch=%s)",
+                            etype, dispatch_id,
+                        )
+                    data["runner_event_type"] = etype
+                    etype = "info"
+                canonical = _canon(etype, data)
 
         if event_writer is not None:
             try:
@@ -785,24 +820,4 @@ def spawn_litellm_agentic(
                     dispatch_id, _exc,
                 )
                 ew_failures += 1
-
-    try:
-        proc.wait(timeout=10)
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        proc.wait()
-    rc = proc.returncode if proc.returncode is not None else 1
-    if error and rc == 0:
-        rc = 1
-
-    return LiteLLMSpawnResult(
-        returncode=rc,
-        completion_text="".join(completion_parts),
-        events_written=events_written,
-        session_id=None,
-        timed_out=timed_out,
-        stopped_early=False,
-        event_writer_failures=ew_failures,
-        error=error,
-        token_usage=token_usage,
-    )
+    return completion_parts, token_usage, error, events_written, ew_failures

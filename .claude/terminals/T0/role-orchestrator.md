@@ -109,7 +109,7 @@ DELIVERABLE = a proposed dispatch created with `vnx deliverable add --objective 
   - To see the lane and the plan warnings before firing: `"${VNX_HOME:-$(git rev-parse --show-toplevel)}/bin/vnx" dispatch <dispatch-id> --dry-run`.
 - Build-worker provider and model are a **free per-dispatch choice**: what the dispatch spec says wins (`workers-kimi-pinned`, pin_semantics=default). sonnet is the default when the spec carries no explicit model (operator decision 2026-09-23). kimi-k3 is an explicit choice, not the default. No override env needed. T0 stays Opus as a governance floor (`t0-opus-only`, pin_semantics=floor).
 - `provider=claude` for a build-worker still routes through a separate gate: `VNX_OVERRIDE_WORKER_CLAUDE=1` with an audit reason in `VNX_OVERRIDE_WORKER_CLAUDE_REASON` (the symbols are `dispatch_cli.WORKER_CLAUDE_OVERRIDE_ENV` and `dispatch_cli.WORKER_CLAUDE_OVERRIDE_REASON_ENV`). Track `worker-provider-free-choice` aims to eventually remove this remaining lock.
-- Default reviewers are `codex_gate` + `kimi_gate`, both on a subscription. `deepseek_gate` and `glm_gate` run on API credit: they are a fallback inside the takeover chain only, never a project default, and never ahead of a subscription gate in a stack or a chain. The default takeover order is codex > kimi > deepseek (glm left the default chain, operator decision 2026-10-17; it stays registered and an explicit chain can still name it). Each seat is filled by its own reviewer, a takeover fills the seat of the reviewer that is out, and the merge door requires a PASS on every seat for the exact head. The signal seat rule is active for vnx-dev since 2026-11-09 (`VNX_REVIEW_SEAT_RULE` row in `project_config`); other projects keep `first_seat_or_every_seat_by_risk`. Rollback and re-measurement: `docs/core/DISPATCH_RULES.md` §2. The mechanism lives in `docs/core/DISPATCH_RULES.md` (§2, and the door table in §2.1).
+- Default reviewers are `codex_gate` (seat 1, subscription) + `deepseek_gate` (seat 2, API credit, `deepseek-v4-pro`): Kimi is cancelled (operator decision 2026-11-11). Subscription first holds for seat 1 only; `kimi_gate` and `glm_gate` stay registered for an explicit stack or chain. Default takeover order: codex > deepseek > claude, and a `deepseek-v4-pro` build passes `deepseek_gate` over (R7b). Each seat is filled by its own reviewer, a takeover fills the seat of the reviewer that is out, and the merge door requires a PASS on every seat for the exact head. The signal seat rule is active for vnx-dev since 2026-11-09 (`VNX_REVIEW_SEAT_RULE` row in `project_config`); other projects keep `first_seat_or_every_seat_by_risk`. Rollback, re-measurement and `VNX_REVIEW_SCOPE` (default `full`): `docs/core/DISPATCH_RULES.md` §2. The mechanism lives in `docs/core/DISPATCH_RULES.md` (§2, and the door table in §2.1).
 - No Claude Code subagents (Task tool). Full decision rule: `docs/core/DISPATCH_RULES.md`.
 
 **Role selection (hard):**
@@ -202,7 +202,7 @@ for acceptance and queue advancement.
 4. Architectural change OR new dependency OR policy violation → ESCALATE.
 5. All gates passed AND no blockers AND no pending work → COMPLETE.
 6. Never guess state; verify via CLI and state files.
-7. If the review stack requires Codex or Kimi evidence, do not complete until both a gate result and a normalized headless report exist.
+7. If the review stack requires Codex or DeepSeek evidence, do not complete until both a gate result and a normalized headless report exist.
 8. `queued` review-gate state is only request state, not completion evidence.
 9. A required gate with empty `contract_hash` or empty `report_path` is incomplete evidence and blocks closure.
 
@@ -271,7 +271,9 @@ Run:
 
 If output is anything other than "success", do NOT merge. Investigate the cause, dispatch a fix-forward, re-run CI, and only merge when the workflow conclusion equals "success".
 
-RATIONALE: `gh pr checks` lists individual job names but the workflow as a whole can still produce a "failure" conclusion (e.g. multi-step Profile A whose Legacy path gate sub-step fails) while the visible names appear "pass". Multiple late-night merges on 2026-05-06/07 had VNX CI = failure that was missed by checking individual names only — Legacy path gate was tripping on a literal `.vnx-data/state/` string in build_current_state.py:263 that the rg-based gate flagged repository-wide on main, but did not flag in PR-scoped diffs.
+This still holds with the main window on: the `main` gate guards main, not the PR head.
+
+RATIONALE: `gh pr checks` lists job names; the workflow can still conclude "failure". Merges on 2026-05-06/07 missed it: the Legacy path gate flagged a `.vnx-data/state/` string repo-wide on main, not in PR diffs.
 
 ## Doubt Escalation Policy
 
@@ -292,6 +294,10 @@ Do NOT ask the user for:
 - permission to continue to the next dispatch
 - informal go-aheads after normal receipt review
 - trivial queue advancement decisions
+
+Two inbox rules (operator-vragen-tot-antwoord, ADR-076):
+- Before you ask Vincent anything, record it with `vnx inbox ask`; a question that lives only in the chat counts as not asked.
+- End every status update to Vincent with `vnx inbox --present --channel status`, which shows the open points and writes the `presented` lines.
 
 ## Stale Lease Cleanup (Required Before First Dispatch)
 
@@ -422,10 +428,11 @@ Cite the policy code (A1, B2, etc) when invoking.
 
 ### Open items
 - **D1**: Close OIs with concrete code/test evidence. No premature close.
-- **D2**: File new OIs liberally — operator-approved.
+- **D2**: An OI for a finding inside the PR's diff: file it freely. An OI for a finding outside the diff: only with a concrete failure scenario (the input or state and the wrong output or crash it produces); without one, the finding is a line in the receipt review, not an OI. Operator decision 2026-11-15, morning list point 4.
+- **D3** (bulk rule): A `warn` or `info` OI without recurrence goes to `deferred`, with the reason in the defer. Without recurrence = no second OI, receipt or review finding on the same point since the OI was opened. `blocker` OIs never fall under this rule. Defer with `scripts/open_items_manager.py defer` (or `defer-pattern` for a group).
 
 ### Stop conditions (wake operator)
-- **E1**: main branch broken after merge.
+- **E1**: main branch broken after merge. With `VNX_MAIN_UNVERIFIED_MAX` set, the door enforces it (gate `main`): the chain waits via `vnx main-window status`, not per main run. `--override-main` only with `revert_or_fix_forward` or an operator reason; see DISPATCH_RULES §2.2.1.
 - **E2**: Data loss risk (db migration, file deletion >100 lines).
 - **E3**: Secrets in logs/PRs.
 - **E4**: GitHub auth/quota fully dead (cannot proceed).

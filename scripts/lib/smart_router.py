@@ -693,8 +693,8 @@ _GATE_BASELINE = "codex_gate"
 # Only the relative order matters, for the up/down direction in the trace.
 #
 # The five full-diff review seats share the top rung because the takeover chain
-# (VNX_REVIEW_GATE_TAKEOVER_CHAIN, default codex_gate,kimi_gate,claude_gate,
-# deepseek_gate; glm_gate when named) declares them interchangeable: any one of
+# (VNX_REVIEW_GATE_TAKEOVER_CHAIN, default codex_gate,deepseek_gate,claude_gate;
+# kimi_gate or glm_gate when named) declares them interchangeable: any one of
 # them may read a PR in place of any other. Giving them different weights would
 # make "heavier/lighter" depend on which seat happened to be free. Which of them
 # fills the obligation is decided by billing, not by weight: see _primary_review_gate.

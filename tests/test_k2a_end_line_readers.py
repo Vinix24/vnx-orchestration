@@ -323,6 +323,8 @@ def test_receipt_classifier_classifies_both_vocabularies_alike(tmp_path: Path) -
 
 def test_state_rebuild_treats_both_end_vocabularies_as_critical(
         tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.delenv("VNX_STATE_REBUILD_TRIGGER", raising=False)
+
     def fires(kind: str, event_type: str) -> bool:
         (tmp_path / ".last_state_rebuild_ts").write_text(
             str(int(__import__("time").time())), encoding="utf-8")

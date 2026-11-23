@@ -239,8 +239,10 @@ _finish_wt_merge_intelligence() {
   # Save/restore env for worktree context operations
   local _saved_project_root="$PROJECT_ROOT"
   local _saved_vnx_data_dir="${VNX_DATA_DIR:-}"
+  local _saved_vnx_data_dir_explicit="${VNX_DATA_DIR_EXPLICIT:-}"
   export PROJECT_ROOT="$wt_dir"
   export VNX_DATA_DIR="$wt_data"
+  export VNX_DATA_DIR_EXPLICIT=1  # OI-1276: an intended override, honored only with the flag
 
   # Strategy 1: Export to git-tracked .vnx-intelligence/ (preferred)
   local merged=false
@@ -263,6 +265,7 @@ _finish_wt_merge_intelligence() {
   # Restore env
   export PROJECT_ROOT="$_saved_project_root"
   export VNX_DATA_DIR="$_saved_vnx_data_dir"
+  if [ -n "$_saved_vnx_data_dir_explicit" ]; then export VNX_DATA_DIR_EXPLICIT="$_saved_vnx_data_dir_explicit"; else unset VNX_DATA_DIR_EXPLICIT; fi
 
   if [ "$merged" = true ]; then
     log "[finish-worktree] Intelligence merged back to main"

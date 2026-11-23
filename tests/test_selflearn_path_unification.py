@@ -18,6 +18,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+from content_boundary_pin import pin_boundary
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
@@ -252,7 +253,7 @@ class TestDreamCycleConsolidatesSeededPatterns:
         empty tmp boundary so the tests never read the operator's ~/.vnx file."""
         boundary_file = tmp_path_factory.mktemp("dream-boundary") / "content_boundary.json"
         boundary_file.write_text(json.dumps({"version": 1}), encoding="utf-8")
-        monkeypatch.setenv("VNX_CONTENT_BOUNDARY_FILE", str(boundary_file))
+        pin_boundary(monkeypatch, str(boundary_file))
 
     @pytest.fixture(autouse=True)
     def _dream_activation_gate_open(self, monkeypatch):
@@ -260,6 +261,7 @@ class TestDreamCycleConsolidatesSeededPatterns:
         consolidation mechanics, so arm the scheduler and stub the probe to 'ok' —
         the same posture as test_dream_consolidator.py's autouse fixture."""
         monkeypatch.setenv("VNX_DREAM_SCHEDULER_ENABLED", "1")
+        monkeypatch.setenv("VNX_DREAM_PROVIDER", "kimi")  # these tests patch the kimi dispatch
         import consolidator
         monkeypatch.setattr(
             consolidator, "_injection_probe_health", lambda state_dir: "ok"

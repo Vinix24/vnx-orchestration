@@ -7,11 +7,11 @@ Purpose: Initialize SQLite Quality Intelligence Database from schema
 
 from __future__ import annotations  # PEP 563: lazy annotation evaluation — Python 3.9 compat
 
-import os
 import re
 import sqlite3
 import shutil
 import sys
+from contextlib import closing
 from pathlib import Path
 from datetime import datetime, timezone
 from typing import Callable
@@ -31,7 +31,7 @@ from db_backup_rotation import parse_backup_keep, rotate_backups_safe
 
 # Highest PRAGMA user_version stamped by bootstrap_qi_db.
 # Increment this constant whenever a new migration block is added.
-HIGHEST_QI_VERSION = 34
+HIGHEST_QI_VERSION = 37
 
 # VNX Base Configuration
 PATHS = ensure_env()
@@ -83,14 +83,7 @@ def check_prerequisites() -> bool:
 _BACKUP_PREFIX = "quality_intelligence.db.backup_"
 
 
-def _parse_backup_keep(raw: str | None, default: int = 3) -> int:
-    """Return a sane keep count from VNX_DB_BACKUP_KEEP.
-
-    Delegates to the shared :func:`db_backup_rotation.parse_backup_keep`.
-    Kept as a module-level wrapper for backward compatibility with callers that
-    import this function directly.
-    """
-    return parse_backup_keep(raw, default=default)
+_BACKUP_KEEP = 3
 
 
 def _rotate_quality_db_backups(state_dir: Path, keep: int) -> None:
@@ -127,8 +120,7 @@ def backup_existing_db() -> bool:
 
         # Rotate older backups best-effort; never let cleanup abort the migration.
         try:
-            keep = _parse_backup_keep(os.environ.get("VNX_DB_BACKUP_KEEP"))
-            _rotate_quality_db_backups(STATE_DIR, keep)
+            _rotate_quality_db_backups(STATE_DIR, _BACKUP_KEEP)
         except Exception as e:
             log('WARNING', f'Backup rotation failed (backup itself succeeded): {e}')
 
@@ -905,9 +897,30 @@ def _migrate_v22(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE _dispatch_metadata_v22 RENAME TO dispatch_metadata")
         log('INFO', 'Migrated dispatch_metadata: composite UNIQUE (project_id, dispatch_id) (ADR-007)')
 
-        # Step 5: Recreate the three views that were dropped in step 1.
-        # These are the canonical view definitions from schemas/quality_intelligence.sql.
-        conn.execute("""
+        _v22_recreate_dependent_views(conn)
+
+    # Ensure composite (project_id, provider) index — covers legacy DBs where
+    # _migrate_v21 ran before project_id existed and left a plain (provider) index.
+    conn.execute("DROP INDEX IF EXISTS idx_dispatch_meta_provider")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_dispatch_meta_provider "
+        "ON dispatch_metadata (project_id, provider)"
+    )
+    # Recreate other indexes (idempotent IF NOT EXISTS).
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_dispatch_meta_id ON dispatch_metadata (dispatch_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_dispatch_meta_terminal ON dispatch_metadata (terminal)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_dispatch_meta_role ON dispatch_metadata (role)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_dispatch_meta_gate ON dispatch_metadata (gate)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_dispatch_meta_outcome ON dispatch_metadata (outcome_status)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_dispatch_meta_dispatched ON dispatch_metadata (dispatched_at DESC)")
+    log('INFO', 'Migrated dispatch_metadata: composite (project_id, provider) index ensured (ADR-007)')
+
+
+def _v22_recreate_dependent_views(conn: sqlite3.Connection) -> None:
+    """Recreate the three dispatch_metadata views _migrate_v22 dropped (its step 5)."""
+    # Step 5: Recreate the three views that were dropped in step 1.
+    # These are the canonical view definitions from schemas/quality_intelligence.sql.
+    conn.execute("""
             CREATE VIEW IF NOT EXISTS dispatch_success_by_role AS
             SELECT
                 role,
@@ -922,7 +935,7 @@ def _migrate_v22(conn: sqlite3.Connection) -> None:
             GROUP BY role
             ORDER BY total_dispatches DESC
         """)
-        conn.execute("""
+    conn.execute("""
             CREATE VIEW IF NOT EXISTS intelligence_effectiveness AS
             SELECT
                 CASE WHEN intelligence_json IS NOT NULL AND intelligence_json != '' THEN 'with_intelligence' ELSE 'without_intelligence' END as intelligence_used,
@@ -934,7 +947,7 @@ def _migrate_v22(conn: sqlite3.Connection) -> None:
             WHERE outcome_status IS NOT NULL
             GROUP BY intelligence_used
         """)
-        conn.execute("""
+    conn.execute("""
             CREATE VIEW IF NOT EXISTS cost_per_dispatch AS
             SELECT
                 dm.dispatch_id,
@@ -953,23 +966,7 @@ def _migrate_v22(conn: sqlite3.Connection) -> None:
             LEFT JOIN session_analytics sa ON sa.dispatch_id = dm.dispatch_id
             WHERE dm.outcome_status IS NOT NULL
         """)
-        log('INFO', 'Recreated dispatch_metadata-dependent views after table rebuild')
-
-    # Ensure composite (project_id, provider) index — covers legacy DBs where
-    # _migrate_v21 ran before project_id existed and left a plain (provider) index.
-    conn.execute("DROP INDEX IF EXISTS idx_dispatch_meta_provider")
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_dispatch_meta_provider "
-        "ON dispatch_metadata (project_id, provider)"
-    )
-    # Recreate other indexes (idempotent IF NOT EXISTS).
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_dispatch_meta_id ON dispatch_metadata (dispatch_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_dispatch_meta_terminal ON dispatch_metadata (terminal)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_dispatch_meta_role ON dispatch_metadata (role)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_dispatch_meta_gate ON dispatch_metadata (gate)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_dispatch_meta_outcome ON dispatch_metadata (outcome_status)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_dispatch_meta_dispatched ON dispatch_metadata (dispatched_at DESC)")
-    log('INFO', 'Migrated dispatch_metadata: composite (project_id, provider) index ensured (ADR-007)')
+    log('INFO', 'Recreated dispatch_metadata-dependent views after table rebuild')
 
 
 def _migrate_v23(conn: sqlite3.Connection) -> None:
@@ -1433,21 +1430,7 @@ def _migrate_v29(conn: sqlite3.Connection) -> None:
     - Fail loudly instead of trusting INSERT OR IGNORE: assert the copied row
       count equals the source row count before swapping the table in.
     """
-    # Step 0: Ensure project_id column exists before table recreation.
-    cols = {r[1] for r in conn.execute("PRAGMA table_info(session_analytics)").fetchall()}
-    if "project_id" not in cols:
-        conn.execute(
-            "ALTER TABLE session_analytics ADD COLUMN project_id TEXT NOT NULL DEFAULT 'vnx-dev'"
-        )
-        cols = {r[1] for r in conn.execute("PRAGMA table_info(session_analytics)").fetchall()}
-
-    # Ensure other missing columns exist (context_reset_count, dispatch_id).
-    if "context_reset_count" not in cols:
-        conn.execute(
-            "ALTER TABLE session_analytics ADD COLUMN context_reset_count INTEGER DEFAULT 0"
-        )
-    if "dispatch_id" not in cols:
-        conn.execute("ALTER TABLE session_analytics ADD COLUMN dispatch_id TEXT")
+    _v29_ensure_columns(conn)
 
     # Idempotent guard: skip rebuild if composite UNIQUE already present.
     needs_rebuild = not _has_composite_unique(
@@ -1569,8 +1552,34 @@ def _migrate_v29(conn: sqlite3.Connection) -> None:
         )
         log('INFO', f'Replayed {len(captured_indexes)} captured session_analytics index(es) + ensured idx_session_dispatch')
 
-        # Step 9: Recreate the cost_per_dispatch view.
-        conn.execute("""
+        _v29_recreate_cost_view(conn)
+
+    _v29_backfill_project_id(conn)
+
+
+def _v29_ensure_columns(conn: sqlite3.Connection) -> None:
+    """Add project_id, context_reset_count and dispatch_id to session_analytics when absent."""
+    # Step 0: Ensure project_id column exists before table recreation.
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(session_analytics)").fetchall()}
+    if "project_id" not in cols:
+        conn.execute(
+            "ALTER TABLE session_analytics ADD COLUMN project_id TEXT NOT NULL DEFAULT 'vnx-dev'"
+        )
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(session_analytics)").fetchall()}
+
+    # Ensure other missing columns exist (context_reset_count, dispatch_id).
+    if "context_reset_count" not in cols:
+        conn.execute(
+            "ALTER TABLE session_analytics ADD COLUMN context_reset_count INTEGER DEFAULT 0"
+        )
+    if "dispatch_id" not in cols:
+        conn.execute("ALTER TABLE session_analytics ADD COLUMN dispatch_id TEXT")
+
+
+def _v29_recreate_cost_view(conn: sqlite3.Connection) -> None:
+    """Recreate the cost_per_dispatch view _migrate_v29 dropped (its step 9)."""
+    # Step 9: Recreate the cost_per_dispatch view.
+    conn.execute("""
             CREATE VIEW IF NOT EXISTS cost_per_dispatch AS
             SELECT
                 dm.dispatch_id,
@@ -1589,8 +1598,11 @@ def _migrate_v29(conn: sqlite3.Connection) -> None:
             LEFT JOIN session_analytics sa ON sa.dispatch_id = dm.dispatch_id
             WHERE dm.outcome_status IS NOT NULL
         """)
-        log('INFO', 'Recreated cost_per_dispatch view')
+    log('INFO', 'Recreated cost_per_dispatch view')
 
+
+def _v29_backfill_project_id(conn: sqlite3.Connection) -> None:
+    """Stamp vnx-dev on session_analytics rows whose project_id is still NULL."""
     # Backfill NULL project_ids for any rows that predate the column addition.
     null_count = conn.execute(
         "SELECT COUNT(*) FROM session_analytics WHERE project_id IS NULL"
@@ -1722,6 +1734,107 @@ def _migrate_v34(conn: sqlite3.Connection) -> None:
         log('INFO', "Migrated: added origin_class column to improvement_suggestions (v34)")
 
 
+_PATTERN_ACTIVATION_DDL = """
+CREATE TABLE IF NOT EXISTS pattern_activation (
+    project_id TEXT NOT NULL,
+    activation_id TEXT NOT NULL,
+    rule_row_id INTEGER NOT NULL,
+    rule_id TEXT NOT NULL,
+    decision_id TEXT NOT NULL,
+    approval_id TEXT NOT NULL,
+    bundle_ref TEXT NOT NULL,
+    rollout_scope TEXT NOT NULL,
+    baseline_metric TEXT NOT NULL,
+    baseline_value INTEGER NOT NULL,
+    effect_criterion TEXT NOT NULL,
+    stop_condition TEXT NOT NULL,
+    recovery_path TEXT NOT NULL,
+    activated_at TEXT NOT NULL,
+    active INTEGER NOT NULL CHECK (active IN (0, 1)),
+    deactivated_at TEXT,
+    deactivation_reason TEXT,
+    deactivation_approval_id TEXT,
+    PRIMARY KEY (project_id, activation_id)
+)
+"""
+
+
+def _migrate_v35(conn: sqlite3.Connection) -> None:
+    """V35: pattern_activation, one row per activation of an approved prevention rule (loop D5).
+
+    Keyed ``(project_id, activation_id)`` (ADR-007); carries the decision record, the
+    ``prevention_rules.id`` it switches on and the recovery path. Only writer:
+    ``scripts/lib/pattern_activation.py``. Purely additive. A table of that name with
+    another shape is never adopted: the migration raises and ``user_version`` stays 34.
+    """
+    shape = "PRAGMA table_info(pattern_activation)"
+    with closing(sqlite3.connect(":memory:")) as reference:
+        reference.execute(_PATTERN_ACTIVATION_DDL)
+        expected = reference.execute(shape).fetchall()
+    conn.execute(_PATTERN_ACTIVATION_DDL)
+    actual = conn.execute(shape).fetchall()
+    if actual != expected:
+        raise RuntimeError(f"pattern_activation exists with another shape {actual}; v35 not applied")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_pattern_activation_rule_active "
+        "ON pattern_activation (project_id, rule_row_id, active)"
+    )
+    log('INFO', "Migrated: pattern_activation table keyed (project_id, activation_id) (v35)")
+
+
+_REWORK_EDGES_DDL = """
+CREATE TABLE IF NOT EXISTS rework_edges (
+    project_id TEXT NOT NULL,
+    rework_dispatch_id TEXT NOT NULL,
+    origin_dispatch_id TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('round', 'oi_fix', 'pr_fix', 'blame')),
+    class TEXT NOT NULL CHECK (class IN ('rework', 'churn')),
+    evidence_json TEXT NOT NULL DEFAULT '{}',
+    detected_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    source TEXT NOT NULL CHECK (source IN ('spec', 'receipt', 'blame')),
+    PRIMARY KEY (project_id, rework_dispatch_id, origin_dispatch_id, kind)
+)
+"""
+
+
+def _migrate_v36(conn: sqlite3.Connection) -> None:
+    """V36: rework_edges, one row per rework -> origin edge (herwerk H3, ADR-071 decision 1).
+
+    Keyed ``(project_id, rework_dispatch_id, origin_dispatch_id, kind)`` (ADR-007). Writers:
+    ``scripts/lib/rework_attribution.record_edge`` (fill-once) and
+    ``scripts/backfill_rework_edges.py``. Purely additive: no existing table, column or row
+    changes. A table of that name with another shape is never adopted: the migration raises
+    and ``user_version`` stays 35.
+    """
+    shape = "PRAGMA table_info(rework_edges)"
+    with closing(sqlite3.connect(":memory:")) as reference:
+        reference.execute(_REWORK_EDGES_DDL)
+        expected = reference.execute(shape).fetchall()
+    conn.execute(_REWORK_EDGES_DDL)
+    actual = conn.execute(shape).fetchall()
+    if actual != expected:
+        raise RuntimeError(f"rework_edges exists with another shape {actual}; v36 not applied")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_rework_edges_origin "
+        "ON rework_edges (project_id, origin_dispatch_id)"
+    )
+    log('INFO', "Migrated: rework_edges table keyed (project_id, rework, origin, kind) (v36)")
+
+
+def _migrate_v37(conn: sqlite3.Connection) -> None:
+    """V37: dispatch_metadata.difficulty_json (herwerk-per-model-en-reviewer, ADR-071).
+
+    Operator decision 2026-11-13 (storage): a column on ``dispatch_metadata``, no new table. Holds the
+    difficulty recorded at staging (line budget, file count, plan complexity, route reason) so a
+    deliberate escalation stratifies apart from an ordinary dispatch. Written fill-once by
+    ``dispatch_metadata_db``. Purely additive: no existing row changes.
+    """
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(dispatch_metadata)").fetchall()}
+    if "difficulty_json" not in cols:
+        conn.execute("ALTER TABLE dispatch_metadata ADD COLUMN difficulty_json TEXT")
+        log('INFO', 'Migrated dispatch_metadata: added difficulty_json column (v37)')
+
+
 # Registry mapping version → migration function.
 # bootstrap_qi_db iterates this in sorted key order after V1.
 MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
@@ -1758,6 +1871,9 @@ MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     32: _migrate_v32,
     33: _migrate_v33,
     34: _migrate_v34,
+    35: _migrate_v35,
+    36: _migrate_v36,
+    37: _migrate_v37,
 }
 
 
@@ -1864,6 +1980,8 @@ def verify_database_structure() -> bool:
             'dream_cycles',
             'dream_pattern_archives',
             'pattern_injection_outcome',
+            'pattern_activation',
+            'rework_edges',
         ]
 
         # Expected views

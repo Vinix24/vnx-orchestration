@@ -278,12 +278,6 @@ The closeout procedure SHOULD be exposed as a `runtime_core_cli.py` subcommand:
 python3 scripts/runtime_core_cli.py chain-closeout [--force]
 ```
 
-And optionally integrated into `bin/vnx`:
-
-```bash
-vnx chain closeout [--force]
-```
-
 ### 5.4 Closeout Is Not Automatic
 
 **BOOT-12 (Explicit Closeout)**: Chain closeout MUST be an explicit operator action, not an automatic side-effect of chain completion. The operator decides when a chain is complete. This preserves the governance invariant that T0 reviews receipts and advances quality gates — automated cleanup must not bypass this.

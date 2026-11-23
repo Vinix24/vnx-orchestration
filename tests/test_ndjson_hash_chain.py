@@ -19,6 +19,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts" / "lib"))
 
+import ndjson_hash_chain as nhc
 from ndjson_hash_chain import (
     GENESIS_HASH,
     append_chained_entry,
@@ -567,3 +568,53 @@ def test_t21_path1_and_path2_concurrent_writes_never_fork(tmp_path, monkeypatch)
     ok, violations, status = verify_chain(receipt_path)
     assert ok, f"chain forked/broken under Path-1/Path-2 concurrency: {violations}"
     assert status in ("verified", "verified-segmented")
+
+
+
+# ADR-083: read_ledger_tail, the bounded tail reading (receipt-hashketen-aan H3)
+def test_tail_window_is_the_closer_window(monkeypatch):
+    # monkeypatch restores sys.path at teardown: a bare sys.path.insert left
+    # scripts/ ahead of scripts/lib for every later test in the process, and
+    # the CLI scripts/crash_recovery_sweep.py then shadowed the library module.
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parent.parent / "scripts"))
+    from append_receipt_internals.idempotency import _TORN_TAIL_WINDOW
+    assert nhc.TAIL_WINDOW == _TORN_TAIL_WINDOW
+
+
+@pytest.mark.parametrize("body", [None, b"", b"\n\n  \n", b'{"torn'])
+def test_tail_of_a_missing_empty_blank_or_debris_only_ledger_is_empty(tmp_path, body):
+    ledger = tmp_path / "l.ndjson"
+    if body is not None:
+        ledger.write_bytes(body)
+    assert nhc.read_ledger_tail(ledger) == (nhc.TAIL_EMPTY, None)
+
+
+def test_tail_classifies_marker_chained_unchained_and_long_records(tmp_path):
+    ledger = tmp_path / "l.ndjson"
+    ledger.write_bytes(b'{"a": 1}\n')
+    assert nhc.read_ledger_tail(ledger) == (nhc.TAIL_UNCHAINED, compute_entry_hash({"a": 1}))
+    marker_hash = nhc.append_epoch_marker(ledger, 1)
+    assert nhc.read_ledger_tail(ledger) == (nhc.TAIL_CHAINING, marker_hash)
+    entry_hash = append_chained_entry(ledger, {"b": 2})
+    with ledger.open("ab") as fh:
+        fh.write(b'[1]\n{"torn\t#vnx-torn-tail-closed\n')
+    assert nhc.read_ledger_tail(ledger) == (nhc.TAIL_CHAINING, entry_hash)
+    long_record = {"prev_hash": "f" * 64, "pad": "x" * 200_000}  # one record, read whole
+    with ledger.open("ab") as fh:
+        fh.write(json.dumps(long_record).encode())
+    assert nhc.read_ledger_tail(ledger) == (nhc.TAIL_CHAINING, compute_entry_hash(long_record))
+
+
+def test_tail_read_of_a_10mb_ledger_stays_inside_the_window(tmp_path, monkeypatch):
+    ledger, line = tmp_path / "big.ndjson", json.dumps({"pad": "x" * 990}).encode() + b"\n"
+    body = line * (10 * 1024 * 1024 // len(line))
+    real_pread, read_sizes = nhc.os.pread, []
+    monkeypatch.setattr(nhc.os, "pread", lambda fd, n, at: read_sizes.append(n) or real_pread(fd, n, at))
+    monkeypatch.setattr(nhc, "_iter_parsed", lambda *_a: pytest.fail("full scan"))
+    ledger.write_bytes(body)
+    assert nhc.read_ledger_tail(ledger)[0] == nhc.TAIL_UNCHAINED
+    assert sum(read_sizes) <= nhc.TAIL_WINDOW
+    read_sizes.clear()
+    ledger.write_bytes(body + b"#" * 70_000 + b"\n")  # one chunk to the window, one to the line start
+    assert nhc.read_ledger_tail(ledger) == (nhc.TAIL_AMBIGUOUS, None)
+    assert sum(read_sizes) <= 2 * nhc.TAIL_WINDOW

@@ -12,10 +12,6 @@ Feature flags (PR-5 defaults — all enabled after cutover):
                            "1" = shadow mode, broker registers but does not own delivery
   VNX_CANONICAL_LEASE_ACTIVE "1" = canonical lease manager active (PR-5 default)
 
-Rollback:
-  Set VNX_RUNTIME_PRIMARY=0 to revert to legacy transport without
-  changing any other component. See docs/operations/RUNTIME_CORE_ROLLBACK.md.
-
 Governance invariants preserved:
   - T0 completion authority: broker only tracks delivery -> accepted.
     The receipt processor + T0 review still determine 'completed'.

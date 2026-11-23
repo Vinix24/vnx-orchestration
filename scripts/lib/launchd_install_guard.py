@@ -15,8 +15,9 @@ only when it is one of:
   3. a primary checkout registered in ``~/.vnx/projects.json``: the registry path of
      the id in ``<root>/.vnx-project-id`` resolves to exactly this root.
 
-A root under ``.vnx-data/worktrees/`` and a linked git worktree (``<root>/.git`` is a
-file) are refused before any of the three is considered. ``.vnx-project-id`` is
+A root under ``.vnx-data/worktrees/``, a root under a temporary directory (a packaged
+engine in a scratch venv is gone with the venv) and a linked git worktree
+(``<root>/.git`` is a file) are refused before any of the three is considered. ``.vnx-project-id`` is
 tracked in git, so a clone carries its origin's id; only path equality refuses it.
 
 The registry is read through ``forge_project_target.project_checkout_path`` (no second
@@ -27,7 +28,9 @@ the reason on stderr when refused.
 """
 from __future__ import annotations
 
+import os
 import sys
+import tempfile
 from pathlib import Path
 from typing import Optional
 
@@ -44,6 +47,38 @@ def _under_worktrees(root: Path) -> bool:
         part == ".vnx-data" and i + 1 < len(parts) and parts[i + 1] == "worktrees"
         for i, part in enumerate(parts)
     )
+
+
+def _temp_roots() -> list:
+    """Resolved temporary directories an engine root must not live under.
+
+    ``VNX_LAUNCHD_GUARD_TEMP_ROOTS`` (os.pathsep list) replaces the set. It is the seam
+    for the test suite only: a fake engine under pytest's ``tmp_path`` is itself under
+    the temp dir, and ``reload_plist.sh`` runs this guard as a subprocess that a
+    monkeypatch cannot reach. ``tests/conftest.py`` sets it; the wheel smoke strips it.
+    """
+    override = os.environ.get("VNX_LAUNCHD_GUARD_TEMP_ROOTS")
+    raws = (
+        [p for p in override.split(os.pathsep) if p]
+        if override is not None
+        else [tempfile.gettempdir(), "/tmp", "/private/tmp", "/private/var/folders"]
+    )
+    roots = []
+    for raw in raws:
+        try:
+            resolved = Path(raw).resolve()
+        except (OSError, RuntimeError):
+            continue
+        if resolved not in roots:
+            roots.append(resolved)
+    return roots
+
+
+def _under_temp_root(root: Path) -> Optional[Path]:
+    for temp_root in _temp_roots():
+        if root == temp_root or temp_root in root.parents:
+            return temp_root
+    return None
 
 
 def _is_central_install(root: Path) -> bool:
@@ -87,6 +122,12 @@ def refusal_reason(engine_root) -> Optional[str]:
         return (
             f"engine root is under .vnx-data/worktrees/ ({root}); a worktree is reaped "
             "and the job would point at a path that is gone"
+        )
+    temp_root = _under_temp_root(root)
+    if temp_root is not None:
+        return (
+            f"engine root is under the temporary directory {temp_root} ({root}); a "
+            "scratch venv or clone is deleted and the job would point at a path that is gone"
         )
     if (root / ".git").is_file():
         return f"engine root {root} is a linked git worktree; install from the primary checkout"

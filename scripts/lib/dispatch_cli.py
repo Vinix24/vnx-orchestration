@@ -16,11 +16,13 @@ import dataclasses
 import json
 import logging
 import os
+import stat as _stat
 import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
-from typing import Optional, Set
+from typing import Any, Mapping, Optional, Set
 
 _LIB_DIR = Path(__file__).resolve().parent
 if str(_LIB_DIR) not in sys.path:
@@ -60,6 +62,7 @@ from dispatch_serialization import LockWaitTimeout, force_release, serialize_lan
 import dispatch_exit  # noqa: E402
 import dispatch_start  # noqa: E402
 from worker_permissions import (  # noqa: E402
+    _registry_role_names,
     resolve_worker_profile,
     role_grants_write,
     worker_permission_enforcement_enabled,
@@ -79,6 +82,7 @@ from runtime_coordination import (  # noqa: E402
     transition_dispatch as _rc_transition_dispatch,
     transition_dispatch_idempotent as _rc_transition_dispatch_idempotent,
     update_attempt as _rc_update_attempt,
+    DuplicateTransitionError as _RcDuplicateTransitionError,
     InvalidStateError as _RcInvalidStateError,
     InvalidTransitionError as _RcInvalidTransitionError,
 )
@@ -218,6 +222,15 @@ def _note_removed_lane_keys(raw: dict, spec_file: Path) -> None:
     )
 
 
+def _parse_difficulty(value: Any) -> "Optional[Mapping[str, Any]]":
+    """The spec's ``difficulty`` object as is (staging validated it); absent = None."""
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ValueError(f"difficulty must be an object, got {type(value).__name__}")
+    return value
+
+
 def load_spec(spec_file: Path) -> DispatchSpec:
     """Parse a DispatchSpec from a JSON dispatch-spec.json file."""
     raw = json.loads(spec_file.read_text(encoding="utf-8"))
@@ -254,6 +267,7 @@ def load_spec(spec_file: Path) -> DispatchSpec:
         parent_dispatch=(raw.get("parent_dispatch") or None),
         tier_from=(raw.get("tier_from") or None),
         tier_to=(raw.get("tier_to") or None),
+        difficulty=_parse_difficulty(raw.get("difficulty")),
         deadline_seconds=int(raw.get("deadline_seconds", 3600)),
         base_ref=str(raw.get("base_ref", "origin/main")),
         isolation=Isolation(raw.get("isolation", "worktree")),
@@ -822,9 +836,6 @@ def _check_reachability(
     pre-check exists, never a silent skip. Never raises: an absent/corrupt
     ledger or a probe failure degrades to the advisory WARN path, never a crash.
     """
-    import urllib.request
-    import urllib.error
-
     provider_val = plan.provider.value
     lane = plan.lane
 
@@ -851,138 +862,164 @@ def _check_reachability(
         provider_val.startswith("litellm:")
         or provider_val in ("litellm",)
     ):
-        proxy_url = os.environ.get(
-            "LITELLM_PROXY_BASE",
-            "http://127.0.0.1:4141",
-        )
-        models_url = f"{proxy_url.rstrip('/')}/v1/models"
-        # OI-893: the probe must carry the proxy's Authorization header — an
-        # unauthenticated GET to an auth-gated /v1/models returns HTTP 401 by
-        # construction, so the OK branch would be unreachable whenever the proxy
-        # enforces a key. Add the header when LITELLM_API_KEY is present; when it
-        # is absent, the 401 the proxy returns is genuine and is reported as
-        # AUTH REJECTED with a "key not set" hint, never as an OK.
-        litellm_key = os.environ.get("LITELLM_API_KEY", "").strip()
-        try:
-            req = urllib.request.Request(models_url)
-            if litellm_key:
-                req.add_header("Authorization", f"Bearer {litellm_key}")
-            resp = urllib.request.urlopen(req, timeout=5)
-            body = resp.read().decode("utf-8", errors="replace")
-            # A 200 with an empty model list is suspicious but not a hard
-            # failure — the proxy may be warming up.
-            if resp.status == 200:
-                try:
-                    data = json.loads(body)
-                    model_count = len(data.get("data", []))
-                    if model_count == 0:
-                        print(
-                            f"[dispatch_cli] [WARN] litellm proxy returned 0 models "
-                            f"from {models_url} — the lane may be stale. Evidence: "
-                            f"empty model list.",
-                            file=sys.stderr,
-                        )
-                    else:
-                        print(
-                            f"[dispatch_cli] [reachability] litellm proxy OK: "
-                            f"{model_count} models at {models_url}",
-                            file=sys.stderr,
-                        )
-                except json.JSONDecodeError:
-                    print(
-                        f"[dispatch_cli] [WARN] litellm proxy response is not valid "
-                        f"JSON from {models_url} — response: {body[:200]}",
-                        file=sys.stderr,
-                    )
-        except urllib.error.HTTPError as exc:
-            status = exc.code
-            body = ""
-            try:
-                body = exc.read().decode("utf-8", errors="replace")[:200]
-            except Exception:  # vnx-silent-except: body read is best-effort; empty case caught by `body or str(exc)` below
-                pass
-            if status in (401, 403):
-                if not litellm_key:
-                    auth_hint = (
-                        "LITELLM_API_KEY is not set — ANY dispatch on this "
-                        "lane will fail silently."
-                    )
-                else:
-                    auth_hint = (
-                        "The proxy API key (LITELLM_API_KEY) is missing or "
-                        "invalid — ANY dispatch on this lane will fail silently."
-                    )
-                print(
-                    f"[dispatch_cli] [WARN] litellm proxy AUTH REJECTED "
-                    f"(HTTP {status}) at {models_url}. Evidence: {body or str(exc)}. "
-                    f"{auth_hint}",
-                    file=sys.stderr,
-                )
-            else:
-                print(
-                    f"[dispatch_cli] [WARN] litellm proxy returned HTTP {status} "
-                    f"from {models_url}. Evidence: {body or str(exc)}",
-                    file=sys.stderr,
-                )
-        except (urllib.error.URLError, OSError) as exc:
-            print(
-                f"[dispatch_cli] [WARN] litellm proxy unreachable at "
-                f"{models_url} ({exc}). The lane may be down — dispatch will "
-                f"likely fail.",
-                file=sys.stderr,
-            )
+        _probe_litellm_proxy()
         return ReachabilityVerdict(block=False)
 
     # ── deepseek-harness lane ──
     if lane == "provider" and provider_val in (
         "deepseek-harness", "deepseek_harness",
     ):
-        ds_url = "https://api.deepseek.com/v1/models"
-        # OI-893: the probe must carry the API key. An unauthenticated GET to
-        # api.deepseek.com/v1/models returns HTTP 401 by construction, so the
-        # OK branch was unreachable. With DEEPSEEK_API_KEY set the probe now
-        # exercises the same auth the lane uses; when it is absent the 401 is
-        # genuine and is reported as AUTH REJECTED with a "key not set" hint.
-        ds_key = os.environ.get("DEEPSEEK_API_KEY", "").strip()
-        try:
-            req = urllib.request.Request(ds_url)
-            if ds_key:
-                req.add_header("Authorization", f"Bearer {ds_key}")
-            urllib.request.urlopen(req, timeout=5)
-            print(
-                f"[dispatch_cli] [reachability] deepseek API OK: {ds_url}",
-                file=sys.stderr,
-            )
-        except urllib.error.HTTPError as exc:
-            if exc.code in (401, 403):
-                if not ds_key:
-                    auth_hint = "DEEPSEEK_API_KEY is not set."
-                elif exc.code == 403:
-                    auth_hint = "the API key is missing permissions."
-                else:
-                    auth_hint = "the API key is missing, invalid, or expired."
-                print(
-                    f"[dispatch_cli] [WARN] deepseek API AUTH REJECTED "
-                    f"(HTTP {exc.code}) at {ds_url}. {auth_hint}",
-                    file=sys.stderr,
-                )
-            else:
-                print(
-                    f"[dispatch_cli] [WARN] deepseek API returned HTTP "
-                    f"{exc.code} from {ds_url}.",
-                    file=sys.stderr,
-                )
-        except (urllib.error.URLError, OSError) as exc:
-            print(
-                f"[dispatch_cli] [WARN] deepseek API unreachable at "
-                f"{ds_url} ({exc}).",
-                file=sys.stderr,
-            )
+        _probe_deepseek_api()
         return ReachabilityVerdict(block=False)
 
     # ── Every other lane — explicit "not checkable", never silence ─────────
     print(_not_checkable_note(lane, provider_val, state_dir), file=sys.stderr)
     return ReachabilityVerdict(block=False)
+
+
+def _probe_litellm_proxy() -> None:
+    """``_check_reachability``'s advisory litellm proxy probe: prints one OK/WARN line, never raises."""
+    import urllib.request
+    import urllib.error
+
+    proxy_url = os.environ.get(
+        "LITELLM_PROXY_BASE",
+        "http://127.0.0.1:4141",
+    )
+    models_url = f"{proxy_url.rstrip('/')}/v1/models"
+    # OI-893: the probe must carry the proxy's Authorization header — an
+    # unauthenticated GET to an auth-gated /v1/models returns HTTP 401 by
+    # construction, so the OK branch would be unreachable whenever the proxy
+    # enforces a key. Add the header when LITELLM_API_KEY is present; when it
+    # is absent, the 401 the proxy returns is genuine and is reported as
+    # AUTH REJECTED with a "key not set" hint, never as an OK.
+    litellm_key = os.environ.get("LITELLM_API_KEY", "").strip()
+    try:
+        req = urllib.request.Request(models_url)
+        if litellm_key:
+            req.add_header("Authorization", f"Bearer {litellm_key}")
+        resp = urllib.request.urlopen(req, timeout=5)
+        _report_litellm_models(resp, models_url)
+    except urllib.error.HTTPError as exc:
+        _warn_litellm_http_error(exc, models_url, litellm_key)
+    except (urllib.error.URLError, OSError) as exc:
+        print(
+            f"[dispatch_cli] [WARN] litellm proxy unreachable at "
+            f"{models_url} ({exc}). The lane may be down — dispatch will "
+            f"likely fail.",
+            file=sys.stderr,
+        )
+
+
+def _report_litellm_models(resp, models_url: str) -> None:
+    """Read a litellm ``/v1/models`` response and print the OK or WARN line for its model list."""
+    body = resp.read().decode("utf-8", errors="replace")
+    # A 200 with an empty model list is suspicious but not a hard
+    # failure — the proxy may be warming up.
+    if resp.status == 200:
+        try:
+            data = json.loads(body)
+            model_count = len(data.get("data", []))
+            if model_count == 0:
+                print(
+                    f"[dispatch_cli] [WARN] litellm proxy returned 0 models "
+                    f"from {models_url} — the lane may be stale. Evidence: "
+                    f"empty model list.",
+                    file=sys.stderr,
+                )
+            else:
+                print(
+                    f"[dispatch_cli] [reachability] litellm proxy OK: "
+                    f"{model_count} models at {models_url}",
+                    file=sys.stderr,
+                )
+        except json.JSONDecodeError:
+            print(
+                f"[dispatch_cli] [WARN] litellm proxy response is not valid "
+                f"JSON from {models_url} — response: {body[:200]}",
+                file=sys.stderr,
+            )
+
+
+def _warn_litellm_http_error(exc, models_url: str, litellm_key: str) -> None:
+    """Print the WARN line for an HTTP error from the litellm proxy probe (auth or other status)."""
+    status = exc.code
+    body = ""
+    try:
+        body = exc.read().decode("utf-8", errors="replace")[:200]
+    except Exception:  # vnx-silent-except: body read is best-effort; empty case caught by `body or str(exc)` below
+        pass
+    if status in (401, 403):
+        if not litellm_key:
+            auth_hint = (
+                "LITELLM_API_KEY is not set — ANY dispatch on this "
+                "lane will fail silently."
+            )
+        else:
+            auth_hint = (
+                "The proxy API key (LITELLM_API_KEY) is missing or "
+                "invalid — ANY dispatch on this lane will fail silently."
+            )
+        print(
+            f"[dispatch_cli] [WARN] litellm proxy AUTH REJECTED "
+            f"(HTTP {status}) at {models_url}. Evidence: {body or str(exc)}. "
+            f"{auth_hint}",
+            file=sys.stderr,
+        )
+    else:
+        print(
+            f"[dispatch_cli] [WARN] litellm proxy returned HTTP {status} "
+            f"from {models_url}. Evidence: {body or str(exc)}",
+            file=sys.stderr,
+        )
+
+
+def _probe_deepseek_api() -> None:
+    """``_check_reachability``'s advisory deepseek API probe: prints one OK/WARN line, never raises."""
+    import urllib.request
+    import urllib.error
+
+    ds_url = "https://api.deepseek.com/v1/models"
+    # OI-893: the probe must carry the API key. An unauthenticated GET to
+    # api.deepseek.com/v1/models returns HTTP 401 by construction, so the
+    # OK branch was unreachable. With DEEPSEEK_API_KEY set the probe now
+    # exercises the same auth the lane uses; when it is absent the 401 is
+    # genuine and is reported as AUTH REJECTED with a "key not set" hint.
+    ds_key = os.environ.get("DEEPSEEK_API_KEY", "").strip()
+    try:
+        req = urllib.request.Request(ds_url)
+        if ds_key:
+            req.add_header("Authorization", f"Bearer {ds_key}")
+        urllib.request.urlopen(req, timeout=5)
+        print(
+            f"[dispatch_cli] [reachability] deepseek API OK: {ds_url}",
+            file=sys.stderr,
+        )
+    except urllib.error.HTTPError as exc:
+        if exc.code in (401, 403):
+            if not ds_key:
+                auth_hint = "DEEPSEEK_API_KEY is not set."
+            elif exc.code == 403:
+                auth_hint = "the API key is missing permissions."
+            else:
+                auth_hint = "the API key is missing, invalid, or expired."
+            print(
+                f"[dispatch_cli] [WARN] deepseek API AUTH REJECTED "
+                f"(HTTP {exc.code}) at {ds_url}. {auth_hint}",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                f"[dispatch_cli] [WARN] deepseek API returned HTTP "
+                f"{exc.code} from {ds_url}.",
+                file=sys.stderr,
+            )
+    except (urllib.error.URLError, OSError) as exc:
+        print(
+            f"[dispatch_cli] [WARN] deepseek API unreachable at "
+            f"{ds_url} ({exc}).",
+            file=sys.stderr,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1447,11 +1484,86 @@ def _record_bookkeeping_failure(
         )
 
 
+#: A refired row in one of these states walks through ``recovered`` into a new claim
+#: (OI-1814). Both have ``recovered`` as an allowed successor in DISPATCH_TRANSITIONS.
+_REFIRE_RECOVERABLE_STATES = frozenset({"failed_delivery", "timed_out"})
+
+
+def _recover_for_refire(conn, row: dict, refire_reason: Optional[str]) -> None:
+    """OI-1814/OI-2482: move a refired row out of a recoverable failure to ``recovered``.
+
+    Without this the claim below met a ``failed_delivery``/``timed_out`` row, was
+    refused as an idempotent no-op, and every owner hop after it was refused too:
+    the attempt ran and landed, the row stayed on the failure of the attempt before.
+    Only an explicit ``--refire`` reason walks the row; a row in any other state
+    (first fire, in flight, terminal) is left to the claim exactly as before.
+    Uses the register API in the caller's transaction, so the walk and the claim
+    commit together or not at all. Same scope as that claim: ``register_dispatch``
+    has already refused a row registered under another project.
+    """
+    reason = (refire_reason or "").strip()
+    if not reason or row.get("state") not in _REFIRE_RECOVERABLE_STATES:
+        return
+    _rc_transition_dispatch(
+        conn, dispatch_id=row["dispatch_id"], to_state="recovered", actor="door",
+        reason=f"door refire of a {row['state']} row as a new attempt: {reason}",
+        metadata={"refire_reason": reason, "recovered_from": row["state"]},
+    )
+
+
+_CLAIM_LOCK_ATTEMPTS = 4
+_CLAIM_LOCK_BACKOFF = (0.25, 0.5, 1.0)
+_CLAIM_SLEEP = time.sleep  # injectable: tests swap it so they do not wait
+
+
+def _is_lock_error(exc: Exception) -> bool:
+    """True only for a sqlite ``OperationalError`` that says the DB is locked or busy."""
+    import sqlite3 as _sqlite3
+    if not isinstance(exc, _sqlite3.OperationalError):
+        return False
+    msg = str(exc).lower()
+    return "database is locked" in msg or "database is busy" in msg
+
+
 def _persist_dispatch_row(
     spec: DispatchSpec,
     *,
     state_dir: Path,
     worker_claude_override_reason: Optional[str] = None,
+    refire_reason: Optional[str] = None,
+) -> Optional[str]:
+    """Run ``_persist_dispatch_row_once``, retrying a locked claim (OI-2754).
+
+    A ``database is locked``/``database is busy`` at the claim (a concurrent fire wave)
+    retries the whole register-and-claim unit from scratch, at most
+    ``_CLAIM_LOCK_ATTEMPTS`` times with ``_CLAIM_LOCK_BACKOFF`` sleeps; the one
+    ``door_bookkeeping_failed`` fact after the last failure names the attempt count.
+    """
+    for attempt in range(1, _CLAIM_LOCK_ATTEMPTS + 1):
+        try:
+            return _persist_dispatch_row_once(
+                spec, state_dir=state_dir, refire_reason=refire_reason,
+                worker_claude_override_reason=worker_claude_override_reason,
+            )
+        except Exception as exc:  # vnx-silent-except: a lock error is retried, then recorded as one fact; anything else is re-raised
+            if not _is_lock_error(exc):
+                raise
+            if attempt < _CLAIM_LOCK_ATTEMPTS:
+                _CLAIM_SLEEP(_CLAIM_LOCK_BACKOFF[attempt - 1])
+                continue
+            _record_bookkeeping_failure(
+                "_persist_dispatch_row", spec.dispatch_id,
+                type(exc)(f"{exc} (after {attempt} attempts)"), state_dir=state_dir,
+            )
+    return None
+
+
+def _persist_dispatch_row_once(
+    spec: DispatchSpec,
+    *,
+    state_dir: Path,
+    worker_claude_override_reason: Optional[str] = None,
+    refire_reason: Optional[str] = None,
 ) -> Optional[str]:
     """Best-effort: create the dispatches tracker row for a door-accepted
     dispatch AND drive it through the EXISTING dispatch state machine
@@ -1509,17 +1621,23 @@ def _persist_dispatch_row(
     EXPECTED idempotent no-op (no second row, no forced re-claim, no
     bookkeeping-failure fact — this is not a bug), and this call returns None
     (no attempt tracking for that particular re-fire; the dispatch itself
-    still runs for real). Every OTHER failure (missing/locked DB, schema
+    still runs for real). The one exception is a ``--refire`` of a row in
+    ``failed_delivery``/``timed_out``: ``_recover_for_refire`` first walks it
+    to ``recovered``, so the claim is a real new attempt (OI-1814).
+    Every OTHER failure (missing/locked DB, schema
     error, etc.) is a genuine bookkeeping failure: never raises, records a
     durable ``door_bookkeeping_failed`` fact via _record_bookkeeping_failure,
     and returns None — tracker bookkeeping must never block the door.
+
+    One register-and-claim unit; a locked/busy DB is re-raised for the retrying
+    ``_persist_dispatch_row`` (OI-2754), every other failure is recorded here.
 
     Returns the new dispatch_attempts row's attempt_id on success, else None.
     """
     try:
         _rc_init_schema(state_dir)
         with _rc_get_connection(state_dir) as conn:
-            _rc_register_dispatch(
+            row = _rc_register_dispatch(
                 conn,
                 dispatch_id=spec.dispatch_id,
                 project_id=spec.project_id,
@@ -1535,6 +1653,7 @@ def _persist_dispatch_row(
                 },
                 actor="door",
             )
+            _recover_for_refire(conn, row, refire_reason)
             try:
                 _rc_transition_dispatch(
                     conn,
@@ -1563,6 +1682,8 @@ def _persist_dispatch_row(
             conn.commit()
             return attempt_row["attempt_id"]
     except Exception as exc:  # vnx-silent-except: dispatch-row persistence is best-effort; door must never block on a tracker-row write failure
+        if _is_lock_error(exc):
+            raise
         _record_bookkeeping_failure(
             "_persist_dispatch_row", spec.dispatch_id, exc, state_dir=state_dir,
         )
@@ -1827,8 +1948,8 @@ def _raise_plan_scope_at_door(spec: DispatchSpec, *, state_dir: Path) -> None:
 
     Track plan-gate-alleen-voor-architectuur: a build dispatch on a light track
     whose paths fall in an architecture class (``plan_scope.dispatch_rule``:
-    schema, security, gate or merge logic, store resolution, a coding-strict
-    variant, or no paths at all) makes the track architecture and seeds
+    schema, security, gate or merge logic, store resolution, task_class
+    03_refactoring, a coding-strict variant, or no paths at all) makes the track architecture and seeds
     ``OI-PLAN-<track>`` in the same transaction. Any build dispatch on a stored
     architecture track that has no OI-PLAN row of any status seeds one. The
     door refuses nothing here: it writes the scope, seeds the blocker, prints
@@ -1919,15 +2040,15 @@ def _discover_valid_roles(agents_dir: Path) -> frozenset[str]:
     file the worker loads as its profile. Missing or unreadable registry → EMPTY
     set, so compile_plan's OI-921 membership check rejects every role (fail-closed):
     an undiscoverable registry must never silently accept an arbitrary role string.
+    Unreadable is decided by an explicit stat, never by ``is_dir``/``is_file``,
+    because those hide the error from Python 3.14 on.
     """
     try:
-        if not agents_dir.is_dir():
+        if not _stat.S_ISDIR(os.stat(agents_dir).st_mode):
             return frozenset()
-        return frozenset(
-            entry.name
-            for entry in agents_dir.iterdir()
-            if entry.is_dir() and (entry / "CLAUDE.md").is_file()
-        )
+        return _registry_role_names(agents_dir)
+    except (FileNotFoundError, NotADirectoryError):
+        return frozenset()
     except OSError:
         return frozenset()
 
@@ -2285,7 +2406,8 @@ def _log_checkout_lag(spec: DispatchSpec, lag: Optional[int]) -> None:
 # ---------------------------------------------------------------------------
 
 # See point 3 above for the full reasoning and the CI evidence this is based on.
-_STOP_CONDITIONS_BLOCKING_CHECK_IDS = frozenset({"provider_exhausted", "repeated_gate_failure_cause"})
+# morning round D1b (ADR-095): morning_pause is a state_dir-scoped project fact too, so it blocks.
+_STOP_CONDITIONS_BLOCKING_CHECK_IDS = frozenset({"provider_exhausted", "repeated_gate_failure_cause", "morning_pause"})
 
 # 6. OI-1694: a blocking-eligible TRIGGERED check still measures BROADLY (see
 #    point 1 — run_all_checks never filters), but no longer refuses on the
@@ -2544,13 +2666,174 @@ def _check_b3_cap_verdict(spec: DispatchSpec, *, state_dir: Path) -> Optional[Co
     )
 
 
-def _project_state_verdicts(spec: DispatchSpec, *, state_dir: Path) -> "tuple[ConstraintVerdict, ...]":
-    """The door's checks against this project's own state: the track link (TL-D1) and the B3 cap (R1)."""
+def _project_state_verdicts(
+    spec: DispatchSpec, *, state_dir: Path, predecessor_override_reason: Optional[str] = None, dry_run: bool = False,
+) -> "tuple[ConstraintVerdict, ...]":
+    """The door's checks against this project's own state: the track link (TL-D1), the B3 cap (R1) and the
+    hard predecessors of the fire's deliverable (ADR-096 B2, per candidate: not a stop condition)."""
     verdicts = (
         _check_track_link_verdict(spec, state_dir=state_dir),
         _check_b3_cap_verdict(spec, state_dir=state_dir),
+        _check_predecessor_verdict(dispatch_id=spec.dispatch_id, project_id=spec.project_id, state_dir=state_dir,
+                                   override_reason=predecessor_override_reason, dry_run=dry_run),
     )
     return tuple(verdict for verdict in verdicts if verdict is not None)
+
+
+def _print_measurement_notes(results, unmeasurable_status) -> None:
+    """The door's non-verdict stop-condition lines: what stayed unmeasurable, and
+    one audit line naming how many panel-lane attempts provider_exhausted left out (OI-1800)."""
+    unmeasurable = [r.check_id for r in results if r.status == unmeasurable_status]
+    if unmeasurable:
+        print(
+            f"[dispatch_cli] [stop-conditions] unmeasurable (not a green "
+            f"light, not a refusal): {', '.join(unmeasurable)}",
+            file=sys.stderr,
+        )
+    for r in results:
+        excluded = r.evidence.get("panel_lane_excluded") if r.check_id == "provider_exhausted" else None
+        if not isinstance(excluded, dict) or not excluded:
+            continue
+        per_provider = ", ".join(f"{provider}={count}" for provider, count in sorted(excluded.items()))
+        print(
+            f"[dispatch_cli] [stop-conditions] provider_exhausted left out "
+            f"{sum(excluded.values())} panel-lane attempt(s) ({per_provider}): panel, plan-gate "
+            f"and tiebreak attempts do not count for a build or gate dispatch (OI-1800)",
+            file=sys.stderr,
+        )
+
+
+def _persist_halt_file(
+    state_dir: Path,
+    results: Any,
+    scoped_out: Any,
+    relevant_spec_providers: Optional[Set[str]],
+    relevant_gates: Optional[Set[str]],
+) -> None:
+    """Write halt.json for an actual blocking trigger; best-effort, never raises."""
+    from stop_conditions import write_halt_file  # noqa: PLC0415
+
+    try:
+        write_halt_file(
+            state_dir,
+            results,
+            scoped_out=scoped_out,
+            scope={
+                "providers": sorted(relevant_spec_providers or ()),
+                "gates": sorted(relevant_gates or ()),
+            },
+        )
+    except Exception as exc:  # vnx-silent-except: halt.json persistence is a best-effort audit trail, never a reason to change the verdict already decided
+        print(
+            f"[dispatch_cli] [WARN] failed to persist halt.json: {exc!r}",
+            file=sys.stderr,
+        )
+
+
+def _book_morning_pause(
+    blocking_triggered: list, *, state_dir: Path, dispatch_id: str, override_reason: str, dry_run: bool = False,
+) -> None:
+    """One ``refused``/``override`` ledger line when morning_pause is blocking on a real fire (never a dry run);
+    a failing append is printed only."""
+    import morning_pause_gate as gate  # noqa: PLC0415
+
+    pause = next((r for r in blocking_triggered if r.check_id == "morning_pause"), None)
+    if pause is None or dry_run:
+        return
+    ev = pause.evidence or {}
+    verdict = gate.MorningPauseVerdict(True, str(ev.get("reason") or ""), str(ev.get("day") or ""))
+    gate.report_event_error(gate.record_event(
+        "override" if override_reason else "refused", verdict, project_id=ev.get("project_id"),
+        state_dir=state_dir, surface="door", ref=dispatch_id, reason=override_reason or verdict.reason))
+
+
+def _check_predecessor_verdict(
+    *, dispatch_id: str, project_id: str, state_dir: Path, override_reason: Optional[str] = None, dry_run: bool = False,
+) -> Optional[ConstraintVerdict]:
+    """ADR-096 B2: an unsatisfied hard predecessor refuses (``refuse``) or reports (``warn``) this one fire;
+    ``off`` reads nothing, an unknown mode reads as refuse, a dry run writes no ledger line."""
+    import config_runtime
+    import deliverable_predecessor_gate as dpg
+
+    raw = config_runtime.get(dpg.MODE_KEY)
+    mode = raw if raw in dpg.MODES else "refuse"
+    findings = dpg.assess(dispatch_id, project_id, state_dir) if mode != "off" else ()
+    soft, hard = ([f"{f.predecessor} ({f.reason}{': ' + f.detail if f.detail else ''})" for f in findings if f.hard is h]
+                  for h in (False, True))
+    if soft:
+        print(f"[dispatch_cli] [INFO] soft predecessor(s) of {dispatch_id}, reported only: {', '.join(soft)}", file=sys.stderr)
+    if not hard:
+        return None
+    reason = (override_reason or "").strip()
+    outcome = "override" if reason else ("warned" if mode == "warn" else "refused")
+    if not dry_run:
+        try:
+            dpg.record(state_dir, project_id, dispatch_id, findings, mode=mode, outcome=outcome, override_reason=reason)
+        except OSError as exc:
+            print(f"[dispatch_cli] [WARN] {dpg.LEDGER} line not written: {exc!r}", file=sys.stderr)
+            outcome = "refused" if outcome == "override" else outcome  # an override leaves a line (ADR-096 §14)
+    refused = outcome == "refused"
+    tail = ". Refusing to fire: merge it, `vnx deliverable undepend`, or --override-predecessor REASON." if refused else (
+        f". Override reason: {reason}" if reason else "")
+    return ConstraintVerdict(code="deliverable-predecessor-unmerged", severity="blocking" if refused else "warn",
+                             override_applied=not refused and bool(reason), message=(
+                                 f"hard predecessor(s) of {dispatch_id} not satisfied: {', '.join(hard)} "
+                                 f"(mode {mode}, stored {raw!r}){tail}"))
+
+
+def _check_blast_radius_verdict(
+    spec: DispatchSpec, repo_root: Path, state_dir: Path, override_reason: Optional[str] = None, dry_run: bool = False,
+) -> Optional[ConstraintVerdict]:
+    """ADR-096 B4b: overlap (or unknown overlap) with live work or an open PR warns or refuses this fire per mode; a dry run writes no line."""
+    import sqlite3
+    import config_runtime
+    import blast_radius as br
+    import blast_radius_gate as brg
+    import blast_radius_sources as brs
+    import deliverable_predecessor_gate as dpg
+
+    raw = config_runtime.get(brg.MODE_KEY)
+    mode = brg.DEFAULT_MODE if raw is None else (raw if raw in brg.MODES else "refuse")
+    if mode == "off" or not _spec_is_writing(spec):  # a dispatch that writes nothing has no blast radius
+        return None
+    base = br._round_base(spec.dispatch_id)
+    try:
+        preds = tuple(e.predecessor for e in dpg.read_edges(state_dir / "runtime_coordination.db", spec.project_id, base))
+    except sqlite3.Error:  # vnx-silent-except: predecessors unread means none excluded, which can only add overlap
+        preds = ()
+    # validation made each path a PurePosixPath, which drops the trailing "/" that marks a directory (ADR-096 §5)
+    paths = tuple(p + "/" if (Path(repo_root) / p).is_dir() else p for p in write_paths(spec.dispatch_paths))
+    candidate = br.Subject(base, paths, br._branch_of(base), preds)
+    verdict, hits = brg.judge(candidate, (
+        ("live_work", brs.live_subjects(state_dir, spec.project_id)),
+        ("open_pr", brs.open_pr_subjects(repo_root, spec.project_id, brs.default_cache_path(state_dir), brg.gh))), repo_root)
+    if verdict == brg.CLEAR:
+        return None
+    reason = (override_reason or "").strip()
+    outcome = "override" if reason else ("warned" if mode == "warn" else "refused")
+    if not dry_run:
+        try:
+            brg.record(state_dir, spec.project_id, spec.dispatch_id, hits, mode=mode, verdict=verdict, outcome=outcome,
+                       override_reason=reason)
+        except (OSError, ValueError) as exc:
+            print(f"[dispatch_cli] [WARN] {brg.LEDGER} line not written: {exc!r}", file=sys.stderr)
+            outcome = "refused" if outcome == "override" else outcome  # an override leaves a line (ADR-096 §14)
+    refused = outcome == "refused"
+    tail = ". Refusing to fire: wait for it, narrow dispatch_paths, or --override-overlap REASON." if refused else (
+        f". Override reason: {reason}" if reason else "")
+    return ConstraintVerdict(code=verdict.replace("_", "-"), severity="blocking" if refused else "warn",
+                             override_applied=not refused and bool(reason), message=(
+                                 f"{verdict} for {spec.dispatch_id}: {brg.describe(hits)} (mode {mode}, stored {raw!r}){tail}"))
+
+
+def _blast_radius_reject(spec: DispatchSpec, *args) -> Optional[Reject]:
+    """Run the blast-radius check; print a warning, or return the Reject the door emits."""
+    verdict = _check_blast_radius_verdict(spec, *args)
+    if verdict is not None and verdict.severity == "blocking":
+        return Reject(verdict.code, verdict.message)
+    if verdict is not None:
+        print(f"[dispatch_cli] [WARN] {verdict.message}", file=sys.stderr)
+    return None
 
 
 def _check_stop_conditions_verdict(
@@ -2560,6 +2843,7 @@ def _check_stop_conditions_verdict(
     dry_run: bool = False,
     relevant_spec_providers: Optional[Set[str]] = None,
     relevant_gates: Optional[Set[str]] = None,
+    dispatch_id: str = "",
 ) -> Optional[ConstraintVerdict]:
     """Measure stop_conditions.run_all_checks() live and return a BLOCKING
     ConstraintVerdict iff a check in _STOP_CONDITIONS_BLOCKING_CHECK_IDS is
@@ -2576,20 +2860,23 @@ def _check_stop_conditions_verdict(
     check to the sub-entities that are actually relevant to THIS dispatch;
     everything scoped out is folded into the WARN-only report, never
     dropped.
+
+    OI-1800: unless ``dispatch_id`` is itself a panel-lane id, panel-lane
+    attempts leave provider_exhausted; the door names how many in one line.
     """
     from stop_conditions import (  # noqa: PLC0415
         CheckStatus,
+        is_panel_lane_dispatch,
         ledger_label_is_relevant,
         run_all_checks,
         triggered_entity_labels,
-        write_halt_file,
     )
 
     try:
         # write_halt=False: a measurement pass never writes on its own — see
         # point 5 above and the explicit write_halt_file call further down,
         # gated on an ACTUAL blocking-eligible trigger on a real fire.
-        results = run_all_checks(state_dir=state_dir, write_halt=False)
+        results = run_all_checks(state_dir=state_dir, write_halt=False, exclude_panel_lane=not is_panel_lane_dispatch(dispatch_id))
     except Exception as exc:  # vnx-silent-except: a bug in the checker must never itself become an outage of the whole door — degrade to "not measured", never crash the fire
         print(
             f"[dispatch_cli] [WARN] stop-conditions measurement raised "
@@ -2598,14 +2885,8 @@ def _check_stop_conditions_verdict(
         )
         return None
 
+    _print_measurement_notes(results, CheckStatus.UNMEASURABLE)
     triggered = [r for r in results if r.status == CheckStatus.TRIGGERED]
-    unmeasurable = [r.check_id for r in results if r.status == CheckStatus.UNMEASURABLE]
-    if unmeasurable:
-        print(
-            f"[dispatch_cli] [stop-conditions] unmeasurable (not a green "
-            f"light, not a refusal): {', '.join(unmeasurable)}",
-            file=sys.stderr,
-        )
 
     blocking_eligible = [r for r in triggered if r.check_id in _STOP_CONDITIONS_BLOCKING_CHECK_IDS]
     warn_only_triggered = [r for r in triggered if r.check_id not in _STOP_CONDITIONS_BLOCKING_CHECK_IDS]
@@ -2656,16 +2937,9 @@ def _check_stop_conditions_verdict(
         return None
 
     if not dry_run:
-        try:
-            write_halt_file(state_dir, results)
-        except Exception as exc:  # vnx-silent-except: halt.json persistence is a best-effort audit trail, never a reason to change the verdict already decided
-            print(
-                f"[dispatch_cli] [WARN] failed to persist halt.json: {exc!r}",
-                file=sys.stderr,
-            )
-
+        _persist_halt_file(state_dir, results, scoped_out, relevant_spec_providers, relevant_gates)
     summary = "; ".join(f"{r.check_id}: {r.message}" for r in blocking_triggered)
-    reason = (override_reason or "").strip()
+    _book_morning_pause(blocking_triggered, state_dir=state_dir, dispatch_id=dispatch_id, dry_run=dry_run, override_reason=(reason := (override_reason or "").strip()))
     if reason:
         logger.warning(
             "[dispatch_cli] AUDIT stop-conditions-override-applied triggered=%s reason=%s",
@@ -2764,7 +3038,7 @@ def build_runtime_snapshot(
     data_dir: Path,
     spec_file: Path,
     stop_conditions_override_reason: Optional[str] = None,
-    dry_run: bool = False,
+    dry_run: bool = False, predecessor_override_reason: Optional[str] = None,
 ) -> RuntimeSnapshot:
     """Perform all I/O required by compile_plan.
 
@@ -2807,6 +3081,165 @@ def build_runtime_snapshot(
     # read from this process's env, which is per-dispatch (the door runs one
     # process per dispatch) — it is never global state. Default path (no override
     # env) is byte-for-byte unchanged.
+    override_gate_verdicts, worker_claude_override_reason, effective_model = (
+        _override_gate_and_effective_model(spec, is_claude_lane, model_pin_specs)
+    )
+
+    # claude-headless enforcement: via='headless' for every claude spec, because
+    # claude_headless is the only claude lane (dispatch_plan.resolve_claude_lane).
+    if is_claude_lane:
+        via = "headless"
+
+    # P0-1: constraint check with instruction_text + check_registry=True; FAIL-CLOSED on error
+    constraint_verdicts = _primary_constraint_verdicts(
+        _constraint_check, vspec, provider_value=provider_value, sub_provider=sub_provider,
+        effective_model=effective_model, via=via,
+    )
+
+    # Defense-in-depth (dispatch-agent-lane-coercion, OI-LANECOERCE): re-check the
+    # RAW requested model so the pin can never mask a mismatched provider.
+    constraint_verdicts = _apply_raw_model_guard(
+        spec=spec,
+        effective_model=effective_model,
+        provider_value=provider_value,
+        sub_provider=sub_provider,
+        via=via,
+        constraint_verdicts=constraint_verdicts,
+    )
+
+    # worker-claude-override verdicts: a gate refusal (reason required) is
+    # prepended so it surfaces as THE reject; an applied override is recorded as an
+    # audited warn verdict (flows via D3 into plan.warnings — advisory, excluded
+    # from the plan digest) carrying the reason, target_slot, and resolved model.
+    constraint_verdicts = _with_override_verdicts(
+        constraint_verdicts, override_gate_verdicts, worker_claude_override_reason,
+        spec=spec, effective_model=effective_model,
+    )
+
+    # P0-2: anchor the pending root BEFORE trusting any bundle path. A symlinked
+    # dispatches/pending that escapes the data root cannot host a promoted bundle
+    # (fail-closed) — checked unconditionally so it holds even if existence is faked.
+    root_verdict = _check_pending_root_anchor_verdict(data_dir)
+    if root_verdict is not None:
+        constraint_verdicts = constraint_verdicts + (root_verdict,)
+
+    # Staging existence check (belt-and-suspenders; binding check below is the specific gate)
+    dispatches_dir = data_dir / "dispatches"
+    staging_promoted = _staging_exists(dispatches_dir / "pending", spec.staging_id)
+
+    # P0-2: staging binding — spec_file and instruction_file must be inside the bundle dir
+    if staging_promoted:
+        binding_verdict = _check_staging_binding_verdict(
+            spec_file,
+            spec.instruction_file,
+            data_dir=data_dir,
+            staging_id=spec.staging_id,
+        )
+        if binding_verdict is not None:
+            constraint_verdicts = constraint_verdicts + (binding_verdict,)
+
+    # TL-D1: track_id door validation (fail-closed on invalid/nonexistent/done;
+    # staged advisory->required WARN/Reject when absent). R1: a build on the
+    # branch of a PR at the B3 cap is refused early (_check_b3_cap_verdict). The
+    # B3 override DECISION rides the ``b3-cap-override-applied`` verdict and is
+    # booked only at the commit-to-fire point (R1d), never here.
+    constraint_verdicts = constraint_verdicts + _project_state_verdicts(spec, state_dir=data_dir / "state", predecessor_override_reason=predecessor_override_reason, dry_run=dry_run)
+
+    # golf 2A: T0 autonomous-chain stop-conditions, measured live on every fire.
+    # OI-1694: scoped to THIS dispatch's own provider/gate — see
+    # _resolve_stop_conditions_scope for the fallback-to-broad rules.
+    _relevant_spec_providers, _relevant_gates = _resolve_stop_conditions_scope(spec)
+    stop_verdict = _check_stop_conditions_verdict(
+        state_dir=data_dir / "state",
+        override_reason=stop_conditions_override_reason,
+        dry_run=dry_run,
+        relevant_spec_providers=_relevant_spec_providers,
+        relevant_gates=_relevant_gates, dispatch_id=spec.dispatch_id,
+    )
+    if stop_verdict is not None:
+        constraint_verdicts = constraint_verdicts + (stop_verdict,)
+
+    if is_claude_lane:
+        target_health: dict[str, str] = {HEADLESS_LANE_TERMINAL: "healthy"}
+        target_capable: dict[str, bool] = {HEADLESS_LANE_TERMINAL: True}
+    else:
+        target_id = spec.target_id_override or spec.target_slot
+        target_health = {target_id: "healthy"}
+        target_capable = {target_id: True}
+
+    # worker-claude-override: strip the build-worker pin for THIS dispatch's
+    # snapshot only, so compile_plan's D4 resolves the requested claude model
+    # instead of the pin. The loaded model_pin_specs dict itself is never
+    # mutated; every dispatch that does not carry the override still sees the
+    # full pins (the build-worker default, currently sonnet, stays in place).
+    snapshot_model_pins = model_pin_specs
+    if worker_claude_override_reason is not None:
+        snapshot_model_pins = {
+            slot: pin for slot, pin in model_pin_specs.items() if slot != spec.target_slot
+        }
+
+    # OI-921: role-registry — the set of roles that exist in agents/ (the engine's
+    # repo root, resolved exactly as run_dispatch does for validate). Empty set when
+    # the registry is missing → compile_plan rejects every role (fail-closed).
+    valid_roles = _discover_valid_roles(_resolve_repo_root() / "agents")
+
+    # OI-1756: task_class closed-set — derived from routing_recommendations.yaml's
+    # routing_by_task keys, never a hardcoded Python copy. Empty set when the file
+    # is missing/malformed → compile_plan rejects every EXPLICIT task_class
+    # (fail-closed, same convention as valid_roles above); a spec that declares no
+    # task_class is unaffected.
+    valid_task_classes = _discover_valid_task_classes()
+
+    # Chain-link (dispatch-20260802-model-ssot-en-ketenlink): computed here,
+    # door-side (I/O + imports allowed), and passed through the snapshot so
+    # compile_plan stays pure. task_class comes from the spec when set, else the
+    # smart_router deterministic classifier (the existing vocabulary — never a
+    # second one). tier_to falls back to the model->tier reverse map so a
+    # dispatch that did not declare a tier still carries an escalation signal.
+    chain_task_class, chain_parent, chain_tier_from, chain_tier_to = _chain_link_fields(
+        vspec, effective_model,
+    )
+
+    # OI-1156: auth-derived billing signal — the claude lane's billing label must
+    # follow the AUTH identity (own key / redirect = metered), not the lane. The
+    # door owns env reads, so compute it here and hand it to the pure compile_plan
+    # via the snapshot.
+    claude_api_metered = claude_auth_is_api_metered(os.environ)
+
+    # OI-1214: the door builds every dispatch from the consumer's local main
+    # checkout. Measure how far that checkout lags origin/main — a NUMBER — and
+    # fail-closed on a post-merge-verification dispatch that would run the old
+    # code. The consumer root is resolved exactly as the worktree allocator does
+    # (resolve_consumer_project_root), so the lag is measured against the same
+    # checkout the worker will actually build in. Best-effort: an unresolvable
+    # root/ref logs an unknown lag and never blocks (fail-open on unknown,
+    # fail-closed on a KNOWN lag — a door that refused on "unknown" would block
+    # every non-git consumer, which is worse than the problem it fixes).
+    constraint_verdicts = constraint_verdicts + _checkout_lag_verdicts(spec, data_dir=data_dir)
+
+    return RuntimeSnapshot(
+        constraint_verdicts=constraint_verdicts,
+        staging_promoted=staging_promoted,
+        target_health=target_health,
+        target_capable=target_capable,
+        model_pins=snapshot_model_pins,
+        valid_roles=valid_roles,
+        valid_task_classes=valid_task_classes,
+        parent_dispatch=chain_parent,
+        task_class=chain_task_class,
+        tier_from=chain_tier_from, tier_to=chain_tier_to,
+        difficulty=spec.difficulty,
+        worker_claude_override_reason=worker_claude_override_reason,
+        # RS-2: the same root the role registry above came from, so a declared
+        # skill is resolved against the checkout the dispatch will run in.
+        claude_api_metered=claude_api_metered, repo_root=_resolve_repo_root(),
+    )
+
+
+def _override_gate_and_effective_model(
+    spec: DispatchSpec, is_claude_lane: bool, model_pin_specs: "dict[str, ModelPin]",
+) -> "tuple[list[ConstraintVerdict], Optional[str], str]":
+    """build_runtime_snapshot's worker-claude override gate, then the effective model."""
     override_gate_verdicts: list[ConstraintVerdict] = []
     worker_claude_override_reason: Optional[str] = None
     if (
@@ -2858,13 +3291,20 @@ def build_runtime_snapshot(
                 effective_model = spec.model or pin.model or "sonnet"
     else:
         effective_model = spec.model or "default"
+    return override_gate_verdicts, worker_claude_override_reason, effective_model
 
-    # claude-headless enforcement: via='headless' for every claude spec, because
-    # claude_headless is the only claude lane (dispatch_plan.resolve_claude_lane).
-    if is_claude_lane:
-        via = "headless"
 
-    # P0-1: constraint check with instruction_text + check_registry=True; FAIL-CLOSED on error
+def _primary_constraint_verdicts(
+    _constraint_check,
+    vspec: ValidatedSpec,
+    *,
+    provider_value: str,
+    sub_provider: Optional[str],
+    effective_model: str,
+    via: Optional[str],
+) -> "tuple[ConstraintVerdict, ...]":
+    """build_runtime_snapshot's P0-1 constraint check; FAIL-CLOSED on error."""
+    spec = vspec.spec
     constraint_verdicts: tuple[ConstraintVerdict, ...] = ()
     try:
         raw_violations = _constraint_check(
@@ -2893,22 +3333,18 @@ def build_runtime_snapshot(
             severity="blocking",
             message=f"Constraint registry unavailable — fail-closed: {exc}",
         ),)
+    return constraint_verdicts
 
-    # Defense-in-depth (dispatch-agent-lane-coercion, OI-LANECOERCE): re-check the
-    # RAW requested model so the pin can never mask a mismatched provider.
-    constraint_verdicts = _apply_raw_model_guard(
-        spec=spec,
-        effective_model=effective_model,
-        provider_value=provider_value,
-        sub_provider=sub_provider,
-        via=via,
-        constraint_verdicts=constraint_verdicts,
-    )
 
-    # worker-claude-override verdicts: a gate refusal (reason required) is
-    # prepended so it surfaces as THE reject; an applied override is recorded as an
-    # audited warn verdict (flows via D3 into plan.warnings — advisory, excluded
-    # from the plan digest) carrying the reason, target_slot, and resolved model.
+def _with_override_verdicts(
+    constraint_verdicts: "tuple[ConstraintVerdict, ...]",
+    override_gate_verdicts: "list[ConstraintVerdict]",
+    worker_claude_override_reason: Optional[str],
+    *,
+    spec: DispatchSpec,
+    effective_model: str,
+) -> "tuple[ConstraintVerdict, ...]":
+    """Fold the worker-claude override verdicts into build_runtime_snapshot's tuple."""
     if override_gate_verdicts:
         constraint_verdicts = tuple(override_gate_verdicts) + constraint_verdicts
     if worker_claude_override_reason is not None:
@@ -2929,87 +3365,14 @@ def build_runtime_snapshot(
             effective_model,
             worker_claude_override_reason,
         )
+    return constraint_verdicts
 
-    # P0-2: anchor the pending root BEFORE trusting any bundle path. A symlinked
-    # dispatches/pending that escapes the data root cannot host a promoted bundle
-    # (fail-closed) — checked unconditionally so it holds even if existence is faked.
-    root_verdict = _check_pending_root_anchor_verdict(data_dir)
-    if root_verdict is not None:
-        constraint_verdicts = constraint_verdicts + (root_verdict,)
 
-    # Staging existence check (belt-and-suspenders; binding check below is the specific gate)
-    dispatches_dir = data_dir / "dispatches"
-    staging_promoted = _staging_exists(dispatches_dir / "pending", spec.staging_id)
-
-    # P0-2: staging binding — spec_file and instruction_file must be inside the bundle dir
-    if staging_promoted:
-        binding_verdict = _check_staging_binding_verdict(
-            spec_file,
-            spec.instruction_file,
-            data_dir=data_dir,
-            staging_id=spec.staging_id,
-        )
-        if binding_verdict is not None:
-            constraint_verdicts = constraint_verdicts + (binding_verdict,)
-
-    # TL-D1: track_id door validation (fail-closed on invalid/nonexistent/done;
-    # staged advisory->required WARN/Reject when absent). R1: a build on the
-    # branch of a PR at the B3 cap is refused early (_check_b3_cap_verdict). The
-    # B3 override DECISION rides the ``b3-cap-override-applied`` verdict and is
-    # booked only at the commit-to-fire point (R1d), never here.
-    constraint_verdicts = constraint_verdicts + _project_state_verdicts(spec, state_dir=data_dir / "state")
-
-    # golf 2A: T0 autonomous-chain stop-conditions, measured live on every fire.
-    # OI-1694: scoped to THIS dispatch's own provider/gate — see
-    # _resolve_stop_conditions_scope for the fallback-to-broad rules.
-    _relevant_spec_providers, _relevant_gates = _resolve_stop_conditions_scope(spec)
-    stop_verdict = _check_stop_conditions_verdict(
-        state_dir=data_dir / "state",
-        override_reason=stop_conditions_override_reason,
-        dry_run=dry_run,
-        relevant_spec_providers=_relevant_spec_providers,
-        relevant_gates=_relevant_gates,
-    )
-    if stop_verdict is not None:
-        constraint_verdicts = constraint_verdicts + (stop_verdict,)
-
-    if is_claude_lane:
-        target_health: dict[str, str] = {HEADLESS_LANE_TERMINAL: "healthy"}
-        target_capable: dict[str, bool] = {HEADLESS_LANE_TERMINAL: True}
-    else:
-        target_id = spec.target_id_override or spec.target_slot
-        target_health = {target_id: "healthy"}
-        target_capable = {target_id: True}
-
-    # worker-claude-override: strip the build-worker pin for THIS dispatch's
-    # snapshot only, so compile_plan's D4 resolves the requested claude model
-    # instead of the pin. The loaded model_pin_specs dict itself is never
-    # mutated; every dispatch that does not carry the override still sees the
-    # full pins (the build-worker default, currently sonnet, stays in place).
-    snapshot_model_pins = model_pin_specs
-    if worker_claude_override_reason is not None:
-        snapshot_model_pins = {
-            slot: pin for slot, pin in model_pin_specs.items() if slot != spec.target_slot
-        }
-
-    # OI-921: role-registry — the set of roles that exist in agents/ (the engine's
-    # repo root, resolved exactly as run_dispatch does for validate). Empty set when
-    # the registry is missing → compile_plan rejects every role (fail-closed).
-    valid_roles = _discover_valid_roles(_resolve_repo_root() / "agents")
-
-    # OI-1756: task_class closed-set — derived from routing_recommendations.yaml's
-    # routing_by_task keys, never a hardcoded Python copy. Empty set when the file
-    # is missing/malformed → compile_plan rejects every EXPLICIT task_class
-    # (fail-closed, same convention as valid_roles above); a spec that declares no
-    # task_class is unaffected.
-    valid_task_classes = _discover_valid_task_classes()
-
-    # Chain-link (dispatch-20260802-model-ssot-en-ketenlink): computed here,
-    # door-side (I/O + imports allowed), and passed through the snapshot so
-    # compile_plan stays pure. task_class comes from the spec when set, else the
-    # smart_router deterministic classifier (the existing vocabulary — never a
-    # second one). tier_to falls back to the model->tier reverse map so a
-    # dispatch that did not declare a tier still carries an escalation signal.
+def _chain_link_fields(
+    vspec: ValidatedSpec, effective_model: str,
+) -> "tuple[str, Optional[str], Optional[str], Optional[str]]":
+    """build_runtime_snapshot's chain-link fields: task_class, parent, tier_from, tier_to."""
+    spec = vspec.spec
     chain_task_class = (spec.task_class or "").strip() or None
     if chain_task_class is None:
         try:
@@ -3026,22 +3389,11 @@ def build_runtime_snapshot(
             chain_tier_to = tier_for_model(effective_model)
         except Exception:  # noqa: BLE001 — tier reverse-map is best-effort
             chain_tier_to = None
+    return chain_task_class, chain_parent, chain_tier_from, chain_tier_to
 
-    # OI-1156: auth-derived billing signal — the claude lane's billing label must
-    # follow the AUTH identity (own key / redirect = metered), not the lane. The
-    # door owns env reads, so compute it here and hand it to the pure compile_plan
-    # via the snapshot.
-    claude_api_metered = claude_auth_is_api_metered(os.environ)
 
-    # OI-1214: the door builds every dispatch from the consumer's local main
-    # checkout. Measure how far that checkout lags origin/main — a NUMBER — and
-    # fail-closed on a post-merge-verification dispatch that would run the old
-    # code. The consumer root is resolved exactly as the worktree allocator does
-    # (resolve_consumer_project_root), so the lag is measured against the same
-    # checkout the worker will actually build in. Best-effort: an unresolvable
-    # root/ref logs an unknown lag and never blocks (fail-open on unknown,
-    # fail-closed on a KNOWN lag — a door that refused on "unknown" would block
-    # every non-git consumer, which is worse than the problem it fixes).
+def _checkout_lag_verdicts(spec: DispatchSpec, *, data_dir: Path) -> "tuple[ConstraintVerdict, ...]":
+    """build_runtime_snapshot's OI-1214 main-checkout lag measurement and refusal."""
     checkout_lag: Optional[int] = None
     try:
         from dispatch_worktree_isolation import resolve_consumer_project_root  # noqa: PLC0415
@@ -3052,27 +3404,8 @@ def build_runtime_snapshot(
         )
     _log_checkout_lag(spec, checkout_lag)
     if checkout_lag is not None and checkout_lag > 0 and spec.post_merge_verification:
-        constraint_verdicts = constraint_verdicts + (
-            _post_merge_verification_lag_verdict(checkout_lag),
-        )
-
-    return RuntimeSnapshot(
-        constraint_verdicts=constraint_verdicts,
-        staging_promoted=staging_promoted,
-        target_health=target_health,
-        target_capable=target_capable,
-        model_pins=snapshot_model_pins,
-        valid_roles=valid_roles,
-        valid_task_classes=valid_task_classes,
-        parent_dispatch=chain_parent,
-        task_class=chain_task_class,
-        tier_from=chain_tier_from,
-        tier_to=chain_tier_to,
-        worker_claude_override_reason=worker_claude_override_reason,
-        # RS-2: the same root the role registry above came from, so a declared
-        # skill is resolved against the checkout the dispatch will run in.
-        claude_api_metered=claude_api_metered, repo_root=_resolve_repo_root(),
-    )
+        return (_post_merge_verification_lag_verdict(checkout_lag),)
+    return ()
 
 
 # ---------------------------------------------------------------------------
@@ -3593,6 +3926,56 @@ def _runtime_end_state(dispatch_id: str, *, state_dir: Path) -> Optional[str]:
     return state if state in _REFIRE_RUNTIME_END_STATES else None
 
 
+def _has_start_refusal_receipt(dispatch_id: str, *, state_dir: Path) -> bool:
+    """True when the receipt ledger carries a refused-start receipt for dispatch_id."""
+    path = state_dir / _RECEIPTS_FILENAME_REFIRE
+    target = f'"dispatch_id":"{dispatch_id}"'
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                if target not in line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if rec.get("dispatch_id") == dispatch_id and _is_start_refusal(rec):
+                    return True
+    except OSError:
+        return False
+    return False
+
+
+def _attempt_started(dispatch_id: str, *, state_dir: Path) -> bool:
+    """True when a claim was booked for dispatch_id; True too when that cannot be read (fail closed)."""
+    import sqlite3 as _sqlite3
+    try:
+        conn = _sqlite3.connect(str(_tracks_db_path(state_dir)), timeout=10.0)
+        try:
+            counted = conn.execute(
+                "SELECT COALESCE(MAX(attempt_count), 0) FROM dispatches WHERE dispatch_id = ?",
+                (dispatch_id,),
+            ).fetchone()[0]
+            rows = conn.execute(
+                "SELECT COUNT(*) FROM dispatch_attempts WHERE dispatch_id = ?", (dispatch_id,),
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        return counted > 0 or rows > 0
+    except (_sqlite3.Error, TypeError):
+        return True
+
+
+def _only_start_refusal(dispatch_id: str, *, state_dir: Path) -> bool:
+    """True when the only evidence of a fire is a refused start: no run receipt, a
+    start-refusal receipt, and no attempt booked (OI-2754). Anything unreadable is False."""
+    return (
+        _find_terminal_receipt_status(dispatch_id, state_dir=state_dir) is None
+        and _has_start_refusal_receipt(dispatch_id, state_dir=state_dir)
+        and not _attempt_started(dispatch_id, state_dir=state_dir)
+    )
+
+
 def _refire_guard_verdict(
     dispatch_id: str, *, state_dir: Path, refire_reason: Optional[str],
 ) -> Optional[str]:
@@ -3600,7 +3983,9 @@ def _refire_guard_verdict(
     and no explicit --refire reason was supplied. None means clear to fire.
 
     Evidence, checked in order (cheapest/most-conclusive first): a terminal
-    receipt, a route decision, a runtime end-state. Any one hit blocks.
+    receipt, a route decision, a runtime end-state. Any one hit blocks, except a
+    route decision whose only terminal evidence is a refused start with no attempt
+    booked (OI-2754): that start never ran, so a plain refire may go.
     """
     if refire_reason and refire_reason.strip():
         return None
@@ -3612,7 +3997,8 @@ def _refire_guard_verdict(
             f"(status={receipt_status!r})"
         )
 
-    if _route_decision_exists(dispatch_id, state_dir=state_dir):
+    if (_route_decision_exists(dispatch_id, state_dir=state_dir)
+            and not _only_start_refusal(dispatch_id, state_dir=state_dir)):
         return (
             f"dispatch_id={dispatch_id!r} already carries a route decision "
             f"(the door already fired it for real at least once)"
@@ -3649,6 +4035,11 @@ def _owner_transition(
     no-op path; missing DB; unreachable transition) is recorded via
     _record_bookkeeping_failure and swallowed, exactly like every other
     door-bookkeeping site in this module.
+
+    The one exception is a row already in a terminal state (completed, expired,
+    dead_letter, withdrawn): a ``--refire`` of such a row does not own it, and a
+    transition out of a terminal state cannot exist. That is no bookkeeping
+    failure (OI-2482), so it is named on stderr and not booked as a fact.
     """
     try:
         with _rc_get_connection(state_dir) as conn:
@@ -3657,6 +4048,9 @@ def _owner_transition(
                 actor="door", reason=reason, metadata=metadata,
             )
             conn.commit()
+    except _RcDuplicateTransitionError as exc:  # vnx-silent-except: a terminal row is not the door's to move (OI-2482)
+        print(f"[dispatch_cli] dispatch {dispatch_id} is terminal ({exc.current_state}); "
+              f"the door leaves the row there ({to_state} not applied)", file=sys.stderr)
     except Exception as exc:  # vnx-silent-except: owner-state transition is best-effort; door must never block on it
         _record_bookkeeping_failure(
             f"_owner_transition:{to_state}", dispatch_id, exc, state_dir=state_dir,
@@ -4110,7 +4504,7 @@ def run_dispatch(
     dry_run: bool = False,
     refire_reason: Optional[str] = None,
     stop_conditions_override_reason: Optional[str] = None,
-    track_id_override: Optional[str] = None,
+    track_id_override: Optional[str] = None, predecessor_override_reason: Optional[str] = None, overlap_override_reason: Optional[str] = None,
 ) -> int:
     """Turn a spec file into a governed dispatch for BOTH lanes.
 
@@ -4162,7 +4556,7 @@ def run_dispatch(
         snapshot = build_runtime_snapshot(
             vspec, data_dir=data_dir, spec_file=spec_file,
             stop_conditions_override_reason=stop_conditions_override_reason,
-            dry_run=dry_run,
+            dry_run=dry_run, predecessor_override_reason=predecessor_override_reason,
         )
 
         plan = _compile_plan_checked(vspec, snapshot)
@@ -4172,24 +4566,13 @@ def run_dispatch(
 
         # Merge the door route reason into the plan so it's visible in dry-run
         # output and carried on the ExecutionPlan.
-        if door_route_reason:
-            plan = dataclasses.replace(
-                plan,
-                route_reason=f"{door_route_reason};{plan.route_reason}",
-            )
-
         # OI-1158: loud isolation-guarantee warning for lanes the door cannot
         # structurally verify (currently: claude_headless). Merged onto
         # plan.warnings — the same mechanism door_route_reason and the D4
         # model-tier warnings already use — so it surfaces in dry-run output
         # via _print_plan AND is available below for the real-execution print
         # and the route-decision receipt field. None for every other lane.
-        headless_isolation_warning = _headless_isolation_guard(plan)
-        if headless_isolation_warning:
-            plan = dataclasses.replace(
-                plan,
-                warnings=plan.warnings + (headless_isolation_warning,),
-            )
+        plan, headless_isolation_warning = _merge_plan_warnings(plan, door_route_reason)
 
         # OI-1248: lane reachability is established HERE — right after the plan
         # is final and BEFORE the door commits to firing (permit, dispatch row,
@@ -4202,7 +4585,7 @@ def run_dispatch(
         # kimi stampede (nine dispatches, one quota 403, eight minutes) fired
         # blind because a real fire never checked reachability at all.
         # Provider-schakelaar B: the operator's switch is asked first (_lane_verdict).
-        lane_reject = _lane_verdict(plan, vspec.spec, project_id=project_id, state_dir=state_dir, dry_run=dry_run)
+        lane_reject = _lane_verdict(plan, vspec.spec, project_id=project_id, state_dir=state_dir, dry_run=dry_run) or _blast_radius_reject(vspec.spec, repo_root, state_dir, overlap_override_reason, dry_run)
         if lane_reject is not None:
             _emit_reject(lane_reject)
             return 1
@@ -4214,20 +4597,7 @@ def run_dispatch(
         # permit / instruction_sha256 TOCTOU below is untouched. Never blocks the
         # door (best-effort, never raises).
         if not dry_run:
-            try:
-                from scout_prepass import maybe_run_scout
-                maybe_run_scout(
-                    dispatch_id=plan.dispatch_id,
-                    instruction_text=vspec.instruction_text,
-                    dispatch_paths=[dp.path for dp in vspec.spec.dispatch_paths],
-                    state_dir=state_dir,
-                    task_class=getattr(vspec.spec, "task_class", None),
-                    lane=plan.lane,
-                )
-            except Exception as exc:  # vnx-silent-except: scout pre-pass is best-effort; door must never block on it
-                _record_bookkeeping_failure(
-                    "scout_prepass", plan.dispatch_id, exc, state_dir=state_dir,
-                )
+            _run_scout_prepass(plan, vspec, state_dir=state_dir)
 
             # The dispatch is irrevocably accepted here (validated, plan
             # compiled): create its dispatches tracker row BEFORE the lane
@@ -4238,8 +4608,7 @@ def run_dispatch(
             # the door. attempt_id (or None) is used below to close out the
             # matching dispatch_attempts row once the lane executor returns.
             attempt_id = _persist_dispatch_row(
-                vspec.spec,
-                state_dir=state_dir,
+                vspec.spec, state_dir=state_dir, refire_reason=refire_reason,
                 worker_claude_override_reason=snapshot.worker_claude_override_reason,
             )
 
@@ -4260,44 +4629,23 @@ def run_dispatch(
             # persist it onto the dispatch tracker row so D2 can propagate it to
             # track.pr_ref on merge; then the plan scope may move up (P1).
             # Best-effort — never blocks the door.
-            if vspec.spec.track_id:
-                os.environ["VNX_CURRENT_TRACK_ID"] = vspec.spec.track_id
-                _door_track_bookkeeping(vspec.spec, state_dir=state_dir)
-
             # Chain-link (dispatch-20260802-model-ssot-en-ketenlink): export the
             # resolved fields so the worker (and any worker-authored
             # receipt) inherits them — the receipt writers read these env vars as
             # a fallback when the caller did not pass explicit values. Only set
             # when present, so unrelated dispatches keep a clean env.
-            if plan.parent_dispatch:
-                os.environ["VNX_PARENT_DISPATCH"] = plan.parent_dispatch
-            if plan.task_class:
-                os.environ["VNX_TASK_CLASS"] = plan.task_class
-            if plan.tier_from:
-                os.environ["VNX_TIER_FROM"] = plan.tier_from
-            if plan.tier_to:
-                os.environ["VNX_TIER_TO"] = plan.tier_to
             # OI-1137: the work-ref / pr-id are exported so the phantom-guard can
             # weigh the pushed branch diff for a fix-forward dispatch (its own worktree reads
             # empty). Same fallback pattern as VNX_PARENT_DISPATCH above.
-            if plan.work_ref:
-                os.environ["VNX_WORK_REF"] = plan.work_ref
-            if plan.pr_id:
-                os.environ["VNX_PR_ID"] = plan.pr_id
             # The resolved model is exported too, so governance corrective
             # receipts (phantom_guard / pr_enforcement) can record the model the
             # dispatch ran without threading a parameter through every call site.
-            os.environ["VNX_CURRENT_MODEL"] = plan.model
             # Attribution fix: export the dispatch's real provider and terminal
             # on the same fallback contract, so a corrective rejection receipt
             # (phantom_guard / pr_enforcement) is attributable even when a call
             # site does not thread them explicitly. A lane that passes the
             # values explicitly always wins.
-            _provider_value = getattr(plan.provider, "value", plan.provider)
-            if _provider_value:
-                os.environ["VNX_CURRENT_PROVIDER"] = str(_provider_value)
-            if plan.target_id:
-                os.environ["VNX_CURRENT_TERMINAL"] = str(plan.target_id)
+            _export_worker_env(plan, vspec.spec, state_dir=state_dir)
 
         permit = issue_permit(plan)
         try:
@@ -4337,99 +4685,175 @@ def run_dispatch(
         if handover is None:
             return 1
 
-        with serialize_lane(plan.serialization_class, dispatch_id=vspec.spec.dispatch_id):
-            if plan.lane == "provider":
-                result = run_envelope_plan(
-                    plan, permit, state_dir=state_dir, data_dir=data_dir,
-                    role=vspec.spec.role, handover=handover, base_sha=start_base_sha,
-                )
-                if result.status != "success":
-                    # Fail-loud: the door must never swallow a provider-lane failure into a
-                    # bare exit code — the caller (bin/vnx dispatch) prints nothing else.
-                    print(
-                        f"[dispatch_cli] provider lane {result.status}: "
-                        f"{result.error or '(no error captured)'}",
-                        file=sys.stderr,
-                    )
-                    # The escalation ladder: classify the failure and stage a
-                    # human-promoted followup when the table says climb (OI-1221,
-                    # wired dispatch 20260816-p6-escalate-tier-ds).
-                    _maybe_stage_escalation(
-                        plan, result, vspec=vspec, state_dir=state_dir, data_dir=data_dir
-                    )
-                _owner_finish(
-                    vspec.spec.dispatch_id, attempt_id, state_dir=state_dir,
-                    success=(result.status == "success"),
-                    failure_reason=(
-                        None if result.status == "success"
-                        else (result.error or f"provider lane status={result.status}")
-                    ),
-                )
-                return result.returncode
-            elif plan.lane == "claude_headless":
-                # OI-1158: the door never printed anything about isolation on a
-                # real (non-dry-run) fire — _print_plan's warnings loop only
-                # runs under --dry-run. Surface the same warning here, loud, so
-                # a live headless dispatch is never silent about the gap.
-                if headless_isolation_warning:
-                    logger.warning("[dispatch_cli] %s", headless_isolation_warning)
-                    print(
-                        f"[dispatch_cli] [WARN] {headless_isolation_warning}",
-                        file=sys.stderr,
-                    )
-                rc = _execute_claude_headless(
-                    plan,
-                    permit,
-                    state_dir=state_dir,
-                    data_dir=data_dir,
-                    role=vspec.spec.role, handover=handover, base_sha=start_base_sha,
-                )
-                _owner_finish(
-                    vspec.spec.dispatch_id, attempt_id, state_dir=state_dir,
-                    success=(rc == 0),
-                    failure_reason=None if rc == 0 else "claude_headless lane returned non-zero",
-                )
-                return rc
-            else:
-                raise _InvariantViolation(
-                    f"closed set violated — unknown lane: {plan.lane!r}"
-                )
+        return _run_lane(plan, permit, vspec, state_dir=state_dir, data_dir=data_dir, handover=handover,
+                         base_sha=start_base_sha, attempt_id=attempt_id, headless_isolation_warning=headless_isolation_warning)
 
     except _InvariantViolation as exc:
-        _finalize_door_exit(handover, state_dir=state_dir, reason=dispatch_exit.REASON_PRE_SPAWN_ERROR)
-        logger.error(
-            "[dispatch_cli] INVARIANT VIOLATION dispatch=%s: %s",
-            getattr(getattr(vspec, "spec", None), "dispatch_id", "?"), exc,
-        )
-        print(f"[dispatch_cli] REJECT [invariant-violation]: {exc}", file=sys.stderr)
-        return 1
+        return _invariant_violation_exit(vspec, handover, exc, state_dir=state_dir)
     except LockWaitTimeout as exc:
         # Point 5 (golf 1A): serialize_lane's own lock-wait timeout — no free
-        # claude-lane slot within VNX_CLAUDE_LOCK_TIMEOUT_SECONDS (default
+        # claude-lane slot within _DEFAULT_TIMEOUT_SECONDS (a constant,
         # 4h, dispatch-20260904-lock-timeout-eindig). This is a caught-before
         # -spawn failure of the door's OWN serialization mechanism, not a
         # generic runtime error: route it to failed_delivery via the same
         # state machine point 3 wired in, instead of folding it into the
         # bare REJECT [runtime-error] path below (which never touched the
         # door-owned row's state at all).
-        dispatch_id = getattr(getattr(vspec, "spec", None), "dispatch_id", None)
-        # ADR-045 §1: the slot never opened, so this exit is a failed end line
-        # with the plan's own reason — before the door-owned row is closed out.
-        _finalize_door_exit(handover, state_dir=state_dir, reason=dispatch_exit.REASON_SLOT_TIMEOUT)
-        if dispatch_id:
-            _owner_finish(
-                dispatch_id, attempt_id, state_dir=state_dir,
-                success=False, failure_reason=f"lock-wait timeout: {exc}",
-            )
-        logger.error(
-            "[dispatch_cli] LOCK-WAIT TIMEOUT dispatch=%s: %s", dispatch_id, exc,
-        )
-        print(f"[dispatch_cli] REJECT [lock-wait-timeout]: {exc}", file=sys.stderr)
-        return 1
+        return _lock_wait_timeout_exit(vspec, handover, attempt_id, exc, state_dir=state_dir)
     except Exception as exc:
         _finalize_door_exit(handover, state_dir=state_dir, reason=dispatch_exit.REASON_DOOR_ERROR)
         print(f"[dispatch_cli] REJECT [runtime-error]: {exc}", file=sys.stderr)
         return 1
+
+
+def _invariant_violation_exit(vspec, handover, exc: Exception, *, state_dir: Path) -> int:
+    """``run_dispatch``'s exit on a door invariant violation: finalize, log, REJECT, 1 (R29b)."""
+    _finalize_door_exit(handover, state_dir=state_dir, reason=dispatch_exit.REASON_PRE_SPAWN_ERROR)
+    logger.error(
+        "[dispatch_cli] INVARIANT VIOLATION dispatch=%s: %s",
+        getattr(getattr(vspec, "spec", None), "dispatch_id", "?"), exc,
+    )
+    print(f"[dispatch_cli] REJECT [invariant-violation]: {exc}", file=sys.stderr)
+    return 1
+
+
+def _lock_wait_timeout_exit(vspec, handover, attempt_id, exc: Exception, *, state_dir: Path) -> int:
+    """``run_dispatch``'s exit on its own lane-slot lock-wait timeout (R29b)."""
+    dispatch_id = getattr(getattr(vspec, "spec", None), "dispatch_id", None)
+    # ADR-045 §1: the slot never opened, so this exit is a failed end line
+    # with the plan's own reason — before the door-owned row is closed out.
+    _finalize_door_exit(handover, state_dir=state_dir, reason=dispatch_exit.REASON_SLOT_TIMEOUT)
+    if dispatch_id:
+        _owner_finish(
+            dispatch_id, attempt_id, state_dir=state_dir,
+            success=False, failure_reason=f"lock-wait timeout: {exc}",
+        )
+    logger.error(
+        "[dispatch_cli] LOCK-WAIT TIMEOUT dispatch=%s: %s", dispatch_id, exc,
+    )
+    print(f"[dispatch_cli] REJECT [lock-wait-timeout]: {exc}", file=sys.stderr)
+    return 1
+
+
+def _merge_plan_warnings(plan: ExecutionPlan, door_route_reason) -> "tuple[ExecutionPlan, Optional[str]]":
+    """Carry the door route reason and the headless isolation warning onto the plan (R29b)."""
+    if door_route_reason:
+        plan = dataclasses.replace(
+            plan,
+            route_reason=f"{door_route_reason};{plan.route_reason}",
+        )
+
+    headless_isolation_warning = _headless_isolation_guard(plan)
+    if headless_isolation_warning:
+        plan = dataclasses.replace(
+            plan,
+            warnings=plan.warnings + (headless_isolation_warning,),
+        )
+    return plan, headless_isolation_warning
+
+
+def _run_scout_prepass(plan: ExecutionPlan, vspec, *, state_dir: Path) -> None:
+    """Best-effort scout pre-pass of a real fire; a failure is recorded, never raised (R29b)."""
+    try:
+        from scout_prepass import maybe_run_scout
+        maybe_run_scout(
+            dispatch_id=plan.dispatch_id,
+            instruction_text=vspec.instruction_text,
+            dispatch_paths=[dp.path for dp in vspec.spec.dispatch_paths],
+            state_dir=state_dir,
+            task_class=getattr(vspec.spec, "task_class", None),
+            lane=plan.lane,
+        )
+    except Exception as exc:  # vnx-silent-except: scout pre-pass is best-effort; door must never block on it
+        _record_bookkeeping_failure(
+            "scout_prepass", plan.dispatch_id, exc, state_dir=state_dir,
+        )
+
+
+def _export_worker_env(plan: ExecutionPlan, spec, *, state_dir: Path) -> None:
+    """Export the track, chain-link and attribution fields a real fire hands its worker (R29b)."""
+    if spec.track_id:
+        _door_track_bookkeeping(spec, state_dir=state_dir)
+    if plan.parent_dispatch:
+        os.environ["VNX_PARENT_DISPATCH"] = plan.parent_dispatch
+    if plan.task_class:
+        os.environ["VNX_TASK_CLASS"] = plan.task_class
+    if plan.tier_from:
+        os.environ["VNX_TIER_FROM"] = plan.tier_from
+    if plan.tier_to:
+        os.environ["VNX_TIER_TO"] = plan.tier_to
+    if plan.work_ref:
+        os.environ["VNX_WORK_REF"] = plan.work_ref
+    if plan.pr_id:
+        os.environ["VNX_PR_ID"] = plan.pr_id
+    os.environ["VNX_CURRENT_MODEL"] = plan.model
+    _provider_value = getattr(plan.provider, "value", plan.provider)
+    if _provider_value:
+        os.environ["VNX_CURRENT_PROVIDER"] = str(_provider_value)
+    if plan.target_id:
+        os.environ["VNX_CURRENT_TERMINAL"] = str(plan.target_id)
+
+
+def _run_lane(plan: ExecutionPlan, permit, vspec, *, state_dir: Path, data_dir: Path, handover,
+              base_sha, attempt_id, headless_isolation_warning) -> int:
+    """Run the plan's lane inside its serialization slot and close out the door-owned row (R29b)."""
+    with serialize_lane(plan.serialization_class, dispatch_id=vspec.spec.dispatch_id):
+        if plan.lane == "provider":
+            result = run_envelope_plan(
+                plan, permit, state_dir=state_dir, data_dir=data_dir,
+                role=vspec.spec.role, handover=handover, base_sha=base_sha,
+            )
+            if result.status != "success":
+                # Fail-loud: the door must never swallow a provider-lane failure into a
+                # bare exit code — the caller (bin/vnx dispatch) prints nothing else.
+                print(
+                    f"[dispatch_cli] provider lane {result.status}: "
+                    f"{result.error or '(no error captured)'}",
+                    file=sys.stderr,
+                )
+                # The escalation ladder: classify the failure and stage a
+                # human-promoted followup when the table says climb (OI-1221,
+                # wired dispatch 20260816-p6-escalate-tier-ds).
+                _maybe_stage_escalation(
+                    plan, result, vspec=vspec, state_dir=state_dir, data_dir=data_dir
+                )
+            _owner_finish(
+                vspec.spec.dispatch_id, attempt_id, state_dir=state_dir,
+                success=(result.status == "success"),
+                failure_reason=(
+                    None if result.status == "success"
+                    else (result.error or f"provider lane status={result.status}")
+                ),
+            )
+            return result.returncode
+        elif plan.lane == "claude_headless":
+            # OI-1158: the door never printed anything about isolation on a
+            # real (non-dry-run) fire — _print_plan's warnings loop only
+            # runs under --dry-run. Surface the same warning here, loud, so
+            # a live headless dispatch is never silent about the gap.
+            if headless_isolation_warning:
+                logger.warning("[dispatch_cli] %s", headless_isolation_warning)
+                print(
+                    f"[dispatch_cli] [WARN] {headless_isolation_warning}",
+                    file=sys.stderr,
+                )
+            rc = _execute_claude_headless(
+                plan,
+                permit,
+                state_dir=state_dir,
+                data_dir=data_dir,
+                role=vspec.spec.role, handover=handover, base_sha=base_sha,
+            )
+            _owner_finish(
+                vspec.spec.dispatch_id, attempt_id, state_dir=state_dir,
+                success=(rc == 0),
+                failure_reason=None if rc == 0 else "claude_headless lane returned non-zero",
+            )
+            return rc
+        else:
+            raise _InvariantViolation(
+                f"closed set violated — unknown lane: {plan.lane!r}"
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -4470,7 +4894,7 @@ def reopen_lane(provider_val: str, reason: str, *, state_dir: Path) -> int:
 
 
 def _add_b3_override_arguments(parser) -> None:
-    """``--override-b3 --reason "..."``: build on the branch of a PR at the B3 cap anyway (R1)."""
+    """``--override-b3 --reason "..."`` (R1) and ``--override-predecessor "..."`` (ADR-096 B2)."""
     parser.add_argument(
         "--override-b3", dest="override_b3", action="store_true",
         help="Fire a build dispatch on the branch of a PR at the B3 cap anyway; requires --reason. "
@@ -4478,10 +4902,20 @@ def _add_b3_override_arguments(parser) -> None:
     )
     parser.add_argument("--reason", dest="b3_reason", metavar="REASON", default=None,
                         help="The reason for --override-b3 (required with it)")
+    parser.add_argument(
+        "--override-predecessor", dest="predecessor_override_reason", metavar="REASON", default=None,
+        help="Fire although a hard predecessor deliverable is not merged (ADR-096); THIS fire only, "
+             "one line in state/deliverable_predecessor.ndjson",
+    )
+    parser.add_argument(
+        "--override-overlap", dest="overlap_override_reason", metavar="REASON", default=None,
+        help="Fire although its paths overlap live work or an open PR (ADR-096); THIS fire only, "
+             "one line per hit in state/blast_radius.ndjson",
+    )
 
 
 def _apply_b3_override(parser, args) -> None:
-    """Refuse ``--override-b3`` without a reason (and ``--reason`` alone); carry the reason in the env."""
+    """Refuse ``--override-b3`` without a reason (and ``--reason`` alone), and an empty ``--override-predecessor``."""
     reason = (args.b3_reason or "").strip()
     if args.override_b3 and not reason:
         parser.error('--override-b3 needs a non-empty --reason "..." (no silent bypass)')
@@ -4489,6 +4923,10 @@ def _apply_b3_override(parser, args) -> None:
         parser.error("--reason only applies to --override-b3")
     if reason:
         os.environ[B3_OVERRIDE_REASON_ENV] = reason
+    if args.predecessor_override_reason is not None and not args.predecessor_override_reason.strip():
+        parser.error('--override-predecessor needs a non-empty reason (no silent bypass)')
+    if args.overlap_override_reason is not None and not args.overlap_override_reason.strip():
+        parser.error('--override-overlap needs a non-empty reason (no silent bypass)')
 
 
 def main(argv: Optional[list] = None) -> int:
@@ -4563,6 +5001,8 @@ def main(argv: Optional[list] = None) -> int:
         args.spec_file, dry_run=args.dry_run, refire_reason=args.refire_reason,
         stop_conditions_override_reason=args.stop_conditions_override_reason,
         track_id_override=args.track_id_override,
+        predecessor_override_reason=args.predecessor_override_reason,
+        overlap_override_reason=args.overlap_override_reason,
     )
 
 

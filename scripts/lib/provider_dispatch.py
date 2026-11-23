@@ -27,6 +27,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+_GEMINI_DEFAULT_MODEL = "gemini-2.5-pro"
+
 sys.path.insert(0, str(Path(__file__).parent))
 
 logger = logging.getLogger(__name__)
@@ -902,7 +904,7 @@ def _build_frontmatter(
         "sub_provider": spawn_fm.get("sub_provider", "none"),
         "model": model_used,
         "terminal_id": args.terminal_id,
-        "pool_id": os.environ.get("VNX_POOL_ID", "headless"),
+        "pool_id": "headless",
         "role": getattr(args, "role", None) or "backend-developer",
         "task_class": task_class,
         "pr_id": getattr(args, "pr_id", None) or "none",
@@ -1619,20 +1621,19 @@ def _resolve_receipt_role(args: argparse.Namespace, state_dir: Path) -> str:
         return _IDENTITY_UNRESOLVED
 
 
-def _resolve_toolcall_signals(args: argparse.Namespace) -> Dict[str, int]:
+def _resolve_toolcall_signals(args: argparse.Namespace, signal_dir: Optional[str] = None) -> Dict[str, int]:
     """Aggregate this dispatch's PreToolUse-hook tool-call signals (step B).
 
-    ``VNX_TMUX_SIGNAL_DIR``'s ``toolcalls.ndjson`` is folded by
+    The ``toolcalls.ndjson`` under ``signal_dir`` (None: no signal dir, nothing to fold) is folded by
     ``toolcall_signals.aggregate_toolcall_signals`` into the three additive
     receipt fields. FAIL-OPEN — an aggregation error or absent signal log must
     never break receipt emission; the dict stays empty and ReceiptV2 omits the
     fields. The import stays lazy: only signal-carrying lanes pay for it.
     """
     try:
-        _signal_dir = os.environ.get("VNX_TMUX_SIGNAL_DIR")
-        if _signal_dir:
+        if signal_dir:
             from toolcall_signals import aggregate_toolcall_signals  # noqa: PLC0415
-            return aggregate_toolcall_signals(_signal_dir) or {}
+            return aggregate_toolcall_signals(signal_dir) or {}
     except Exception:  # noqa: BLE001 — observability signal must never break receipt emission
         logger.debug(
             "_emit_governance: toolcall signal aggregation failed dispatch=%s (non-fatal)",
@@ -1733,6 +1734,7 @@ def _emit_governance(
     immediately without retry.
     """
     from governance_emit import emit_dispatch_receipt, emit_unified_report
+    from receipt_token_fields import receipt_token_fields
 
     state_dir = _resolve_state_dir()
     data_dir = _resolve_data_dir()
@@ -1811,6 +1813,23 @@ def _emit_governance(
     # reported" without consulting the door log.
     _delivery_state = _derive_delivery_state(status, result)
 
+    _fail_reason, _fail_class = _emit_receipt_with_retry(
+        emit_dispatch_receipt, receipt_token_fields, args, provider, model_used, result, status,
+        duration, token_usage, cost_usd, cost_source, _run_ids, state_dir, report_path, events_path,
+        permission_posture, _integrity, _role, _role_app, _skill_app, _toolcall_signals, _delivery_state,
+    )
+    _finish_governance(
+        emit_unified_report, args, provider, model_used, result, status, duration, token_usage,
+        cost_usd, cost_source, state_dir, data_dir, report_path, event_store, _fail_reason, _fail_class,
+    )
+
+
+def _emit_receipt_with_retry(
+    emit_dispatch_receipt, receipt_token_fields, args, provider, model_used, result, status,
+    duration, token_usage, cost_usd, cost_source, _run_ids, state_dir, report_path, events_path,
+    permission_posture, _integrity, _role, _role_app, _skill_app, _toolcall_signals, _delivery_state,
+) -> tuple:
+    """The receipt step of ``_emit_governance``: classify, emit, retry; returns (failure_reason, failure_class)."""
     for attempt in range(_EMIT_MAX_RETRIES):
         try:
             # OI-866: classify failure so the receipt carries a distinguishable
@@ -1819,37 +1838,7 @@ def _emit_governance(
             # returns an empty failure_reason for a non-success status — a
             # classify_failure regression can no longer land a receipt with
             # the field silently unset.
-            _fail_reason: Optional[str] = None
-            _fail_class: Optional[str] = None
-            if status != "success":
-                try:
-                    from failure_classification import classify_failure_safe  # noqa: PLC0415
-                    _classification = classify_failure_safe(
-                        status=status,
-                        error=getattr(result, "error", None),
-                        completion_text=getattr(result, "completion_text", None),
-                        timed_out=getattr(result, "timed_out", False),
-                        provider=provider,
-                        duration_seconds=duration,
-                        returncode=getattr(result, "returncode", None),
-                        dispatch_id=getattr(args, "dispatch_id", "?"),
-                    )
-                    _fail_reason = _classification.get("failure_reason")
-                    _fail_class = _classification.get("failure_class")
-                except Exception as _classify_exc:  # noqa: BLE001 — the failure_classification
-                    # module itself failing to import is the one thing
-                    # classify_failure_safe cannot guard against from inside
-                    # itself; keep the same never-empty guarantee here.
-                    logger.debug(
-                        "_emit_governance: failure_classification unavailable dispatch=%s (non-fatal)",
-                        getattr(args, "dispatch_id", "?"),
-                        exc_info=True,
-                    )
-                    _fail_class = "unknown"
-                    _fail_reason = (
-                        f"failure_classification unavailable: {_classify_exc!r} "
-                        f"(dispatch={getattr(args, 'dispatch_id', '?')})"
-                    )
+            _fail_reason, _fail_class = _classify_emit_failure(args, provider, status, result, duration)
 
             receipt_path = emit_dispatch_receipt(
                 dispatch_id=args.dispatch_id,
@@ -1864,57 +1853,26 @@ def _emit_governance(
                 duration_seconds=duration,
                 token_usage=token_usage,
                 cost_usd=cost_usd, cost_source=cost_source, cost_ledger_run_ids=_run_ids,
+                # No ledger record is at hand here (``_book_dispatch_cost`` returns only the cost triple):
+                # the normalized tokens come from the lane's own usage.
+                **receipt_token_fields(provider=provider, role=vars(args).get("role"), token_usage=token_usage, session_id=getattr(result, "session_id", None), ledger_record=None),
                 state_dir=state_dir,
                 report_path=str(report_path),
                 events_path=events_path,
-                permission_enforcement=(
-                    "enforced" if worker_permission_enforcement_enabled() else None
-                ),
-                permission_posture=(
-                    (permission_posture or {}).get("permission_posture")
-                ),
-                permission_profile=(
-                    (permission_posture or {}).get("permission_profile")
-                ),
-                permission_allow_pattern_count=(
-                    (permission_posture or {}).get("permission_allow_pattern_count")
-                ),
+                **_permission_receipt_fields(permission_posture),
                 mandate_id=getattr(args, "mandate_id", None),
-                final_prompt_path=getattr(_integrity, "final_prompt_path", None) if _integrity is not None else None,
-                final_prompt_sha256=getattr(_integrity, "final_prompt_sha256", None) if _integrity is not None else None,
-                injection_reconstructs=(
-                    getattr(_integrity, "injection_reconstructs", None) if _integrity is not None else None
-                ),
+                **_integrity_receipt_fields(_integrity),
                 # ADR-035 §3.1.1: multi-provider sub-path — this call runs
                 # BEFORE emit_unified_report below, so report_path is a
                 # precomputed string with no file behind it yet. Stamp
                 # method="pending-report" explicitly, never a silent blank —
                 # this sub-path is never backfilled (append-only, no second
                 # write for this dispatch_id).
-                verification={
-                    "method": "pending-report",
-                    "tests_run": None,
-                    "tests_passed": None,
-                    "tests_failed": None,
-                    "command": None,
-                    "pr_ref": None,
-                    "push_verified": None,
-                    "spec_deviation": None,
-                },
+                verification={"method": "pending-report", "tests_run": None, "tests_passed": None, "tests_failed": None,
+                              "command": None, "pr_ref": None, "push_verified": None, "spec_deviation": None},
                 role=_role,
                 receipt_kind="dispatch",
-                role_applied=(
-                    getattr(_role_app, "role_applied", None) if _role_app is not None else None
-                ),
-                role_tier=(
-                    getattr(_role_app, "tier", None) if _role_app is not None else None
-                ),
-                role_not_applied_reason=(
-                    getattr(_role_app, "reason", None) if _role_app is not None else None
-                ),
-                role_source_path=(
-                    getattr(_role_app, "source_path", None) if _role_app is not None else None
-                ),
+                **_role_receipt_fields(_role_app),
                 **skill_receipt_fields(_skill_app),
                 # receipt-quality PR-B1: threaded through so the claude-lane
                 # benchmark exemption path (the only route that reaches this
@@ -1930,7 +1888,6 @@ def _emit_governance(
                 session_id=(
                     getattr(result, "session_id", None)
                     or getattr(args, "session_id", None)
-                    or os.environ.get("VNX_SESSION_ID")
                 ),
                 tool_call_count=_toolcall_signals.get("tool_call_count"),
                 tool_call_failures=_toolcall_signals.get("tool_call_failures"),
@@ -1961,7 +1918,14 @@ def _emit_governance(
                 _EMIT_MAX_RETRIES, exc,
             )
             raise
+    return _fail_reason, _fail_class
 
+
+def _finish_governance(
+    emit_unified_report, args, provider, model_used, result, status, duration, token_usage,
+    cost_usd, cost_source, state_dir, data_dir, report_path, event_store, _fail_reason, _fail_class,
+) -> None:
+    """The steps of ``_emit_governance`` after the receipt: outcome records, then the unified report."""
     # OI-1263 + OI-1454 + OI-2115: cooldown, reachability and the live-stream
     # clear, all fail-open; see _record_dispatch_outcome.
     _record_dispatch_outcome(
@@ -2005,6 +1969,91 @@ def _emit_governance(
         )
 
     _emit_marked_report(_write_report, frontmatter, report_path)
+
+
+def _classify_emit_failure(
+    args: argparse.Namespace, provider: str, status: str, result: Any, duration: float,
+) -> tuple:
+    """(failure_reason, failure_class) for the receipt; both None on success, never empty otherwise."""
+    _fail_reason: Optional[str] = None
+    _fail_class: Optional[str] = None
+    if status != "success":
+        try:
+            from failure_classification import classify_failure_safe  # noqa: PLC0415
+            _classification = classify_failure_safe(
+                status=status,
+                error=getattr(result, "error", None),
+                completion_text=getattr(result, "completion_text", None),
+                timed_out=getattr(result, "timed_out", False),
+                provider=provider,
+                duration_seconds=duration,
+                returncode=getattr(result, "returncode", None),
+                dispatch_id=getattr(args, "dispatch_id", "?"),
+            )
+            _fail_reason = _classification.get("failure_reason")
+            _fail_class = _classification.get("failure_class")
+        except Exception as _classify_exc:  # noqa: BLE001 — the failure_classification
+            # module itself failing to import is the one thing
+            # classify_failure_safe cannot guard against from inside
+            # itself; keep the same never-empty guarantee here.
+            logger.debug(
+                "_emit_governance: failure_classification unavailable dispatch=%s (non-fatal)",
+                getattr(args, "dispatch_id", "?"),
+                exc_info=True,
+            )
+            _fail_class = "unknown"
+            _fail_reason = (
+                f"failure_classification unavailable: {_classify_exc!r} "
+                f"(dispatch={getattr(args, 'dispatch_id', '?')})"
+            )
+    return _fail_reason, _fail_class
+
+
+def _permission_receipt_fields(permission_posture: "Optional[Dict[str, Any]]") -> Dict[str, Any]:
+    """The permission marker and the OI-864 posture fields of the dispatch receipt."""
+    return dict(
+        permission_enforcement=(
+            "enforced" if worker_permission_enforcement_enabled() else None
+        ),
+        permission_posture=(
+            (permission_posture or {}).get("permission_posture")
+        ),
+        permission_profile=(
+            (permission_posture or {}).get("permission_profile")
+        ),
+        permission_allow_pattern_count=(
+            (permission_posture or {}).get("permission_allow_pattern_count")
+        ),
+    )
+
+
+def _integrity_receipt_fields(_integrity: Any) -> Dict[str, Any]:
+    """The final-prompt integrity fields of the dispatch receipt; all None when it was never computed."""
+    return dict(
+        final_prompt_path=getattr(_integrity, "final_prompt_path", None) if _integrity is not None else None,
+        final_prompt_sha256=getattr(_integrity, "final_prompt_sha256", None) if _integrity is not None else None,
+        injection_reconstructs=(
+            getattr(_integrity, "injection_reconstructs", None) if _integrity is not None else None
+        ),
+    )
+
+
+def _role_receipt_fields(_role_app: Any) -> Dict[str, Any]:
+    """The role-applied verdict fields of the dispatch receipt; all None when there is no verdict."""
+    return dict(
+        role_applied=(
+            getattr(_role_app, "role_applied", None) if _role_app is not None else None
+        ),
+        role_tier=(
+            getattr(_role_app, "tier", None) if _role_app is not None else None
+        ),
+        role_not_applied_reason=(
+            getattr(_role_app, "reason", None) if _role_app is not None else None
+        ),
+        role_source_path=(
+            getattr(_role_app, "source_path", None) if _role_app is not None else None
+        ),
+    )
 
 
 def _emit_marked_report(write_report: Any, frontmatter: Dict[str, Any], report_path: Path) -> None:
@@ -2086,7 +2135,7 @@ def _constraint_model_for_provider(args: argparse.Namespace, provider: str) -> s
         except _reg.CodexModelResolutionError:
             return ""
     if provider == "gemini":
-        return args.model if (args.model and args.model != "sonnet") else os.environ.get("VNX_GEMINI_MODEL", "gemini-2.5-pro")
+        return args.model if (args.model and args.model != "sonnet") else _GEMINI_DEFAULT_MODEL
     if provider == "kimi":
         return _kimi_resolve_requested_key(getattr(args, "model", None))
     if provider == "deepseek-harness":
@@ -3400,58 +3449,11 @@ def _dispatch_litellm(args: argparse.Namespace) -> int:
     # Fast-fail for providers that require an explicit API key
     required_key = _SUB_PROVIDER_KEY_REQS.get(base_sub)
     if required_key and not os.environ.get(required_key):
-        print(
-            f"litellm:{base_sub} requires {required_key} env var",
-            file=sys.stderr,
-        )
-        try:
-            _emit_refusal_receipt(
-                args, args.provider, getattr(args, "model", None) or base_sub or "litellm",
-                f"litellm:{base_sub} requires {required_key} env var (missing)",
-            )
-        except Exception as _ref_exc:
-            logger.error("_dispatch_litellm: refusal receipt failed dispatch=%s: %s", args.dispatch_id, _ref_exc)
-        return _EX_USAGE
+        return _litellm_missing_key_refusal(args, base_sub, required_key)
 
-    env_model = os.environ.get("VNX_LITELLM_MODEL", "")
-    if base_sub == "deepseek":
-        model = env_model or _resolve_deepseek_model()
-    elif base_sub == "moonshot":
-        model = env_model or _resolve_moonshot_model(model_alias)
-    elif base_sub == "zai":
-        _validate_zai_model_not_legacy(args.model)
-        if model_alias:
-            _validate_zai_model_not_legacy(model_alias)
-        model = env_model or _resolve_zai_model(model_alias)
-    elif base_sub == "openrouter":
-        model = env_model or _resolve_openrouter_model(model_alias)
-    elif env_model:
-        model = env_model
-    elif base_sub and base_sub in _LITELLM_SUB_PROVIDER_DEFAULTS:
-        model = _LITELLM_SUB_PROVIDER_DEFAULTS[base_sub]
-    elif base_sub:
-        model = f"{base_sub}/default"
-    else:
-        model = "anthropic/claude-sonnet-4-6"
-
+    model = _litellm_resolve_model(args, base_sub, model_alias)
     lane_key = _build_lane_key(base_sub, model_alias)
-    _contract = None
-    _tool_call_shape = None
-    try:
-        from providers.behavior_contracts import get_contract as _get_contract
-        _contract = _get_contract(lane_key)
-        _tool_call_shape = _contract.tool_call_shape
-        logger.debug(
-            "_dispatch_litellm: lane=%s cache_control=%s tool_shape=%s",
-            lane_key,
-            _contract.cache_control_supported,
-            _tool_call_shape,
-        )
-    except KeyError:
-        logger.warning(
-            "_dispatch_litellm: no behavior contract for lane %r — proceeding without contract enforcement",
-            lane_key,
-        )
+    _tool_call_shape = _litellm_lane_tool_call_shape(lane_key)
 
     enriched_instruction = _enrich_instruction(args)
     # Isolation + (bench) seed materialization. Fail-loud by design, never a
@@ -3517,27 +3519,7 @@ def _dispatch_litellm(args: argparse.Namespace) -> int:
             review_only=getattr(args, "role", None) == "review-gate",
         )
         isolation_worktree = None
-
-        if result.error:
-            _emit_governance(args, args.provider, model, result, start_time, end_time, "failure", event_store=event_store)
-            print(f"spawn_litellm failed: {result.error}", file=sys.stderr)
-            return 1
-        if result.timed_out:
-            _emit_governance(args, args.provider, model, result, start_time, end_time, "timeout", event_store=event_store)
-            print("spawn_litellm timed out", file=sys.stderr)
-            return 1
-        if result.returncode != 0:
-            _emit_governance(args, args.provider, model, result, start_time, end_time, "failure", event_store=event_store)
-            return 1
-        if result.event_writer_failures > 0:
-            logger.error(
-                "litellm dispatch completed but %d event_writer failures occurred — audit gap",
-                result.event_writer_failures,
-            )
-            _emit_governance(args, args.provider, model, result, start_time, end_time, "success", event_store=event_store)
-            return 2
-        _emit_governance(args, args.provider, model, result, start_time, end_time, "success", event_store=event_store)
-        return 0
+        return _litellm_outcome(args, model, result, start_time, end_time, event_store)
     finally:
         # Reap the worktree FIRST (its provider_teardown_worktree event lands
         # in the live buffer), then the safety net archives+clears — the ring
@@ -3551,6 +3533,96 @@ def _dispatch_litellm(args: argparse.Namespace) -> int:
             review_only=getattr(args, "role", None) == "review-gate",
         )
         _event_store_safety_net(event_store, args)
+
+
+def _litellm_missing_key_refusal(args: argparse.Namespace, base_sub: str, required_key: str) -> int:
+    """Refuse a litellm dispatch whose sub-provider API key is not set: stderr line, receipt, EX_USAGE."""
+    print(
+        f"litellm:{base_sub} requires {required_key} env var",
+        file=sys.stderr,
+    )
+    try:
+        _emit_refusal_receipt(
+            args, args.provider, getattr(args, "model", None) or base_sub or "litellm",
+            f"litellm:{base_sub} requires {required_key} env var (missing)",
+        )
+    except Exception as _ref_exc:
+        logger.error("_dispatch_litellm: refusal receipt failed dispatch=%s: %s", args.dispatch_id, _ref_exc)
+    return _EX_USAGE
+
+
+def _litellm_resolve_model(args: argparse.Namespace, base_sub: str, model_alias: "str | None") -> str:
+    """The litellm model path for ``base_sub``; VNX_LITELLM_MODEL wins over every default."""
+    env_model = os.environ.get("VNX_LITELLM_MODEL", "")
+    if base_sub == "deepseek":
+        model = env_model or _resolve_deepseek_model()
+    elif base_sub == "moonshot":
+        model = env_model or _resolve_moonshot_model(model_alias)
+    elif base_sub == "zai":
+        _validate_zai_model_not_legacy(args.model)
+        if model_alias:
+            _validate_zai_model_not_legacy(model_alias)
+        model = env_model or _resolve_zai_model(model_alias)
+    elif base_sub == "openrouter":
+        model = env_model or _resolve_openrouter_model(model_alias)
+    elif env_model:
+        model = env_model
+    elif base_sub and base_sub in _LITELLM_SUB_PROVIDER_DEFAULTS:
+        model = _LITELLM_SUB_PROVIDER_DEFAULTS[base_sub]
+    elif base_sub:
+        model = f"{base_sub}/default"
+    else:
+        model = "anthropic/claude-sonnet-4-6"
+    return model
+
+
+def _litellm_lane_tool_call_shape(lane_key: str) -> "str | None":
+    """The behavior contract's tool_call_shape for ``lane_key``; None (with a warning) without a contract."""
+    _contract = None
+    _tool_call_shape = None
+    try:
+        from providers.behavior_contracts import get_contract as _get_contract
+        _contract = _get_contract(lane_key)
+        _tool_call_shape = _contract.tool_call_shape
+        logger.debug(
+            "_dispatch_litellm: lane=%s cache_control=%s tool_shape=%s",
+            lane_key,
+            _contract.cache_control_supported,
+            _tool_call_shape,
+        )
+    except KeyError:
+        logger.warning(
+            "_dispatch_litellm: no behavior contract for lane %r — proceeding without contract enforcement",
+            lane_key,
+        )
+    return _tool_call_shape
+
+
+def _litellm_outcome(
+    args: argparse.Namespace, model: str, result: Any, start_time: datetime, end_time: datetime,
+    event_store: Any,
+) -> int:
+    """Emit governance for a finished litellm spawn and map its outcome to the exit code."""
+    if result.error:
+        _emit_governance(args, args.provider, model, result, start_time, end_time, "failure", event_store=event_store)
+        print(f"spawn_litellm failed: {result.error}", file=sys.stderr)
+        return 1
+    if result.timed_out:
+        _emit_governance(args, args.provider, model, result, start_time, end_time, "timeout", event_store=event_store)
+        print("spawn_litellm timed out", file=sys.stderr)
+        return 1
+    if result.returncode != 0:
+        _emit_governance(args, args.provider, model, result, start_time, end_time, "failure", event_store=event_store)
+        return 1
+    if result.event_writer_failures > 0:
+        logger.error(
+            "litellm dispatch completed but %d event_writer failures occurred — audit gap",
+            result.event_writer_failures,
+        )
+        _emit_governance(args, args.provider, model, result, start_time, end_time, "success", event_store=event_store)
+        return 2
+    _emit_governance(args, args.provider, model, result, start_time, end_time, "success", event_store=event_store)
+    return 0
 
 
 def _dispatch_kimi(args: argparse.Namespace) -> int:
@@ -3941,7 +4013,7 @@ def _dispatch_gemini(args: argparse.Namespace) -> int:
         )
         return 1
 
-    model = args.model if (args.model and args.model != "sonnet") else os.environ.get("VNX_GEMINI_MODEL", "gemini-2.5-pro")
+    model = args.model if (args.model and args.model != "sonnet") else _GEMINI_DEFAULT_MODEL
     enriched_instruction = _enrich_instruction(args)
     # Isolation + (bench) seed materialization. Fail-loud by design, never a
     # silent shared-checkout fallback. VNX_BENCH_REQUIRE_ISOLATION=1 (benchmark):
@@ -4169,6 +4241,11 @@ def main(argv: list[str] | None = None) -> int:
         print(f"provider_dispatch: constraint violation - {exc}", file=sys.stderr)
         return 1
 
+    return _gate_delegation_then_dispatch(args, provider, parser)
+
+
+def _gate_delegation_then_dispatch(args: argparse.Namespace, provider: str, parser: argparse.ArgumentParser) -> int:
+    """The signed-delegation step of ``main``: refuse with exit 1, or go on to the budget step."""
     # Signed-delegation mandate gate (VNX_SIGNED_DELEGATION, default OFF).
     # When the flag is off this block is skipped entirely.
     try:
@@ -4197,7 +4274,7 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         _ctx = _dm.DispatchContext(
             project_id=_resolve_data_dir().name,
-            session_id=getattr(args, "session_id", None) or os.environ.get("VNX_SESSION_ID"),
+            session_id=getattr(args, "session_id", None),
             task_class=getattr(args, "task_class", None) or None,
             dispatch_id=args.dispatch_id,
         )
@@ -4231,6 +4308,11 @@ def main(argv: list[str] | None = None) -> int:
                 args.dispatch_id, _recorded_mandate,
             )
 
+    return _gate_budget_then_dispatch(args, provider, parser)
+
+
+def _gate_budget_then_dispatch(args: argparse.Namespace, provider: str, parser: argparse.ArgumentParser) -> int:
+    """The paid-lane daily budget step of ``main``: refuse with exit 1, or route to the handler."""
     # PAID-LANE DAILY BUDGET (golf 2B) — the standalone-CLI side door onto the
     # provider lane (e.g. plan_gate_panel.py invokes this file as a subprocess
     # directly, bypassing dispatch_cli.py's door). run_envelope_plan carries
@@ -4258,6 +4340,11 @@ def main(argv: list[str] | None = None) -> int:
             )
         return 1
 
+    return _route_to_provider_handler(args, provider, parser)
+
+
+def _route_to_provider_handler(args: argparse.Namespace, provider: str, parser: argparse.ArgumentParser) -> int:
+    """The last step of ``main``: run the provider's handler; an uncaught spawn exception exits 1."""
     try:
         if provider == "claude":
             # Benchmark exemption: the measurement harness is exempt from the single-entry

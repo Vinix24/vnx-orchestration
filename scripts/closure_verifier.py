@@ -28,6 +28,7 @@ from codex_final_gate import enforce_codex_gate
 from codex_severity_translator import translate_findings as translate_codex_findings
 from gate_lane_contract import canonical_review_verdict
 from gate_status import (
+    EXECUTION_ID_FIELD as _EXECUTION_ID_FIELD,
     FAIL_STATES as _GATE_FAIL_STATES,
     PARTIAL_REVIEW_STATES as _GATE_PARTIAL_REVIEW_STATES,
     PASS_STATES as _GATE_PASS_STATES,
@@ -38,8 +39,10 @@ from gate_status import (
     has_complete_evidence as gate_has_complete_evidence,
     is_pass as gate_is_pass,
     is_terminal as gate_is_terminal,
+    is_execution_id as _is_execution_id,
     is_test_run_record as _is_test_run_record,
 )
+from failure_classification import VERDICT_WITHOUT_FINDINGS
 from dispatch_spec import RETIRED_GATE_NAMES, Gate
 from gate_recorder import GATE_PROVIDER_HARNESS_LANE, resolve_gate_provider
 from gate_obligations import (
@@ -216,6 +219,25 @@ def _remote_branch_exists(branch: str, project_root: Path) -> bool:
     return result.returncode == 0 and bool(result.stdout.strip())
 
 
+# Profile A of .github/workflows/vnx-ci.yml: the aggregator and the jobs it ``needs``. In the serial mode
+# (VNX_CI_XDIST=0 / xdist_off) the four shard jobs conclude SKIPPED while the aggregator is green.
+# tests/test_closure_verifier.py pins these names to the workflow.
+_PROFILE_A_AGGREGATOR = "Profile A (doctor + core tests)"
+_PROFILE_A_NEEDED_JOBS = frozenset(
+    {f"Profile A shard ({k}/4)" for k in range(1, 5)} | {"Profile A guards"}
+)
+
+
+def _profile_a_aggregator_green(rollup: List[Dict[str, Any]]) -> bool:
+    return any(
+        item.get("__typename") == "CheckRun"
+        and item.get("name") == _PROFILE_A_AGGREGATOR
+        and item.get("status") == "COMPLETED"
+        and item.get("conclusion") == "SUCCESS"
+        for item in rollup
+    )
+
+
 def _rollup_all_green(rollup: List[Dict[str, Any]]) -> bool:
     """Decide whether a GitHub statusCheckRollup represents an all-green CI state.
 
@@ -236,6 +258,14 @@ def _rollup_all_green(rollup: List[Dict[str, Any]]) -> bool:
         typename = item.get("__typename") or ""
         if typename == "CheckRun":
             recognised += 1
+            if (
+                item.get("status") == "COMPLETED"
+                and item.get("conclusion") == "SKIPPED"
+                and item.get("name") in _PROFILE_A_NEEDED_JOBS
+                and _profile_a_aggregator_green(rollup)
+            ):
+                # A skipped Profile A shard/guards job counts only next to a green aggregator.
+                continue
             if item.get("status") != "COMPLETED" or item.get("conclusion") != "SUCCESS":
                 return False
         elif typename == "StatusContext":
@@ -801,7 +831,7 @@ def _merge_door_record_verdict(
         }
     # Invariant 7: a passing verdict whose report still carries blocking
     # indicators is a contradiction, not evidence.
-    indicators = _report_blocking_indicators(report_path)
+    indicators = _report_blocking_indicators(report_path, result)
     if indicators is None:
         return {
             "verdict": "NO-GO",
@@ -1506,6 +1536,7 @@ def _find_gate_request_payload(
     pr_id: str,
     results_dir: Path,
     branch: Optional[str] = None,
+    execution_id: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """Locate a gate **request** payload as a fallback when no result exists.
 
@@ -1515,6 +1546,9 @@ def _find_gate_request_payload(
     file is written.  This helper finds that payload and normalises legacy
     ``status``-only writers into the same shape the closure verifier expects
     (with ``state``/``contributed_evidence``/``was_intentionally_absent``).
+
+    ``execution_id`` (OI-1438): only a request record of that run counts; a
+    request without the id, or with another run's, is skipped.
     """
     requests_dir = results_dir.parent / "requests"
     if not requests_dir.exists():
@@ -1555,6 +1589,8 @@ def _find_gate_request_payload(
         # Reject requests recorded for a different branch — a cross-branch request
         # with the same pr_id must not satisfy closure for the current branch.
         if branch and data.get("branch") and data["branch"] != branch:
+            continue
+        if execution_id is not None and data.get(_EXECUTION_ID_FIELD) != execution_id:
             continue
 
         # Normalise legacy `status`-only payloads (writer: _request_claude_github)
@@ -2016,6 +2052,69 @@ def _record_report_check(name: str, label: str, result: Optional[Dict[str, Any]]
     return CheckResult(f"report_{name}", "PASS", f"{label} normalized report exists at {report_path}")
 
 
+def _check_request_records(
+    contract: ReviewContract, results_dir: Path, skip: frozenset = frozenset(),
+) -> List[CheckResult]:
+    """Closure invariant 1 per gate: the result was requested (OI-1438).
+
+    ``skip``: the seats the seat rule already judged (their record is checked in
+    :func:`_seat_evidence_checks`) and the seats the merge did not require, as
+    :func:`_check_contract_hashes`.
+    """
+    checks: List[CheckResult] = []
+    branch = contract.branch or None
+    for gate in contract.review_stack:
+        if gate not in _KNOWN_GATES or gate in skip:
+            continue
+        result = _find_gate_result(gate, contract.pr_id, results_dir, branch=branch)
+        check = _record_request_check(gate, gate, gate, contract.pr_id, result, results_dir, branch)
+        if check is not None:
+            checks.append(check)
+    return checks
+
+
+def _record_request_check(
+    name: str, label: str, gate: str, pr_id: str, result: Optional[Dict[str, Any]],
+    results_dir: Path, branch: Optional[str],
+) -> Optional[CheckResult]:
+    """``gate_<name>_request_record``: the request record of the result's run exists.
+
+    The run's identity is ``execution_id``: minted when the request turns
+    ``executing`` (``gate_runner._mark_executing``), persisted on the request
+    (``gate_recorder.persist_request``) and copied onto every result of the run
+    (``gate_recorder.stamp_request_identity``). A result without the key was
+    written before that writer existed: a legacy PASS that says so. A key
+    holding anything but a minted id is a FAIL, never a legacy record. No
+    result at all is the gate check's own FAIL, not this one's.
+    """
+    if result is None:
+        return None
+    check_name = f"gate_{name}_request_record"
+    if _EXECUTION_ID_FIELD not in result:
+        return CheckResult(
+            check_name, "PASS",
+            f"{label} result for {pr_id} carries no execution_id: legacy record written "
+            "before requests were persisted, request record not required",
+        )
+    execution_id = result[_EXECUTION_ID_FIELD]
+    if not _is_execution_id(execution_id):
+        return CheckResult(
+            check_name, "FAIL",
+            f"{label} result for {pr_id} carries a malformed execution_id {execution_id!r}: "
+            "cannot tie it to a request record",
+        )
+    request = _find_gate_request_payload(gate, pr_id, results_dir, branch=branch, execution_id=execution_id)
+    if request is None:
+        return CheckResult(
+            check_name, "FAIL",
+            f"{label} result for {pr_id} (execution_id {execution_id}) has no matching request "
+            f"record in {results_dir.parent / 'requests'}: the gate was never requested for this run",
+        )
+    return CheckResult(
+        check_name, "PASS", f"{label} request record for {pr_id} found (execution_id {execution_id})",
+    )
+
+
 def _check_deterministic_findings(contract: ReviewContract) -> CheckResult:
     """Return FAIL if any error-severity deterministic findings remain unresolved."""
     error_findings = [f for f in contract.deterministic_findings if f.severity == "error"]
@@ -2135,7 +2234,7 @@ def _seat_rule_checks(
             else f"seat {fill.seat} niet gevuld: {fill.message}"
         )
         checks.append(CheckResult(f"seat_{fill.seat}", "PASS" if fill.filled else "FAIL", detail))
-        checks.extend(_seat_evidence_checks(fill, contract.content_hash))
+        checks.extend(_seat_evidence_checks(fill, contract, results_dir))
     not_required = _seats_not_required(seat_record)
     if not_required:
         checks.append(CheckResult("review_seats_not_required", "PASS", _not_required_text(seat_record, not_required)))
@@ -2198,17 +2297,23 @@ def _not_required_text(seat_record: Dict[str, Any], not_required: Sequence[str])
     )
 
 
-def _seat_evidence_checks(fill: Any, content_hash: str) -> List[CheckResult]:
-    """The old rule's hash and report checks on the record that answers for one seat.
+def _seat_evidence_checks(fill: Any, contract: ReviewContract, results_dir: Path) -> List[CheckResult]:
+    """The old rule's hash, report and request checks on the record that answers for one seat.
 
     A matching hash is a PASS here, so each seat names the reviewer and the hash
-    of the record it checked.
+    of the record it checked. The request check (OI-1438) looks in the slot of
+    the gate that wrote the record, which for a takeover is not the seat.
     """
-    reviewer = fill.reviewer or str((fill.record or {}).get("gate") or fill.seat)
-    label = f"seat {fill.seat}: {reviewer}"
+    record = fill.record or {}
+    record_gate = str(record.get("gate") or fill.seat)
+    label = f"seat {fill.seat}: {fill.reviewer or record_gate}"
     found = (
-        _record_hash_check(fill.seat, label, fill.record, content_hash, report_match=True),
+        _record_hash_check(fill.seat, label, fill.record, contract.content_hash, report_match=True),
         _record_report_check(fill.seat, label, fill.record),
+        _record_request_check(
+            fill.seat, label, record_gate, str(record.get("pr_id") or contract.pr_id), fill.record,
+            results_dir, contract.branch or None,
+        ),
     )
     return [check for check in found if check is not None]
 
@@ -2268,6 +2373,7 @@ def _validate_review_evidence(
 
     checks.extend(_check_contract_hashes(contract, results_dir, seat_gates))
     checks.extend(_check_report_paths(contract, results_dir, seat_gates))
+    checks.extend(_check_request_records(contract, results_dir, seat_gates))
     checks.append(_check_deterministic_findings(contract))
 
     return checks
@@ -2438,6 +2544,44 @@ def verify_pr_closure(
         ))
 
     # 4. Review contract and gate evidence
+    review_evidence_summary = _per_pr_review_checks(
+        checks, pr_id, review_contract, gate_results_dir, paths, receipts_file, branch,
+    )
+
+    # 5. GitHub PR and CI checks (when branch is provided and explicitly required)
+    # Local-only closure cannot pass merge readiness without a real GitHub PR + green checks.
+    # Per-PR mode must mirror the full-feature pre_merge guarantees: state == OPEN and
+    # mergeStateStatus == CLEAN, otherwise a draft, blocked, or merged-but-stale PR with
+    # green CI could be reported as merge-ready.
+    github_pr = _per_pr_github_checks(checks, branch, require_github_pr)
+
+    verdict = "pass" if all(c.status == "PASS" for c in checks) else "fail"
+    return {
+        "verdict": verdict,
+        "mode": "per_pr",
+        "pr_id": pr_id,
+        "branch": branch,
+        "reconciled_state": {
+            "pr_id": pr_reconciled.pr_id,
+            "state": pr_reconciled.state,
+            "provenance": pr_reconciled.provenance,
+        },
+        "checks": [c.__dict__ for c in checks],
+        "review_evidence": review_evidence_summary,
+        "github_pr": github_pr,
+    }
+
+
+def _per_pr_review_checks(
+    checks: List[CheckResult],
+    pr_id: str,
+    review_contract: Optional[ReviewContract],
+    gate_results_dir: Optional[Path],
+    paths: Dict[str, str],
+    receipts_file: Path,
+    branch: Optional[str],
+) -> Optional[Dict[str, Any]]:
+    """Steps 4-5 of ``verify_pr_closure``: append the review checks, return the evidence summary."""
     review_evidence_summary: Optional[Dict[str, Any]] = None
     if review_contract is not None:
         # Per-PR closure must reject a contract for a different PR — combining
@@ -2463,25 +2607,31 @@ def verify_pr_closure(
                 )
             )
 
-            review_evidence_summary = {
-                "contract_pr_id": review_contract.pr_id,
-                "contract_hash": review_contract.content_hash,
-                "review_stack": review_contract.review_stack,
-                "risk_class": review_contract.risk_class,
-                "deterministic_finding_count": len(review_contract.deterministic_findings),
-                "error_finding_count": len([f for f in review_contract.deterministic_findings if f.severity == "error"]),
-            }
+            review_evidence_summary = _review_evidence_summary(review_contract)
     else:
         checks.append(CheckResult(
             "review_contract", "FAIL",
             "no review contract provided — per-PR closure requires contract-backed evidence",
         ))
+    return review_evidence_summary
 
-    # 5. GitHub PR and CI checks (when branch is provided and explicitly required)
-    # Local-only closure cannot pass merge readiness without a real GitHub PR + green checks.
-    # Per-PR mode must mirror the full-feature pre_merge guarantees: state == OPEN and
-    # mergeStateStatus == CLEAN, otherwise a draft, blocked, or merged-but-stale PR with
-    # green CI could be reported as merge-ready.
+
+def _review_evidence_summary(review_contract: ReviewContract) -> Dict[str, Any]:
+    """The ``review_evidence`` block of a closure payload."""
+    return {
+        "contract_pr_id": review_contract.pr_id,
+        "contract_hash": review_contract.content_hash,
+        "review_stack": review_contract.review_stack,
+        "risk_class": review_contract.risk_class,
+        "deterministic_finding_count": len(review_contract.deterministic_findings),
+        "error_finding_count": len([f for f in review_contract.deterministic_findings if f.severity == "error"]),
+    }
+
+
+def _per_pr_github_checks(
+    checks: List[CheckResult], branch: Optional[str], require_github_pr: bool,
+) -> Optional[Dict[str, Any]]:
+    """Step 5 of ``verify_pr_closure``: append the GitHub PR and CI checks, return the PR."""
     github_pr: Optional[Dict[str, Any]] = None
     if branch and require_github_pr:
         github_pr = _find_branch_pr(branch)
@@ -2508,22 +2658,7 @@ def verify_pr_closure(
                 "all required GitHub checks green" if all_green
                 else "GitHub checks incomplete or failing — merge readiness blocked",
             ))
-
-    verdict = "pass" if all(c.status == "PASS" for c in checks) else "fail"
-    return {
-        "verdict": verdict,
-        "mode": "per_pr",
-        "pr_id": pr_id,
-        "branch": branch,
-        "reconciled_state": {
-            "pr_id": pr_reconciled.pr_id,
-            "state": pr_reconciled.state,
-            "provenance": pr_reconciled.provenance,
-        },
-        "checks": [c.__dict__ for c in checks],
-        "review_evidence": review_evidence_summary,
-        "github_pr": github_pr,
-    }
+    return github_pr
 
 
 # The producer line a gate report writes about itself. Accepts the bold-field
@@ -2879,7 +3014,87 @@ def _count_report_blocking_indicators(content: str) -> int:
     return _count_matches_excluding_negations(_PROSE_FALLBACK_PATTERNS, filtered)
 
 
-def _report_blocking_indicators(report_path: Path) -> Optional[int]:
+# ADR-080 besluit 2 (track reviews-zonder-uitkomst, D2). The writer (D5) puts
+# this section in the writer-made part of the report, i.e. ahead of
+# RAW_OUTPUT_HEADING, with exactly one line ``execution_id: <id>``. D5 imports
+# both constants from here.
+RECLASSIFICATION_HEADING = "## Herclassificatie"
+# gate_artifacts.format_report: from this heading to the end of the report is
+# the reviewer's raw output, copied verbatim. Nothing in it is writer-made.
+RAW_OUTPUT_HEADING = "## Gate Output"
+_RECLASSIFICATION_SECTION_RE = re.compile(
+    rf"^{re.escape(RECLASSIFICATION_HEADING)}[ \t]*$(.*?)(?=^## |\Z)", re.MULTILINE | re.DOTALL,
+)
+_RECLASSIFICATION_ID_RE = re.compile(r"^[ \t]*(?:-[ \t]*)?execution_id:[ \t]*`?([^`\s]+)`?[ \t]*$", re.MULTILINE)
+_FINDINGS_COUNT_RE = re.compile(r"^(Blocking|Advisory) count:[ \t]*(\d+)[ \t]*$", re.MULTILINE)
+
+
+def is_reclassified_without_findings(record: Dict[str, Any]) -> bool:
+    """Condition 1 of ADR-080 besluit 2: status ``unavailable`` with reason ``verdict_without_findings``."""
+    return (
+        isinstance(record, dict)
+        and gate_canonical_status(record) in _GATE_UNAVAILABLE_STATES
+        and record.get("reason") == VERDICT_WITHOUT_FINDINGS
+    )
+
+
+def _record_has_no_findings(record: Dict[str, Any]) -> bool:
+    """Condition 2: both findings lists present and empty; a missing or malformed field is not empty."""
+    if record.get("blocking_findings") != [] or record.get("advisory_findings") != []:
+        return False
+    if "findings" in record and record["findings"] != []:
+        return False
+    return all(
+        key not in record or (type(record[key]) is int and record[key] == 0)
+        for key in ("blocking_count", "advisory_count")
+    )
+
+
+def _writer_part(content: str) -> Optional[str]:
+    """The report before its raw output, ``None`` when the raw-output heading is absent."""
+    lines = content.splitlines()
+    for index, line in enumerate(lines):
+        if line.rstrip() == RAW_OUTPUT_HEADING:
+            return "\n".join(lines[:index])
+    return None
+
+
+def _writer_findings_empty(writer: str) -> bool:
+    """Condition 3: the writer's ``## Findings`` counts exactly 0 blocking and 0 advisory, and lists nothing."""
+    section = _extract_normalized_findings_section(writer)
+    if section is None:
+        return False
+    if sorted(_FINDINGS_COUNT_RE.findall(section)) != [("Advisory", "0"), ("Blocking", "0")]:
+        return False
+    if any(re.search(pattern, section, re.IGNORECASE) for pattern in _FINDINGS_SECTION_PATTERNS):
+        return False
+    return not any(line.lstrip().startswith(("-", "*", "#")) for line in section.splitlines())
+
+
+def _names_execution_id(writer: str, execution_id: Any) -> bool:
+    """Condition 4: one writer-made Herclassificatie section naming exactly the record's ``execution_id``."""
+    if not _is_execution_id(execution_id):
+        return False
+    sections = _RECLASSIFICATION_SECTION_RE.findall(writer)
+    return len(sections) == 1 and _RECLASSIFICATION_ID_RE.findall(sections[0]) == [execution_id]
+
+
+def report_reclassification_holds(record: Dict[str, Any], content: str) -> bool:
+    """ADR-080 besluit 2: may the FAIL verdict of this report be skipped? Only when all four conditions hold.
+
+    Each is read from the record or from the writer-made part of the report
+    (before :data:`RAW_OUTPUT_HEADING`), never from the reviewer's raw output:
+    a planted Herclassificatie heading in that output counts for nothing.
+    """
+    if not is_reclassified_without_findings(record) or not _record_has_no_findings(record):
+        return False
+    writer = _writer_part(content)
+    if writer is None:
+        return False
+    return _writer_findings_empty(writer) and _names_execution_id(writer, record.get(_EXECUTION_ID_FIELD))
+
+
+def _report_blocking_indicators(report_path: Path, record: Optional[Dict[str, Any]] = None) -> Optional[int]:
     """Invariant 7's reading of one report on disk: its blocking indicators, ``None`` when unreadable.
 
     The one report reader for a contradiction between a record and its report.
@@ -2887,11 +3102,17 @@ def _report_blocking_indicators(report_path: Path) -> Optional[int]:
     (:func:`_merge_door_record_verdict`), and the seat evaluation uses it to
     find a rejection in the report of any review peer on the head
     (``review_seat_evaluation.report_rejects``, OI-2058 R5b round 2).
+
+    With ``record``, the one exception of ADR-080 besluit 2: a report whose
+    record passes :func:`report_reclassification_holds` counts 0. Any other
+    record (a PASS record among them) is read as before.
     """
     try:
         content = Path(report_path).read_text(encoding="utf-8")
     except OSError:
         return None
+    if record is not None and report_reclassification_holds(record, content):
+        return 0
     return _count_report_blocking_indicators(content)
 
 
@@ -3066,6 +3287,32 @@ def verify_closure(
         )
     )
 
+    checks.extend(_feature_pr_state_checks(pr, mode, project_root))
+
+    checks.extend(_validate_test_claims(claims, project_root))
+    checks.append(_check_stale_staging(paths, track.pr_ids))
+
+    # Review contract and gate evidence enforcement
+    review_evidence_summary = _feature_review_checks(checks, review_contract, gate_results_dir, paths, branch, pr)
+
+    verdict = "pass" if all(check.status == "PASS" for check in checks) else "fail"
+    payload = {
+        "verdict": verdict,
+        "mode": mode,
+        "branch": branch,
+        "track_id": track.track_id or None,
+        "feature_title": track.title,
+        "checks": [check.__dict__ for check in checks],
+        "pr": pr,
+        "claim_file": str(claim_file) if claim_file else None,
+        "review_evidence": review_evidence_summary,
+    }
+    return payload
+
+
+def _feature_pr_state_checks(pr: Optional[Dict[str, Any]], mode: str, project_root: Path) -> List[CheckResult]:
+    """The merge-state checks of ``verify_closure`` for the branch's PR, per mode."""
+    checks: List[CheckResult] = []
     if pr:
         if mode == "pre_merge":
             clean = str(pr.get("mergeStateStatus") or "").upper() == "CLEAN" and str(pr.get("state") or "").upper() == "OPEN"
@@ -3104,11 +3351,18 @@ def verify_closure(
                     f"merge commit {'present on origin/main' if on_main else 'missing from origin/main'}",
                 )
             )
+    return checks
 
-    checks.extend(_validate_test_claims(claims, project_root))
-    checks.append(_check_stale_staging(paths, track.pr_ids))
 
-    # Review contract and gate evidence enforcement
+def _feature_review_checks(
+    checks: List[CheckResult],
+    review_contract: Optional[ReviewContract],
+    gate_results_dir: Optional[Path],
+    paths: Dict[str, str],
+    branch: str,
+    pr: Optional[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    """The review-evidence step of ``verify_closure``: append its checks, return the summary."""
     review_evidence_summary: Optional[Dict[str, Any]] = None
     if review_contract is not None:
         effective_results_dir = gate_results_dir
@@ -3124,34 +3378,14 @@ def verify_closure(
                 review_contract, effective_results_dir, branch=branch
             )
         )
-        review_evidence_summary = {
-            "contract_pr_id": review_contract.pr_id,
-            "contract_hash": review_contract.content_hash,
-            "review_stack": review_contract.review_stack,
-            "risk_class": review_contract.risk_class,
-            "deterministic_finding_count": len(review_contract.deterministic_findings),
-            "error_finding_count": len([f for f in review_contract.deterministic_findings if f.severity == "error"]),
-        }
+        review_evidence_summary = _review_evidence_summary(review_contract)
     else:
         checks.append(CheckResult(
             "review_contract",
             "FAIL",
             "no review contract provided — closure requires contract-backed evidence",
         ))
-
-    verdict = "pass" if all(check.status == "PASS" for check in checks) else "fail"
-    payload = {
-        "verdict": verdict,
-        "mode": mode,
-        "branch": branch,
-        "track_id": track.track_id or None,
-        "feature_title": track.title,
-        "checks": [check.__dict__ for check in checks],
-        "pr": pr,
-        "claim_file": str(claim_file) if claim_file else None,
-        "review_evidence": review_evidence_summary,
-    }
-    return payload
+    return review_evidence_summary
 
 
 def _feature_merge_record(pr: Optional[Dict[str, Any]], paths: Dict[str, str]) -> Optional[Dict[str, Any]]:

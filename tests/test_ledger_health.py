@@ -36,6 +36,7 @@ sys.path.insert(0, str(SCRIPTS_DIR))
 
 import ledger_health as lh  # noqa: E402
 from ndjson_hash_chain import append_chained_entry  # noqa: E402
+from ndjson_hash_chain import append_epoch_marker
 
 
 # ---------------------------------------------------------------------------
@@ -388,6 +389,21 @@ class TestChainStatus:
 
         assert result["chain_state"] == "broken"
         assert result["status"] == lh.STATUS_FINDING
+
+    def test_sealed_ledger_with_an_unchained_line_is_a_finding_without_the_variable(self, state_dir, monkeypatch):
+        monkeypatch.delenv("VNX_CHAIN_RECEIPTS", raising=False)
+        ledger_path = state_dir / lh.LEDGER_NAME
+        _write_ndjson(ledger_path, _receipt("d-001"))
+        append_epoch_marker(ledger_path, 1)
+        assert lh._chain_receipts_configured(ledger_path) == (True, "chaining")
+        with ledger_path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(_receipt("d-002")) + "\n")
+
+        result = lh.check_chain_status(state_dir)
+
+        assert result["status"] == lh.STATUS_FINDING
+        assert result["chain_state"] == "broken"
+        assert result["violations_sample"][0]["note"] == "unchained entry inside a chained epoch"
 
     def test_missing_ledger_is_unmeasurable(self, state_dir):
         result = lh.check_chain_status(state_dir)
@@ -989,7 +1005,6 @@ class TestReceiptCoverageAcknowledged:
 
 class TestAcknowledgeCli:
     def test_writes_one_line_with_the_documented_fields(self, state_dir, monkeypatch):
-        monkeypatch.delenv("VNX_ACTOR", raising=False)
 
         exit_code = lh.main([
             "acknowledge", "--state-dir", str(state_dir),
@@ -1008,8 +1023,7 @@ class TestAcknowledgeCli:
         assert parsed.tzinfo is not None
         assert abs((datetime.datetime.now(datetime.timezone.utc) - parsed).total_seconds()) < 60
 
-    def test_actor_comes_from_env_and_the_flag_beats_the_env(self, state_dir, monkeypatch):
-        monkeypatch.setenv("VNX_ACTOR", "t0")
+    def test_actor_defaults_and_the_flag_beats_the_default(self, state_dir):
         lh.main(["acknowledge", "--state-dir", str(state_dir), "--dispatch-id", "d-a", "--reason", "r"])
         lh.main([
             "acknowledge", "--state-dir", str(state_dir),
@@ -1017,7 +1031,7 @@ class TestAcknowledgeCli:
         ])
 
         actors = {rec["dispatch_id"]: rec["actor"] for rec in _read_ack_lines(state_dir)}
-        assert actors == {"d-a": "t0", "d-b": "vincent"}
+        assert actors == {"d-a": "operator", "d-b": "vincent"}
 
     @pytest.mark.parametrize("blank_reason", ["", "   ", "\t\n "])
     def test_empty_or_whitespace_reason_is_refused_and_writes_nothing(self, state_dir, blank_reason, capsys):

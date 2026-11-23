@@ -10,7 +10,7 @@ production OAuth subscription (no own key) — hence the explicit DEEPSEEK_API_K
 requirement in is_available().
 
 Cheap (DeepSeek-Flash ~$0.14/$0.28 per MTok) and model-agnostic: the model is
-selectable via VNX_DEEPSEEK_CLASSIFIER_MODEL.
+passed to the constructor.
 """
 from __future__ import annotations
 
@@ -52,11 +52,9 @@ class DeepSeekProvider(ClassifierProvider):
         model: Optional[str] = None,
         timeout_seconds: Optional[int] = None,
     ) -> None:
-        self.model = model or os.environ.get("VNX_DEEPSEEK_CLASSIFIER_MODEL", _DEFAULT_MODEL)
+        self.model = model or _DEFAULT_MODEL
         self.timeout_seconds = int(
-            timeout_seconds
-            if timeout_seconds is not None
-            else os.environ.get("VNX_DEEPSEEK_CLASSIFIER_TIMEOUT", _DEFAULT_TIMEOUT)
+            timeout_seconds if timeout_seconds is not None else _DEFAULT_TIMEOUT
         )
 
     def is_present(self) -> bool:

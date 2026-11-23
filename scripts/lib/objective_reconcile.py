@@ -441,7 +441,7 @@ def _is_merged(pr_data: Optional[Dict[str, Any]]) -> bool:
 # ``reconcile --apply`` close path (run_reconcile step 4c + close_track_if_done),
 # but the operator-facing ``objective close`` verb did NOT call that path — it
 # peeked/reconciled with the local-only set, fell back to _load_merged_pr_numbers
-# (whose gh source is default-ON since OI-1155, opt out via VNX_RECONCILE_GIT=0), and
+# (whose gh source is always on since OI-1155), and
 # re-derived 'queued' for a track whose PRs merged via a bare ``gh pr merge``.
 #
 # The two helpers below are the SINGLE source of the evidence set both code
@@ -896,36 +896,18 @@ def run_reconcile(
     # ``gh pr view`` calls: only MERGED results already fetched in step 4b are
     # extracted, so the --max-gh-calls cap still holds for the whole run.
     # ------------------------------------------------------------------ step 4c
-    gh_confirmed_merged: set = set()
-    for cc in confirmed_candidates:
-        for pr in cc["pr_results"]:
-            if isinstance(pr, dict) and _is_merged({
-                "state": pr.get("state"),
-                "mergedAt": pr.get("mergedAt"),
-            }):
-                try:
-                    gh_confirmed_merged.add(int(pr["number"]))
-                except (TypeError, ValueError, KeyError):
-                    pass
     # OI-1071: the UNION of gh-confirmed MERGED PR numbers and the local set is
     # built by the shared primitive so the standalone close verb and this bulk
     # sweep consume the SAME function and cannot drift apart.
-    evidence_merged_pr_numbers: FrozenSet[int] = merge_evidence_pr_numbers(
-        frozenset(gh_confirmed_merged), state_dir, repo_root
-    )
-
     # Re-derive the confirmed tracks so the bulk-pass-derived_status (which ran
     # before the gh sweep and wrote 'queued' for bare-gh-merge tracks) is
     # corrected in the DB with the same evidence the close path will use. This
     # is idempotent (reconcile_track rewrites derived_status) and adds zero gh
     # calls. Non-apply mode also benefits: the derived_status persisted for
     # reporting matches the evidence reconcile actually gathered.
-    for cc in confirmed_candidates:
-        track_reconciler.reconcile_track(
-            state_dir, cc["track_id"], project_id,
-            repo_root=repo_root,
-            _merged_pr_numbers=evidence_merged_pr_numbers,
-        )
+    evidence_merged_pr_numbers = _gh_evidence_and_rederive(
+        state_dir, project_id, repo_root, confirmed_candidates,
+    )
 
     # ------------------------------------------------------------------ step 5
     # Close confirmed candidates (--apply only). The evidence set from step 4c
@@ -992,3 +974,33 @@ def run_reconcile(
     }
     _persist_summary(state_dir, summary)
     return summary, exit_code
+
+
+def _gh_evidence_and_rederive(
+    state_dir: Path,
+    project_id: str,
+    repo_root: Path,
+    confirmed_candidates: List[Dict[str, Any]],
+) -> FrozenSet[int]:
+    """Step 4c of run_reconcile: merge-evidence set (gh UNION local), then re-derive."""
+    gh_confirmed_merged: set = set()
+    for cc in confirmed_candidates:
+        for pr in cc["pr_results"]:
+            if isinstance(pr, dict) and _is_merged({
+                "state": pr.get("state"),
+                "mergedAt": pr.get("mergedAt"),
+            }):
+                try:
+                    gh_confirmed_merged.add(int(pr["number"]))
+                except (TypeError, ValueError, KeyError):
+                    pass
+    evidence_merged_pr_numbers: FrozenSet[int] = merge_evidence_pr_numbers(
+        frozenset(gh_confirmed_merged), state_dir, repo_root
+    )
+    for cc in confirmed_candidates:
+        track_reconciler.reconcile_track(
+            state_dir, cc["track_id"], project_id,
+            repo_root=repo_root,
+            _merged_pr_numbers=evidence_merged_pr_numbers,
+        )
+    return evidence_merged_pr_numbers

@@ -1091,8 +1091,8 @@ UNDETECTED_LAUNCH_FUNCTIONS: Dict[str, str] = {
         "delegates to spawn_claude with the DeepSeek ANTHROPIC_BASE_URL, labelled deepseek; "
         "no process call in its own body",
     "scripts/lib/provider_spawns/glm_harness_spawn.py:spawn_glm_harness":
-        "delegates to spawn_claude with the proxy ANTHROPIC_BASE_URL (VNX_GLM_PROXY_URL, "
-        "default :4141), labelled glm; no process call in its own body",
+        "delegates to spawn_claude with the proxy ANTHROPIC_BASE_URL (default "
+        ":4141), labelled glm; no process call in its own body",
     "scripts/lib/provider_spawns/kimi_spawn.py:_start_kimi_subprocess":
         "Popen of an argv that arrives as a parameter; the literal 'kimi' head sits in "
         "_build_kimi_cmd, called by spawn_kimi",
@@ -1132,7 +1132,6 @@ ENFORCED: Tuple[str, ...] = (
     "scripts/lib/gemini_wrapper.py:gemini_exec",
     "scripts/lib/kimi_wrapper.py:kimi_exec",
     "scripts/lib/providers/local_gemma/spawn.py:_run_ollama_fallback",
-    "scripts/lib/vertex_ai_runner.py:run_vertex_ai",
     "scripts/llm_benchmark.py:_ollama_api",
     "scripts/llm_benchmark.py:_ollama_stream",
     *UNDETECTED_LAUNCH_FUNCTIONS,
@@ -1153,7 +1152,9 @@ EXEMPT: Dict[str, str] = {
     "scripts/lib/adapters/codex_adapter.py:CodexAdapter.stream_events": "codex launch (decision 2b)",
     "scripts/conversation_analyzer/deep_analyzer.py:DeepAnalyzer._try_claude_max":
         "claude launch on the subscription (decision 2b)",
-    "scripts/lib/dispatch_cli.py:_check_reachability":
+    "scripts/lib/dispatch_cli.py:_probe_litellm_proxy":
+        "reachability probe (GET /v1/models): no model call",
+    "scripts/lib/dispatch_cli.py:_probe_deepseek_api":
         "reachability probe (GET /v1/models): no model call",
     "scripts/lib/adapters/ollama_adapter.py:OllamaAdapter.reachability":
         "reachability probe (GET /api/tags): no model call",

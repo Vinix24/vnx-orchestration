@@ -80,6 +80,18 @@ def _make_db(tmp_path: Path) -> Path:
     return state_dir
 
 
+@pytest.fixture(autouse=True)
+def _pin_data_root(tmp_path, monkeypatch):
+    """Pin the data-root chain to the test's own .vnx-data.
+
+    ``_cmd_*`` resolves the store through ``vnx_paths`` (explicit override >
+    VNX_DATA_HOME > ``~/.vnx-data/<id>``); without the pin a run would reach the
+    real home store instead of the fixture DB.
+    """
+    monkeypatch.setenv("VNX_DATA_DIR", str(tmp_path / ".vnx-data"))
+    monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+
+
 def _make_args(**kwargs) -> argparse.Namespace:
     defaults = {
         "project_dir": ".",

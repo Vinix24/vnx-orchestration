@@ -117,22 +117,24 @@ def _make_realistic_v21_db(path: Path, row_count: int = 3) -> None:
     conn = sqlite3.connect(str(path))
     try:
         conn.isolation_level = None
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS session_analytics (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                session_id TEXT NOT NULL UNIQUE,
-                project_path TEXT NOT NULL,
-                terminal TEXT,
-                session_date DATE NOT NULL,
-                total_input_tokens INTEGER DEFAULT 0,
-                total_output_tokens INTEGER DEFAULT 0,
-                tool_calls_total INTEGER DEFAULT 0,
-                duration_minutes REAL,
-                session_model TEXT DEFAULT 'unknown',
-                dispatch_id TEXT,
-                analyzed_at DATETIME DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
+        # A DB at v21 already carries the base-schema tables (session_analytics,
+        # nightly_digests, success_patterns, ...): migrations v17+ and v29 alter
+        # them. Copy their DDL from the canonical schema; dispatch_metadata, the
+        # views and the FTS shadow tables stay out.
+        base = sqlite3.connect(":memory:")
+        try:
+            base.executescript(_SCHEMA_FILE.read_text())
+            ddl = base.execute(
+                "SELECT name, sql FROM sqlite_master WHERE type='table' "
+                "AND sql NOT LIKE 'CREATE VIRTUAL%' AND name != 'dispatch_metadata' AND name != 'sqlite_sequence' "
+                "AND name NOT LIKE '%\\_fts%' ESCAPE '\\' "
+                "AND name NOT LIKE 'code\\_snippets\\_%' ESCAPE '\\'"
+            ).fetchall()
+        finally:
+            base.close()
+        for _name, sql in ddl:
+            conn.execute(sql)
+        QDB._migrate_v17(conn)
         # Keep user_version at 21
         conn.execute("PRAGMA user_version = 21")
     finally:
@@ -230,7 +232,9 @@ class TestLegacyV21Bootstrap:
     def test_bootstrap_succeeds_on_v21_legacy_db(self, tmp_path):
         """bootstrap_qi_db must return True on a DB at user_version=21."""
         db = tmp_path / "qi_v21.db"
-        _make_legacy_v21_db(db, row_count=3)
+        # Realistic fixture: migration v29 alters session_analytics, which every
+        # production v21 DB has (created by _migrate_v3).
+        _make_realistic_v21_db(db, row_count=3)
         assert _get_user_version(db) == 21, "precondition: legacy DB at v21"
 
         result = QDB.bootstrap_qi_db(db, _SCHEMA_FILE)
@@ -243,7 +247,7 @@ class TestLegacyV21Bootstrap:
     def test_legacy_db_reaches_highest_version(self, tmp_path):
         """user_version must be HIGHEST_QI_VERSION after bootstrap on v21 DB."""
         db = tmp_path / "qi_v21.db"
-        _make_legacy_v21_db(db)
+        _make_realistic_v21_db(db)
 
         QDB.bootstrap_qi_db(db, _SCHEMA_FILE)
 
@@ -332,7 +336,7 @@ class TestLegacyV21Bootstrap:
     def test_legacy_bootstrap_idempotent(self, tmp_path):
         """Running bootstrap twice on a v21 legacy DB must be a clean no-op."""
         db = tmp_path / "qi_v21.db"
-        _make_legacy_v21_db(db, row_count=3)
+        _make_realistic_v21_db(db, row_count=3)
 
         assert QDB.bootstrap_qi_db(db, _SCHEMA_FILE) is True, "first bootstrap must succeed"
         assert QDB.bootstrap_qi_db(db, _SCHEMA_FILE) is True, "second bootstrap must succeed"

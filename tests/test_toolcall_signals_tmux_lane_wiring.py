@@ -97,7 +97,7 @@ def _last_receipt(tmp_path: Path) -> dict:
     return json.loads(lines[-1])
 
 
-def test_tmux_lane_completion_receipt_carries_toolcall_signals(tmp_path: Path):
+def test_tmux_lane_completion_receipt_ignores_the_deleted_signal_dir_variable(tmp_path: Path):
     signal_dir = tmp_path / "tmux-signal"
     record_toolcall_event(signal_dir, {"tool_name": "Bash", "tool_input": {"command": "ls"}}, blocked=False)
     record_toolcall_event(signal_dir, {"tool_name": "Bash", "tool_input": {"command": "claude -p x"}}, blocked=True)
@@ -111,9 +111,29 @@ def test_tmux_lane_completion_receipt_carries_toolcall_signals(tmp_path: Path):
     assert result.returncode == 0, result.stderr
 
     stored = _last_receipt(tmp_path)
-    assert stored["tool_call_count"] == 4
-    assert stored["tool_call_failures"] == 1
-    assert stored["tool_call_retries"] == 1
+    assert "tool_call_count" not in stored
+    assert "tool_call_failures" not in stored
+    assert "tool_call_retries" not in stored
+
+
+def test_enrich_toolcall_signals_folds_an_explicit_signal_dir(tmp_path: Path):
+    from append_receipt_internals.enrichment import _enrich_toolcall_signals
+
+    signal_dir = tmp_path / "tmux-signal"
+    record_toolcall_event(signal_dir, {"tool_name": "Bash", "tool_input": {"command": "ls"}}, blocked=False)
+    record_toolcall_event(signal_dir, {"tool_name": "Bash", "tool_input": {"command": "claude -p x"}}, blocked=True)
+    enriched: dict = {}
+    _enrich_toolcall_signals(enriched, str(signal_dir))
+    assert enriched["tool_call_count"] == 2
+    assert enriched["tool_call_failures"] == 1
+
+
+def test_enrich_toolcall_signals_without_a_signal_dir_changes_nothing():
+    from append_receipt_internals.enrichment import _enrich_toolcall_signals
+
+    enriched: dict = {}
+    _enrich_toolcall_signals(enriched)
+    assert enriched == {}
 
 
 def test_tmux_lane_completion_receipt_omits_signals_when_dir_unset(tmp_path: Path):

@@ -120,7 +120,7 @@ Gate state is per-project, per-gate:
 
 **Storage**: `.vnx/configs/governance_gates.yaml` (repo-relative, keyed per project path; `GATE_CONFIG_PATH` in `dashboard/api_operator.py`). Missing or invalid file reads back as an empty gates dict rather than raising.
 
-**Defaults**: The standard review stack is `codex_gate,kimi_gate` (`scripts/lib/config_registry.py`); `claude_github_optional` is off unless a project's config explicitly enables it.
+**Defaults**: The standard review stack is `codex_gate,deepseek_gate` (operator decision 2026-11-11, `scripts/lib/config_registry.py`); `claude_github_optional` is off unless a project's config explicitly enables it.
 
 ### 3.4 Gate Toggle Invariants
 

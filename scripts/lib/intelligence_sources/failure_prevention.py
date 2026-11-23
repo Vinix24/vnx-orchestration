@@ -29,6 +29,8 @@ try:
     from project_scope import current_project_id
 except ImportError:
     from project_scope import current_project_id  # type: ignore
+from config_runtime import central_db_flag as _central_db_flag
+from pattern_activation import injectable_clause, state_dir_of
 
 try:
     import shadow_verifier as _shadow_verifier
@@ -60,7 +62,7 @@ def query_failure_prevention(
     project_id_fn: Optional[Callable[[], Optional[str]]] = None,
 ) -> List[IntelligenceItem]:
     """3-state dispatcher: per-project | central | shadow (metric 3, antipatterns)."""
-    flag = os.environ.get("VNX_USE_CENTRAL_DB", "")
+    flag = _central_db_flag()
     if flag == "":
         return _query_per_project(db, task_class, scope_tags, has_column_fn)
     if flag == "1":
@@ -182,17 +184,19 @@ def _query_prevention_rules(
         has_column_fn("prevention_rules", "project_id")
     )
     try:
+        guard_sql, guard_params = injectable_clause(db, state_dir_of(db))
         rule_rows = db.execute(
             f"""
             SELECT id, tag_combination, rule_type, description,
                    recommendation, confidence, triggered_count, last_triggered
             FROM prevention_rules
             WHERE (valid_until IS NULL OR valid_until > datetime('now'))
+              AND {guard_sql}
               {pr_scope_clause}
             ORDER BY confidence DESC
             LIMIT 10
             """,
-            pr_scope_params,
+            (*guard_params, *pr_scope_params),
         ).fetchall()
     except Exception as exc:
         logger.warning("failure_prevention prevention_rules query failed: %s", exc)

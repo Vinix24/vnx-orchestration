@@ -70,8 +70,8 @@ Each item carries ``kind``, counted in ``by_kind``:
 
 * ``gate_retry_cap`` (R10) — a review-gate obligation of this project that
   the obligation runner parked at the retry cap: its gate ran twice on the
-  PR's head without a verdict it can book (``degenerate_retry_cap``, see
-  ``gate_run_guard``), and the runner will not run it again on that head. It
+  PR's head without a verdict it can book (``degenerate_retry_cap`` or
+  ``verdict_without_findings_retry_cap``, see ``gate_run_guard``), and the runner will not run it again on that head. It
   is a point about the gate, not about the dispatch's outcome: it is listed
   beside any dispatch item of the same id, and a decision does not close it.
   It leaves the list when the obligation leaves the cap: a new head reviewed,
@@ -98,7 +98,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, NamedTuple, Optional
 
-from gate_obligations import OBLIGATIONS_SUBDIR, REASON_DEGENERATE_RETRY_CAP, STATUS_PENDING
+from gate_obligations import (
+    OBLIGATIONS_SUBDIR, REASON_DEGENERATE_RETRY_CAP, REASON_VERDICT_WITHOUT_FINDINGS_RETRY_CAP, STATUS_PENDING,
+)
 from ledger_attempt_state import (AttemptVerdict, KIND_ENDED, KIND_LEGACY, KIND_LIVE,  # noqa: E501
                                   KIND_UNKNOWN, LEDGER_FILENAME, attempt_verdict, read_ledger)
 from receipt_outcome import (
@@ -195,16 +197,35 @@ def iter_complete_lines(path: Path) -> Iterator[Dict[str, Any]]:
                 yield obj
 
 
-def read_outcome_decisions(log_path: Path, project_id: str) -> Dict[str, Dict[str, Any]]:
-    """Map dispatch_id -> the last outcome decision of ``project_id`` in file order.
+class DecisionLogUnreadable(ValueError):
+    """The decision log holds a line the strict read cannot take; ``str(exc)`` names it."""
 
-    An empty ``project_id`` reads nothing: a decision is only ever taken as
-    one of a named project (ADR-007).
+
+def iter_strict_lines(path: Path) -> Iterator[Dict[str, Any]]:
+    """Yield each JSON object of ``path``, or raise ``DecisionLogUnreadable`` on the first line that is none.
+
+    The reader for an authorization that must not skip what it cannot read: a line that is
+    not valid UTF-8, not valid JSON or not a JSON object fails the read with its line
+    number, and a last line without a newline (a writer mid-append) fails it as partial.
+    A missing file raises ``OSError``.
     """
+    with open(path, "rb") as fh:
+        for number, raw in enumerate(fh, start=1):
+            if not raw.endswith(b"\n"):
+                raise DecisionLogUnreadable("decision log has a partial last line")
+            try:
+                obj = json.loads(raw.decode("utf-8"))
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                raise DecisionLogUnreadable(f"decision log unreadable at line {number}") from None
+            if not isinstance(obj, dict):
+                raise DecisionLogUnreadable(f"decision log unreadable at line {number}")
+            yield obj
+
+
+def _last_outcome_decisions(records: Iterator[Dict[str, Any]], project_id: str) -> Dict[str, Dict[str, Any]]:
+    """Fold ``records`` into dispatch_id -> the last outcome decision of ``project_id`` (file order)."""
     decisions: Dict[str, Dict[str, Any]] = {}
-    if not project_id:
-        return decisions
-    for record in iter_complete_lines(Path(log_path)):
+    for record in records:
         if record.get("decision_type") != OUTCOME_DECISION_TYPE:
             continue
         if record.get("project_id") != project_id:
@@ -216,6 +237,24 @@ def read_outcome_decisions(log_path: Path, project_id: str) -> Dict[str, Dict[st
             continue
         decisions[did.strip()] = record
     return decisions
+
+
+def read_outcome_decisions(log_path: Path, project_id: str) -> Dict[str, Dict[str, Any]]:
+    """Map dispatch_id -> the last outcome decision of ``project_id`` in file order.
+
+    An empty ``project_id`` reads nothing: a decision is only ever taken as
+    one of a named project (ADR-007). Lenient: a line it cannot read is skipped.
+    """
+    if not project_id:
+        return {}
+    return _last_outcome_decisions(iter_complete_lines(Path(log_path)), project_id)
+
+
+def read_outcome_decisions_strict(log_path: Path, project_id: str) -> Dict[str, Dict[str, Any]]:
+    """``read_outcome_decisions`` for an authorization: any unreadable line raises ``DecisionLogUnreadable``."""
+    if not project_id:
+        return {}
+    return _last_outcome_decisions(iter_strict_lines(Path(log_path)), project_id)
 
 
 def _decision_identity(dispatch_id: str) -> Dict[str, str]:
@@ -804,11 +843,16 @@ def abandoned_dispatch_items(
     return items
 
 
+# The two cap reasons of R10: the degenerate cap and, ADR-080 besluit 3, the
+# cap after two runs that ended in ``verdict_without_findings``.
+_RETRY_CAP_REASONS = frozenset({REASON_DEGENERATE_RETRY_CAP, REASON_VERDICT_WITHOUT_FINDINGS_RETRY_CAP})
+
+
 def gate_retry_cap_items(obligations_dir: Path, project_id: str) -> List[Dict[str, Any]]:
     """The review-gate obligations of ``project_id`` parked at the retry cap (R10).
 
     Read from ``<state_dir>/review_gates/obligations``: pending, reason
-    ``degenerate_retry_cap``. An obligation stamped with another project is not
+    ``degenerate_retry_cap`` or ``verdict_without_findings_retry_cap``. An obligation stamped with another project is not
     this project's (ADR-007); one without a project id is the store's own. An
     obligation file that cannot be read is skipped here with a warning: the
     producer-freshness monitor already reports it as ``source_unreadable``
@@ -827,7 +871,8 @@ def gate_retry_cap_items(obligations_dir: Path, project_id: str) -> List[Dict[st
             continue
         if not isinstance(record, dict) or record.get("status") != STATUS_PENDING:
             continue
-        if record.get("reason") != REASON_DEGENERATE_RETRY_CAP:
+        cap_reason = record.get("reason")
+        if cap_reason not in _RETRY_CAP_REASONS:
             continue
         if str(record.get("project_id") or project_id) != project_id:
             continue
@@ -838,7 +883,7 @@ def gate_retry_cap_items(obligations_dir: Path, project_id: str) -> List[Dict[st
             "dispatch_id": str(record.get("dispatch_id") or path.stem),
             "outcome": OUTCOME_RETRY_CAP,
             "status": STATUS_PENDING,
-            "reason": str(record.get("reason_detail") or REASON_DEGENERATE_RETRY_CAP),
+            "reason": str(record.get("reason_detail") or cap_reason),
             "last_seen": seen.astimezone(timezone.utc).isoformat() if seen else None,
             "gate": record.get("gate"),
             "pr_number": record.get("pr_number"),

@@ -296,20 +296,9 @@ def _scan_collisions_in_db(
             )
             continue
 
-        scalar_cols = [c for c in columns if _is_collision_column(c)]
-        json_cols = [c for c in columns if c in COLLISION_JSON_ARRAY_COLUMNS]
-        is_entity_table = (
-            table == COLLISION_ENTITY_TABLE
-            and COLLISION_ENTITY_ID_COLUMN in columns
-            and COLLISION_ENTITY_TYPE_COLUMN in columns
+        scalar_cols, json_cols, is_entity_table, select_targets = _collision_select_plan(
+            table, columns
         )
-
-        select_targets: list[str] = list(scalar_cols)
-        select_targets.extend(c for c in json_cols if c not in select_targets)
-        if is_entity_table:
-            for c in (COLLISION_ENTITY_TYPE_COLUMN, COLLISION_ENTITY_ID_COLUMN):
-                if c not in select_targets:
-                    select_targets.append(c)
         if not select_targets:
             continue
 
@@ -332,47 +321,105 @@ def _scan_collisions_in_db(
 
         target_index = {name: idx for idx, name in enumerate(select_targets)}
         for row in rows:
-            for column in scalar_cols:
-                value = row[target_index[column]]
-                if value is None or value == "":
-                    continue
-                bucket = (
-                    pattern_seen
-                    if _classify_dispatch_or_pattern(column) == "pattern_id"
-                    else dispatch_seen
-                )
-                bucket.setdefault(str(value), []).append(project_id)
-
-            for column in json_cols:
-                value = row[target_index[column]]
-                if not value:
-                    continue
-                try:
-                    parsed = json.loads(value) if isinstance(value, str) else value
-                except (TypeError, ValueError):
-                    continue
-                if not isinstance(parsed, list):
-                    continue
-                bucket = (
-                    pattern_seen
-                    if _classify_dispatch_or_pattern(column) == "pattern_id"
-                    else dispatch_seen
-                )
-                for item in parsed:
-                    if item is None or item == "":
-                        continue
-                    bucket.setdefault(str(item), []).append(project_id)
-
+            _harvest_scalar_columns(
+                row, scalar_cols, target_index, project_id, dispatch_seen, pattern_seen
+            )
+            _harvest_json_columns(
+                row, json_cols, target_index, project_id, dispatch_seen, pattern_seen
+            )
             if is_entity_table:
-                etype = row[target_index[COLLISION_ENTITY_TYPE_COLUMN]]
-                eid = row[target_index[COLLISION_ENTITY_ID_COLUMN]]
-                if (etype or "") and eid:
-                    etype_l = str(etype).lower()
-                    if etype_l in COLLISION_ENTITY_TYPES_PREFIXED:
-                        bucket = (
-                            pattern_seen if etype_l == "pattern" else dispatch_seen
-                        )
-                        bucket.setdefault(str(eid), []).append(project_id)
+                _harvest_entity_row(
+                    row, target_index, project_id, dispatch_seen, pattern_seen
+                )
+
+
+def _collision_select_plan(
+    table: str, columns: list[str]
+) -> tuple[list[str], list[str], bool, list[str]]:
+    """Return ``(scalar_cols, json_cols, is_entity_table, select_targets)``."""
+    scalar_cols = [c for c in columns if _is_collision_column(c)]
+    json_cols = [c for c in columns if c in COLLISION_JSON_ARRAY_COLUMNS]
+    is_entity_table = (
+        table == COLLISION_ENTITY_TABLE
+        and COLLISION_ENTITY_ID_COLUMN in columns
+        and COLLISION_ENTITY_TYPE_COLUMN in columns
+    )
+
+    select_targets: list[str] = list(scalar_cols)
+    select_targets.extend(c for c in json_cols if c not in select_targets)
+    if is_entity_table:
+        for c in (COLLISION_ENTITY_TYPE_COLUMN, COLLISION_ENTITY_ID_COLUMN):
+            if c not in select_targets:
+                select_targets.append(c)
+    return scalar_cols, json_cols, is_entity_table, select_targets
+
+
+def _harvest_scalar_columns(
+    row: tuple,
+    scalar_cols: list[str],
+    target_index: dict[str, int],
+    project_id: str,
+    dispatch_seen: dict[str, list[str]],
+    pattern_seen: dict[str, list[str]],
+) -> None:
+    """Record every non-empty scalar collision column of ``row``."""
+    for column in scalar_cols:
+        value = row[target_index[column]]
+        if value is None or value == "":
+            continue
+        bucket = (
+            pattern_seen
+            if _classify_dispatch_or_pattern(column) == "pattern_id"
+            else dispatch_seen
+        )
+        bucket.setdefault(str(value), []).append(project_id)
+
+
+def _harvest_json_columns(
+    row: tuple,
+    json_cols: list[str],
+    target_index: dict[str, int],
+    project_id: str,
+    dispatch_seen: dict[str, list[str]],
+    pattern_seen: dict[str, list[str]],
+) -> None:
+    """Record every non-empty item of each JSON-array collision column of ``row``."""
+    for column in json_cols:
+        value = row[target_index[column]]
+        if not value:
+            continue
+        try:
+            parsed = json.loads(value) if isinstance(value, str) else value
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(parsed, list):
+            continue
+        bucket = (
+            pattern_seen
+            if _classify_dispatch_or_pattern(column) == "pattern_id"
+            else dispatch_seen
+        )
+        for item in parsed:
+            if item is None or item == "":
+                continue
+            bucket.setdefault(str(item), []).append(project_id)
+
+
+def _harvest_entity_row(
+    row: tuple,
+    target_index: dict[str, int],
+    project_id: str,
+    dispatch_seen: dict[str, list[str]],
+    pattern_seen: dict[str, list[str]],
+) -> None:
+    """Record the ``entity_id`` of a coordination_events row by its entity_type."""
+    etype = row[target_index[COLLISION_ENTITY_TYPE_COLUMN]]
+    eid = row[target_index[COLLISION_ENTITY_ID_COLUMN]]
+    if (etype or "") and eid:
+        etype_l = str(etype).lower()
+        if etype_l in COLLISION_ENTITY_TYPES_PREFIXED:
+            bucket = pattern_seen if etype_l == "pattern" else dispatch_seen
+            bucket.setdefault(str(eid), []).append(project_id)
 
 
 def _detect_collisions(
@@ -497,6 +544,19 @@ def build_dry_run_report(projects: list[ProjectEntry]) -> dict:
 def render_markdown(plan: dict) -> str:
     """Render the dry-run plan into an operator-readable markdown document."""
     lines: list[str] = []
+    lines.extend(_render_md_projects(plan))
+    lines.extend(_render_md_row_counts(plan))
+    lines.extend(_render_md_totals(plan))
+    lines.extend(_render_md_collisions(plan))
+    lines.extend(_render_md_drift(plan))
+    lines.extend(_render_md_read_errors(plan))
+    lines.extend(_render_md_checklist())
+    return "\n".join(lines)
+
+
+def _render_md_projects(plan: dict) -> list[str]:
+    """Title and ``Projects in scope`` section."""
+    lines: list[str] = []
     lines.append("# Phase 6 P4 — One-shot data import DRY-RUN REPORT")
     lines.append("")
     lines.append(f"_Generated: {plan['generated_at']}_")
@@ -508,7 +568,12 @@ def render_markdown(plan: dict) -> str:
     for p in plan["projects"]:
         lines.append(f"| `{p['project_id']}` | {p['name']} | `{p['path']}` |")
     lines.append("")
+    return lines
 
+
+def _render_md_row_counts(plan: dict) -> list[str]:
+    """``Per-project row-count plan`` section."""
+    lines: list[str] = []
     lines.append("## Per-project row-count plan (per source DB)")
     lines.append("")
     by_project: dict[str, list[dict]] = {}
@@ -525,7 +590,12 @@ def render_markdown(plan: dict) -> str:
                 f"| {row['db']} | {row['table']} | {row['rows']:,} | {check} |"
             )
         lines.append("")
+    return lines
 
+
+def _render_md_totals(plan: dict) -> list[str]:
+    """``Expected central totals`` section."""
+    lines: list[str] = []
     lines.append("## Expected central totals after import")
     lines.append("")
     lines.append("| DB | Table | Rows (sum across projects) |")
@@ -535,7 +605,12 @@ def render_markdown(plan: dict) -> str:
             f"| {entry['db']} | {entry['table']} | {entry['rows']:,} |"
         )
     lines.append("")
+    return lines
 
+
+def _render_md_collisions(plan: dict) -> list[str]:
+    """``Collisions detected`` section."""
+    lines: list[str] = []
     lines.append("## Collisions detected")
     lines.append("")
     dc = plan["collisions"]["dispatch_id"]
@@ -569,7 +644,12 @@ def render_markdown(plan: dict) -> str:
             "disjoint. Apply rule confirmed via `test_collision_detection.py`."
         )
         lines.append("")
+    return lines
 
+
+def _render_md_drift(plan: dict) -> list[str]:
+    """``Schema drift`` section."""
+    lines: list[str] = []
     lines.append("## Schema drift")
     lines.append("")
     drift = plan["schema_drift"]
@@ -593,7 +673,12 @@ def render_markdown(plan: dict) -> str:
     if not any_drift:
         lines.append("_No schema drift detected._")
     lines.append("")
+    return lines
 
+
+def _render_md_read_errors(plan: dict) -> list[str]:
+    """``Read errors`` section."""
+    lines: list[str] = []
     lines.append("## Read errors (fatal if non-empty)")
     lines.append("")
     read_errors = plan.get("read_errors") or []
@@ -614,7 +699,12 @@ def render_markdown(plan: dict) -> str:
                 f"`{str(err.get('error','?')).replace('|', ' ')}` |"
             )
     lines.append("")
+    return lines
 
+
+def _render_md_checklist() -> list[str]:
+    """``Operator pre-flight checklist`` section."""
+    lines: list[str] = []
     lines.append("## Operator pre-flight checklist")
     lines.append("")
     lines.append("Before running `scripts/migrate_to_central_vnx.py --apply`:")
@@ -627,7 +717,7 @@ def render_markdown(plan: dict) -> str:
     lines.append("- [ ] No active dispatches in any project (check each `<project>/.vnx-data/state/runtime_coordination.db`)")
     lines.append("- [ ] Backup directory `~/Documents/vnx-pre-p4-auto-backup-<ts>/` is writable")
     lines.append("")
-    return "\n".join(lines)
+    return lines
 
 
 def _default_output_path() -> Path:

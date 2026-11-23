@@ -23,7 +23,7 @@
         ]
       },
       {
-        "matcher": "Write|Edit|MultiEdit|Bash",
+        "matcher": "Write|Edit|MultiEdit|NotebookEdit|Bash",
         "hooks": [
           {
             "type": "command",
@@ -33,7 +33,7 @@
         ]
       },
       {
-        "matcher": "Task",
+        "matcher": "Agent|Task",
         "hooks": [
           {
             "type": "command",
@@ -75,7 +75,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash -c 'VNX_HOME=\"${VNX_HOME:-$(git rev-parse --show-toplevel 2>/dev/null || echo .)}\"; if [ -f \"${VNX_HOME}/scripts/hooks/build_t0_state_hook.sh\" ]; then exec bash \"${VNX_HOME}/scripts/hooks/build_t0_state_hook.sh\"; else printf \"[vnx] build_t0_state_hook artifact MISSING (no scripts/hooks/build_t0_state_hook.sh under %s); t0_state.json will not refresh\\n\" \"${VNX_HOME}\" >&2; exit 0; fi'"
+            "command": "bash -c 'VNX_HOME=\"${VNX_HOME:-$(git rev-parse --show-toplevel 2>/dev/null || echo .)}\"; if [ -f \"${VNX_HOME}/scripts/hooks/build_t0_state_hook.sh\" ]; then exec bash \"${VNX_HOME}/scripts/hooks/build_t0_state_hook.sh\"; else printf \"[vnx] build_t0_state_hook artifact MISSING (no scripts/hooks/build_t0_state_hook.sh under %s); t0_state.json will not refresh\\n\" \"${VNX_HOME}\" >&2; exit 0; fi'",
+            "timeout": 10
           }
         ]
       },
@@ -127,16 +128,6 @@
           {
             "type": "command",
             "command": "bash -c 'exec bash \"$(git rev-parse --show-toplevel)/scripts/hooks/stop_report_hook.sh\"'"
-          }
-        ]
-      },
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bash -c 'ROOT=$(git rev-parse --show-toplevel 2>/dev/null || echo .); if [ \"$VNX_T0_ROTATION\" = \"1\" ]; then mkdir -p \"$ROOT/.vnx-data/logs\" 2>/dev/null; python3 \"$ROOT/scripts/hooks/session_stop_rotation.py\" 2>>\"$ROOT/.vnx-data/logs/session_stop_rotation.err\"; else python3 \"$ROOT/scripts/hooks/session_stop_rotation.py\" >/dev/null 2>&1; fi; exit 0'",
-            "timeout": 10
           }
         ]
       }

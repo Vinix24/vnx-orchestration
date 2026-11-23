@@ -409,16 +409,16 @@ class TestManualReportBackwardCompatibility:
 **Status**: success
 **Terminal**: T2
 
-## Implementation Summary
+## Summary
 
-Wired receipt processor integration. All manual tests pass.
+Wired receipt processor integration. All manual tests pass and the report satisfies the body contract.
 
 ## Files Modified
 
 - `scripts/receipt_processor.sh` — validation logic
 - `tests/test_receipt_processor.py` — regression tests
 
-## Testing Evidence
+## Test Results
 
 12 passed in 0.31s
 

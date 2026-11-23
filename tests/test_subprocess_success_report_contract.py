@@ -24,7 +24,6 @@ import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS_LIB = REPO_ROOT / "scripts" / "lib"
@@ -84,12 +83,6 @@ def _run_success(*, model: str = "sonnet", touched=frozenset(), dispatch_id: str
             role="backend-developer",
         )
     return mock_receipt
-
-
-@pytest.fixture(autouse=True)
-def _shared_govern_off(monkeypatch):
-    """The defect lives on the default branch (VNX_SHARED_GOVERN off)."""
-    monkeypatch.delenv("VNX_SHARED_GOVERN", raising=False)
 
 
 def test_success_writes_contract_valid_report_naming_model(tmp_path, monkeypatch):

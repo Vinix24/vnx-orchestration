@@ -14,7 +14,7 @@ import re
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path, PurePosixPath
-from typing import Dict, Iterable, Optional
+from typing import Any, Dict, Iterable, Mapping, Optional
 
 import gate_lane_rows  # stdlib-only; the Gate members of the harness-lane gates come from its rows
 
@@ -286,6 +286,9 @@ class DispatchSpec:
     parent_dispatch: Optional[str] = None
     tier_from: Optional[str] = None
     tier_to: Optional[str] = None
+    # Staged dispatch difficulty (herwerk-per-model-en-reviewer): recorded at staging,
+    # carried to dispatch_metadata.difficulty_json at lane start. None = staged before it existed.
+    difficulty: Optional[Mapping[str, Any]] = None
     deadline_seconds: int = 3600
     base_ref: str = "origin/main"
     isolation: Isolation = Isolation.WORKTREE
@@ -515,26 +518,9 @@ def validate(
         return Reject("bad-staging-id", f"staging_id {spec.staging_id!r} does not match id regex")
 
     # Rule 5 — instruction_file must be absolute, regular, non-symlink, readable
-    ifile = spec.instruction_file
-    if not ifile.is_absolute():
-        return Reject("instruction-unreadable", f"instruction_file must be absolute, got {ifile}")
-    try:
-        stat = ifile.stat()
-    except OSError as exc:
-        return Reject("instruction-unreadable", f"instruction_file not accessible: {exc}")
-    import stat as stat_mod
-    if not stat_mod.S_ISREG(stat.st_mode):
-        return Reject("instruction-unreadable", f"instruction_file is not a regular file: {ifile}")
-    if ifile.is_symlink():
-        return Reject("instruction-unreadable", f"instruction_file must not be a symlink: {ifile}")
-    try:
-        instruction_text = ifile.read_text(encoding="utf-8")
-    except OSError as exc:
-        return Reject("instruction-unreadable", f"instruction_file not readable: {exc}")
-    except UnicodeDecodeError as exc:
-        # P1 (PR-4c): a non-UTF-8 instruction must Reject, not raise out of the door.
-        # The "door never panics" invariant must cover validation, not just runtime.
-        return Reject("instruction-unreadable", f"instruction_file is not valid UTF-8: {exc}")
+    instruction_text = _read_instruction_file(spec)
+    if isinstance(instruction_text, Reject):
+        return instruction_text
 
     # P0-3: compute sha256 over instruction content; verify against DispatchSpec field if set
     computed_sha256 = hashlib.sha256(instruction_text.encode("utf-8")).hexdigest()
@@ -630,18 +616,9 @@ def validate(
     # Rule 15 — work_ref format (OI-1137). An explicit work-ref is a git branch name (may
     # contain "/"), validated with git's own ref rules. Strip a leading origin/ or refs/heads/
     # prefix before validating, since the resolver normalizes those away at use time.
-    if spec.work_ref is not None:
-        _work_ref = spec.work_ref.strip()
-        for _prefix in ("refs/heads/", "refs/remotes/origin/", "origin/"):
-            if _work_ref.startswith(_prefix):
-                _work_ref = _work_ref[len(_prefix):]
-                break
-        _err = _validate_branch_ref(_work_ref)
-        if _err is not None:
-            return Reject(
-                "bad-work-ref",
-                f"work_ref {spec.work_ref!r} is not a valid branch name ({_err})",
-            )
+    _work_ref_err = _work_ref_reject(spec)
+    if _work_ref_err is not None:
+        return _work_ref_err
 
     # Rule 16 — review gate must be a registered gate name (see _gate_reject).
     _gate_err = _gate_reject(spec)
@@ -670,3 +647,45 @@ def validate(
         normalized_paths=tuple(normalized),
         instruction_sha256=computed_sha256,
     )
+
+
+def _read_instruction_file(spec: DispatchSpec) -> "str | Reject":
+    """Rule 5: instruction_file must be absolute, regular, non-symlink and UTF-8 readable."""
+    ifile = spec.instruction_file
+    if not ifile.is_absolute():
+        return Reject("instruction-unreadable", f"instruction_file must be absolute, got {ifile}")
+    try:
+        stat = ifile.stat()
+    except OSError as exc:
+        return Reject("instruction-unreadable", f"instruction_file not accessible: {exc}")
+    import stat as stat_mod
+    if not stat_mod.S_ISREG(stat.st_mode):
+        return Reject("instruction-unreadable", f"instruction_file is not a regular file: {ifile}")
+    if ifile.is_symlink():
+        return Reject("instruction-unreadable", f"instruction_file must not be a symlink: {ifile}")
+    try:
+        instruction_text = ifile.read_text(encoding="utf-8")
+    except OSError as exc:
+        return Reject("instruction-unreadable", f"instruction_file not readable: {exc}")
+    except UnicodeDecodeError as exc:
+        # P1 (PR-4c): a non-UTF-8 instruction must Reject, not raise out of the door.
+        # The "door never panics" invariant must cover validation, not just runtime.
+        return Reject("instruction-unreadable", f"instruction_file is not valid UTF-8: {exc}")
+    return instruction_text
+
+
+def _work_ref_reject(spec: DispatchSpec) -> "Reject | None":
+    """Rule 15: an explicit work_ref must be a valid git branch name (OI-1137)."""
+    if spec.work_ref is not None:
+        _work_ref = spec.work_ref.strip()
+        for _prefix in ("refs/heads/", "refs/remotes/origin/", "origin/"):
+            if _work_ref.startswith(_prefix):
+                _work_ref = _work_ref[len(_prefix):]
+                break
+        _err = _validate_branch_ref(_work_ref)
+        if _err is not None:
+            return Reject(
+                "bad-work-ref",
+                f"work_ref {spec.work_ref!r} is not a valid branch name ({_err})",
+            )
+    return None

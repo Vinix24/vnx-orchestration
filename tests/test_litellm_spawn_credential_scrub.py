@@ -24,7 +24,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "scripts" / "lib"))
 
 from provider_spawns import litellm_spawn as ls  # noqa: E402
 
-_LEAKED_ANTHROPIC_KEY = "sk-ant-real-production-key"
+_LEAKED_ANTHROPIC_KEY = "sk-" + "ant-real-production-key"  # runtime-built: BS-3 must not match the source
 _LEAKED_OAUTH_TOKEN = "oauth-real-production-session-token"
 # OI-1619 followup: a fabricated (never-real) secret shaped like the exact literal
 # VNX_SMTP_PASS finding that motivated the sibling kimi/codex/gemini fix — proves

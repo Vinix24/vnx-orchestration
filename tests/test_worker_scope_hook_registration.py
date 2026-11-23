@@ -126,3 +126,22 @@ def test_explicit_skip_beats_an_enabled_flag(monkeypatch):
     monkeypatch.setenv("VNX_WORKER_ENFORCEMENT_SKIP", "1")
     payload = {"tool_name": "Bash", "tool_input": {"command": "rm -rf /"}}
     assert hook.evaluate(payload) == ("allow", None)
+
+
+def _expected_matcher_tools() -> set[str]:
+    module = _load_hook_module()
+    return set(module._WRITE_LIKE_TOOLS) | {"Bash"}
+
+
+def test_the_settings_matcher_equals_the_hooks_write_like_tools_plus_bash():
+    (_, group, _hook), = _entries_naming_wrapper()
+    assert set(group.get("matcher", "").split("|")) == _expected_matcher_tools()
+
+
+def test_the_probe_settings_matcher_equals_the_hooks_write_like_tools_plus_bash():
+    import re
+
+    text = (REPO / "scripts" / "probe_agent_layout.sh").read_text(encoding="utf-8")
+    matchers = re.findall(r'"matcher":"([^"]*)"[^\n]*' + re.escape(WRAPPER), text)
+    assert len(matchers) == 1, f"expected one probe registration, got {matchers}"
+    assert set(matchers[0].split("|")) == _expected_matcher_tools()

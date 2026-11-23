@@ -797,14 +797,3 @@ def _phase_cutover_check(
         outcome="applied",
         detail=f"Runtime core {'ACTIVE' if is_primary else 'INACTIVE (legacy mode)'}",
     ))
-
-    if is_primary:
-        report.actions.append(RecoveryAction(
-            phase="cutover",
-            action="rollback_guidance",
-            target="runtime_core",
-            outcome="applied",
-            detail=(
-                "Rollback: python scripts/rollback_runtime_core.py rollback && vnx start"
-            ),
-        ))

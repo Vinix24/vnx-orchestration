@@ -41,6 +41,7 @@ from review_vendor import (
     resolve_builder_vendor,
     vendor_from_spec,
 )
+from review_stack_support import pin_kimi_era_review_config
 
 
 @pytest.fixture(autouse=True)
@@ -188,6 +189,7 @@ def store(tmp_path, monkeypatch):
     for key in ("VNX_REVIEW_GATE_TAKEOVER_CHAIN", "VNX_OVERRIDE_REVIEW_GATE_TAKEOVER_CHAIN"):
         monkeypatch.delenv(key, raising=False)
     monkeypatch.chdir(project_root)
+    pin_kimi_era_review_config(monkeypatch)
     return {"data_dir": data_dir, "requests": state_dir / "review_gates" / "requests",
             "results": state_dir / "review_gates" / "results"}
 

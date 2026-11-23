@@ -217,7 +217,7 @@ def _gates(result) -> list[str]:
 
 def test_heavy_profile_without_enforcement_config_requires_three_seats(env):
     result = _run_required_gates(env, {"VNX_GOVERNANCE_PROFILE": "heavy"})
-    assert _gates(result) == ["codex_gate", "kimi_gate", "claude_gate"]
+    assert _gates(result) == ["codex_gate", "deepseek_gate", "claude_gate"]
 
 
 def test_c6_lock_vnx_dev_dials_without_a_profile_keep_todays_stack(env):
@@ -234,7 +234,7 @@ def test_level_1_dial_makes_a_seat_advisory(env):
 
 def test_level_0_dial_removes_a_seat_of_the_heavy_stack(env):
     _write_enforcement_config(
-        env, "version: 1\nchecks:\n  kimi_gate_required:\n    level: 0  # off\n",
+        env, "version: 1\nchecks:\n  deepseek_gate_required:\n    level: 0  # off\n",
     )
     result = _run_required_gates(env, {"VNX_GOVERNANCE_PROFILE": "heavy"})
     assert _gates(result) == ["codex_gate", "claude_gate"]
@@ -248,7 +248,7 @@ def test_ci_green_required_at_level_2_alone_requires_ci_gate_alone(env):
 
 def test_ci_gate_stays_out_at_level_1_and_joins_on_the_env_flag(env):
     _write_enforcement_config(env, "version: 1\nchecks:\n  ci_green_required:\n    level: 1\n")
-    assert _gates(_run_required_gates(env)) == ["codex_gate", "kimi_gate"]
+    assert _gates(_run_required_gates(env)) == ["codex_gate", "deepseek_gate"]
     assert _gates(_run_required_gates(env, {"VNX_CI_GATE_REQUIRED": "true"}))[-1] == "ci_gate"
 
 
@@ -333,7 +333,7 @@ def test_required_stack_equals_the_former_bash_function(env, case):
     if body is not None:
         _write_enforcement_config(env, body)
     old = _run_old_required_gates(env)
-    new = _run_required_gates(env)
+    new = _run_required_gates(env, {"VNX_DEFAULT_REVIEW_STACK": "codex_gate,kimi_gate"})  # the old literal, not the default since 2026-11-11
     assert old.returncode == 0, old.stderr
     assert _gates(new) == [g for g in old.stdout.strip().split(",") if g] == expected
 

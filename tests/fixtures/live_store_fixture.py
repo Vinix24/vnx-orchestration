@@ -17,6 +17,7 @@ import schema_manifest
 
 from fixtures.closure_track_fixture import build_tracks_db
 
+_DEPENDENCIES_SQL = Path(__file__).resolve().parents[2] / "schemas" / "migrations" / "0039_deliverable_dependencies.sql"
 _STATE_CHECK = re.compile(r"\s*CHECK\s*\(\s*state\s+IN\s*\([^)]*\)\s*\)", re.IGNORECASE)
 
 
@@ -51,9 +52,15 @@ def terminal_deliverables_view(db_path: Path) -> None:
 
 
 def build_live_store(state_dir: Path) -> Path:
-    """``build_tracks_db`` without the state CHECK, with the terminal deliverables view."""
+    """``build_tracks_db`` without the state CHECK, with the terminal deliverables view
+    and the 0039 ``deliverable_dependencies`` table."""
     build_tracks_db(state_dir)
     db_path = state_dir / "runtime_coordination.db"
     drop_state_check(db_path)
     terminal_deliverables_view(db_path)
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.executescript(_DEPENDENCIES_SQL.read_text(encoding="utf-8"))
+    finally:
+        conn.close()
     return db_path

@@ -5,7 +5,7 @@
 row mis-stamped with the wrong project_id is offered to that wrong project and
 withheld from the project that actually produced it — RED against the
 untouched selector, GREEN after an --apply run of the reattribution.
-(b)-(d) cover the decision rule's other branches (mixed, no_match, no_sources)
+(b)-(d) cover the other ADR-068 categories (ambiguous, absent, unattributed)
 and idempotency of --apply.
 
 All DB and receipt-store state lives under pytest's tmp_path — never touches
@@ -13,6 +13,7 @@ a real ~/.vnx-data store.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 import sys
@@ -23,18 +24,8 @@ import pytest
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "scripts" / "lib"))
 
-from pattern_reattribution import (  # noqa: E402
-    STATUS_MIXED,
-    STATUS_MOVED,
-    STATUS_NO_MATCH,
-    STATUS_NO_SOURCES,
-    STATUS_PARTIAL_MATCH,
-    STATUS_UNCHANGED,
-    apply_decisions,
-    build_dispatch_project_index,
-    discover_receipt_stores,
-    scan_database,
-)
+import pattern_reattribution as pr  # noqa: E402
+from pattern_reattribution import apply_decisions, main, scan_database  # noqa: E402
 from intelligence_sources.proven_pattern import _query_central as _query_central_sp  # noqa: E402
 
 _SCHEMA_SQL = """
@@ -142,7 +133,7 @@ def _insert_success_pattern(
                VALUES ('code', 'architect', ?, 'desc', '{}', 0.8, 3, ?, ?)""",
             (
                 title,
-                json.dumps(source_dispatch_ids) if source_dispatch_ids is not None else None,
+                json.dumps(source_dispatch_ids) if isinstance(source_dispatch_ids, list) else source_dispatch_ids,
                 project_id,
             ),
         )
@@ -167,9 +158,33 @@ def _write_receipt_store(vnx_data_root: Path, project_id: str, dispatch_ids) -> 
             }) + "\n")
 
 
+def _receipt(vnx_data_root: Path, store: str, dispatch_id, **fields) -> None:
+    """One receipt line in ``store``'s ledger carrying exactly ``fields``."""
+    state_dir = vnx_data_root / store / "state"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    with (state_dir / "t0_receipts.ndjson").open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps({"dispatch_id": dispatch_id, "schema_version": 2, **fields}) + "\n")
+
+
+def _decide(tmp_path: Path, db: Path, mode: str = "--dry-run"):
+    """The CLI, which old and new code share: (exit, {row id: (status, new project)})."""
+    out = tmp_path / "report.json"
+    code = main([mode, "--db", str(db), "--vnx-data-root", str(tmp_path / "vnx-data"), "--report", str(out)])
+    rows = json.loads(out.read_text())["rows"] if out.exists() else []
+    return code, {r["id"]: (r["status"], r["new_project_id"]) for r in rows}
+
+
 def _build_index(vnx_data_root: Path):
-    stores = discover_receipt_stores(vnx_data_root)
-    return stores, build_dispatch_project_index(stores)
+    index = pr.build_attribution_index(vnx_data_root)
+    return index.stores, index
+
+
+def _db_in(tmp_path: Path, project: str, make=_make_db) -> Path:
+    """A QI DB that is ``project``'s own file: ``<root>/<project>/state/``."""
+    path = tmp_path / "vnx-data" / project / "state" / "quality_intelligence.db"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    make(path)
+    return path
 
 
 def _offered_to(db_path: Path, project_id: str):
@@ -190,8 +205,7 @@ def _offered_to(db_path: Path, project_id: str):
 # ---------------------------------------------------------------------------
 
 def test_selector_offers_to_wrong_project_until_reattributed(tmp_path):
-    db_path = tmp_path / "quality_intelligence.db"
-    _make_db(db_path)
+    db_path = _db_in(tmp_path, "project-b")
     vnx_data_root = tmp_path / "vnx-data"
 
     # Row stamped project-a, but its ONLY source dispatch actually ran in project-b.
@@ -218,7 +232,7 @@ def test_selector_offers_to_wrong_project_until_reattributed(tmp_path):
     # Apply reattribution.
     stores, index = _build_index(vnx_data_root)
     decisions = scan_database(db_path, index)
-    moved = [d for d in decisions if d.status == STATUS_MOVED]
+    moved = [d for d in decisions if d.status == "moves"]
     assert len(moved) == 1
     assert moved[0].row_id == row_id
     assert moved[0].old_project_id == "project-a"
@@ -239,8 +253,7 @@ def test_selector_offers_to_wrong_project_until_reattributed(tmp_path):
 
 
 def test_apply_is_idempotent(tmp_path):
-    db_path = tmp_path / "quality_intelligence.db"
-    _make_db(db_path)
+    db_path = _db_in(tmp_path, "project-b")
     vnx_data_root = tmp_path / "vnx-data"
     _insert_success_pattern(db_path, project_id="project-a", source_dispatch_ids=["D-1"])
     _write_receipt_store(vnx_data_root, "project-b", ["D-1"])
@@ -271,7 +284,7 @@ def test_mixed_sources_stays_and_is_reported(tmp_path):
     _, index = _build_index(vnx_data_root)
     decisions = scan_database(db_path, index)
     row_decision = next(d for d in decisions if d.row_id == row_id)
-    assert row_decision.status == STATUS_MIXED
+    assert row_decision.status == "ambiguous"
     assert row_decision.resolved_projects == ["project-b", "project-c"]
 
     apply_decisions(db_path, decisions)
@@ -297,7 +310,7 @@ def test_no_match_stays_and_is_reported(tmp_path):
     _, index = _build_index(vnx_data_root)
     decisions = scan_database(db_path, index)
     row_decision = next(d for d in decisions if d.row_id == row_id)
-    assert row_decision.status == STATUS_NO_MATCH
+    assert row_decision.status == "absent"
     assert row_decision.resolved_projects == []
 
     apply_decisions(db_path, decisions)
@@ -314,13 +327,13 @@ def test_partial_match_stays_and_is_reported(tmp_path):
     row_id = _insert_success_pattern(
         db_path, project_id="project-a", source_dispatch_ids=["D-1", "D-ghost"],
     )
-    _write_receipt_store(vnx_data_root, "project-b", ["D-1"])
+    _receipt(vnx_data_root, "project-b", "D-1", project_id="unknown")  # one vote: no winner
 
     _, index = _build_index(vnx_data_root)
     decisions = scan_database(db_path, index)
     row_decision = next(d for d in decisions if d.row_id == row_id)
-    assert row_decision.status == STATUS_PARTIAL_MATCH
-    assert row_decision.resolved_projects == ["project-b"]
+    assert row_decision.status == "store_only"
+    assert row_decision.resolved_projects == []
 
 
 def test_no_sources_stays_and_is_reported(tmp_path):
@@ -334,12 +347,11 @@ def test_no_sources_stays_and_is_reported(tmp_path):
     _, index = _build_index(vnx_data_root)
     decisions = scan_database(db_path, index)
     row_decision = next(d for d in decisions if d.row_id == row_id)
-    assert row_decision.status == STATUS_NO_SOURCES
+    assert row_decision.status == "unattributed"
 
 
 def test_all_sources_agree_with_own_project_is_unchanged(tmp_path):
-    db_path = tmp_path / "quality_intelligence.db"
-    _make_db(db_path)
+    db_path = _db_in(tmp_path, "project-a")
     vnx_data_root = tmp_path / "vnx-data"
     row_id = _insert_success_pattern(
         db_path, project_id="project-a", source_dispatch_ids=["D-1"],
@@ -349,7 +361,7 @@ def test_all_sources_agree_with_own_project_is_unchanged(tmp_path):
     _, index = _build_index(vnx_data_root)
     decisions = scan_database(db_path, index)
     row_decision = next(d for d in decisions if d.row_id == row_id)
-    assert row_decision.status == STATUS_UNCHANGED
+    assert row_decision.status == "positive_own"
 
     result = apply_decisions(db_path, decisions)
     assert result == {"rows_moved": 0}
@@ -360,8 +372,7 @@ def test_all_sources_agree_with_own_project_is_unchanged(tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_antipatterns_row_reattributed_and_junction_rows_follow(tmp_path):
-    db_path = tmp_path / "quality_intelligence.db"
-    _make_db(db_path)
+    db_path = _db_in(tmp_path, "project-z")
     vnx_data_root = tmp_path / "vnx-data"
 
     conn = sqlite3.connect(str(db_path))
@@ -399,7 +410,7 @@ def test_antipatterns_row_reattributed_and_junction_rows_follow(tmp_path):
     _, index = _build_index(vnx_data_root)
     decisions = scan_database(db_path, index)
     row_decision = next(d for d in decisions if d.table == "antipatterns" and d.row_id == row_id)
-    assert row_decision.status == STATUS_MOVED
+    assert row_decision.status == "moves"
     assert row_decision.new_project_id == "project-z"
 
     apply_decisions(db_path, decisions)
@@ -588,8 +599,7 @@ def test_legacy_pk_junction_rows_survive_reattribution_not_lost(tmp_path):
     is ignored, and the DELETE that follows erases it. GREEN after the fix:
     every junction row is moved (count 1, new project_id), never lost
     (count 0)."""
-    db_path = tmp_path / "quality_intelligence.db"
-    _make_legacy_db(db_path)
+    db_path = _db_in(tmp_path, "project-z", _make_legacy_db)
     vnx_data_root = tmp_path / "vnx-data"
 
     row_id, pattern_id = _seed_antipattern_with_junction_rows(
@@ -602,7 +612,7 @@ def test_legacy_pk_junction_rows_survive_reattribution_not_lost(tmp_path):
     row_decision = next(
         d for d in decisions if d.table == "antipatterns" and d.row_id == row_id
     )
-    assert row_decision.status == STATUS_MOVED
+    assert row_decision.status == "moves"
     assert row_decision.new_project_id == "project-z"
 
     apply_decisions(db_path, decisions)
@@ -643,8 +653,7 @@ def test_legacy_pk_junction_rows_survive_reattribution_not_lost(tmp_path):
 def test_legacy_pk_reattribution_is_idempotent(tmp_path):
     """A second --apply over the same legacy-PK store moves nothing further
     and leaves exactly one junction row per table (no duplication either)."""
-    db_path = tmp_path / "quality_intelligence.db"
-    _make_legacy_db(db_path)
+    db_path = _db_in(tmp_path, "project-z", _make_legacy_db)
     vnx_data_root = tmp_path / "vnx-data"
     row_id, pattern_id = _seed_antipattern_with_junction_rows(
         db_path, project_id="project-a", source_dispatch_id="D-9",
@@ -678,8 +687,7 @@ def test_legacy_pk_reattribution_is_idempotent(tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_dispatch_pattern_offered_real_collision_is_merged_not_dropped(tmp_path):
-    db_path = tmp_path / "quality_intelligence.db"
-    _make_db(db_path)
+    db_path = _db_in(tmp_path, "project-z")
     vnx_data_root = tmp_path / "vnx-data"
 
     conn = sqlite3.connect(str(db_path))
@@ -731,8 +739,7 @@ def test_dispatch_pattern_offered_real_collision_is_merged_not_dropped(tmp_path)
 
 
 def test_pattern_injection_outcome_real_collision_is_merged_not_dropped(tmp_path):
-    db_path = tmp_path / "quality_intelligence.db"
-    _make_db(db_path)
+    db_path = _db_in(tmp_path, "project-z")
     vnx_data_root = tmp_path / "vnx-data"
 
     conn = sqlite3.connect(str(db_path))
@@ -779,6 +786,90 @@ def test_pattern_injection_outcome_real_collision_is_merged_not_dropped(tmp_path
         )
     finally:
         conn.close()
+
+
+# ADR-068 besluit 2, 3, 11 through main(), so red1-red5 fail on behaviour on origin/main.
+# The row sits in seocrawler-v2's own DB; vnx-dev has a DB, sales-copilot only receipts.
+
+_A, _B, _C = "vnx-dev", "seocrawler-v2", "sales-copilot"
+_PATH_A, _PATH_B = (f"/Users/x/.vnx-data/{p}/unified_reports/d-1.md" for p in (_A, _B))
+_WIN_A = [(_A, "d-1", {"project_id": _A})]  # store and body agree: vnx-dev wins d-1
+
+_CASES = {  # raw source_dispatch_ids, receipts (store, dispatch_id, fields), (status, new project)
+    "red1_absent_id_does_not_block": (
+        ["d-1", "d-2", "d-3"], _WIN_A + [(_A, "d-2", {"project_id": _A})], ("moves", _A)),
+    "red2_body_and_path_beat_store": (
+        ["d-1"], [(_B, "d-1", {"project_id": _A, "report_path": _PATH_A})], ("moves", _A)),
+    "red3_known_prefix_is_stripped": (["sales-copilot:d-1"], [(_C, "d-1", {})], ("store_only", _B)),
+    "red4_sentinel_is_no_id": (
+        ["unknown"], [(s, "unknown", {"project_id": s}) for s in (_A, _B, _C)], ("unattributed", _B)),
+    "null_column_is_unattributed": (None, _WIN_A, ("unattributed", _B)),
+    "empty_list_is_unattributed": ("[]", _WIN_A, ("unattributed", _B)),
+    "malformed_json_is_unattributed": ('["d-1"', _WIN_A, ("unattributed", _B)),
+    "non_list_is_unattributed": ('{"d-1": 1}', _WIN_A, ("unattributed", _B)),
+    "null_element_is_unattributed": ('["d-1", null]', _WIN_A, ("unattributed", _B)),
+    "only_sentinels_are_unattributed": ('["unknown", "null", " "]', _WIN_A, ("unattributed", _B)),
+    "unknown_prefix_is_kept": (["headless-review:d-1"], _WIN_A, ("absent", _B)),
+    "receipt_without_dispatch_id_is_absent": (["d-1"], [(_A, None, {"project_id": _A})], ("absent", _B)),
+    "unknown_project_is_no_vote": (["d-1"], [(_A, "d-1", {
+        "project_id": "ghost", "report_path": "/x/.vnx-data/ghost/r.md"})], ("store_only", _B)),
+    "sentinel_body_is_no_vote": (["d-1"], [(_A, "d-1", {"project_id": "unknown"})], ("store_only", _B)),
+    "missing_body_is_no_vote": (["d-1"], [(_A, "d-1", {})], ("store_only", _B)),
+    "tie_is_store_only": (["d-1"], _WIN_A + [(_B, "d-1", {"project_id": _B})], ("store_only", _B)),
+    "two_winners_are_ambiguous": (["d-1", "d-2"], _WIN_A + [(_B, "d-2", {"project_id": _B})], ("ambiguous", _B)),
+    "winner_without_own_db_is_ambiguous": (["d-1"], [(_C, "d-1", {"project_id": _C})], ("ambiguous", _B)),
+}
+
+
+def _seocrawler_world(tmp_path: Path, raw, receipts):
+    db = _db_in(tmp_path, _B)
+    _db_in(tmp_path, _A)
+    row_id = _insert_success_pattern(db, project_id=_B, source_dispatch_ids=raw)
+    for store, dispatch_id, fields in receipts:
+        _receipt(tmp_path / "vnx-data", store, dispatch_id, **fields)
+    return db, row_id
+
+
+@pytest.mark.parametrize("raw,receipts,expected", list(_CASES.values()), ids=list(_CASES))
+def test_vote_categories_fail_closed(tmp_path, raw, receipts, expected):
+    db, row_id = _seocrawler_world(tmp_path, raw, receipts)
+    assert _decide(tmp_path, db) == (0, {row_id: expected})
+
+
+def test_red5_apply_refuses_a_move_into_another_db_file(tmp_path, capsys):
+    """Red on origin/main: --apply relabels the row inside the seocrawler file."""
+    db, _ = _seocrawler_world(tmp_path, ["d-1"], _WIN_A)
+    _insert_success_pattern(db, project_id=_A, source_dispatch_ids=["d-2"])  # an in-file relabel
+    _receipt(tmp_path / "vnx-data", _B, "d-2", project_id=_B)
+    before = hashlib.sha256(db.read_bytes()).hexdigest()
+    code, _ = _decide(tmp_path, db, "--apply")
+    assert code != 0
+    assert hashlib.sha256(db.read_bytes()).hexdigest() == before
+    assert "qi_transfer_apply.py" in capsys.readouterr().err
+
+
+def test_red6_defaulted_body_never_moves_a_seocrawler_row(tmp_path):
+    """Characterisation, green on origin/main too: body vnx-dev, store and path seocrawler-v2."""
+    db, row_id = _seocrawler_world(
+        tmp_path, ["d-1"], [(_B, "d-1", {"project_id": _A, "report_path": _PATH_B})])
+    code, rows = _decide(tmp_path, db, "--apply")
+    assert code == 0 and rows[row_id][1] == _B
+    label = sqlite3.connect(str(db)).execute(
+        "SELECT project_id FROM success_patterns WHERE id = ?", (row_id,)).fetchone()
+    assert label == (_B,)
+
+
+@pytest.mark.parametrize("destination", [None, "missing.db", "other.db"])
+def test_apply_refuses_a_destination_that_is_not_provably_this_file(tmp_path, destination):
+    db = _db_in(tmp_path, _B)
+    _make_db(tmp_path / "other.db")
+    row_id = _insert_success_pattern(db, project_id=_A, source_dispatch_ids=["d-1"])
+    move = pr.ReattributionDecision(
+        "success_patterns", row_id, "t", _A, "moves", _B,
+        destination_db=str(tmp_path / destination) if destination else None)
+    with pytest.raises(pr.CrossDatabaseMove, match="qi_transfer_apply.py"):
+        apply_decisions(db, [move])
+    assert sqlite3.connect(str(db)).execute("SELECT project_id FROM success_patterns").fetchone() == (_A,)
 
 
 if __name__ == "__main__":

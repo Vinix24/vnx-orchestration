@@ -160,7 +160,49 @@ def main() -> int:
     linked = [did for did in specs if did in did2shas]
     unlinked = [did for did in specs if did not in did2shas]
 
-    # ---- per-dispatch verdict over the linked population with real diffs ----
+    flip = _flip_verdicts(linked, specs, did2shas)
+
+    # directory-vs-fnmatch gap, over dispatches that declared paths
+    dir_declared = 0
+    for did in linked:
+        spec = specs[did]
+        declared = write_granting_paths(spec)
+        if declared_directory_paths(declared):
+            dir_declared += 1
+
+    role_outside, role_inside, role_outside_examples = _role_scope_outside(
+        linked, specs, did2shas
+    )
+    compliance = _dispatch_scope_compliance(linked, specs, did2shas)
+    dir_fix_rescued = compliance["dir_fix_rescued"]
+
+    summary = {
+        "dispatch_specs_total": len(specs),
+        "linked_to_commit": len(linked),
+        "unlinked": len(unlinked),
+        "linked_with_changed_files": len(linked) - flip["no_changed_files"],
+        "no_dispatch_paths": flip["no_dispatch_paths"],
+        "with_dispatch_paths": flip["with_dispatch_paths"],
+        "would_be_blocked_by_flip": flip["blocked"],
+        "not_blocked": flip["not_blocked"],
+        "blocked_no_dispatch_paths__role_scope_only": flip["blocked_no_paths"],
+        "blocked_with_paths__dispatch_narrowing": flip["blocked_by_dispatch_narrow"],
+        "blocked_with_paths__also_outside_role_scope": flip["blocked_by_role_scope_with_paths"],
+        "dispatches_declaring_a_directory_path": dir_declared,
+        "role_scope_only__outside": role_outside,
+        "role_scope_only__inside": role_inside,
+        "dispatch_scope_only__declared_total": compliance["total"],
+        "dispatch_scope_only__outside_literal": compliance["outside_literal"],
+        "dispatch_scope_only__outside_dir_aware": compliance["outside_dir_aware"],
+        "dispatch_scope_only__dir_fix_rescued": len(dir_fix_rescued),
+    }
+    print(json.dumps(summary, indent=2))
+    _print_examples(flip["blocked_examples"], role_outside_examples, dir_fix_rescued)
+    return 0
+
+
+def _flip_verdicts(linked: "list[str]", specs: "dict[str, dict]", did2shas: "dict[str, list[str]]") -> dict:
+    """Per-dispatch verdict over the linked population with real diffs."""
     no_dispatch_paths = 0        # declared none -> role scope alone binds
     with_dispatch_paths = 0      # declared >=1 write-granting path
     no_changed_files = 0         # linked but empty diff (merge-only)
@@ -194,16 +236,7 @@ def main() -> int:
         else:
             with_dispatch_paths += 1
 
-        # Which files would the hook block?
-        blocked_files: list[dict] = []
-        for f in sorted(files):
-            if match_file_write_scope(f, profile, dispatch_scope):
-                continue
-            # attribute the block: role scope, dispatch narrowing, or both
-            role_ok = match_file_write_scope(f, profile, None)
-            blocked_files.append(
-                {"file": f, "role_ok": role_ok}
-            )
+        blocked_files = _blocked_files(files, profile, dispatch_scope)
 
         if blocked_files:
             blocked += 1
@@ -229,18 +262,40 @@ def main() -> int:
         else:
             not_blocked += 1
 
-    # directory-vs-fnmatch gap, over dispatches that declared paths
-    dir_declared = 0
-    for did in linked:
-        spec = specs[did]
-        declared = write_granting_paths(spec)
-        if declared_directory_paths(declared):
-            dir_declared += 1
+    return {
+        "no_dispatch_paths": no_dispatch_paths,
+        "with_dispatch_paths": with_dispatch_paths,
+        "no_changed_files": no_changed_files,
+        "blocked": blocked,
+        "not_blocked": not_blocked,
+        "blocked_no_paths": blocked_no_paths,
+        "blocked_by_dispatch_narrow": blocked_by_dispatch_narrow,
+        "blocked_by_role_scope_with_paths": blocked_by_role_scope_with_paths,
+        "blocked_examples": blocked_examples,
+    }
 
-    # ---- role-scope-only outside rate (step 3 of the fix-forward) ----
-    # Ignore dispatch_paths entirely: does any changed file fall outside the
-    # dispatch's ROLE file_write_scope? This is the number that matters most
-    # for the flip, because the role scope is the layer that becomes hard.
+
+def _blocked_files(files: "set[str]", profile, dispatch_scope) -> "list[dict]":
+    """Which files would the hook block?"""
+    blocked_files: list[dict] = []
+    for f in sorted(files):
+        if match_file_write_scope(f, profile, dispatch_scope):
+            continue
+        # attribute the block: role scope, dispatch narrowing, or both
+        role_ok = match_file_write_scope(f, profile, None)
+        blocked_files.append(
+            {"file": f, "role_ok": role_ok}
+        )
+    return blocked_files
+
+
+def _role_scope_outside(linked: "list[str]", specs: "dict[str, dict]", did2shas: "dict[str, list[str]]"):
+    """Role-scope-only outside rate (step 3 of the fix-forward).
+
+    Ignore dispatch_paths entirely: does any changed file fall outside the
+    dispatch's ROLE file_write_scope? This is the number that matters most
+    for the flip, because the role scope is the layer that becomes hard.
+    """
     role_outside = 0
     role_inside = 0
     role_outside_examples: list[dict] = []
@@ -262,12 +317,16 @@ def main() -> int:
                 )
         else:
             role_inside += 1
+    return role_outside, role_inside, role_outside_examples
 
-    # ---- dispatch-scope-only compliance: outside-declaration rate, under the
-    # literal (pre-fix) and dir-aware (post-fix) matchers. Proves the
-    # directory-matching fix: a dispatch that declared a bare directory (e.g.
-    # ``tests``) and wrote inside it was "outside-declaration" under the literal
-    # fnmatch matcher but is "inside" once the directory expands to ``tests/**``.
+
+def _dispatch_scope_compliance(linked: "list[str]", specs: "dict[str, dict]", did2shas: "dict[str, list[str]]") -> dict:
+    """Dispatch-scope-only compliance: outside-declaration rate, under the
+    literal (pre-fix) and dir-aware (post-fix) matchers. Proves the
+    directory-matching fix: a dispatch that declared a bare directory (e.g.
+    ``tests``) and wrote inside it was "outside-declaration" under the literal
+    fnmatch matcher but is "inside" once the directory expands to ``tests/**``.
+    """
     dispatch_scope_total = 0
     outside_declaration_literal = 0
     outside_declaration_dir_aware = 0
@@ -296,28 +355,15 @@ def main() -> int:
             outside_declaration_dir_aware += 1
         if literal_out and not diraware_out:
             dir_fix_rescued.append(did)
-
-    summary = {
-        "dispatch_specs_total": len(specs),
-        "linked_to_commit": len(linked),
-        "unlinked": len(unlinked),
-        "linked_with_changed_files": len(linked) - no_changed_files,
-        "no_dispatch_paths": no_dispatch_paths,
-        "with_dispatch_paths": with_dispatch_paths,
-        "would_be_blocked_by_flip": blocked,
-        "not_blocked": not_blocked,
-        "blocked_no_dispatch_paths__role_scope_only": blocked_no_paths,
-        "blocked_with_paths__dispatch_narrowing": blocked_by_dispatch_narrow,
-        "blocked_with_paths__also_outside_role_scope": blocked_by_role_scope_with_paths,
-        "dispatches_declaring_a_directory_path": dir_declared,
-        "role_scope_only__outside": role_outside,
-        "role_scope_only__inside": role_inside,
-        "dispatch_scope_only__declared_total": dispatch_scope_total,
-        "dispatch_scope_only__outside_literal": outside_declaration_literal,
-        "dispatch_scope_only__outside_dir_aware": outside_declaration_dir_aware,
-        "dispatch_scope_only__dir_fix_rescued": len(dir_fix_rescued),
+    return {
+        "total": dispatch_scope_total,
+        "outside_literal": outside_declaration_literal,
+        "outside_dir_aware": outside_declaration_dir_aware,
+        "dir_fix_rescued": dir_fix_rescued,
     }
-    print(json.dumps(summary, indent=2))
+
+
+def _print_examples(blocked_examples: "list[dict]", role_outside_examples: "list[dict]", dir_fix_rescued: "list[str]") -> None:
     print()
     print("== concrete examples: dispatches the flip would block ==")
     for e in blocked_examples:
@@ -335,8 +381,6 @@ def main() -> int:
     print("== dispatches the directory-matching fix rescues (outside-declaration under literal, inside under dir-aware) ==")
     for did in dir_fix_rescued:
         print(f"  {did}")
-    return 0
-
 
 if __name__ == "__main__":
     sys.exit(main())

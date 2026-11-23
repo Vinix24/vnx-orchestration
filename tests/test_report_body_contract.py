@@ -308,22 +308,14 @@ def test_build_directive_identity_block_adds_no_required_heading():
     assert set(re.findall(r"^## .+", d, re.MULTILINE)) == {"## Report Body Contract"}
 
 
-def test_with_directive_appends_once(monkeypatch):
-    monkeypatch.delenv("VNX_REPORT_CONTRACT_DIRECTIVE", raising=False)
+def test_with_directive_appends_once():
     once = with_directive("body", "disp-y")
     twice = with_directive(once, "disp-y")
     assert once.startswith("body\n\n<!-- VNX-REPORT-CONTRACT-DIRECTIVE -->")
     assert twice == once
 
 
-@pytest.mark.parametrize("value", ["0", "false", "no", "off", " OFF "])
-def test_with_directive_is_a_no_op_when_the_switch_is_off(monkeypatch, value):
-    monkeypatch.setenv("VNX_REPORT_CONTRACT_DIRECTIVE", value)
-    assert with_directive("body", "disp-y") == "body"
-
-
-def test_with_directive_passes_pr_and_identity_values_through(monkeypatch):
-    monkeypatch.delenv("VNX_REPORT_CONTRACT_DIRECTIVE", raising=False)
+def test_with_directive_passes_pr_and_identity_values_through():
     out = with_directive("body", "disp-y", pr_id="PR-3", model="opus", provider="claude")
     assert "`## PR`" in out
     assert "`**Model**: opus`" in out

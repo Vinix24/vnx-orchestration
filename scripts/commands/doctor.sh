@@ -215,7 +215,7 @@ cmd_doctor() {
 
   # Legacy fallback (pre-PR-1)
   local failed=0
-  local do_package_check="${VNX_DOCTOR_PACKAGE_CHECK:-0}"
+  local do_package_check=0
   local do_runtime_check=0
   local runtime_verbose=0
   local runtime_json=0
@@ -267,7 +267,7 @@ cmd_doctor() {
   if [ -n "$resolved_node_path" ] && [ -x "$resolved_node_path/node" ]; then
     log "[doctor] OK node path: $resolved_node_path"
   else
-    log "[doctor] WARN: Node path not resolved. MCP servers may fail in tmux. Set VNX_NODE_PATH or install nvm."
+    log "[doctor] WARN: Node path not resolved. MCP servers may fail in tmux. Install node or nvm."
   fi
 
   local resolved_venv=""

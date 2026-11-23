@@ -70,10 +70,7 @@ _UNAVAILABLE: Dict[str, Any] = {
 
 
 def _default_claude_projects_dir() -> Path:
-    """Resolve ``~/.claude/projects``, overridable for tests via env var."""
-    override = os.environ.get("VNX_CLAUDE_PROJECTS_DIR", "").strip()
-    if override:
-        return Path(override).expanduser()
+    """Resolve ``~/.claude/projects``; tests patch this function."""
     return Path.home() / ".claude" / "projects"
 
 

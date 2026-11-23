@@ -234,8 +234,8 @@ class TestResultDataclasses:
         assert r.strategy == ""
 
     def test_shutdown_is_noop(self, adapter: TmuxAdapter) -> None:
-        adapter.shutdown(graceful=True)
-        adapter.shutdown(graceful=False)
+        adapter.shutdown(True)
+        adapter.shutdown(False)
 
 
 # ---------------------------------------------------------------------------

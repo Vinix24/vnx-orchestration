@@ -4,7 +4,7 @@
 Tests every documented Gemini event type and verifies correct CanonicalEvent
 output, including observability_tier=1 on all events (streaming path).
 
-Also verifies that VNX_GEMINI_STREAM=0 default path preserves legacy Tier-3 behavior.
+Also verifies that the default (non-stream) path preserves legacy Tier-3 behavior.
 """
 
 from __future__ import annotations
@@ -323,28 +323,19 @@ class TestToDictRoundtrip:
         assert "timestamp" in d
 
 
-# ── env-gate: VNX_GEMINI_STREAM flag ─────────────────────────────────────────
+# ── streaming gate: off, steered by one seam ─────────────────────────────────
 
 class TestEnvGate:
-    def test_stream_disabled_by_default(self, monkeypatch):
-        monkeypatch.delenv("VNX_GEMINI_STREAM", raising=False)
+    def test_stream_disabled_by_default(self):
         assert _gemini_stream_enabled() is False
 
-    def test_stream_enabled_when_1(self, monkeypatch):
+    def test_variable_no_longer_steers_the_gate(self, monkeypatch):
         monkeypatch.setenv("VNX_GEMINI_STREAM", "1")
+        assert _gemini_stream_enabled() is False
+
+    def test_seam_steers_the_adapter_gate(self, monkeypatch):
+        monkeypatch.setattr("provider_spawns.gemini_spawn.gemini_stream_enabled", lambda: True)
         assert _gemini_stream_enabled() is True
-
-    def test_stream_disabled_when_0(self, monkeypatch):
-        monkeypatch.setenv("VNX_GEMINI_STREAM", "0")
-        assert _gemini_stream_enabled() is False
-
-    def test_stream_disabled_when_empty(self, monkeypatch):
-        monkeypatch.setenv("VNX_GEMINI_STREAM", "")
-        assert _gemini_stream_enabled() is False
-
-    def test_stream_disabled_when_false(self, monkeypatch):
-        monkeypatch.setenv("VNX_GEMINI_STREAM", "false")
-        assert _gemini_stream_enabled() is False
 
 
 # ── legacy path: stream_events yields Tier-3 result ──────────────────────────
@@ -354,7 +345,6 @@ class TestLegacyStreamEvents:
         """VNX_GEMINI_STREAM=0: stream_events() yields a single Tier-3 result event."""
         import subprocess as sp
 
-        monkeypatch.delenv("VNX_GEMINI_STREAM", raising=False)
 
         # Mock _execute_legacy to avoid needing real gemini binary
         from provider_adapter import AdapterResult

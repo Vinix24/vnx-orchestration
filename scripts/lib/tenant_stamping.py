@@ -512,10 +512,44 @@ def _rebuild_table_phase1(
     cols = _get_table_columns(conn, table)
     widened_here: list[tuple[str, str]] = []
     has_project_id = any(c["name"] == "project_id" for c in cols)
-    col_defs = []
     pk_cols = [c for c in cols if c["pk"] > 0]
     pk_col_names = {c["name"] for c in pk_cols}
 
+    col_defs = _phase1_column_defs(cols, pk_cols)
+
+    # Composite PK table constraint.
+    # B2 fix: emit for BOTH multi-col PK AND single-col non-INTEGER PK so the
+    # PK is never silently dropped.  For single-col non-INTEGER PK, expand to
+    # (original_pk_col, project_id) — the ADR-007 shape.
+    _phase1_pk_constraint(table, pk_cols, col_defs, widened_here)
+
+    # Rebuild UNIQUE constraints: re-emit ALL declared (origin='u') UNIQUE constraints.
+    # - Already-composite ones (contain project_id) are re-emitted verbatim to avoid loss.
+    # - Non-composite ones (lack project_id) are widened by appending project_id.
+    # origin='c' indexes come from CREATE [UNIQUE] INDEX statements and carry verbatim
+    # DDL including any partial WHERE clause — they are recreated verbatim after the
+    # rename via _get_secondary_indexes. Never fold them into table-level UNIQUE constraints
+    # as that would lose any WHERE clause and silently change a partial index into a full one.
+    #
+    # BUG 2 fix: enumerate the full set of origin='u' UNIQUEs from the live schema, not
+    # just the non_composite_uniques subset passed by the caller. The caller only passes
+    # the uniques that LACK project_id (the ones W1 actually widens), but a rebuild must
+    # also preserve any already-composite declared UNIQUE that was filtered out of that
+    # subset — otherwise the rebuilt table silently loses it, breaking FK constraints that
+    # reference the composite unique key.
+    _phase1_unique_constraints(conn, table, col_defs, widened_here)
+
+    # Get FK list for this table
+    _phase1_fk_constraints(conn, table, widened_keys, has_project_id, col_defs)
+
+    _phase1_swap_table(conn, table, cols, col_defs)
+
+    return widened_here
+
+
+def _phase1_column_defs(cols: list[dict], pk_cols: list[dict]) -> list[str]:
+    """Column definitions of the Phase 1 staging table (project_id nullable)."""
+    col_defs = []
     for col in cols:
         cname = col["name"]
         ctype = col["type"] or "TEXT"
@@ -556,11 +590,16 @@ def _rebuild_table_phase1(
         if dflt:
             parts.append(dflt)
         col_defs.append("  " + " ".join(p for p in parts if p))
+    return col_defs
 
-    # Composite PK table constraint.
-    # B2 fix: emit for BOTH multi-col PK AND single-col non-INTEGER PK so the
-    # PK is never silently dropped.  For single-col non-INTEGER PK, expand to
-    # (original_pk_col, project_id) — the ADR-007 shape.
+
+def _phase1_pk_constraint(
+    table: str,
+    pk_cols: list[dict],
+    col_defs: list[str],
+    widened_here: list[tuple[str, str]],
+) -> None:
+    """Append the composite PRIMARY KEY table constraint, recording a widened PK."""
     single_nonint_pk = (
         len(pk_cols) == 1 and pk_cols[0]["type"].upper() != "INTEGER"
     )
@@ -581,20 +620,14 @@ def _rebuild_table_phase1(
             existing_pk = ", ".join(_safe_ident(c["name"]) for c in pk_col_list)
             col_defs.append(f"  PRIMARY KEY ({existing_pk})")
 
-    # Rebuild UNIQUE constraints: re-emit ALL declared (origin='u') UNIQUE constraints.
-    # - Already-composite ones (contain project_id) are re-emitted verbatim to avoid loss.
-    # - Non-composite ones (lack project_id) are widened by appending project_id.
-    # origin='c' indexes come from CREATE [UNIQUE] INDEX statements and carry verbatim
-    # DDL including any partial WHERE clause — they are recreated verbatim after the
-    # rename via _get_secondary_indexes. Never fold them into table-level UNIQUE constraints
-    # as that would lose any WHERE clause and silently change a partial index into a full one.
-    #
-    # BUG 2 fix: enumerate the full set of origin='u' UNIQUEs from the live schema, not
-    # just the non_composite_uniques subset passed by the caller. The caller only passes
-    # the uniques that LACK project_id (the ones W1 actually widens), but a rebuild must
-    # also preserve any already-composite declared UNIQUE that was filtered out of that
-    # subset — otherwise the rebuilt table silently loses it, breaking FK constraints that
-    # reference the composite unique key.
+
+def _phase1_unique_constraints(
+    conn: sqlite3.Connection,
+    table: str,
+    col_defs: list[str],
+    widened_here: list[tuple[str, str]],
+) -> None:
+    """Append every declared (origin='u') UNIQUE, widened with project_id where needed."""
     all_declared_uniques = _get_all_declared_unique_indexes(conn, table)
     for uidx in all_declared_uniques:
         existing_cols = uidx["cols"]
@@ -609,7 +642,15 @@ def _rebuild_table_phase1(
         uc_list = ", ".join(_safe_ident(c) for c in extended)
         col_defs.append(f"  UNIQUE ({uc_list})")
 
-    # Get FK list for this table
+
+def _phase1_fk_constraints(
+    conn: sqlite3.Connection,
+    table: str,
+    widened_keys: set[tuple[str, str]],
+    has_project_id: bool,
+    col_defs: list[str],
+) -> None:
+    """Append the FOREIGN KEY constraints, widening those whose parent key widened."""
     fk_rows = conn.execute(f"PRAGMA foreign_key_list({_safe_ident(table)[1:-1]})").fetchall()
     fk_by_id: dict[int, list] = {}
     for row in fk_rows:
@@ -647,6 +688,14 @@ def _rebuild_table_phase1(
             f" ON UPDATE {on_update} ON DELETE {on_delete}"
         )
 
+
+def _phase1_swap_table(
+    conn: sqlite3.Connection,
+    table: str,
+    cols: list[dict],
+    col_defs: list[str],
+) -> None:
+    """Copy ``table`` into the staging table, swap it in and recreate dependents."""
     # Capture secondary indexes (CREATE [UNIQUE] INDEX) BEFORE DROP+RENAME.
     # DROP TABLE cascade-removes all associated indexes. The origin='c' indexes
     # captured here include verbatim DDL with any partial WHERE clause and
@@ -722,8 +771,6 @@ def _rebuild_table_phase1(
     # sql exactly — this preserves WHERE clauses, expression columns, and collations.
     for _, idx_sql in secondary_indexes:
         conn.execute(idx_sql)
-
-    return widened_here
 
 
 def run_phase1_ddl(

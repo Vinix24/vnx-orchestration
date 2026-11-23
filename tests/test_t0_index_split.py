@@ -132,7 +132,7 @@ class TestIndexRequiredFields:
 
     def test_schema_value(self):
         index = _build_t0_index(_make_full_state())
-        assert index["schema"] == "t0_index/1.3"
+        assert index["schema"] == "t0_index/1.6"
 
     def test_timestamp_from_generated_at(self):
         state = _make_full_state()
@@ -204,7 +204,7 @@ class TestIndexRequiredFields:
 
     def test_empty_state_no_crash(self):
         index = _build_t0_index({})
-        assert index["schema"] == "t0_index/1.3"
+        assert index["schema"] == "t0_index/1.6"
         assert "terminals" not in index
         assert index["live_work"]["available"] is False
         assert index["recent_receipts"] == []
@@ -336,7 +336,7 @@ class TestIndexDetailSeparation:
         state = _make_full_state()
         index = _build_t0_index(state)
         # Index builds without needing t0_detail/ to exist
-        assert index["schema"] == "t0_index/1.3"
+        assert index["schema"] == "t0_index/1.6"
         assert not (tmp_path / "t0_detail").exists()
 
 
@@ -345,7 +345,10 @@ class TestIndexDetailSeparation:
 # ---------------------------------------------------------------------------
 
 class TestIntegrationWithBuildT0State:
-    def test_build_t0_state_output_feeds_index(self, tmp_path):
+    def test_build_t0_state_output_feeds_index(self, tmp_path, monkeypatch):
+        from test_besluiten_adapter import populate_register
+        populate_register(tmp_path / "register", 60, 8)
+        monkeypatch.setattr("build_t0_state._besluiten_logdir", lambda: tmp_path / "register")
         state_dir = tmp_path / "state"
         dispatch_dir = tmp_path / "dispatches"
         state_dir.mkdir(parents=True)
@@ -355,9 +358,10 @@ class TestIntegrationWithBuildT0State:
         state = build_t0_state(state_dir=state_dir, dispatch_dir=dispatch_dir)
         index = _build_t0_index(state)
 
-        assert index["schema"] == "t0_index/1.3"
+        assert index["schema"] == "t0_index/1.6"
         assert len(index) <= 50
         serialized = json.dumps(index, indent=2, default=str).encode("utf-8")
+        assert index["besluiten"]["geldig"] == 60 and len(json.dumps(index["besluiten"])) <= 400
         assert len(serialized) < 5 * 1024
 
     def test_build_t0_state_output_feeds_detail_files(self, tmp_path):

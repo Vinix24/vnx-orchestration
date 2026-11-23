@@ -132,10 +132,13 @@ HELP
   local _saved_vnx_reports_dir="${VNX_REPORTS_DIR:-}"
   local _saved_vnx_db_dir="${VNX_DB_DIR:-}"
   local _saved_vnx_skills_dir="${VNX_SKILLS_DIR:-}"
+  local _saved_vnx_data_dir_explicit="${VNX_DATA_DIR_EXPLICIT:-}"
 
   export PROJECT_ROOT="$wt_dir"
   # Reset data dirs so worktree-start derives them from the new PROJECT_ROOT
   export VNX_DATA_DIR="$wt_dir/.vnx-data"
+  # OI-1276: an intended override; events resolve it only with the flag.
+  export VNX_DATA_DIR_EXPLICIT=1
   export VNX_STATE_DIR="$VNX_DATA_DIR/state"
   export VNX_DISPATCH_DIR="$VNX_DATA_DIR/dispatches"
   export VNX_LOGS_DIR="$VNX_DATA_DIR/logs"
@@ -158,7 +161,7 @@ HELP
     _new_worktree_restore_env "$_saved_project_root" "$_saved_vnx_data_dir" \
       "$_saved_vnx_state_dir" "$_saved_vnx_dispatch_dir" "$_saved_vnx_logs_dir" \
       "$_saved_vnx_pids_dir" "$_saved_vnx_locks_dir" "$_saved_vnx_reports_dir" \
-      "$_saved_vnx_db_dir" "$_saved_vnx_skills_dir"
+      "$_saved_vnx_db_dir" "$_saved_vnx_skills_dir" "$_saved_vnx_data_dir_explicit"
     return 1
   fi
 
@@ -227,7 +230,7 @@ HELP
   _new_worktree_restore_env "$_saved_project_root" "$_saved_vnx_data_dir" \
     "$_saved_vnx_state_dir" "$_saved_vnx_dispatch_dir" "$_saved_vnx_logs_dir" \
     "$_saved_vnx_pids_dir" "$_saved_vnx_locks_dir" "$_saved_vnx_reports_dir" \
-    "$_saved_vnx_db_dir" "$_saved_vnx_skills_dir"
+    "$_saved_vnx_db_dir" "$_saved_vnx_skills_dir" "$_saved_vnx_data_dir_explicit"
 
   log ""
   log "════════════════════════════════════════════════════════════════"
@@ -252,4 +255,5 @@ _new_worktree_restore_env() {
   export VNX_REPORTS_DIR="$8"
   export VNX_DB_DIR="$9"
   export VNX_SKILLS_DIR="${10}"
+  if [ -n "${11:-}" ]; then export VNX_DATA_DIR_EXPLICIT="${11}"; else unset VNX_DATA_DIR_EXPLICIT; fi
 }

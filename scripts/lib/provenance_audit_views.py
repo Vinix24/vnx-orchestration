@@ -69,7 +69,29 @@ def governance_audit_view(
       - overrides: recent governance override records
       - summary: aggregate counts
     """
-    # Policy evaluation events
+    evaluations, outcome_counts = _governance_evaluations(conn, dispatch_id, limit)
+    escalations, esc_counts = _governance_escalations(conn, dispatch_id, limit)
+    overrides, ovr_counts = _governance_overrides(conn, dispatch_id, limit)
+
+    return {
+        "dispatch_id": dispatch_id,
+        "policy_evaluations": evaluations,
+        "escalations": escalations,
+        "overrides": overrides,
+        "summary": {
+            "evaluation_count": len(evaluations),
+            "outcome_counts": outcome_counts,
+            "escalation_counts": esc_counts,
+            "blocking_count": esc_counts["hold"] + esc_counts["escalate"],
+            "override_counts": ovr_counts,
+        },
+    }
+
+
+def _governance_evaluations(
+    conn: sqlite3.Connection, dispatch_id: Optional[str], limit: int
+) -> Any:
+    """Policy evaluation events and their outcome counts."""
     if dispatch_id:
         eval_rows = conn.execute(
             """
@@ -106,8 +128,13 @@ def governance_audit_view(
             "enforcement": metadata.get("enforcement"),
             "occurred_at": d["occurred_at"],
         })
+    return evaluations, outcome_counts
 
-    # Escalation states
+
+def _governance_escalations(
+    conn: sqlite3.Connection, dispatch_id: Optional[str], limit: int
+) -> Any:
+    """Unresolved escalation states and their level counts."""
     if dispatch_id:
         esc_rows = conn.execute(
             """
@@ -148,8 +175,13 @@ def governance_audit_view(
             "policy_class": d.get("policy_class"),
             "since": d.get("updated_at"),
         })
+    return escalations, esc_counts
 
-    # Override records
+
+def _governance_overrides(
+    conn: sqlite3.Connection, dispatch_id: Optional[str], limit: int
+) -> Any:
+    """Override records and their outcome counts."""
     if dispatch_id:
         ovr_rows = conn.execute(
             """
@@ -184,20 +216,7 @@ def governance_audit_view(
             "new_level": d.get("new_level"),
             "occurred_at": d["occurred_at"],
         })
-
-    return {
-        "dispatch_id": dispatch_id,
-        "policy_evaluations": evaluations,
-        "escalations": escalations,
-        "overrides": overrides,
-        "summary": {
-            "evaluation_count": len(evaluations),
-            "outcome_counts": outcome_counts,
-            "escalation_counts": esc_counts,
-            "blocking_count": esc_counts["hold"] + esc_counts["escalate"],
-            "override_counts": ovr_counts,
-        },
-    }
+    return overrides, ovr_counts
 
 
 def provenance_audit_view(
@@ -216,7 +235,29 @@ def provenance_audit_view(
       - gap_events: provenance gap events
       - summary: aggregate chain status counts
     """
-    # Registry entries
+    registry_entries, status_counts = _provenance_registry(conn, dispatch_id, limit)
+    verifications, verdict_counts = _provenance_verifications(conn, dispatch_id, limit)
+    gap_events = _provenance_gap_events(conn, dispatch_id, limit)
+
+    return {
+        "dispatch_id": dispatch_id,
+        "registry_entries": registry_entries,
+        "verifications": verifications,
+        "gap_events": gap_events,
+        "summary": {
+            "registry_count": len(registry_entries),
+            "chain_status_counts": status_counts,
+            "verification_count": len(verifications),
+            "verdict_counts": verdict_counts,
+            "gap_event_count": len(gap_events),
+        },
+    }
+
+
+def _provenance_registry(
+    conn: sqlite3.Connection, dispatch_id: Optional[str], limit: int
+) -> Any:
+    """Registry entries and their chain status counts."""
     if dispatch_id:
         reg_rows = conn.execute(
             "SELECT * FROM provenance_registry WHERE dispatch_id = ?",
@@ -251,8 +292,13 @@ def provenance_audit_view(
             "verified_at": d.get("verified_at"),
             "registered_at": d.get("registered_at"),
         })
+    return registry_entries, status_counts
 
-    # Verification history
+
+def _provenance_verifications(
+    conn: sqlite3.Connection, dispatch_id: Optional[str], limit: int
+) -> Any:
+    """Verification history and its verdict counts."""
     if dispatch_id:
         ver_rows = conn.execute(
             """
@@ -287,8 +333,13 @@ def provenance_audit_view(
             "verified_by": d.get("verified_by"),
             "verified_at": d["verified_at"],
         })
+    return verifications, verdict_counts
 
-    # Provenance gap events
+
+def _provenance_gap_events(
+    conn: sqlite3.Connection, dispatch_id: Optional[str], limit: int
+) -> List[Dict[str, Any]]:
+    """Provenance gap events."""
     if dispatch_id:
         gap_rows = conn.execute(
             """
@@ -320,20 +371,7 @@ def provenance_audit_view(
             "reason": d.get("reason"),
             "occurred_at": d["occurred_at"],
         })
-
-    return {
-        "dispatch_id": dispatch_id,
-        "registry_entries": registry_entries,
-        "verifications": verifications,
-        "gap_events": gap_events,
-        "summary": {
-            "registry_count": len(registry_entries),
-            "chain_status_counts": status_counts,
-            "verification_count": len(verifications),
-            "verdict_counts": verdict_counts,
-            "gap_event_count": len(gap_events),
-        },
-    }
+    return gap_events
 
 
 # ---------------------------------------------------------------------------
@@ -380,6 +418,53 @@ def pre_merge_advisory(
         advisories.extend(result.advisories)
 
     # Check governance health
+    holds, escalations = _escalation_blockers(conn, dispatch_ids, blockers)
+
+    if holds:
+        advisories.append(Advisory(
+            advisory_type=ADVISORY_RESOLVE_ESCALATION,
+            severity="warning",
+            entity_type="batch",
+            entity_id="pre_merge",
+            recommendation=f"{len(holds)} dispatch(es) on hold — resolve before merge",
+            evidence={"holds": holds},
+        ))
+
+    # Check for recent overrides
+    override_dispatches = _granted_overrides_in_scope(conn, dispatch_ids)
+
+    if override_dispatches:
+        advisories.append(Advisory(
+            advisory_type=ADVISORY_REVIEW_OVERRIDE,
+            severity="info",
+            entity_type="batch",
+            entity_id="pre_merge",
+            recommendation=(
+                f"{len(override_dispatches)} governance override(s) granted for "
+                f"dispatches in scope — review justifications before merge"
+            ),
+            evidence={"overrides": override_dispatches},
+        ))
+
+    return {
+        "ready": len(blockers) == 0,
+        "blockers": blockers,
+        "warnings": warnings,
+        "advisories": [a.to_dict() for a in advisories],
+        "governance": {
+            "holds": holds,
+            "escalations": escalations,
+            "override_count": len(override_dispatches),
+        },
+    }
+
+
+def _escalation_blockers(
+    conn: sqlite3.Connection,
+    dispatch_ids: List[str],
+    blockers: List[Dict[str, Any]],
+) -> Any:
+    """Unresolved holds/escalations in scope; appends their blockers in place."""
     esc_rows = conn.execute(
         "SELECT * FROM escalation_state WHERE resolved_at IS NULL"
     ).fetchall()
@@ -416,18 +501,13 @@ def pre_merge_advisory(
                     "description": f"Dispatch escalated to T0: {d.get('trigger_description', 'unknown')}",
                     "layer": "governance",
                 })
+    return holds, escalations
 
-    if holds:
-        advisories.append(Advisory(
-            advisory_type=ADVISORY_RESOLVE_ESCALATION,
-            severity="warning",
-            entity_type="batch",
-            entity_id="pre_merge",
-            recommendation=f"{len(holds)} dispatch(es) on hold — resolve before merge",
-            evidence={"holds": holds},
-        ))
 
-    # Check for recent overrides
+def _granted_overrides_in_scope(
+    conn: sqlite3.Connection, dispatch_ids: List[str]
+) -> List[Dict[str, Any]]:
+    """Recent granted overrides that belong to the dispatches in scope."""
     recent_overrides = conn.execute(
         """
         SELECT * FROM governance_overrides
@@ -446,31 +526,7 @@ def pre_merge_advisory(
                 "type": d["override_type"],
                 "justification": d["justification"],
             })
-
-    if override_dispatches:
-        advisories.append(Advisory(
-            advisory_type=ADVISORY_REVIEW_OVERRIDE,
-            severity="info",
-            entity_type="batch",
-            entity_id="pre_merge",
-            recommendation=(
-                f"{len(override_dispatches)} governance override(s) granted for "
-                f"dispatches in scope — review justifications before merge"
-            ),
-            evidence={"overrides": override_dispatches},
-        ))
-
-    return {
-        "ready": len(blockers) == 0,
-        "blockers": blockers,
-        "warnings": warnings,
-        "advisories": [a.to_dict() for a in advisories],
-        "governance": {
-            "holds": holds,
-            "escalations": escalations,
-            "override_count": len(override_dispatches),
-        },
-    }
+    return override_dispatches
 
 
 # ---------------------------------------------------------------------------

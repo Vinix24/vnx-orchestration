@@ -345,7 +345,7 @@ class TestLaneDeadlineIsBookedAsTimeout:
         self, gate_dirs, monkeypatch,
     ):
         """The lane's own word, not the runner's arithmetic: a lane whose
-        deadline was set lower (VNX_KIMI_TIMEOUT) says it fired at 600 s while
+        deadline was set lower (the caller's total_deadline) says it fired at 600 s while
         the runner applied 900 s. The old duration rule read that as a quick
         failure."""
         report = _lane_report(

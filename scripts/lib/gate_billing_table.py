@@ -45,8 +45,7 @@ GATE_BILLING_NONE = gate_lane_rows.BILLING_NONE
 # column of its row in ``gate_lane_rows.GATE_LANE_ROWS``.
 _GATES_WITHOUT_LANE_ROW: Dict[str, str] = {
     "codex_gate": GATE_BILLING_SUBSCRIPTION,   # codex CLI, ChatGPT subscription
-    # gemini CLI on OAuth. VNX_GEMINI_ROUTING=vertex is an explicit opt-in that
-    # bills the API; the default routing is oauth, so the default is a subscription.
+    # gemini CLI on OAuth.
     "gemini_review": GATE_BILLING_SUBSCRIPTION,
     "claude_github_optional": GATE_BILLING_NONE,
     "ci_gate": GATE_BILLING_NONE,

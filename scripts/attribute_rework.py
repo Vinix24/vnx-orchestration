@@ -13,6 +13,10 @@ Usage:
     python3 scripts/attribute_rework.py --json
     python3 scripts/attribute_rework.py --project-id mission-control --max-commits 500
 
+Blame edges (ADR-071), every commit on main after a watermark, exit 2 on bad input:
+    python3 scripts/attribute_rework.py --persist --since <sha>        # first run; later runs use the watermark
+    python3 scripts/attribute_rework.py --blame-dry-run --since <sha>  # count only
+
 Read-git + a single fill-once UPDATE per rework edge. Idempotent. No LLM, no Anthropic SDK.
 """
 
@@ -34,6 +38,7 @@ from project_root import (  # noqa: E402
     resolve_project_id,
     resolve_project_root,
 )
+from rework_blame_edges import WATERMARK_FILE, run_blame_edges  # noqa: E402
 from rework_attribution import (  # noqa: E402
     benchmark_excluded_count,
     compute_rework_edges,
@@ -43,15 +48,46 @@ from rework_attribution import (  # noqa: E402
 
 EXIT_OK = 0
 EXIT_ERROR = 1
+EXIT_STOPPED = 2
 
 
-def main(argv: "list[str] | None" = None) -> int:
+def _run_blame(args, repo_root: Path, project_id: str, state: Path) -> int:
+    rc_path, qi_path = state / "runtime_coordination.db", state / "quality_intelligence.db"
+    rc_conn = qi_conn = None
+    try:
+        if not qi_path.exists():
+            raise RuntimeError(f"no quality_intelligence.db at {qi_path}")
+        rc_conn = sqlite3.connect(f"file:{rc_path}?mode=ro", uri=True) if rc_path.exists() else None
+        qi_conn = sqlite3.connect(str(qi_path))
+        summary = run_blame_edges(
+            repo_root, rc_conn, qi_conn, project_id, watermark_path=state / WATERMARK_FILE,
+            since=args.since, ref=args.ref, persist=args.persist and not args.blame_dry_run,
+        )
+    except (RuntimeError, sqlite3.Error) as exc:
+        summary = {"stopped": str(exc)}
+    finally:
+        for conn in (rc_conn, qi_conn):
+            if conn is not None:
+                conn.close()
+    print(json.dumps(summary, sort_keys=True) if args.json else f"attribute_rework[{project_id}] blame: {summary}")
+    return EXIT_STOPPED if summary.get("stopped") else EXIT_OK
+
+
+def _parse_args(argv: "list[str] | None") -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--max-commits", type=int, default=300)
     parser.add_argument("--project-id", default=None)
     parser.add_argument("--no-persist", action="store_true", help="compute only; do not write parent_dispatch")
     parser.add_argument("--json", action="store_true")
-    args = parser.parse_args(argv)
+    parser.add_argument("--persist", action="store_true", help="blame edges: write rework_edges since the watermark")
+    parser.add_argument("--blame-dry-run", action="store_true", help="blame edges: count only, write nothing")
+    parser.add_argument("--since", default=None, help="blame edges: start commit (exclusive) without a watermark")
+    parser.add_argument("--ref", default="main", help="blame edges: branch to scan")
+    return parser.parse_args(argv)
+
+
+def main(argv: "list[str] | None" = None) -> int:
+    args = _parse_args(argv)
 
     repo_root = resolve_project_root(__file__)
     try:
@@ -63,6 +99,9 @@ def main(argv: "list[str] | None" = None) -> int:
     state = resolve_central_data_dir(project_id) / "state"
     rc_path = state / "runtime_coordination.db"
     qi_path = state / "quality_intelligence.db"
+    if args.persist or args.blame_dry_run:
+        return _run_blame(args, repo_root, project_id, state)
+
     if not qi_path.exists():
         msg = {"degraded": f"no quality_intelligence.db at {qi_path}", "edges": [], "persisted": 0}
         print(json.dumps(msg) if args.json else f"attribute_rework: {msg['degraded']} — nothing to do")

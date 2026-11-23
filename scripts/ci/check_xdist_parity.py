@@ -75,7 +75,13 @@ sum (SEOcrawler M27), and a conftest hook in this repository drops 31
 the summary counts tests that never run.
 
 Subcommands: ``compare`` writes ``xdist-parity-verdict.json`` (and a step
-summary); ``fingerprint`` prints the selection fingerprint of an args
+summary). Its candidate is ``--candidate`` (the two-phase shape) or, with
+``--shard-dir`` once per shard in order, the N Profile A shards of one run
+(C4a): shard 1's serial phase plus every shard's own phase, read as the
+completeness check reads them, under the same rules; a partition entry names
+the phases a test is in, and the selection proof is the partition against the
+reference (no args fingerprint). The verdict records ``candidate_shape``
+(``two_phase`` or ``shards``, with ``shards``: N). ``fingerprint`` prints the selection fingerprint of an args
 directory written by ``scripts/ci/profile_a_pytest_args.sh`` with
 ``VNX_CI_XDIST=1``; ``completeness`` is Profile A's own per-PR check after the
 switch (D4): with no serial reference to compare against, it reads the two
@@ -83,7 +89,8 @@ phase manifests and XMLs of the same run and fails on a collected test that
 did not run, a test run more than once, a selection the two phases do not
 partition, a failed collection, or a skip whose key is not recorded in
 ``scripts/ci/xdist_expected_skips.txt``. Its verdict is
-``xdist-completeness-verdict.json``. Exit codes of ``compare`` and
+``xdist-completeness-verdict.json``. ``--shard-dir`` per shard, in order: N shards of one run (C2b), also failing
+on collected sets or plans that differ between shards or a test in no shard or two. Exit codes of ``compare`` and
 ``completeness``: the verdict's exit (0, 1, 2), or 0 when a compare run is not
 applicable (light profile); 2 with a reason on stderr, never a traceback, when
 an argument is malformed or the verdict or its summary cannot be written.
@@ -125,7 +132,7 @@ DIFFERENCE_KINDS = (
 )
 # phase (the file stem: junit-<phase>.xml, manifest-<phase>.json) -> the mode an
 # active manifest of that phase must record
-PHASE_MODES = {"full": "serial", "serial": "serial", "parallel": "xdist"}
+PHASE_MODES = {"full": "serial", "serial": "serial", "parallel": "xdist", "shard": "xdist"}
 PARITY_STEPS = ("checkout", "prelude", "selection", "download_reference", "download_candidate")
 # The comparison step (id ``parity``) exits after writing the verdict, so only
 # the record step after it can add its outcome; a recorded verdict carries all six.
@@ -142,6 +149,10 @@ COMPLETENESS_KINDS = (
     "unexpected_skip",
     "collection_outcome_failed",
 )
+# N shards of one run (C2b): the plan and the collection before the split, in each shard's directory
+SHARD_COMPLETENESS_KINDS = COMPLETENESS_KINDS + ("collected_differs", "source_differs")
+SHARD_PLAN_FILE = "args/shard.json"
+COLLECTED_FILE = "args/collected.json"
 CLASS_ORDER = ("fail", "xfail", "skip", "pass")
 _TEARDOWN_PREFIX = "failed on teardown with"
 _XPASS_AS_SKIPPED = "xfail-marked test passes unexpectedly"
@@ -578,22 +589,35 @@ def _entry(k: tuple, nodeid_of: dict, **extra) -> dict:
     return {"nodeid": nodeid_of.get(k, f"{k[0]}::{k[1]}"), "key": list(k), **extra}
 
 
-def compare_partition(reference: Phase, serial: Phase, parallel: Phase) -> list:
-    """The candidate phases must split the reference selection: union equal, intersection empty."""
-    ref, ser, par = set(reference.nodeids), set(serial.nodeids), set(parallel.nodeids)
-    entries = [{"nodeid": n, "problem": "in both candidate phases"} for n in ser & par]
-    entries += [{"nodeid": n, "problem": "in no candidate phase"} for n in ref - (ser | par)]
-    entries += [{"nodeid": n, "problem": "not in the reference selection"} for n in (ser | par) - ref]
-    ser_coll = {o["nodeid"] for o in serial.manifest["collection_outcomes"]}
-    par_coll = {o["nodeid"] for o in parallel.manifest["collection_outcomes"]}
-    entries += [{"nodeid": n, "problem": "collection outcome in both candidate phases"} for n in ser_coll & par_coll]
+def compare_partition(reference: Phase, candidates: list, named: bool = False) -> list:
+    """The candidate phases must split the reference selection: union equal, no test in two phases.
+
+    *named* (the shard shape) adds the phases a test is in to its entry, so the
+    entry says where it went; the two-phase shape keeps its entries as they were.
+    """
+    owners, collection_owners = {}, {}
+    for phase in candidates:
+        for nodeid in set(phase.nodeids):
+            owners.setdefault(nodeid, []).append(phase.name)
+        for nodeid in _collection_nodes(phase):
+            collection_owners.setdefault(nodeid, []).append(phase.name)
+    many = "in more than one candidate phase" if named else "in both candidate phases"
+
+    def entry(nodeid: str, problem: str, names: list) -> dict:
+        return {"nodeid": nodeid, "problem": problem, **({"phases": names} if named else {})}
+
+    ref = set(reference.nodeids)
+    entries = [entry(n, many, names) for n, names in owners.items() if len(names) > 1]
+    entries += [{"nodeid": n, "problem": "in no candidate phase"} for n in ref - set(owners)]
+    entries += [entry(n, "not in the reference selection", names) for n, names in owners.items() if n not in ref]
+    entries += [entry(n, f"collection outcome {many}", names) for n, names in collection_owners.items() if len(names) > 1]
     return sorted(entries, key=lambda e: (e["nodeid"], e["problem"]))
 
 
-def candidate_executions(serial: Phase, parallel: Phase) -> dict:
-    """key -> {phase: executions} over both candidate phases."""
+def candidate_executions(candidates: list) -> dict:
+    """key -> {phase: executions} over every candidate phase."""
     merged = {}
-    for phase in (serial, parallel):
+    for phase in candidates:
         for k, executions in phase.executions.items():
             merged.setdefault(k, {})[phase.name] = executions
     return merged
@@ -637,9 +661,9 @@ def _collection_form(outcomes: list) -> dict:
     return {nodeid: sorted(states) for nodeid, states in form.items()}
 
 
-def compare_collection(reference: Phase, serial: Phase, parallel: Phase) -> list:
+def compare_collection(reference: Phase, candidates: list) -> list:
     ref = _collection_form(reference.manifest["collection_outcomes"])
-    cand = _collection_form(serial.manifest["collection_outcomes"] + parallel.manifest["collection_outcomes"])
+    cand = _collection_form([o for phase in candidates for o in phase.manifest["collection_outcomes"]])
     return [
         {"nodeid": nodeid, "reference": ref.get(nodeid, []), "candidate": cand.get(nodeid, [])}
         for nodeid in sorted(set(ref) | set(cand))
@@ -647,12 +671,14 @@ def compare_collection(reference: Phase, serial: Phase, parallel: Phase) -> list
     ]
 
 
-def compare(reference: Phase, serial: Phase, parallel: Phase) -> dict:
-    """Every difference list of the contract, each sorted by nodeid."""
-    nodeid_of = {**reference.nodeid_by_key, **serial.nodeid_by_key, **parallel.nodeid_by_key}
-    differences = compare_runs(reference, candidate_executions(serial, parallel), nodeid_of)
-    differences["collection_outcome_differs"] = compare_collection(reference, serial, parallel)
-    differences["partition"] = compare_partition(reference, serial, parallel)
+def compare(reference: Phase, candidates: list, named: bool = False) -> dict:
+    """Every difference list of the contract, each sorted by nodeid; *candidates* are the candidate phases."""
+    nodeid_of = dict(reference.nodeid_by_key)
+    for phase in candidates:
+        nodeid_of.update(phase.nodeid_by_key)
+    differences = compare_runs(reference, candidate_executions(candidates), nodeid_of)
+    differences["collection_outcome_differs"] = compare_collection(reference, candidates)
+    differences["partition"] = compare_partition(reference, candidates, named)
     for kind in DIFFERENCE_KINDS:
         differences[kind] = sorted(differences[kind], key=lambda e: json.dumps(e, sort_keys=True))
     return {kind: differences[kind] for kind in DIFFERENCE_KINDS}
@@ -758,6 +784,13 @@ class CompareInputs:
     meta: dict
     steps: dict
     upstream: dict
+    # the shard shape (C4a): shard k's evidence directory, in order; empty for the two-phase shape
+    shard_dirs: list = field(default_factory=list)
+
+
+def candidate_home(inputs: CompareInputs) -> Path:
+    """Where the shadow record lies: the candidate directory, or shard 1's directory in the shard shape."""
+    return inputs.shard_dirs[0] if inputs.shard_dirs else inputs.candidate_dir
 
 
 def run_of(inputs: CompareInputs) -> tuple:
@@ -821,10 +854,12 @@ def fingerprint_block(inputs: CompareInputs, problems: list) -> tuple:
 def evaluate(inputs: CompareInputs) -> dict:
     """The full verdict for one run (also when the evidence is unusable)."""
     run = run_of(inputs)
-    shadow_record = read_json_object(inputs.candidate_dir / SHADOW_RECORD_FILE)
+    shadow_record = read_json_object(candidate_home(inputs) / SHADOW_RECORD_FILE)
     shadow_stale = None if shadow_record is None else stale_evidence_reason(SHADOW_WHAT, shadow_record, *run)
     profile = resolve_profile(inputs, None if shadow_stale else shadow_record)
-    verdict = {"schema": VERDICT_SCHEMA, **inputs.meta, "profile": profile, "steps": inputs.steps}
+    shape = ({"candidate_shape": "shards", "shards": len(inputs.shard_dirs)} if inputs.shard_dirs
+             else {"candidate_shape": "two_phase"})
+    verdict = {"schema": VERDICT_SCHEMA, **inputs.meta, "profile": profile, "steps": inputs.steps, **shape}
     verdict["shadow"] = shadow_block(shadow_record, inputs.upstream.get("shadow"), shadow_stale)
     verdict["reference"], reference_stale = reference_block(inputs, run)
     if profile == "light":
@@ -836,7 +871,9 @@ def evaluate(inputs: CompareInputs) -> dict:
                 for name in ("download_reference", "download_candidate")
                 if name in inputs.steps and inputs.steps[name] != "success"]
     problems += [("stale_evidence", reason) for reason in (shadow_stale, reference_stale) if reason is not None]
-    verdict["selection_fingerprint"], verdict["selection_fingerprint_source"] = fingerprint_block(inputs, problems)
+    # the shard shape proves its selection by the partition rule against the reference, not by an args emission
+    verdict["selection_fingerprint"], verdict["selection_fingerprint_source"] = (
+        (None, None) if inputs.shard_dirs else fingerprint_block(inputs, problems))
     verdict.update(_compare_evidence(inputs, problems))
     verdict["invalid_evidence"] = [{"reason": r, "detail": d} for r, d in problems]
     has_differences = any(verdict["differences"].values()) if verdict["differences"] else False
@@ -858,12 +895,38 @@ def _compare_evidence(inputs: CompareInputs, problems: list) -> dict:
         return {"differences": None, "counts": None, "tool_versions": pins}
     reader = PhaseReader(pins, junit_key_function(), run_of(inputs), problems)
     reference = reader.load(inputs.reference_dir, "full")
-    serial = reader.load(inputs.candidate_dir, "serial")
-    parallel = reader.load(inputs.candidate_dir, "parallel")
-    counts = {"reference": phase_counts(reference), "serial": phase_counts(serial), "parallel": phase_counts(parallel)}
-    if None in (reference, serial, parallel):
+    if inputs.shard_dirs:
+        candidates = shard_candidates(reader, inputs.shard_dirs)
+        counts = {"reference": phase_counts(reference), **{p.name: phase_counts(p) for p in candidates or []}}
+    else:
+        candidates = [reader.load(inputs.candidate_dir, "serial"), reader.load(inputs.candidate_dir, "parallel")]
+        counts = {"reference": phase_counts(reference), "serial": phase_counts(candidates[0]),
+                  "parallel": phase_counts(candidates[1])}
+    if reference is None or candidates is None or None in candidates:
         return {"differences": None, "counts": counts, "tool_versions": pins}
-    return {"differences": compare(reference, serial, parallel), "counts": counts, "tool_versions": pins}
+    differences = compare(reference, candidates, named=bool(inputs.shard_dirs))
+    return {"differences": differences, "counts": counts, "tool_versions": pins}
+
+
+def shard_candidates(reader: PhaseReader, dirs: list) -> list | None:
+    """The candidate phases of N shards: shard 1's serial phase, then each shard's own; None when a shard is unusable.
+
+    Read by ``read_shards``, the reader of the completeness check; a missing
+    directory, plan or manifest, or a shard 1 without its serial phase, is a
+    problem in the reader's list (invalid evidence), never an empty candidate.
+    """
+    shards = read_shards(reader, dirs)
+    if not shards or None in shards:
+        return None
+    serial, own = [], []
+    for shard in shards:
+        first, *rest = shard["phases"]
+        first.name = f"shard {shard['shard']}/{len(dirs)}"
+        own.append(first)
+        for phase in rest:
+            phase.name = "serial"
+            serial.append(phase)
+    return serial + own
 
 
 # --- the per-PR completeness check of Profile A after the switch (D4) --------------------
@@ -925,25 +988,125 @@ def completeness_differences(serial: Phase, parallel: Phase, expected: set) -> d
                         + [{"nodeid": n, "problem": "collection outcome in both phases"}
                            for n in _collection_nodes(serial) & _collection_nodes(parallel)])
     for phase in (serial, parallel):
-        for k, executions in phase.executions.items():
-            if len(executions) > 1:
-                out["run_more_than_once"].append(
-                    {"nodeid": phase.nodeid_by_key.get(k, f"{k[0]}::{k[1]}"), "phase": phase.name,
-                     "executions": len(executions)})
-        out["not_run"] += [{"nodeid": nodeid, "phase": phase.name}
-                           for k, nodeid in phase.nodeid_by_key.items() if k not in phase.executions]
-        for outcome in phase.manifest["collection_outcomes"]:
-            if outcome["outcome"] == "failed":
-                out["collection_outcome_failed"].append(
-                    {"nodeid": outcome["nodeid"], "phase": phase.name, "reason": outcome["reason"]})
+        phase_differences(phase, expected, out)
     for k in set(serial.executions) & set(parallel.executions):
         out["run_more_than_once"].append(
             {"nodeid": serial.nodeid_by_key.get(k, f"{k[0]}::{k[1]}"), "phases": ["serial", "parallel"]})
-    for phase in (serial, parallel):
-        out["unexpected_skip"] += [entry for entry in phase_skips(phase) if entry["nodeid"] not in expected]
-    for kind in COMPLETENESS_KINDS:
-        out[kind] = sorted(out[kind], key=lambda entry: json.dumps(entry, sort_keys=True))
-    return out
+    return _sorted_kinds(out)
+
+
+def phase_differences(phase: Phase, expected: set, out: dict) -> None:
+    """What one phase shows by itself: a test run twice or not run, a failed collection, an unexpected skip."""
+    for k, executions in phase.executions.items():
+        if len(executions) > 1:
+            out["run_more_than_once"].append(
+                {"nodeid": phase.nodeid_by_key.get(k, f"{k[0]}::{k[1]}"), "phase": phase.name,
+                 "executions": len(executions)})
+    out["not_run"] += [{"nodeid": nodeid, "phase": phase.name}
+                       for k, nodeid in phase.nodeid_by_key.items() if k not in phase.executions]
+    for outcome in phase.manifest["collection_outcomes"]:
+        if outcome["outcome"] == "failed":
+            out["collection_outcome_failed"].append(
+                {"nodeid": outcome["nodeid"], "phase": phase.name, "reason": outcome["reason"]})
+    out["unexpected_skip"] += [entry for entry in phase_skips(phase) if entry["nodeid"] not in expected]
+
+
+def _sorted_kinds(out: dict) -> dict:
+    return {kind: sorted(entries, key=lambda entry: json.dumps(entry, sort_keys=True)) for kind, entries in out.items()}
+
+
+def read_shard(reader: PhaseReader, k: int, total: int, directory: Path) -> dict | None:
+    """Shard *k*'s plan, collected set and phases; None (the reasons in the reader's problems) when unusable."""
+    plan = read_json_object(directory / SHARD_PLAN_FILE)
+    if plan is None:
+        reader.problems.append(("missing_shard_plan", f"{directory / SHARD_PLAN_FILE} is missing or not a JSON object"))
+        return None
+    if not reader.current(SHARD_PLAN_FILE, plan):
+        return None
+    if (whole_number(plan.get("shard")) != k or whole_number(plan.get("shards")) != total
+            or not isinstance(plan.get("source"), str) or not plan["source"] or not isinstance(plan.get("assignment"), dict)):
+        reader.problems.append(("malformed_shard_plan", f"shard {plan.get('shard')!r} of {plan.get('shards')!r}, source "
+                                f"{plan.get('source')!r}; expected shard {k} of {total} with a source and an assignment"))
+        return None
+    try:
+        collected = load_manifest(directory / COLLECTED_FILE)
+    except EvidenceError as exc:
+        reader.problems.append((exc.reason, exc.detail))
+        return None
+    if not reader.current(COLLECTED_FILE, collected):
+        return None
+    if collected.get("collection_finished") is not True:
+        reader.problems.append(("collection_unfinished", "the collection before the split did not finish"))
+        return None
+    phases = [reader.load(directory, "shard")]
+    if k == 1:
+        phases.append(reader.load(directory, "serial"))
+    elif (directory / "manifest-serial.json").exists() or (directory / "junit-serial.xml").exists():
+        reader.problems.append(("serial_outside_shard_one", "serial-phase evidence; the serial list runs in shard 1 only"))
+    problem = None if None in phases else assignment_problem(plan["assignment"], k, total, phases[0])
+    reader.problems += [("malformed_shard_plan", problem)] if problem else []
+    if None in phases or problem:
+        return None
+    for phase in phases:
+        phase.name = f"shard-{k}" if phase.name == "shard" else f"shard-{k}-{phase.name}"
+    units = set(collected["nodeids"]) | {o["nodeid"] for o in collected["collection_outcomes"]}
+    return {"shard": k, "plan": plan, "collected": units, "phases": phases}
+
+
+def assignment_problem(assignment: dict, k: int, total: int, phase: Phase) -> str | None:
+    """Why the plan's file -> shard map is unusable, or None; the serial phase of shard 1 is outside it."""
+    bad = [f"{f!r}: {n!r}" for f, n in assignment.items() if not f or f.startswith("/") or ".." in f.split("/")
+           or whole_number(n) is None or not 1 <= n <= total]
+    if not assignment or bad:
+        return f"assignment is empty or holds {bad[:3]}; expected relative test paths to shards 1..{total}"
+    ran = {n.split("::")[0] for n in [*map(phase.nodeid_by_key.get, phase.executions), *_collection_nodes(phase)] if n}
+    mine = {f for f, n in assignment.items() if n == k}
+    return None if ran == mine else f"assignment gives shard {k} {sorted(mine)[:3]}, it ran {sorted(ran)[:3]}"
+
+
+def shard_differences(shards: list, expected: set) -> dict:
+    """Every way N shards of one run are not complete together."""
+    out = {kind: [] for kind in SHARD_COMPLETENESS_KINDS}
+    for shard in shards[1:]:
+        missing, extra = shards[0]["collected"] - shard["collected"], shard["collected"] - shards[0]["collected"]
+        if missing or extra:
+            out["collected_differs"].append({"shard": shard["shard"], "missing": sorted(missing), "extra": sorted(extra)})
+    if len({json.dumps([s["plan"]["source"], s["plan"]["assignment"]], sort_keys=True) for s in shards}) > 1:
+        out["source_differs"] = [{"shard": s["shard"], "source": s["plan"]["source"]} for s in shards]
+    owners, ran = {}, {}
+    for phase in (phase for shard in shards for phase in shard["phases"]):
+        for unit in set(phase.nodeids) | _collection_nodes(phase):
+            owners.setdefault(unit, []).append(phase.name)
+        for k in phase.executions:
+            ran.setdefault(k, []).append(phase)
+        phase_differences(phase, expected, out)
+    collected = set().union(*(shard["collected"] for shard in shards))
+    out["partition"] = [{"nodeid": unit, "problem": "in no shard"} for unit in collected - set(owners)]
+    out["partition"] += [{"nodeid": unit, "problem": "in more than one phase", "phases": names}
+                         for unit, names in owners.items() if len(names) > 1]
+    out["partition"] += [{"nodeid": unit, "problem": "not in the collected set", "phases": names}
+                         for unit, names in owners.items() if unit not in collected]
+    out["run_more_than_once"] += [{"nodeid": phases[0].nodeid_by_key.get(k, f"{k[0]}::{k[1]}"),
+                                   "phases": [phase.name for phase in phases]} for k, phases in ran.items() if len(phases) > 1]
+    return _sorted_kinds(out)
+
+
+def read_shards(reader: PhaseReader, dirs: list) -> list:
+    """``read_shard`` of each of N directories, in order (None for an unusable one); each problem names its shard."""
+    shards, problems = [], reader.problems
+    for k, directory in enumerate(dirs, start=1):
+        start = len(problems)
+        shards.append(read_shard(reader, k, len(dirs), directory))
+        problems[start:] = [(reason, f"shard {k}: {detail}") for reason, detail in problems[start:]]
+    return shards
+
+
+def shards_completeness(reader: PhaseReader | None, dirs: list, expected: set, problems: list) -> tuple:
+    """(counts, differences or None) of N shard directories; each problem names its shard."""
+    shards = read_shards(reader, dirs) if reader is not None else []
+    counts = {phase.name: phase_counts(phase) for shard in shards if shard for phase in shard["phases"]}
+    usable = shards and None not in shards and not problems
+    return counts, (shard_differences(shards, expected) if usable else None)
 
 
 def completeness_summary(verdict: dict) -> str:
@@ -965,10 +1128,11 @@ def completeness_summary(verdict: dict) -> str:
 
 @dataclass
 class CompletenessInputs:
-    candidate_dir: Path
+    candidate_dir: Path | None
     constraints: Path
     expected_skips: Path
     meta: dict
+    shard_dirs: list = field(default_factory=list)
 
 
 def evaluate_completeness(inputs: CompletenessInputs) -> dict:
@@ -983,15 +1147,20 @@ def evaluate_completeness(inputs: CompletenessInputs) -> dict:
         problems.append(("unreadable_constraints", f"{inputs.constraints}: {exc}"))
     own = own_tool_problems(pins)
     problems.extend(own)
-    serial = parallel = None
+    serial = parallel = reader = None
     if not (own and own[0][0] == "pytest_unavailable"):
         reader = PhaseReader(pins, junit_key_function(),
                              (inputs.meta.get("run_id"), inputs.meta.get("run_attempt")), problems)
-        serial = reader.load(inputs.candidate_dir, "serial")
-        parallel = reader.load(inputs.candidate_dir, "parallel")
-    counts = {"serial": phase_counts(serial), "parallel": phase_counts(parallel)}
-    differences = (completeness_differences(serial, parallel, expected)
-                   if serial is not None and parallel is not None and not problems else None)
+    if inputs.shard_dirs:
+        verdict["shards"] = len(inputs.shard_dirs)
+        counts, differences = shards_completeness(reader, inputs.shard_dirs, expected, problems)
+    else:
+        if reader is not None:
+            serial = reader.load(inputs.candidate_dir, "serial")
+            parallel = reader.load(inputs.candidate_dir, "parallel")
+        counts = {"serial": phase_counts(serial), "parallel": phase_counts(parallel)}
+        differences = (completeness_differences(serial, parallel, expected)
+                       if serial is not None and parallel is not None and not problems else None)
     verdict.update(counts=counts, differences=differences,
                    invalid_evidence=[{"reason": reason, "detail": detail} for reason, detail in problems])
     has_differences = any(differences.values()) if differences else False
@@ -1002,9 +1171,10 @@ def evaluate_completeness(inputs: CompletenessInputs) -> dict:
 
 def _cmd_completeness(args) -> int:
     inputs = CompletenessInputs(
-        candidate_dir=Path(args.candidate),
+        candidate_dir=Path(args.candidate) if args.candidate else None,
         constraints=Path(args.constraints),
         expected_skips=Path(args.expected_skips),
+        shard_dirs=[Path(d) for d in args.shard_dir or []],
         meta={"head_sha": args.head_sha, "tested_sha": args.tested_sha, "run_id": args.run_id,
               "run_attempt": args.run_attempt, "event": args.event, "ref": args.ref},
     )
@@ -1046,7 +1216,10 @@ def summary_markdown(verdict: dict) -> str:
     ]
     if verdict["verdict"] == "not_applicable":
         return "\n".join(lines) + "\n"
-    lines.append(f"Selection fingerprint: `{verdict.get('selection_fingerprint')}`")
+    if verdict.get("candidate_shape") == "shards":
+        lines.append(f"Candidate: {verdict.get('shards')} Profile A shards; the selection proof is the partition rule.")
+    else:
+        lines.append(f"Selection fingerprint: `{verdict.get('selection_fingerprint')}`")
     lines.append("")
     for problem in verdict["invalid_evidence"]:
         lines.append(f"- invalid evidence `{problem['reason']}`: {problem['detail']}")
@@ -1101,14 +1274,15 @@ def _cmd_compare(args) -> int:
     }
     inputs = CompareInputs(
         reference_dir=Path(args.reference),
-        candidate_dir=Path(args.candidate),
+        candidate_dir=Path(args.candidate) if args.candidate else None,
         constraints=Path(args.constraints),
-        args_dir=Path(args.args_dir) if args.args_dir else None,
+        args_dir=Path(args.args_dir) if args.args_dir and not args.shard_dir else None,
         workspace_root=args.workspace_root,
         profile=args.profile,
         meta=meta,
         steps=dict(args.step or []),
         upstream=dict(args.upstream or []),
+        shard_dirs=[Path(d) for d in args.shard_dir or []],
     )
     verdict = evaluate(inputs)
     problem = _write_outputs(verdict, args.output, args.summary)
@@ -1133,11 +1307,14 @@ def _parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
     cmp = sub.add_parser("compare", help="compare the reference with the candidate and write the verdict")
     cmp.add_argument("--reference", required=True, help="directory with junit-full.xml and manifest-full.json")
-    cmp.add_argument("--candidate", required=True, help="directory with the shadow's phase XMLs and manifests")
+    shape = cmp.add_mutually_exclusive_group(required=True)
+    shape.add_argument("--candidate", help="directory with the two-phase shape's serial and parallel XMLs and manifests")
+    shape.add_argument("--shard-dir", action="append",
+                       help="evidence directory of Profile A shard k, once per shard, in order (shard 1 holds the serial phase)")
     cmp.add_argument("--constraints", required=True, help="scripts/ci/profile_a_constraints.txt")
     cmp.add_argument("--output", required=True, help=f"path of {VERDICT_FILE}")
     cmp.add_argument("--summary", default="", help="append a markdown summary here (GITHUB_STEP_SUMMARY)")
-    cmp.add_argument("--args-dir", default="", help="this job's VNX_CI_XDIST=1 emission of the args script")
+    cmp.add_argument("--args-dir", default="", help="this job's VNX_CI_XDIST=1 emission of the args script (two-phase shape only)")
     cmp.add_argument("--workspace-root", default="", help="root stripped from the args before hashing")
     cmp.add_argument("--profile", default="", help="light or heavy, from the CI profile classifier")
     for name in ("head-sha", "tested-sha", "run-id", "run-attempt", "event", "ref"):
@@ -1150,8 +1327,10 @@ def _parser() -> argparse.ArgumentParser:
     fp.add_argument("--constraints", required=True)
     fp.add_argument("--workspace-root", required=True)
     fp.set_defaults(func=_cmd_fingerprint)
-    comp = sub.add_parser("completeness", help="check the two phases of one run against each other")
-    comp.add_argument("--candidate", required=True, help="directory with the serial and parallel manifests and XMLs")
+    comp = sub.add_parser("completeness", help="check the phases or the N shards of one run against each other")
+    where = comp.add_mutually_exclusive_group(required=True)
+    where.add_argument("--candidate", help="directory with the serial and parallel manifests and XMLs")
+    where.add_argument("--shard-dir", action="append", help="evidence directory of shard k, once per shard, in order")
     comp.add_argument("--constraints", required=True, help="scripts/ci/profile_a_constraints.txt")
     comp.add_argument("--expected-skips", required=True, help="scripts/ci/xdist_expected_skips.txt")
     comp.add_argument("--output", required=True, help=f"path of {COMPLETENESS_FILE}")

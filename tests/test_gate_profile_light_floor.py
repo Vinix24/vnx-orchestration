@@ -21,7 +21,7 @@ from gate_profile import GateProfileConfigError
 from review_seats import resolve_review_seats
 
 HEAD = "c" * 40
-STANDARD_SEATS = ("codex_gate", "kimi_gate")
+STANDARD_SEATS = ("codex_gate", "deepseek_gate")
 
 
 @pytest.fixture(autouse=True)
@@ -128,7 +128,7 @@ class TestTheFloorNeverWeakensOtherProfiles:
 
     def test_heavy_stack_is_unchanged_from_p1(self, monkeypatch):
         monkeypatch.setenv("VNX_GOVERNANCE_PROFILE", "heavy")
-        assert resolve_review_seats().seats == ("codex_gate", "kimi_gate", "claude_gate")
+        assert resolve_review_seats().seats == ("codex_gate", "deepseek_gate", "claude_gate")
 
     def test_an_invalid_profile_value_still_fails_closed(self, monkeypatch, tmp_path):
         monkeypatch.setenv("VNX_GOVERNANCE_PROFILE", "Light")
@@ -146,7 +146,7 @@ class TestAnExplicitStackWins:
         assert resolved.seats == STANDARD_SEATS and resolved.profile == "light"
 
     def test_an_operator_override_stack_with_two_seats_does_not_refuse(self, light, monkeypatch, tmp_path):
-        monkeypatch.setenv("VNX_OVERRIDE_DEFAULT_REVIEW_STACK", "codex_gate,kimi_gate")
+        monkeypatch.setenv("VNX_OVERRIDE_DEFAULT_REVIEW_STACK", ",".join(STANDARD_SEATS))
         required = _required(tmp_path, _risk(".github/workflows/ci.yml"))
         assert required.error == "" and required.seats == STANDARD_SEATS
 

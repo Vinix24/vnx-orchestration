@@ -1,1 +1,0 @@
-- The skill-discovery probe keeps the CLI stderr out of the evidence stream, so C3b is measurable, names the last stderr line when a call fails, and `--evidence-dir DIR` keeps each cell stream and stderr after the run (OI-2693).

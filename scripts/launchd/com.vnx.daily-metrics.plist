@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.vnx.daily-metrics.${VNX_PROJECT_ID}</string>
+  <!--
+    The opt-in driver of scripts/daily_metrics.py (decision 14). One job PER PROJECT:
+    the Label carries the project id, so two projects never replace each other.
+
+    Opt-in (decision 29): `vnx init` does NOT install this job. The operator installs
+    it per project with the `install` verb of `vnx daily-metrics`; removal of exactly
+    that one job follows as a verb in a later change. The family is absent from
+    REQUIRED_PER_PROJECT_FAMILIES, so no project is made to carry it.
+
+    Cadence 04:10 local (decision 14). A day D (UTC) is settled only after
+    D + 1 day + SETTLE_HOURS=2; 04:10 local is 02:10 UTC in CEST and 03:10 UTC in CET,
+    so the run never reads a day that is still open. `daily` collects the catch-up
+    window and then runs every command module that declares DAILY_STEP (propose,
+    verdict) in order, so this plist does not change when those steps land later.
+
+    Pinned start: each start runs vnx_pinned_launcher.sh from ${VNX_HOME}, which
+    resolves the project's .vnx-version and starts the engine's script from the pin.
+  -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>${VNX_HOME}/scripts/launchd/vnx_pinned_launcher.sh</string>
+    <string>${VNX_PROJECT_ID}</string>
+    <string>scripts/daily_metrics.py</string>
+    <string>daily</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key><integer>4</integer>
+    <key>Minute</key><integer>10</integer>
+  </dict>
+  <key>StandardOutPath</key><string>/tmp/vnx-daily-metrics-${VNX_PROJECT_ID}.log</string>
+  <key>StandardErrorPath</key><string>/tmp/vnx-daily-metrics-${VNX_PROJECT_ID}.err</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>VNX_HOME</key>
+    <string>${VNX_HOME}</string>
+    <key>VNX_PROJECT_ID</key>
+    <string>${VNX_PROJECT_ID}</string>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+</dict>
+</plist>

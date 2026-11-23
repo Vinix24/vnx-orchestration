@@ -50,6 +50,8 @@ _FINDINGS_SECTION_RE = re.compile(r"^## Findings[ \t]*$(.*?)(?=^## |\Z)", re.MUL
 _ADVISORY_SECTION_RE = re.compile(r"^### Advisory[ \t]*$(.*?)(?=^#{1,3} |\Z)", re.MULTILINE | re.DOTALL)
 _ADVISORY_COUNT_RE = re.compile(r"^Advisory count:[ \t]*(\d+)[ \t]*$", re.MULTILINE)
 _ADVISORY_BULLET_RE = re.compile(r"^[ \t]*-[ \t]+(.+?)[ \t]*$", re.MULTILINE)
+_HEADER_GATE_RE = re.compile(r"^\*\*Gate\*\*:[ \t]*(\S+)[ \t]*$", re.MULTILINE)
+_HEADER_PR_RE = re.compile(r"^\*\*PR\*\*:[ \t]*(\S+)[ \t]*$", re.MULTILINE)
 
 
 @dataclass(frozen=True)
@@ -97,15 +99,26 @@ def counts_from_report(report_path: Any) -> Optional[ReportCounts]:
 def counts_for_payload(payload: Mapping[str, Any]) -> Optional[ReportCounts]:
     """The counts of the verdict ``payload`` books, from its own ``report_path``.
 
-    A takeover is unknown without reading anything: the verdict the door then
-    counts was produced by a walk that took the seat over, and the plan's
-    input contract sends it to "unknown" instead of reading an earlier or
-    foreign report. Every other verdict reads exactly the report its own
-    payload names.
+    Every verdict reads exactly the report its own payload names; an earlier or
+    foreign report is never read. A takeover (OI-2701) is read only when that
+    report is provably its own: the header ``gate_artifacts`` writes carries one
+    ``**Gate**:`` line naming the payload's ``gate`` and one ``**PR**:`` line
+    naming its ``pr_number`` (it carries no head sha). Else it stays unknown.
     """
-    if payload.get("takeover") is True:
+    if payload.get("takeover") is not True:
+        return counts_from_report(payload.get("report_path"))
+    text = _read_report(payload.get("report_path"))
+    if text is None or not _header_names(text, payload.get("gate"), payload.get("pr_number")):
         return None
-    return counts_from_report(payload.get("report_path"))
+    return parse_report_counts(text)
+
+
+def _header_names(text: str, gate: Any, pr_number: Any) -> bool:
+    """Whether the header (the lines before the first ``---`` or ``## ``) names exactly this gate and PR."""
+    if not isinstance(gate, str) or not gate.strip() or not isinstance(pr_number, int) or isinstance(pr_number, bool):
+        return False
+    header = re.split(r"^(?:---[ \t]*|## .*)$", text, maxsplit=1, flags=re.MULTILINE)[0]
+    return _HEADER_GATE_RE.findall(header) == [gate.strip()] and _HEADER_PR_RE.findall(header) == [str(pr_number)]
 
 
 def _read_report(report_path: Any) -> Optional[str]:

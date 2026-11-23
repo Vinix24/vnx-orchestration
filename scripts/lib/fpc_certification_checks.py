@@ -72,6 +72,43 @@ class FPCCertificationChecksMixin:
             self._fail("1.1", "coding_interactive routes to interactive",
                        f"routed={decision.routed}, type={decision.selected_target_type}")
 
+        self._certify_routing_headless_toggle(router)
+
+        # 1.5 channel_response without inbox -> rejected
+        did = f"cert_1_5_{uuid.uuid4().hex[:8]}"
+        self._register_test_dispatch(did)
+        decision = router.route(did, "channel_response", channel_origin=None)
+        if not decision.routed and decision.escalation_reason and "R-3" in decision.escalation_reason:
+            self._pass("1.5", "channel_response without inbox rejected",
+                       f"reason={decision.escalation_reason[:80]}")
+        else:
+            self._fail("1.5", "channel_response without inbox rejected",
+                       f"routed={decision.routed}")
+
+        # 1.6 ops_watchdog prefers interactive
+        did = f"cert_1_6_{uuid.uuid4().hex[:8]}"
+        self._register_test_dispatch(did)
+        decision = router.route(did, "ops_watchdog")
+        if decision.routed and decision.selected_target_type in INTERACTIVE_TARGET_TYPES:
+            self._pass("1.6", "ops_watchdog prefers interactive",
+                       f"target_type={decision.selected_target_type}")
+        else:
+            self._fail("1.6", "ops_watchdog prefers interactive",
+                       f"routed={decision.routed}, type={decision.selected_target_type}")
+
+        # 1.7 Unknown skill -> coding_interactive
+        resolved = DispatchRouter.resolve_task_class(skill="unknown_skill_xyz")
+        if resolved == "coding_interactive":
+            self._pass("1.7", "unknown skill maps to coding_interactive",
+                       f"resolved={resolved}")
+        else:
+            self._fail("1.7", "unknown skill maps to coding_interactive",
+                       f"resolved={resolved}")
+
+        self._certify_routing_overrides(router)
+
+    def _certify_routing_headless_toggle(self, router: DispatchRouter) -> None:
+        """Rows 1.2-1.4: routing with VNX_HEADLESS_ROUTING set, restored after each row."""
         # 1.2 research_structured with headless (requires VNX_HEADLESS_ROUTING=1)
         old_val = os.environ.get("VNX_HEADLESS_ROUTING")
         os.environ["VNX_HEADLESS_ROUTING"] = "1"
@@ -129,37 +166,8 @@ class FPCCertificationChecksMixin:
             else:
                 os.environ["VNX_HEADLESS_ROUTING"] = old_val
 
-        # 1.5 channel_response without inbox -> rejected
-        did = f"cert_1_5_{uuid.uuid4().hex[:8]}"
-        self._register_test_dispatch(did)
-        decision = router.route(did, "channel_response", channel_origin=None)
-        if not decision.routed and decision.escalation_reason and "R-3" in decision.escalation_reason:
-            self._pass("1.5", "channel_response without inbox rejected",
-                       f"reason={decision.escalation_reason[:80]}")
-        else:
-            self._fail("1.5", "channel_response without inbox rejected",
-                       f"routed={decision.routed}")
-
-        # 1.6 ops_watchdog prefers interactive
-        did = f"cert_1_6_{uuid.uuid4().hex[:8]}"
-        self._register_test_dispatch(did)
-        decision = router.route(did, "ops_watchdog")
-        if decision.routed and decision.selected_target_type in INTERACTIVE_TARGET_TYPES:
-            self._pass("1.6", "ops_watchdog prefers interactive",
-                       f"target_type={decision.selected_target_type}")
-        else:
-            self._fail("1.6", "ops_watchdog prefers interactive",
-                       f"routed={decision.routed}, type={decision.selected_target_type}")
-
-        # 1.7 Unknown skill -> coding_interactive
-        resolved = DispatchRouter.resolve_task_class(skill="unknown_skill_xyz")
-        if resolved == "coding_interactive":
-            self._pass("1.7", "unknown skill maps to coding_interactive",
-                       f"resolved={resolved}")
-        else:
-            self._fail("1.7", "unknown skill maps to coding_interactive",
-                       f"resolved={resolved}")
-
+    def _certify_routing_overrides(self, router: DispatchRouter) -> None:
+        """Rows 1.8-1.9: a T0 target override to a healthy and to an unhealthy target."""
         # 1.8 T0 override to healthy target
         did = f"cert_1_8_{uuid.uuid4().hex[:8]}"
         self._register_test_dispatch(did)

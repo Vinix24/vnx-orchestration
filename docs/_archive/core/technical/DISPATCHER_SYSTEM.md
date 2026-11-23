@@ -63,7 +63,7 @@ Dispatcher V8.2 supports multiple PRs in progress simultaneously across differen
 The dispatcher uses `vnx_proc_acquire_lock()` with:
 - Atomic `mkdir` for lock acquisition
 - PID + fingerprint validation
-- **Timestamp-based stale expiry**: locks include `created_at` and `heartbeat` timestamps; locks older than `VNX_LOCK_MAX_AGE` (default 3600s) are auto-expired
+- **Timestamp-based stale expiry**: locks include `created_at` and `heartbeat` timestamps; locks older than 3600s are auto-expired
 
 ### Large Payload Transport (V8)
 

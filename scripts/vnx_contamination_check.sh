@@ -19,8 +19,7 @@
 #   vnx_contamination_check.sh --quiet               # suppress the "clean" message
 #
 # Resolution order for the scan root (when neither flag is given):
-#   1. $VNX_CENTRAL_ROOT
-#   2. $HOME/.vnx-system
+#   $HOME/.vnx-system
 #
 # Exit codes:
 #   0  no contamination found (or nothing to scan)
@@ -84,7 +83,7 @@ main() {
   if [ -n "$version_dir" ]; then
     scan_dirs+=("$version_dir")
   else
-    [ -n "$install_root" ] || install_root="${VNX_CENTRAL_ROOT:-$HOME/.vnx-system}"
+    [ -n "$install_root" ] || install_root="$HOME/.vnx-system"
     local versions_dir="$install_root/versions"
     if [ -d "$versions_dir" ]; then
       local d

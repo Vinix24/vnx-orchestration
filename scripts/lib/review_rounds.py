@@ -69,8 +69,9 @@ enforceable:
   verdict line also carries ``warning_count`` and ``prescan_notice_count``,
   read from that verdict's own report (``review_report_counts``) and never from
   an earlier run on the PR. The field is absent when the count is unknown -- an
-  old line, a missing or unreadable report, or a takeover -- and absent is
-  never read as zero.
+  old line, a missing or unreadable report, or a takeover whose report does
+  not name its own gate and PR -- and absent is never read as zero. The
+  payload's ``model`` is booked as ``reviewer_model`` (OI-2701).
 
 Readers: ``gate_request_handler`` (refusal where a run starts),
 ``review_seat_evaluation`` (the merge door, ``vnx-gate/review``,
@@ -151,9 +152,14 @@ EVIDENCE_REANCHORED = "reanchored"
 
 VERDICT_FAIL = "fail"
 _VERDICTS = ("pass", VERDICT_FAIL)
+PARENT_CHAIN_STRING_FIELDS = (
+    "scope", "parent_head_sha", "parent_round_ref", "delta_base", "changekind", "patch_id",
+    "full_review_reason",
+)
 _STRING_FIELDS = (
     "project_id", "head_sha", "seat", "reviewer", "takeover_from", "verdict",
     "report_path", "dispatch_id", "recorded_at", "branch", "source", "reanchored_from", "granted_by",
+    "reviewer_model",
 )
 
 
@@ -371,6 +377,18 @@ class RoundLine:
     # without it reads the same way. Unknown is never zero.
     warning_count: Optional[int] = None
     prescan_notice_count: Optional[int] = None
+    # OI-2701: the payload's ``model``; ``""`` when it named none, and for an old line.
+    reviewer_model: str = ""
+    # ADR-064 besluit 4: the parent chain of a review, all optional. Empty is
+    # "not set" and is not written, so a line without them is today's line.
+    scope: str = ""
+    parent_head_sha: str = ""
+    parent_round_ref: str = ""
+    delta_base: str = ""
+    changekind: str = ""
+    patch_id: str = ""
+    full_review_reason: str = ""
+    finding_ids: Tuple[str, ...] = ()
 
     @property
     def key(self) -> Tuple[str, int, str, str]:
@@ -406,6 +424,9 @@ class RoundLine:
             record["warning_count"] = self.warning_count
         if self.prescan_notice_count is not None:
             record["prescan_notice_count"] = self.prescan_notice_count
+        if self.reviewer_model:
+            record["reviewer_model"] = self.reviewer_model
+        record.update(parent_chain_record(self.__dict__))
         return record
 
     @classmethod
@@ -432,6 +453,7 @@ class RoundLine:
         return cls(
             pr_number=pr_number, blocking_count=blocking, override=override,
             warning_count=warning, prescan_notice_count=notices, **values,
+            **parse_parent_chain(data),
         )
 
 
@@ -488,6 +510,41 @@ class OpenedLine:
 
 def _is_int(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
+
+
+def parse_parent_chain(data: Dict[str, Any]) -> Dict[str, Any]:
+    """The parent-chain fields present in ``data`` (ADR-064 besluit 4); absent ones are left out.
+
+    A present field of the wrong type is no line: it raises ``ValueError``.
+    """
+    values: Dict[str, Any] = {}
+    for name in PARENT_CHAIN_STRING_FIELDS:
+        if name not in data or data[name] is None:
+            continue
+        if not isinstance(data[name], str):
+            raise ValueError(f"field {name!r} is not a string")
+        values[name] = data[name]
+    ids = data.get("finding_ids")
+    if ids is not None:
+        if not isinstance(ids, (list, tuple)) or not all(isinstance(i, str) for i in ids):
+            raise ValueError("finding_ids must be a list of strings")
+        values["finding_ids"] = tuple(ids)
+    return values
+
+
+def parent_chain_record(data: Dict[str, Any]) -> Dict[str, Any]:
+    """The parent-chain keys of ``data`` that are set, ready to write; empty when none is.
+
+    The one place a ledger line and a request record take these fields, so
+    neither writes a key a reader that ignores them would trip on. ``data``
+    carries facts already computed (the ``patch_id`` is a value, never a git
+    call), so nothing here runs under the ledger lock.
+    """
+    chain = parse_parent_chain(data)
+    record: Dict[str, Any] = {k: v for k, v in chain.items() if k != "finding_ids" and v}
+    if chain.get("finding_ids"):
+        record["finding_ids"] = list(chain["finding_ids"])
+    return record
 
 
 def _optional_count(data: Dict[str, Any], name: str) -> Optional[int]:
@@ -1508,8 +1565,9 @@ def line_from_payload(payload: Dict[str, Any], *, gate: str, project_id: str) ->
     takeover_from = str(payload.get("takeover_from") or "") if payload.get("takeover") is True else ""
     override = payload.get("override_b3")
     # OI-2476: this verdict's own report, never an earlier run's. Unknown stays
-    # ``None`` and is not written; a takeover books unknown (review_report_counts).
+    # ``None`` and is not written; so is a takeover whose report is not its own.
     counts = counts_for_payload(payload)
+    model = payload.get("model")
     return RoundLine(
         project_id=project_id, pr_number=pr_number, head_sha=head_sha,
         seat=payload_seat(gate, payload), reviewer=gate, takeover_from=takeover_from,
@@ -1522,6 +1580,8 @@ def line_from_payload(payload: Dict[str, Any], *, gate: str, project_id: str) ->
         reanchored_from=reanchored_from(payload),
         warning_count=counts.warnings if counts is not None else None,
         prescan_notice_count=counts.notices if counts is not None else None,
+        reviewer_model=model.strip() if isinstance(model, str) else "",
+        **parse_parent_chain(payload),
     )
 
 

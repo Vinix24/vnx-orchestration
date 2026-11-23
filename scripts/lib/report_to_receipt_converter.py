@@ -942,13 +942,21 @@ def _run_fail_closed_checks(
     violations: List[str] = []
 
     # Check 1: v1 frontmatter validation
+    # The import sits in its own try: an unbound SchemaViolation in the handler
+    # below crashed the whole converter (OI-2975). A missing module is a named
+    # violation, never a skip.
     try:
         from unified_report_schema import validate_frontmatter, SchemaViolation
-        validate_frontmatter(text)
-    except SchemaViolation as exc:
-        violations.append(f"frontmatter_v1: {exc}")
-    except ImportError:
-        pass  # schema module not available — skip check rather than crash
+    except ImportError as exc:
+        violations.append(
+            f"frontmatter_v1: schema module unavailable "
+            f"({type(exc).__name__}: {str(exc)[:120]})"
+        )
+    else:
+        try:
+            validate_frontmatter(text)
+        except SchemaViolation as exc:
+            violations.append(f"frontmatter_v1: {exc}")
 
     # Check 2: body contract headings (re-verify via the existing validator)
     if not body_result.valid:
@@ -1207,7 +1215,6 @@ def _build_receipt_from_report_core(
     # Check if dispatch_id comes from report content (frontmatter or body fields).
     # A filename-derived dispatch_id is NOT authoritative and is treated as a
     # contract violation — it must not produce a clean task_complete receipt.
-    content_dispatch_id: Optional[str] = merged.get("dispatch_id") or None
     # OI-1122: a growing deny-list ("unknown"/"none"/"null") never covers a
     # template placeholder echoed back verbatim (`Dispatch-ID: <dispatch_id>`)
     # — the literal string isn't in the list, so it was adopted as the real
@@ -1217,24 +1224,11 @@ def _build_receipt_from_report_core(
     # never have been a real dispatch_id to begin with. A shape failure is
     # treated identically to a missing id — it falls through to the filename
     # fallback and the existing OI-1102 register cross-check below, not a
-    # new rejection path of its own.
-    content_id_valid = bool(
-        content_dispatch_id
-        and content_dispatch_id.lower() not in ("unknown", "none", "null")
-        and _ID_RE.match(content_dispatch_id)
+    # new rejection path of its own. The body contract is validated and all
+    # contract violations are collected before deciding the receipt type.
+    content_dispatch_id, content_id_valid, body_result, contract_violations = (
+        _report_contract_violations(merged, text, validate_body, _ID_RE)
     )
-
-    # Validate body against the report body contract.
-    body_result = validate_body(text)
-
-    # Collect all contract violations before deciding the receipt type.
-    contract_violations: List[str] = []
-    if not content_id_valid:
-        contract_violations.append("missing_content_dispatch_id")
-    if not body_result.valid:
-        contract_violations.extend(body_result.missing)
-        if body_result.placeholder:
-            contract_violations.append("placeholder_summary")
 
     # Resolve the best available dispatch_id.  For contract-invalid receipts
     # we fall back to the filename so the audit trail has a key.
@@ -1296,20 +1290,14 @@ def _build_receipt_from_report_core(
         dispatch_id, merged, state_dir, contract_violations,
     )
 
-    base: Dict[str, Any] = {
-        "dispatch_id": dispatch_id,
-        # Receipt-quality PR-3: converter receipts are dispatch-lane outcomes
-        # (closed-set receipt_kind; the emit-time lint raises on untagged).
-        "receipt_kind": "dispatch",
-        # Receipt-quality PR-4: real role from dispatch_metadata via the
-        # resolver; fail-open to identity_unresolved (never unknown / fake).
-        "role": _resolve_report_role(dispatch_id, merged, state_dir),
-        "terminal": merged.get("terminal", "unknown"),
-        "provider": _resolved_provider,
-        "model": _resolved_model,
-        "timestamp": timestamp,
-        "report_path": canonical_report_path,
-    }
+    base = _report_receipt_base(
+        dispatch_id, merged, state_dir, _resolved_provider, _resolved_model,
+        timestamp, canonical_report_path,
+    )
+    # Receipt-quality PR-3: converter receipts are dispatch-lane outcomes
+    # (closed-set receipt_kind; the emit-time lint raises on untagged).
+    # Receipt-quality PR-4: real role from dispatch_metadata via the
+    # resolver; fail-open to identity_unresolved (never unknown / fake).
     # OI-1408: task_id is NOT part of the receipt_kind="dispatch" field
     # contract (append_receipt_internals/validation.py::
     # _validate_dispatch_field_contract). Measured across every dispatch
@@ -1320,11 +1308,6 @@ def _build_receipt_from_report_core(
     # dispatch_id. Fabricating "unknown" every time is worse than omitting
     # the key: it reads as data. Carry the field through ONLY when the
     # report itself declares a real, non-sentinel value.
-    real_task_id = str(merged.get("task_id") or "").strip()
-    if real_task_id and real_task_id.lower() not in {
-        "unknown", "none", "null", "n/a", "na", "unset", "-",
-    }:
-        base["task_id"] = real_task_id
 
     # OI-1035 fail-closed gate: when the report claims a terminal success
     # status, all three validation checks must pass before a success receipt
@@ -1332,48 +1315,23 @@ def _build_receipt_from_report_core(
     # with a queryable reason — never a silent skip and never the pre-existing
     # "contract_invalid" bucket (which received 96 hits in 7 days and is
     # invisible to any alarm).
-    status_raw = (merged.get("status") or "").strip().lower()
-    status_derived = False
-    if not status_raw:
-        # OI-1408: schemas/unified_report_v1.json REQUIRES exit_code but never
-        # required status — a schema-valid v1 report can carry no status field
-        # at all (measured: 20260823-alpha-a1-ledger-health-cadans.md, exit_code:
-        # 0, no status key). Falling straight through to "no_signal" ignored an
-        # answer sitting two lines above the missing status. Derive the outcome
-        # from exit_code before treating the report as signal-less — this feeds
-        # the SAME canonical vocabulary below (resolve_status_category), not a
-        # second mapping.
-        exit_code_raw = merged.get("exit_code")
-        if exit_code_raw is not None:
-            try:
-                exit_code = int(str(exit_code_raw).strip())
-            except (TypeError, ValueError):
-                exit_code = None
-            if exit_code is not None:
-                status_raw = "success" if exit_code == 0 else "failed"
-                logger.info(
-                    "report_to_receipt_converter: dispatch=%s no status field — "
-                    "derived status=%r from exit_code=%d",
-                    dispatch_id, status_raw, exit_code,
-                )
-    if not status_raw:
-        # No status and no usable exit_code. The report still says something:
-        # one that satisfies the body contract and declares no failure
-        # delivered its deliverable (the definition dispatch_govern already
-        # applies, OI-1202). Before this step such a report landed as
-        # ``no_signal`` beside a same-shaped report that happened to carry an
-        # exit_code, and the quality score excluded it. Derived, not declared:
-        # the receipt says so (``status_source``). A DECLARED status, the
-        # literal ``unknown`` included, is a claim and is never re-derived.
-        derived = resolve_undeclared_status(status_raw, body_valid=body_result.valid)
-        if derived is not None:
-            status_raw = derived
-            status_derived = True
-            logger.info(
-                "report_to_receipt_converter: dispatch=%s no status and no "
-                "exit_code, derived status=%r from the report contract",
-                dispatch_id, status_raw,
-            )
+    # OI-1408: schemas/unified_report_v1.json REQUIRES exit_code but never
+    # required status — a schema-valid v1 report can carry no status field
+    # at all (measured: 20260823-alpha-a1-ledger-health-cadans.md, exit_code:
+    # 0, no status key). Falling straight through to "no_signal" ignored an
+    # answer sitting two lines above the missing status. Derive the outcome
+    # from exit_code before treating the report as signal-less — this feeds
+    # the SAME canonical vocabulary below (resolve_status_category), not a
+    # second mapping.
+    # No status and no usable exit_code. The report still says something:
+    # one that satisfies the body contract and declares no failure
+    # delivered its deliverable (the definition dispatch_govern already
+    # applies, OI-1202). Before this step such a report landed as
+    # ``no_signal`` beside a same-shaped report that happened to carry an
+    # exit_code, and the quality score excluded it. Derived, not declared:
+    # the receipt says so (``status_source``). A DECLARED status, the
+    # literal ``unknown`` included, is a claim and is never re-derived.
+    status_raw, status_derived = _derive_report_status(merged, dispatch_id, body_result)
     try:
         status_category = resolve_status_category(status_raw)
     except UnknownStatusError:
@@ -1381,24 +1339,9 @@ def _build_receipt_from_report_core(
         # canonical list is refused as a failure, never adopted as a quiet
         # no-signal receipt. A new literal must enter the canonical vocabulary
         # first; an unknown one is evidence of a typo or an unvetted emitter.
-        logger.warning(
-            "report_to_receipt_converter: unknown status dispatch=%s status=%r: refusing",
-            dispatch_id, status_raw,
+        return _unknown_status_receipt(
+            base, dispatch_id, status_raw, ambiguous_report, resolved,
         )
-        receipt_out: Dict[str, Any] = {
-            **base,
-            "event_type": "task_failed",
-            "status": "failed",
-            "failure_reason": "unknown_status",
-            "unknown_status": status_raw,
-        }
-        if ambiguous_report:
-            receipt_out["ambiguous_report_path"] = True
-            receipt_out["report_path_candidates"] = [
-                {"path": str(c), "size": resolved.candidate_sizes[str(c)]}
-                for c in resolved.candidates_found
-            ] if resolved is not None else []
-        return receipt_out
 
     is_terminal_success = status_category == "success" and not status_derived
 
@@ -1407,27 +1350,11 @@ def _build_receipt_from_report_core(
         # verified PR, a branch on origin) do not apply to it: the report
         # made no assertion for them to refute. Delivery stays the merge
         # gate's evidence.
-        fail_closed_violations = _run_fail_closed_checks(
-            text, dispatch_id, body_result, merged=merged,
+        receipt_out = _fail_closed_receipt(
+            base, text, dispatch_id, status_raw, body_result, merged,
+            ambiguous_report, resolved,
         )
-        if fail_closed_violations:
-            logger.warning(
-                "report_to_receipt_converter: fail-closed REJECTION dispatch=%s "
-                "status=%s violations=%s",
-                dispatch_id, status_raw, fail_closed_violations,
-            )
-            receipt_out: Dict[str, Any] = {
-                **base,
-                "event_type": "task_failed",
-                "status": "failure",
-                "fail_closed_violations": fail_closed_violations,
-            }
-            if ambiguous_report:
-                receipt_out["ambiguous_report_path"] = True
-                receipt_out["report_path_candidates"] = [
-                    {"path": str(c), "size": resolved.candidate_sizes[str(c)]}
-                    for c in resolved.candidates_found
-                ] if resolved is not None else []
+        if receipt_out is not None:
             return receipt_out
 
     # OI-1130: a report that declares an explicit terminal FAILURE status is
@@ -1446,12 +1373,7 @@ def _build_receipt_from_report_core(
         failure_reason = str(merged.get("failure_reason") or "").strip()
         if failure_reason:
             receipt_out["failure_reason"] = failure_reason
-        if ambiguous_report:
-            receipt_out["ambiguous_report_path"] = True
-            receipt_out["report_path_candidates"] = [
-                {"path": str(c), "size": resolved.candidate_sizes[str(c)]}
-                for c in resolved.candidates_found
-            ] if resolved is not None else []
+        _stamp_ambiguous_report(receipt_out, ambiguous_report, resolved)
         return receipt_out
 
     if contract_violations:
@@ -1466,12 +1388,7 @@ def _build_receipt_from_report_core(
             "status": "contract_invalid",
             "contract_violations": contract_violations,
         }
-        if ambiguous_report:
-            receipt_out["ambiguous_report_path"] = True
-            receipt_out["report_path_candidates"] = [
-                {"path": str(c), "size": resolved.candidate_sizes[str(c)]}
-                for c in resolved.candidates_found
-            ] if resolved is not None else []
+        _stamp_ambiguous_report(receipt_out, ambiguous_report, resolved)
         return receipt_out
 
     # OI-1408: even with the exit_code fallback above, a report can still
@@ -1486,17 +1403,158 @@ def _build_receipt_from_report_core(
     }
     if status_derived:
         receipt["status_source"] = DERIVED_STATUS_SOURCE
+    _stamp_ambiguous_report(receipt, ambiguous_report, resolved)
+    if state_dir and dispatch_id:
+        route_dec = _load_route_decision(dispatch_id, state_dir)
+        if route_dec:
+            receipt["route_decision"] = route_dec
+    return receipt
+
+
+def _report_contract_violations(
+    merged: Dict[str, Any], text: str, validate_body: Any, id_re: Any,
+) -> Tuple[Optional[str], bool, Any, List[str]]:
+    """Content-side dispatch_id validity plus the body-contract violations.
+
+    Returns ``(content_dispatch_id, content_id_valid, body_result,
+    contract_violations)``; see the OI-1122 comment at the call site.
+    """
+    content_dispatch_id: Optional[str] = merged.get("dispatch_id") or None
+    content_id_valid = bool(
+        content_dispatch_id
+        and content_dispatch_id.lower() not in ("unknown", "none", "null")
+        and id_re.match(content_dispatch_id)
+    )
+
+    # Validate body against the report body contract.
+    body_result = validate_body(text)
+
+    # Collect all contract violations before deciding the receipt type.
+    contract_violations: List[str] = []
+    if not content_id_valid:
+        contract_violations.append("missing_content_dispatch_id")
+    if not body_result.valid:
+        contract_violations.extend(body_result.missing)
+        if body_result.placeholder:
+            contract_violations.append("placeholder_summary")
+    return content_dispatch_id, content_id_valid, body_result, contract_violations
+
+
+def _report_receipt_base(
+    dispatch_id: str, merged: Dict[str, Any], state_dir: Optional[Path],
+    provider: str, model: str, timestamp: Any, canonical_report_path: str,
+) -> Dict[str, Any]:
+    """The shared receipt fields, plus ``task_id`` only when the report
+    declares a real, non-sentinel value (OI-1408, see the call site)."""
+    base: Dict[str, Any] = {
+        "dispatch_id": dispatch_id,
+        "receipt_kind": "dispatch",
+        "role": _resolve_report_role(dispatch_id, merged, state_dir),
+        "terminal": merged.get("terminal", "unknown"),
+        "provider": provider,
+        "model": model,
+        "timestamp": timestamp,
+        "report_path": canonical_report_path,
+    }
+    real_task_id = str(merged.get("task_id") or "").strip()
+    if real_task_id and real_task_id.lower() not in {
+        "unknown", "none", "null", "n/a", "na", "unset", "-",
+    }:
+        base["task_id"] = real_task_id
+    return base
+
+
+def _derive_report_status(
+    merged: Dict[str, Any], dispatch_id: str, body_result: Any,
+) -> Tuple[str, bool]:
+    """``(status_raw, status_derived)``: declared, else from exit_code, else from
+    the report contract (only this sets ``status_derived``; see the call site)."""
+    status_raw = (merged.get("status") or "").strip().lower()
+    status_derived = False
+    if not status_raw:
+        exit_code_raw = merged.get("exit_code")
+        if exit_code_raw is not None:
+            try:
+                exit_code = int(str(exit_code_raw).strip())
+            except (TypeError, ValueError):
+                exit_code = None
+            if exit_code is not None:
+                status_raw = "success" if exit_code == 0 else "failed"
+                logger.info(
+                    "report_to_receipt_converter: dispatch=%s no status field — "
+                    "derived status=%r from exit_code=%d",
+                    dispatch_id, status_raw, exit_code,
+                )
+    if not status_raw:
+        derived = resolve_undeclared_status(status_raw, body_valid=body_result.valid)
+        if derived is not None:
+            status_raw = derived
+            status_derived = True
+            logger.info(
+                "report_to_receipt_converter: dispatch=%s no status and no "
+                "exit_code, derived status=%r from the report contract",
+                dispatch_id, status_raw,
+            )
+    return status_raw, status_derived
+
+
+def _stamp_ambiguous_report(
+    receipt: Dict[str, Any], ambiguous_report: bool, resolved: Any,
+) -> None:
+    """OI-989/OI-993: stamp the ambiguity flag and every candidate path."""
     if ambiguous_report:
         receipt["ambiguous_report_path"] = True
         receipt["report_path_candidates"] = [
             {"path": str(c), "size": resolved.candidate_sizes[str(c)]}
             for c in resolved.candidates_found
         ] if resolved is not None else []
-    if state_dir and dispatch_id:
-        route_dec = _load_route_decision(dispatch_id, state_dir)
-        if route_dec:
-            receipt["route_decision"] = route_dec
-    return receipt
+
+
+def _unknown_status_receipt(
+    base: Dict[str, Any], dispatch_id: str, status_raw: str,
+    ambiguous_report: bool, resolved: Any,
+) -> Dict[str, Any]:
+    """Refuse a status literal outside the canonical vocabulary as a failure."""
+    logger.warning(
+        "report_to_receipt_converter: unknown status dispatch=%s status=%r: refusing",
+        dispatch_id, status_raw,
+    )
+    receipt_out: Dict[str, Any] = {
+        **base,
+        "event_type": "task_failed",
+        "status": "failed",
+        "failure_reason": "unknown_status",
+        "unknown_status": status_raw,
+    }
+    _stamp_ambiguous_report(receipt_out, ambiguous_report, resolved)
+    return receipt_out
+
+
+def _fail_closed_receipt(
+    base: Dict[str, Any], text: str, dispatch_id: str, status_raw: str,
+    body_result: Any, merged: Dict[str, Any], ambiguous_report: bool,
+    resolved: Any,
+) -> Optional[Dict[str, Any]]:
+    """OI-1035: the rejection receipt for a success claim that fails a
+    fail-closed check, or None when every check passes."""
+    fail_closed_violations = _run_fail_closed_checks(
+        text, dispatch_id, body_result, merged=merged,
+    )
+    if not fail_closed_violations:
+        return None
+    logger.warning(
+        "report_to_receipt_converter: fail-closed REJECTION dispatch=%s "
+        "status=%s violations=%s",
+        dispatch_id, status_raw, fail_closed_violations,
+    )
+    receipt_out: Dict[str, Any] = {
+        **base,
+        "event_type": "task_failed",
+        "status": "failure",
+        "fail_closed_violations": fail_closed_violations,
+    }
+    _stamp_ambiguous_report(receipt_out, ambiguous_report, resolved)
+    return receipt_out
 
 
 # ---------------------------------------------------------------------------
@@ -1840,6 +1898,91 @@ def _convert_one_detailed(
     if receipt is None:
         return None, "malformed"
 
+    _guard_did = receipt.get("dispatch_id")
+    _guard_matched = _completion_already_booked(receipt, receipts_file)
+
+    # The sync call sits outside the OSError-scoped try of
+    # _completion_already_booked and outside
+    # any handler that reads a specific exception attribute (see the
+    # append_receipt_payload try/except below): a sync-branch failure of
+    # ANY shape must never be mistaken for — or swallowed alongside — an
+    # NDJSON-read or booking failure. _sync_report_open_items() never raises
+    # on its own (it self-guards and logs), so this call is a plain
+    # statement, not a try body.
+    if _guard_matched:
+        if not dry_run:
+            _sync_report_open_items(receipt, text)
+        return AppendResult(
+            status="duplicate",
+            receipts_file=Path(receipts_file),
+            idempotency_key=_guard_did,
+        ), "duplicate"
+
+    if dry_run:
+        return _dry_run_outcome(
+            receipt, report_path, AppendReceiptError,
+            rejected_detail_sink, error_reason_sink,
+        )
+
+    # The booking call and its AppendReceiptError/.code handling are scoped
+    # to this try alone. The open-items sync runs strictly AFTER this block
+    # returns a result, never inside it — a sync-branch failure (of any
+    # shape, with or without a .code attribute) must never be caught by a
+    # handler that assumes every exception here is an AppendReceiptError.
+    try:
+        result = append_receipt_payload(
+            receipt,
+            receipts_file=receipts_file,
+            cache_window_seconds=cache_window_seconds,
+            # skip_enrichment covers the quality advisory hooks and the
+            # provenance/session/cqs enrichment. The confidence update is an
+            # outcome hook and runs regardless: a converter receipt is the
+            # only outcome record a dispatch gets when the lane wrote none.
+            skip_enrichment=True,
+        )
+    except AppendReceiptError as exc:
+        if exc.code in MODEL_REFUSAL_CODES:
+            # receipt_conversion_rejection_beacon.parse_rejections keys on the
+            # exact "REJECTED (fail-closed) dispatch=... file=... reason=..."
+            # shape of this line: every model refusal logs it, whatever its code.
+            logger.warning(
+                "report_to_receipt_converter: REJECTED (fail-closed) dispatch=%s file=%s reason=%s",
+                receipt.get("dispatch_id"), report_path.name, exc.message,
+            )
+            _note_rejected_detail(rejected_detail_sink, receipt, report_path, exc.message)
+            # A model refusal (no model, or a value that is not a model name)
+            # is a verdict on the report's bytes: no later scan can turn it
+            # into a receipt, so keeping the file in the scanned directory
+            # only re-fails the beacon on every scan and buries the next new
+            # refusal under an alarm that is already on.
+            # Quarantine, not deletion: the report stays readable in
+            # receipt_deadletter/ and an operator can put it back once the
+            # model has been fixed (new bytes, new hash, so the watermark entry
+            # _deadletter_report leaves does not shadow it). The INDEX line
+            # carries the refusal's own code. Only when the state dir is
+            # known, the same guard as the unknown_dispatch quarantine; a
+            # caller without receipts_file leaves the report for the next
+            # directory scan to quarantine.
+            if state_dir_for_route is not None:
+                _deadletter_report(report_path, exc.code, state_dir_for_route)
+            return None, "rejected"
+        logger.warning(
+            "report_to_receipt_converter: append failed for %s: %s",
+            report_path.name, exc,
+        )
+        return _error_outcome(error_reason_sink, f"append failed: {exc.code}")
+    except Exception as exc:
+        logger.warning(
+            "report_to_receipt_converter: append failed for %s: %s",
+            report_path.name, exc,
+        )
+        return _error_outcome(error_reason_sink, f"append failed: {type(exc).__name__}")
+
+    return _booked_outcome(result, receipt, text, report_path, error_reason_sink)
+
+
+def _completion_already_booked(receipt: Dict[str, Any], receipts_file: Optional[str]) -> bool:
+    """True when *receipts_file* already holds the completion line *receipt* would book."""
     # OI-1017/OI-1048 guard: when the envelope hot-path already wrote a
     # receipt for this dispatch (binding body-contract enforcement landed
     # before the converter's periodic sweep), skip the append to avoid
@@ -1900,139 +2043,70 @@ def _convert_one_detailed(
                     break
         except OSError:
             pass  # can't read NDJSON — fall through to normal append (idempotency will catch it)
+    return _guard_matched
 
-    # The sync call sits outside the OSError-scoped try above and outside
-    # any handler that reads a specific exception attribute (see the
-    # append_receipt_payload try/except below): a sync-branch failure of
-    # ANY shape must never be mistaken for — or swallowed alongside — an
-    # NDJSON-read or booking failure. _sync_report_open_items() never raises
-    # on its own (it self-guards and logs), so this call is a plain
-    # statement, not a try body.
-    if _guard_matched:
-        if not dry_run:
-            _sync_report_open_items(receipt, text)
-        return AppendResult(
-            status="duplicate",
-            receipts_file=Path(receipts_file),
-            idempotency_key=_guard_did,
-        ), "duplicate"
 
-    if dry_run:
-        # OI-1744: a dry run must measure what a real scan would WRITE — and
-        # a report whose receipt fails the append-time fail-closed validation
-        # (append_receipt_internals/validation.py::_validate_receipt →
-        # _validate_model_present et al.) writes NOTHING on a real run.
-        # Before this check, dry-run reported every buildable receipt as
-        # "would_append", counting would-be REJECTED reports as future
-        # bookings (measured on the vnx-dev backlog 2026-09-20: reports still
-        # missing a real model — the 14 F1-3 could not restore — counted as
-        # "would book"). Run the same PURE validation append_receipt_payload()
-        # runs and mirror the real path's outcome mapping exactly
-        # (missing_model -> "rejected", any other AppendReceiptError ->
-        # "error"), so a dry-run count is a faithful preview, not an
-        # overestimate. _validate_receipt writes nothing — it only raises.
-        # (Model refusals are the codes in MODEL_REFUSAL_CODES.)
-        try:
-            from append_receipt_internals.validation import (  # noqa: PLC0415
-                _validate_receipt,
-            )
-            _validate_receipt(receipt)
-        except AppendReceiptError as exc:
-            if exc.code in MODEL_REFUSAL_CODES:
-                logger.warning(
-                    "report_to_receipt_converter: [dry-run] REJECTED (fail-closed) "
-                    "dispatch=%s file=%s reason=%s",
-                    receipt.get("dispatch_id"), report_path.name, exc.message,
-                )
-                if rejected_detail_sink is not None:
-                    rejected_detail_sink.append({
-                        "dispatch_id": str(receipt.get("dispatch_id") or ""),
-                        "file": report_path.name,
-                        "reason": exc.message,
-                        "rejected_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-                    })
-                return None, "rejected"
-            logger.warning(
-                "report_to_receipt_converter: [dry-run] append validation failed "
-                "for %s: %s",
-                report_path.name, exc,
-            )
-            return _error_outcome(error_reason_sink, f"dry-run append validation failed: {exc.code}")
-        except Exception as exc:
-            logger.warning(
-                "report_to_receipt_converter: [dry-run] append validation crashed "
-                "for %s: %s: %s",
-                report_path.name, type(exc).__name__, exc,
-            )
-            return _error_outcome(error_reason_sink, f"dry-run append validation crashed: {type(exc).__name__}")
-        logger.info(
-            "report_to_receipt_converter: [dry-run] would book dispatch=%s "
-            "event_type=%s status=%s file=%s",
-            receipt.get("dispatch_id"), receipt.get("event_type"),
-            receipt.get("status"), report_path.name,
-        )
-        return receipt, "would_append"
-
-    # The booking call and its AppendReceiptError/.code handling are scoped
-    # to this try alone. The open-items sync runs strictly AFTER this block
-    # returns a result, never inside it — a sync-branch failure (of any
-    # shape, with or without a .code attribute) must never be caught by a
-    # handler that assumes every exception here is an AppendReceiptError.
+def _dry_run_outcome(
+    receipt: Dict[str, Any], report_path: Path, AppendReceiptError: Any,
+    rejected_detail_sink: Optional[List[Dict[str, Any]]],
+    error_reason_sink: Optional[List[str]],
+) -> Tuple[Optional[Any], str]:
+    """The dry-run outcome of a built receipt: the append-time validation, no write."""
+    # OI-1744: a dry run must measure what a real scan would WRITE — and
+    # a report whose receipt fails the append-time fail-closed validation
+    # (append_receipt_internals/validation.py::_validate_receipt →
+    # _validate_model_present et al.) writes NOTHING on a real run.
+    # Before this check, dry-run reported every buildable receipt as
+    # "would_append", counting would-be REJECTED reports as future
+    # bookings (measured on the vnx-dev backlog 2026-09-20: reports still
+    # missing a real model — the 14 F1-3 could not restore — counted as
+    # "would book"). Run the same PURE validation append_receipt_payload()
+    # runs and mirror the real path's outcome mapping exactly
+    # (missing_model -> "rejected", any other AppendReceiptError ->
+    # "error"), so a dry-run count is a faithful preview, not an
+    # overestimate. _validate_receipt writes nothing — it only raises.
+    # (Model refusals are the codes in MODEL_REFUSAL_CODES.)
     try:
-        result = append_receipt_payload(
-            receipt,
-            receipts_file=receipts_file,
-            cache_window_seconds=cache_window_seconds,
-            # skip_enrichment covers the quality advisory hooks and the
-            # provenance/session/cqs enrichment. The confidence update is an
-            # outcome hook and runs regardless: a converter receipt is the
-            # only outcome record a dispatch gets when the lane wrote none.
-            skip_enrichment=True,
+        from append_receipt_internals.validation import (  # noqa: PLC0415
+            _validate_receipt,
         )
+        _validate_receipt(receipt)
     except AppendReceiptError as exc:
         if exc.code in MODEL_REFUSAL_CODES:
-            # receipt_conversion_rejection_beacon.parse_rejections keys on the
-            # exact "REJECTED (fail-closed) dispatch=... file=... reason=..."
-            # shape of this line: every model refusal logs it, whatever its code.
             logger.warning(
-                "report_to_receipt_converter: REJECTED (fail-closed) dispatch=%s file=%s reason=%s",
+                "report_to_receipt_converter: [dry-run] REJECTED (fail-closed) "
+                "dispatch=%s file=%s reason=%s",
                 receipt.get("dispatch_id"), report_path.name, exc.message,
             )
-            if rejected_detail_sink is not None:
-                rejected_detail_sink.append({
-                    "dispatch_id": str(receipt.get("dispatch_id") or ""),
-                    "file": report_path.name,
-                    "reason": exc.message,
-                    "rejected_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-                })
-            # A model refusal (no model, or a value that is not a model name)
-            # is a verdict on the report's bytes: no later scan can turn it
-            # into a receipt, so keeping the file in the scanned directory
-            # only re-fails the beacon on every scan and buries the next new
-            # refusal under an alarm that is already on.
-            # Quarantine, not deletion: the report stays readable in
-            # receipt_deadletter/ and an operator can put it back once the
-            # model has been fixed (new bytes, new hash, so the watermark entry
-            # _deadletter_report leaves does not shadow it). The INDEX line
-            # carries the refusal's own code. Only when the state dir is
-            # known, the same guard as the unknown_dispatch quarantine; a
-            # caller without receipts_file leaves the report for the next
-            # directory scan to quarantine.
-            if state_dir_for_route is not None:
-                _deadletter_report(report_path, exc.code, state_dir_for_route)
+            _note_rejected_detail(rejected_detail_sink, receipt, report_path, exc.message)
             return None, "rejected"
         logger.warning(
-            "report_to_receipt_converter: append failed for %s: %s",
+            "report_to_receipt_converter: [dry-run] append validation failed "
+            "for %s: %s",
             report_path.name, exc,
         )
-        return _error_outcome(error_reason_sink, f"append failed: {exc.code}")
+        return _error_outcome(error_reason_sink, f"dry-run append validation failed: {exc.code}")
     except Exception as exc:
         logger.warning(
-            "report_to_receipt_converter: append failed for %s: %s",
-            report_path.name, exc,
+            "report_to_receipt_converter: [dry-run] append validation crashed "
+            "for %s: %s: %s",
+            report_path.name, type(exc).__name__, exc,
         )
-        return _error_outcome(error_reason_sink, f"append failed: {type(exc).__name__}")
+        return _error_outcome(error_reason_sink, f"dry-run append validation crashed: {type(exc).__name__}")
+    logger.info(
+        "report_to_receipt_converter: [dry-run] would book dispatch=%s "
+        "event_type=%s status=%s file=%s",
+        receipt.get("dispatch_id"), receipt.get("event_type"),
+        receipt.get("status"), report_path.name,
+    )
+    return receipt, "would_append"
 
+
+def _booked_outcome(
+    result: Any, receipt: Dict[str, Any], text: str, report_path: Path,
+    error_reason_sink: Optional[List[str]],
+) -> Tuple[Optional[Any], str]:
+    """The outcome of a real append that returned; open items sync only on a booked row."""
     # append_receipt_payload's documented contract (payload.py's own OI-948
     # guard, and its mirror in scripts/append_receipt.py main()) is: return an
     # AppendResult or raise AppendReceiptError — never return None. Every real
@@ -2057,6 +2131,20 @@ def _convert_one_detailed(
     if result.status in ("appended", "duplicate"):
         _sync_report_open_items(receipt, text)
     return result, result.status
+
+
+def _note_rejected_detail(
+    sink: Optional[List[Dict[str, Any]]], receipt: Dict[str, Any],
+    report_path: Path, reason: str,
+) -> None:
+    """Name one model refusal in *sink*: dispatch, file, reason and the time of the refusal."""
+    if sink is not None:
+        sink.append({
+            "dispatch_id": str(receipt.get("dispatch_id") or ""),
+            "file": report_path.name,
+            "reason": reason,
+            "rejected_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        })
 
 
 def convert_report_to_receipt(
@@ -2384,23 +2472,10 @@ def scan_and_convert(
     ANY stage of parsing/building/appending is caught, logged once, and the
     scan continues with the next report.
     """
-    if state_dir is None:
-        try:
-            state_dir = _resolve_state_dir()
-        except Exception as exc:
-            logger.error("report_to_receipt_converter: cannot resolve state_dir: %s", exc)
-            return ScanStats()
-
-    if not dry_run:
-        state_dir.mkdir(parents=True, exist_ok=True)
-    receipts_file = str(state_dir / "t0_receipts.ndjson")
-    watermark_path = state_dir / _WATERMARK_FILENAME
-    # OI-1102: also load the Bash processor's watermark so a report processed
-    # by the Bash lane is skipped here, and vice versa (cross-processor dedup).
-    bash_watermark_path = state_dir / _BASH_WATERMARK_FILENAME
-
-    watermark = _load_watermark(watermark_path)
-    bash_watermark = _load_watermark(bash_watermark_path)
+    opened = _open_scan_state(state_dir, dry_run)
+    if opened is None:
+        return ScanStats()
+    state_dir, receipts_file, watermark_path, watermark, bash_watermark_path, bash_watermark = opened
 
     new_count = 0
     duplicate_count = 0
@@ -2524,6 +2599,33 @@ def scan_and_convert(
     return stats
 
 
+def _open_scan_state(state_dir: Optional[Path], dry_run: bool):
+    """Resolve the state dir and load both watermarks for a scan.
+
+    Returns ``(state_dir, receipts_file, watermark_path, watermark,
+    bash_watermark_path, bash_watermark)``, or None after one ERROR line when
+    ``state_dir`` cannot be resolved. A dry run never creates ``state_dir``.
+    """
+    if state_dir is None:
+        try:
+            state_dir = _resolve_state_dir()
+        except Exception as exc:
+            logger.error("report_to_receipt_converter: cannot resolve state_dir: %s", exc)
+            return None
+
+    if not dry_run:
+        state_dir.mkdir(parents=True, exist_ok=True)
+    receipts_file = str(state_dir / "t0_receipts.ndjson")
+    watermark_path = state_dir / _WATERMARK_FILENAME
+    # OI-1102: also load the Bash processor's watermark so a report processed
+    # by the Bash lane is skipped here, and vice versa (cross-processor dedup).
+    bash_watermark_path = state_dir / _BASH_WATERMARK_FILENAME
+
+    watermark = _load_watermark(watermark_path)
+    bash_watermark = _load_watermark(bash_watermark_path)
+    return state_dir, receipts_file, watermark_path, watermark, bash_watermark_path, bash_watermark
+
+
 # ---------------------------------------------------------------------------
 # Targeted conversion — specific dispatch_ids, no directory scan
 # ---------------------------------------------------------------------------
@@ -2558,20 +2660,10 @@ def convert_dispatch_ids(
     """
     ids = [str(d).strip() for d in dispatch_ids if str(d).strip()]
 
-    if state_dir is None:
-        try:
-            state_dir = _resolve_state_dir()
-        except Exception as exc:
-            logger.error("report_to_receipt_converter: cannot resolve state_dir: %s", exc)
-            return ScanStats()
-
-    if not dry_run:
-        state_dir.mkdir(parents=True, exist_ok=True)
-    receipts_file = str(state_dir / "t0_receipts.ndjson")
-    watermark_path = state_dir / _WATERMARK_FILENAME
-    bash_watermark_path = state_dir / _BASH_WATERMARK_FILENAME
-    watermark = _load_watermark(watermark_path)
-    bash_watermark = _load_watermark(bash_watermark_path)
+    opened = _open_scan_state(state_dir, dry_run)
+    if opened is None:
+        return ScanStats()
+    state_dir, receipts_file, watermark_path, watermark, bash_watermark_path, bash_watermark = opened
 
     from report_path import resolve_report_path  # noqa: PLC0415
     from dispatch_spec import _ID_RE  # noqa: PLC0415 — canonical id-shape guard, same regex dispatch_bridge.py uses to kill path traversal before any path join
@@ -2587,43 +2679,11 @@ def convert_dispatch_ids(
     rejected_details, error_details = [], []
 
     for dispatch_id in ids:
-        # Codex finding (PR #1635): dispatch_id is caller-supplied CLI input
-        # and resolve_report_path() formats it straight into filenames — a
-        # value containing "/" or ".." could resolve reads outside
-        # unified_reports/. Validate against the same id-shape regex
-        # dispatch_bridge.stage_spec_bundle() already validates against
-        # before any path join, so there is exactly one definition of "a
-        # valid dispatch id" in the codebase. Rejected loudly (WARNING +
-        # malformed_count), never silently dropped.
-        if not _ID_RE.match(dispatch_id):
-            logger.warning(
-                "report_to_receipt_converter: --dispatch-id %r rejected — does not "
-                "match the dispatch id pattern (dispatch_spec._ID_RE); refusing to "
-                "resolve a report path from it",
-                dispatch_id,
-            )
+        located = _locate_dispatch_report(dispatch_id, data_dir, _ID_RE, resolve_report_path)
+        if located is None:
             malformed_count += 1
             continue
-        resolved = resolve_report_path(dispatch_id, data_dir=data_dir)
-        if resolved is None:
-            logger.warning(
-                "report_to_receipt_converter: --dispatch-id %s — no report file "
-                "found under %s/unified_reports",
-                dispatch_id, data_dir,
-            )
-            malformed_count += 1
-            continue
-        report_path = resolved.path
-
-        try:
-            file_hash = _compute_sha256(report_path)
-        except OSError as exc:
-            logger.warning(
-                "report_to_receipt_converter: --dispatch-id %s — cannot hash %s: %s",
-                dispatch_id, report_path, exc,
-            )
-            malformed_count += 1
-            continue
+        report_path, file_hash = located
 
         # Same cross-processor dedup as scan_and_convert(): already-processed
         # reports are silently skipped, not counted — in BOTH modes, so a
@@ -2706,6 +2766,45 @@ def convert_dispatch_ids(
     if not dry_run:
         _write_scan_heartbeat(state_dir, stats)
     return stats
+
+
+def _locate_dispatch_report(dispatch_id: str, data_dir: Path, id_re, resolve_report_path):
+    """Resolve and hash one ``--dispatch-id`` report; None (logged) when it cannot."""
+    # Codex finding (PR #1635): dispatch_id is caller-supplied CLI input
+    # and resolve_report_path() formats it straight into filenames — a
+    # value containing "/" or ".." could resolve reads outside
+    # unified_reports/. Validate against the same id-shape regex
+    # dispatch_bridge.stage_spec_bundle() already validates against
+    # before any path join, so there is exactly one definition of "a
+    # valid dispatch id" in the codebase. Rejected loudly (WARNING +
+    # malformed_count), never silently dropped.
+    if not id_re.match(dispatch_id):
+        logger.warning(
+            "report_to_receipt_converter: --dispatch-id %r rejected — does not "
+            "match the dispatch id pattern (dispatch_spec._ID_RE); refusing to "
+            "resolve a report path from it",
+            dispatch_id,
+        )
+        return None
+    resolved = resolve_report_path(dispatch_id, data_dir=data_dir)
+    if resolved is None:
+        logger.warning(
+            "report_to_receipt_converter: --dispatch-id %s — no report file "
+            "found under %s/unified_reports",
+            dispatch_id, data_dir,
+        )
+        return None
+    report_path = resolved.path
+
+    try:
+        file_hash = _compute_sha256(report_path)
+    except OSError as exc:
+        logger.warning(
+            "report_to_receipt_converter: --dispatch-id %s — cannot hash %s: %s",
+            dispatch_id, report_path, exc,
+        )
+        return None
+    return report_path, file_hash
 
 
 # ---------------------------------------------------------------------------

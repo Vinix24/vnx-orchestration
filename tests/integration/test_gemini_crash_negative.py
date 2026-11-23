@@ -5,7 +5,7 @@ Uses real Python subprocesses to simulate gemini mid-run SIGKILL without
 requiring the gemini binary. Verifies that StreamingDrainerMixin emits a
 synthetic error event on crash and that EventStore is consistent (no data loss).
 
-Only tests the streaming path (VNX_GEMINI_STREAM=1); the legacy buffered path
+Only tests the streaming path (streaming on); the legacy buffered path
 is not affected by drain_stream crash recovery.
 
 BILLING SAFETY: No Anthropic SDK. subprocess-only.
@@ -281,7 +281,7 @@ class TestGeminiCrashNegative:
         self, tmp_path: Path, monkeypatch, event_store: EventStore
     ):
         """stream_events() crash mid-run: receipt is recoverable (no unhandled exception)."""
-        monkeypatch.setenv("VNX_GEMINI_STREAM", "1")
+        monkeypatch.setattr("provider_spawns.gemini_spawn.gemini_stream_enabled", lambda: True)
         import adapters.gemini_adapter as ga_mod
 
         terminal_id = "T-se-crash"
@@ -343,7 +343,7 @@ class TestGeminiCrashNegative:
         ({"type": "error", ...}) with no event_type key. Consumers reading
         event_type saw nothing exactly on the path that matters most.
         """
-        monkeypatch.setenv("VNX_GEMINI_STREAM", "1")
+        monkeypatch.setattr("provider_spawns.gemini_spawn.gemini_stream_enabled", lambda: True)
         import adapters.gemini_adapter as ga_mod
 
         def raise_oserror(*args, **kwargs):
@@ -368,7 +368,7 @@ class TestGeminiCrashNegative:
 
     def test_stream_events_broken_pipe_yields_error_with_event_type(self, monkeypatch):
         """Adapter stdin.write BrokenPipeError → error event carrying event_type."""
-        monkeypatch.setenv("VNX_GEMINI_STREAM", "1")
+        monkeypatch.setattr("provider_spawns.gemini_spawn.gemini_stream_enabled", lambda: True)
         import adapters.gemini_adapter as ga_mod
 
         class _BrokenStdin:

@@ -55,6 +55,21 @@ TIER_STARTER_OPERATOR: FrozenSet[str] = frozenset({
     "roadmap", "insights", "objective", "horizon", "deliverable",
     "install-git-hooks", "uninstall-git-hooks", "install-shell-helper",
     "init-db", "providers", "guard", "preflight",
+    # `vnx daily-metrics` (doorloop PR-13): the read verbs (collect/daily/report)
+    # are safe in both modes, and it owns the opt-in per-project job's install.
+    # Removal of that job follows as a verb in a later change, not here. It is the
+    # only tier that fits a single command with both halves; leaving it out of
+    # every tier made the fabric gate refuse it as an unknown name (measured,
+    # same defect OI-2456 fixed for `preflight`).
+    "daily-metrics",
+    # `vnx main-window` (ADR-073 besluit 8) is the read-only probe of the window on main;
+    # in no tier the mode gate refuses it as an unknown name (OI-2456).
+    "main-window",
+    # `vnx impact` (ADR-074 besluit 8): collect keeps the CI shadow artifacts in a local ledger,
+    # report only reads it. In no tier the mode gate refuses it as an unknown name (OI-2456).
+    "impact",
+    # `vnx config` (PR-10a): list/get/explain/get --raw only read, so safe in both modes.
+    "config",
 })
 
 TIER_OPERATOR_ONLY: FrozenSet[str] = frozenset({
@@ -63,9 +78,10 @@ TIER_OPERATOR_ONLY: FrozenSet[str] = frozenset({
     "worktree-refresh", "worktree-status", "worktree-release", "merge-preflight",
     "dispatch-cleanup",
     "smoke", "package-check", "fabric-audit", "subsystems",
-    "dispatch", "gate", "gate-reanchor", "review", "dream",
+    "dispatch", "gate", "gate-reanchor", "review", "dream", "memory",
     "snapshot", "restore", "quiesce-check", "pause", "resume",
-    "pool", "release",
+    "pool", "release", "learning", "rework-attribution", "slot", "inbox",
+    "morning-round",
 })
 
 # Mode -> allowed command sets
@@ -377,33 +393,6 @@ def get_mode_description(mode: VNXMode) -> str:
         VNXMode.OPERATOR: "Full multi-agent orchestration with tmux grid, multiple providers, and all governance controls.",
     }
     return descriptions.get(mode, "Unknown mode")
-
-
-# ---------------------------------------------------------------------------
-# Feature flags for rollback control
-# ---------------------------------------------------------------------------
-
-FEATURE_FLAGS = {
-    "VNX_STARTER_MODE_ENABLED": ("1", "Enable starter mode (set '0' to disable)"),
-    "VNX_MODE_GATING_ENABLED": ("1", "Enable command gating by mode (set '0' for backward compat)"),
-}
-
-
-def is_feature_enabled(flag_name: str) -> bool:
-    """Check if a feature flag is enabled. Defaults from FEATURE_FLAGS."""
-    default, _ = FEATURE_FLAGS.get(flag_name, ("0", ""))
-    return os.environ.get(flag_name, default) == "1"
-
-
-def check_mode_feature_enabled(mode: VNXMode) -> bool:
-    """Check if the given mode is enabled via feature flags."""
-    flag_map = {
-        VNXMode.STARTER: "VNX_STARTER_MODE_ENABLED",
-    }
-    flag = flag_map.get(mode)
-    if flag is None:
-        return True  # Operator mode always enabled
-    return is_feature_enabled(flag)
 
 
 # ---------------------------------------------------------------------------

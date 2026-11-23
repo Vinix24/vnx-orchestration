@@ -1,1 +1,0 @@
-- ADR-046 amendment 1: the gate dispatch table, the lane row as the only registration (billing and `Gate` enum derived) and closure admission by kind (docs only).

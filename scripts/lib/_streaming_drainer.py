@@ -319,17 +319,7 @@ def _run_producer(
     line_buffer = b""
     start = time.monotonic()
 
-    tee_fh = None
-    if raw_tee_path is not None:
-        try:
-            raw_tee_path.parent.mkdir(parents=True, exist_ok=True)
-            tee_fh = open(raw_tee_path, "ab", buffering=0)
-        except OSError as exc:
-            logger.warning(
-                "_streaming_drainer: raw tee open failed for %s (heartbeat disabled): %s",
-                raw_tee_path, exc,
-            )
-            tee_fh = None
+    tee_fh = _open_raw_tee(raw_tee_path)
 
     try:
         while True:
@@ -369,33 +359,12 @@ def _run_producer(
                 # (`remaining`), so the log/receipt never blames a false Ns of
                 # silence — a worker that paused for 1s right as its deadline
                 # ran out must not be reported as "silent for chunk_timeout".
-                gap = remaining
-                deadline_compressed = remaining < chunk_timeout
-                logger.warning(
-                    "_streaming_drainer: %s (%.0fs) for %s",
-                    "deadline-compressed stall" if deadline_compressed else "chunk timeout",
-                    gap, terminal_id,
+                _emit_stall_error(
+                    process=process, terminal_id=terminal_id, dispatch_id=dispatch_id,
+                    event_store=event_store, chunk_timeout=chunk_timeout,
+                    total_deadline=total_deadline, remaining=remaining,
+                    result_queue=result_queue, timed_out=timed_out, provider_name=provider_name,
                 )
-                timed_out.set()
-                _kill_process(process)
-                reason = (
-                    f"total deadline reached during final stall window "
-                    f"({gap:.0f}s remaining, configured chunk_timeout={chunk_timeout:.0f}s not "
-                    f"fully elapsed)"
-                    if deadline_compressed
-                    else f"chunk timeout {chunk_timeout:.0f}s exceeded"
-                )
-                err = _make_error_event(
-                    terminal_id=terminal_id,
-                    dispatch_id=dispatch_id,
-                    provider=provider_name,
-                    raw=None,
-                    reason=reason,
-                    # OI-2066: a compressed window ended AT the total deadline.
-                    deadline_seconds=total_deadline if deadline_compressed else None,
-                )
-                _append_to_store(event_store, terminal_id, err, dispatch_id)
-                result_queue.put(err)
                 return
 
             try:
@@ -451,6 +420,57 @@ def _run_producer(
                 tee_fh.close()
             except OSError:
                 pass
+
+
+def _open_raw_tee(raw_tee_path: Optional[Path]) -> Any:
+    """The raw tee file opened for append, or None (no path, or the open failed)."""
+    tee_fh = None
+    if raw_tee_path is not None:
+        try:
+            raw_tee_path.parent.mkdir(parents=True, exist_ok=True)
+            tee_fh = open(raw_tee_path, "ab", buffering=0)
+        except OSError as exc:
+            logger.warning(
+                "_streaming_drainer: raw tee open failed for %s (heartbeat disabled): %s",
+                raw_tee_path, exc,
+            )
+            tee_fh = None
+    return tee_fh
+
+
+def _emit_stall_error(
+    *, process: subprocess.Popen, terminal_id: str, dispatch_id: str, event_store: Optional[Any],
+    chunk_timeout: float, total_deadline: float, remaining: float,
+    result_queue: "queue.Queue[Any]", timed_out: threading.Event, provider_name: str,
+) -> None:
+    """Kill the stalled child and queue its error event (chunk timeout or compressed window)."""
+    gap = remaining
+    deadline_compressed = remaining < chunk_timeout
+    logger.warning(
+        "_streaming_drainer: %s (%.0fs) for %s",
+        "deadline-compressed stall" if deadline_compressed else "chunk timeout",
+        gap, terminal_id,
+    )
+    timed_out.set()
+    _kill_process(process)
+    reason = (
+        f"total deadline reached during final stall window "
+        f"({gap:.0f}s remaining, configured chunk_timeout={chunk_timeout:.0f}s not "
+        f"fully elapsed)"
+        if deadline_compressed
+        else f"chunk timeout {chunk_timeout:.0f}s exceeded"
+    )
+    err = _make_error_event(
+        terminal_id=terminal_id,
+        dispatch_id=dispatch_id,
+        provider=provider_name,
+        raw=None,
+        reason=reason,
+        # OI-2066: a compressed window ended AT the total deadline.
+        deadline_seconds=total_deadline if deadline_compressed else None,
+    )
+    _append_to_store(event_store, terminal_id, err, dispatch_id)
+    result_queue.put(err)
 
 
 def _parse_line(

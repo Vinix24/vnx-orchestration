@@ -1504,10 +1504,24 @@ def generate_markdown_report(
     results: Dict[str, Dict], all_models: List[str], config: BenchmarkConfig,
 ) -> str:
     """Generate the full markdown comparison report."""
+    lines = _report_header_lines(results, all_models, config)
+    lines.extend(_report_summary_lines(results, all_models))
+    lines.extend(_report_speed_lines(results, all_models))
+    lines.extend(_report_per_task_lines(results, all_models))
+    lines.extend(_report_recommendation_lines(results))
+    lines.extend(["", "---", ""])
+    lines.append("*Quality scores are null (reserved for manual 1-5 review).*")
+
+    return "\n".join(lines)
+
+
+def _report_header_lines(
+    results: Dict[str, Dict], all_models: List[str], config: BenchmarkConfig,
+) -> List[str]:
+    """Title block with run id, models, mode and counts."""
     ts = datetime.now().strftime("%Y-%m-%d %H:%M")
     task_count = len(set(r["task_id"] for r in results.values()))
-
-    lines = [
+    return [
         f"# LLM Benchmark Report -- {ts}",
         "",
         f"**Run ID**: {config.run_id}",
@@ -1520,13 +1534,15 @@ def generate_markdown_report(
         "",
     ]
 
-    # -- Summary table --
-    lines.extend([
+
+def _report_summary_lines(results: Dict[str, Dict], all_models: List[str]) -> List[str]:
+    """Summary table, one row per model that has results."""
+    lines = [
         "## Summary",
         "",
         "| Model | Success | Avg Speed (tok/s) | Format OK | Completeness | Avg Time |",
         "|-------|---------|-------------------|-----------|--------------|----------|",
-    ])
+    ]
 
     for model in all_models:
         mr = [r for r in results.values() if r["model"] == model]
@@ -1544,9 +1560,12 @@ def generate_markdown_report(
         )
 
     lines.extend(["", "---", ""])
+    return lines
 
-    # -- Speed comparison chart (ASCII) --
-    lines.extend(["## Speed Comparison (tokens/second)", ""])
+
+def _report_speed_lines(results: Dict[str, Dict], all_models: List[str]) -> List[str]:
+    """ASCII speed comparison chart."""
+    lines = ["## Speed Comparison (tokens/second)", ""]
 
     # Collect average tps per model
     model_avg_tps: Dict[str, float] = {}
@@ -1568,9 +1587,12 @@ def generate_markdown_report(
         lines.append(f"  {model:<{name_width}} |{bar}| {tps:.1f} tok/s")
     lines.append("```")
     lines.extend(["", "---", ""])
+    return lines
 
-    # -- Per-task detailed results --
-    lines.extend(["## Per-Task Results", ""])
+
+def _report_per_task_lines(results: Dict[str, Dict], all_models: List[str]) -> List[str]:
+    """Per-task detail sections, in first-seen task order."""
+    lines = ["## Per-Task Results", ""]
 
     task_ids_seen: List[str] = []
     for r in results.values():
@@ -1590,75 +1612,88 @@ def generate_markdown_report(
             "| Metric | " + " | ".join(all_models) + " |",
             "|--------|" + "|".join("------" for _ in all_models) + "|",
         ])
-
-        # Duration row
-        vals = []
-        for m in all_models:
-            r = task_results.get(m)
-            if r and r["success"]:
-                vals.append(f"{r['duration_seconds']:.1f}s")
-            elif r:
-                vals.append("FAIL")
-            else:
-                vals.append("-")
-        lines.append("| Duration | " + " | ".join(vals) + " |")
-
-        # Tokens/sec row
-        vals = []
-        for m in all_models:
-            r = task_results.get(m)
-            tps = r["tokens_per_second"] if r and r["success"] else 0
-            vals.append(f"{tps:.1f}" if tps > 0 else "-")
-        lines.append("| Tokens/sec | " + " | ".join(vals) + " |")
-
-        # Format compliant row
-        vals = []
-        for m in all_models:
-            r = task_results.get(m)
-            vals.append("Yes" if r and r["format_compliant"] else "No")
-        lines.append("| Format OK | " + " | ".join(vals) + " |")
-
-        # Completeness row
-        vals = []
-        for m in all_models:
-            r = task_results.get(m)
-            c = r["completeness_score"] if r else 0
-            vals.append(f"{c:.0%}")
-        lines.append("| Completeness | " + " | ".join(vals) + " |")
-
-        # Fields missing row
-        vals = []
-        for m in all_models:
-            r = task_results.get(m)
-            missing = r.get("fields_missing", []) if r else []
-            vals.append(", ".join(missing) if missing else "none")
-        lines.append("| Missing fields | " + " | ".join(vals) + " |")
-
+        lines.extend(_report_task_metric_rows(task_results, all_models))
         lines.append("")
-
-        # Output previews in collapsible sections
-        for m in all_models:
-            r = task_results.get(m)
-            if r and r["success"]:
-                preview = r["output"][:600].replace("\n", "\n> ")
-                lines.extend([
-                    f"<details><summary>{m} output (preview)</summary>",
-                    "",
-                    f"> {preview}",
-                    "",
-                    "</details>",
-                    "",
-                ])
-
+        lines.extend(_report_output_previews(task_results, all_models))
         lines.extend(["---", ""])
+    return lines
 
-    # -- Recommendations per category --
-    lines.extend([
+
+def _report_task_metric_rows(task_results: Dict[str, Dict], all_models: List[str]) -> List[str]:
+    """The five metric rows of one task table."""
+    rows: List[str] = []
+
+    # Duration row
+    vals = []
+    for m in all_models:
+        r = task_results.get(m)
+        if r and r["success"]:
+            vals.append(f"{r['duration_seconds']:.1f}s")
+        elif r:
+            vals.append("FAIL")
+        else:
+            vals.append("-")
+    rows.append("| Duration | " + " | ".join(vals) + " |")
+
+    # Tokens/sec row
+    vals = []
+    for m in all_models:
+        r = task_results.get(m)
+        tps = r["tokens_per_second"] if r and r["success"] else 0
+        vals.append(f"{tps:.1f}" if tps > 0 else "-")
+    rows.append("| Tokens/sec | " + " | ".join(vals) + " |")
+
+    # Format compliant row
+    vals = []
+    for m in all_models:
+        r = task_results.get(m)
+        vals.append("Yes" if r and r["format_compliant"] else "No")
+    rows.append("| Format OK | " + " | ".join(vals) + " |")
+
+    # Completeness row
+    vals = []
+    for m in all_models:
+        r = task_results.get(m)
+        c = r["completeness_score"] if r else 0
+        vals.append(f"{c:.0%}")
+    rows.append("| Completeness | " + " | ".join(vals) + " |")
+
+    # Fields missing row
+    vals = []
+    for m in all_models:
+        r = task_results.get(m)
+        missing = r.get("fields_missing", []) if r else []
+        vals.append(", ".join(missing) if missing else "none")
+    rows.append("| Missing fields | " + " | ".join(vals) + " |")
+    return rows
+
+
+def _report_output_previews(task_results: Dict[str, Dict], all_models: List[str]) -> List[str]:
+    """Collapsible output previews for the successful runs of one task."""
+    lines: List[str] = []
+    for m in all_models:
+        r = task_results.get(m)
+        if r and r["success"]:
+            preview = r["output"][:600].replace("\n", "\n> ")
+            lines.extend([
+                f"<details><summary>{m} output (preview)</summary>",
+                "",
+                f"> {preview}",
+                "",
+                "</details>",
+                "",
+            ])
+    return lines
+
+
+def _report_recommendation_lines(results: Dict[str, Dict]) -> List[str]:
+    """Recommendation table: best composite-scoring model per category."""
+    lines = [
         "## Recommendations per Category",
         "",
         "| Category | Recommended Model | Score | Reasoning |",
         "|----------|------------------|-------|-----------|",
-    ])
+    ]
 
     categories = list(dict.fromkeys(r["category"] for r in results.values()))
     for cat in categories:
@@ -1698,11 +1733,7 @@ def generate_markdown_report(
             f"composite {best_avg:.2f}/1.5"
         )
         lines.append(f"| {cat} | **{best_model}** | {best_avg:.2f} | {reason} |")
-
-    lines.extend(["", "---", ""])
-    lines.append("*Quality scores are null (reserved for manual 1-5 review).*")
-
-    return "\n".join(lines)
+    return lines
 
 
 # ---------------------------------------------------------------------------
@@ -1796,6 +1827,63 @@ def run_benchmark(config: BenchmarkConfig, tasks: List[Task],
 
 
 def main() -> None:
+    args = _parse_args()
+
+    # Apply token limit overrides
+    global NUM_PREDICT, NUM_CTX
+    if args.num_predict > 0:
+        NUM_PREDICT = args.num_predict
+    if args.num_ctx > 0:
+        NUM_CTX = args.num_ctx
+
+    print("=" * 64)
+    mode_label = "Marketing/MKB" if args.marketing else "Coding/Technical"
+    print(f"  VNX LLM Benchmark ({mode_label})")
+    print("=" * 64)
+
+    # Validate Ollama connectivity (skip if only running Claude)
+    only_claude = args.include_claude and args.models and args.models.strip().lower() == "none"
+    if not only_claude and not check_ollama_available():
+        print("\nERROR: Ollama not available at " + OLLAMA_URL)
+        print("Start with: ollama serve")
+        sys.exit(1)
+
+    models = _resolve_models(args)
+    tasks = _select_tasks(args)
+
+    all_models_display = models + (list(CLAUDE_MODELS.keys()) if args.include_claude else [])
+    print(f"\nModels:  {', '.join(all_models_display) or '(none)'}")
+    print(f"Tasks:   {', '.join(t.id for t in tasks)} ({len(tasks)} total)")
+    est_minutes = len(tasks) * len(all_models_display) * 1.5
+    print(f"Est:     ~{est_minutes:.0f} minutes")
+    if args.resume:
+        print(f"Resume:  from {PROGRESS_FILE}")
+    print()
+
+    # Build config
+    run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+    config = BenchmarkConfig(
+        models=models,
+        task_ids=[t.id for t in tasks],
+        include_claude=args.include_claude,
+        run_id=run_id,
+        started_at=datetime.now().isoformat(),
+        no_think=args.no_think,
+    )
+
+    # Execute
+    results = run_benchmark(config, tasks, resume=args.resume, no_think=args.no_think, timeout=args.timeout)
+
+    if not results:
+        print("No results collected.")
+        sys.exit(1)
+
+    md_path, json_path = _write_reports(results, all_models_display, config)
+    _print_results_summary(results, all_models_display, md_path, json_path)
+
+
+def _parse_args() -> argparse.Namespace:
+    """Build the CLI parser and parse sys.argv."""
     parser = argparse.ArgumentParser(
         description="VNX LLM Benchmark -- compare Ollama models vs Claude on project tasks"
     )
@@ -1839,49 +1927,33 @@ def main() -> None:
         "--num-ctx", type=int, default=0,
         help="Override context window size (default: 8192). Use 16384+ for longer outputs.",
     )
-    args = parser.parse_args()
+    return parser.parse_args()
 
-    # Apply token limit overrides
-    global NUM_PREDICT, NUM_CTX
-    if args.num_predict > 0:
-        NUM_PREDICT = args.num_predict
-    if args.num_ctx > 0:
-        NUM_CTX = args.num_ctx
 
-    print("=" * 64)
-    mode_label = "Marketing/MKB" if args.marketing else "Coding/Technical"
-    print(f"  VNX LLM Benchmark ({mode_label})")
-    print("=" * 64)
-
-    # Validate Ollama connectivity (skip if only running Claude)
-    only_claude = args.include_claude and args.models and args.models.strip().lower() == "none"
-    if not only_claude and not check_ollama_available():
-        print("\nERROR: Ollama not available at " + OLLAMA_URL)
-        print("Start with: ollama serve")
-        sys.exit(1)
-
-    # Determine models
+def _resolve_models(args: argparse.Namespace) -> List[str]:
+    """Determine the local model list; exits 1 when none can be found."""
     if args.models:
         if args.models.strip().lower() == "none":
-            models: List[str] = []
-        else:
-            models = [m.strip() for m in args.models.split(",")]
-    else:
-        available = list_ollama_models()
-        # Filter to defaults that are available, preserve order
-        models = [m for m in DEFAULT_LOCAL_MODELS if m in available]
-        if not models and available:
-            # Fall back to any available qwen models
-            models = [m for m in available if "qwen" in m.lower()]
-        if not models and available:
-            models = available[:4]
-        if not models and not args.include_claude:
-            print(f"\nNo local models found. Available: {available}")
-            print(f"Expected: {DEFAULT_LOCAL_MODELS}")
-            print("Pull a model with: ollama pull qwen3.5:9b")
-            sys.exit(1)
+            return []
+        return [m.strip() for m in args.models.split(",")]
+    available = list_ollama_models()
+    # Filter to defaults that are available, preserve order
+    models = [m for m in DEFAULT_LOCAL_MODELS if m in available]
+    if not models and available:
+        # Fall back to any available qwen models
+        models = [m for m in available if "qwen" in m.lower()]
+    if not models and available:
+        models = available[:4]
+    if not models and not args.include_claude:
+        print(f"\nNo local models found. Available: {available}")
+        print(f"Expected: {DEFAULT_LOCAL_MODELS}")
+        print("Pull a model with: ollama pull qwen3.5:9b")
+        sys.exit(1)
+    return models
 
-    # Determine task pool
+
+def _select_tasks(args: argparse.Namespace) -> List[Task]:
+    """Determine the task pool selection; exits 1 when empty."""
     task_pool = MARKETING_TASKS if args.marketing else BENCHMARK_TASKS
     quick_ids = QUICK_MARKETING_IDS if args.marketing else QUICK_TASK_IDS
 
@@ -1896,42 +1968,20 @@ def main() -> None:
     if not tasks:
         print("ERROR: No valid tasks selected")
         sys.exit(1)
+    return tasks
 
-    all_models_display = models + (list(CLAUDE_MODELS.keys()) if args.include_claude else [])
-    print(f"\nModels:  {', '.join(all_models_display) or '(none)'}")
-    print(f"Tasks:   {', '.join(t.id for t in tasks)} ({len(tasks)} total)")
-    est_minutes = len(tasks) * len(all_models_display) * 1.5
-    print(f"Est:     ~{est_minutes:.0f} minutes")
-    if args.resume:
-        print(f"Resume:  from {PROGRESS_FILE}")
-    print()
 
-    # Build config
-    run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
-    config = BenchmarkConfig(
-        models=models,
-        task_ids=[t.id for t in tasks],
-        include_claude=args.include_claude,
-        run_id=run_id,
-        started_at=datetime.now().isoformat(),
-        no_think=args.no_think,
-    )
-
-    # Execute
-    results = run_benchmark(config, tasks, resume=args.resume, no_think=args.no_think, timeout=args.timeout)
-
-    if not results:
-        print("No results collected.")
-        sys.exit(1)
-
-    # Generate reports
+def _write_reports(
+    results: Dict[str, Dict], all_models_display: List[str], config: BenchmarkConfig,
+) -> tuple:
+    """Write the markdown and JSON reports; returns (md_path, json_path)."""
     REPORT_DIR.mkdir(parents=True, exist_ok=True)
 
     report_md = generate_markdown_report(results, all_models_display, config)
-    md_path = REPORT_DIR / f"benchmark_{run_id}.md"
+    md_path = REPORT_DIR / f"benchmark_{config.run_id}.md"
     md_path.write_text(report_md, encoding="utf-8")
 
-    json_path = REPORT_DIR / f"benchmark_{run_id}.json"
+    json_path = REPORT_DIR / f"benchmark_{config.run_id}.json"
     raw_data = {
         "config": asdict(config),
         "results": results,
@@ -1940,8 +1990,14 @@ def main() -> None:
         json.dumps(raw_data, indent=2, ensure_ascii=False),
         encoding="utf-8",
     )
+    return md_path, json_path
 
-    # Print summary
+
+def _print_results_summary(
+    results: Dict[str, Dict], all_models_display: List[str],
+    md_path: Path, json_path: Path,
+) -> None:
+    """Print the per-model result lines and the report locations."""
     print()
     print("=" * 64)
     print("  RESULTS")

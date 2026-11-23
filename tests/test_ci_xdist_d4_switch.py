@@ -23,6 +23,8 @@ from pathlib import Path
 import pytest
 import yaml
 
+import ci_workflow_shape as shape
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PARITY = REPO_ROOT / "scripts" / "ci" / "check_xdist_parity.py"
 ARGS_SCRIPT = REPO_ROOT / "scripts" / "ci" / "profile_a_pytest_args.sh"
@@ -277,13 +279,20 @@ def test_the_committed_skip_set_names_the_run_it_was_measured_on():
     assert "50 skips" in header
     assert "OI-2518" in header  # the first key added after that run
     assert "OI-2564" in header  # the second key added after that run
+    assert "OI-2589" in header  # the third to fifth keys added after that run
     entries, problems = cxp.read_expected_skips(EXPECTED_SKIPS)
     assert problems == []
-    assert len(entries) == 53
+    assert len(entries) == 57
     assert ("tests/test_report_to_receipt_converter.py::TestFailClosedBranchNotOnOrigin"
             "::test_existing_branch_passes_check") in entries
     assert ("tests/test_launchd_interpreter_pin.py"
             "::test_without_a_venv_the_pinned_312_is_taken") in entries
+    assert ("tests/integration/test_gemini_streaming_gated.py::TestGeminiLiveStreaming"
+            "::test_stream_events_yields_events") in entries
+    assert ("tests/integration/test_gemini_streaming_gated.py::TestGeminiLiveStreaming"
+            "::test_all_real_events_have_tier_1") in entries
+    assert ("tests/test_w_init_project_id_threading.py::TestMigrationLinter"
+            "::test_passes_actual_repo_in_normal_mode") in entries
     for line in text.splitlines():
         if line.strip() and not line.startswith("#"):
             assert "  # " in line, line
@@ -415,6 +424,10 @@ def _jobs(path: Path) -> dict:
     return yaml.safe_load(path.read_text(encoding="utf-8"))["jobs"]
 
 
+def _profile_a(path: Path = WORKFLOW) -> shape.ProfileA:
+    return shape.profile_a(path)
+
+
 def _step(job: dict, step_id: str) -> dict:
     [step] = [s for s in job["steps"] if s.get("id") == step_id]
     return step
@@ -424,7 +437,7 @@ def test_the_per_pr_workflow_no_longer_runs_a_shadow_or_parity_job():
     jobs = _jobs(WORKFLOW)
     assert "profile-a-xdist-shadow" not in jobs
     assert "xdist-parity" not in jobs
-    assert "profile-a" in jobs
+    assert _profile_a().required_job.name == shape.REQUIRED_CHECK_NAME
 
 
 def test_the_shadow_job_and_the_test_of_it_are_gone_together():
@@ -436,9 +449,9 @@ def _profile_a_job_text() -> str:
     """The `profile-a` job block of the workflow as text — the comments included, the steps too."""
     lines = WORKFLOW.read_text(encoding="utf-8").splitlines()
     try:
-        start = lines.index("  profile-a:")
+        start = lines.index(f"  {_profile_a().required_job.job_id}:")
     except ValueError:
-        raise AssertionError("vnx-ci.yml has no `profile-a` job") from None
+        raise AssertionError("vnx-ci.yml has no job block for the required Profile A check") from None
     body = lines[start + 1:]
     end = next((i for i, line in enumerate(body) if line.strip() and not line.startswith("    ")), len(body))
     return "\n".join(body[:end])
@@ -468,14 +481,14 @@ def _timeout_comment() -> str:
 
 
 _ACTIONS_TOKEN = re.compile(r"(?P<space>\s+)|(?P<string>'(?:[^']|'')*')|(?P<number>\d+)"
-                            r"|(?P<name>[A-Za-z_][A-Za-z0-9_.]*)|(?P<operator>&&|\|\||==|\(|\))")
+                            r"|(?P<name>[A-Za-z_][A-Za-z0-9_.]*)|(?P<operator>&&|\|\||==|!|\(|\))")
 
 
 class ActionsExpression:
     """The subset of the GitHub Actions expression language a job timeout uses.
 
-    `||`, `&&` and `==` over string and number literals, `vars.<name>` and
-    parentheses, with GitHub's operand-returning `&&`/`||` and its truthiness
+    `||`, `&&`, `==` and `!` over string and number literals, `vars.<name>`,
+    `inputs.<name>` (keyed ``inputs.<name>`` in the variables) and parentheses, with GitHub's operand-returning `&&`/`||` and its truthiness
     (null, 0 and the empty string are false, every other value — `'0'` included —
     is true). A token or a form it does not know raises, so a rewritten
     expression can never be read as a number it does not produce.
@@ -542,6 +555,8 @@ class ActionsExpression:
 
     def _parse_primary(self):
         kind, text = self._take()
+        if (kind, text) == ("operator", "!"):
+            return not self._truthy(self._parse_primary())
         if (kind, text) == ("operator", "("):
             value = self._parse_or()
             if self._take() != ("operator", ")"):
@@ -553,9 +568,9 @@ class ActionsExpression:
             return int(text)
         if kind == "name":
             scope, _, name = text.partition(".")
-            if scope != "vars" or not name:
-                raise AssertionError(f"only `vars.<name>` is supported, not {text!r}")
-            return self.variables.get(name)
+            if scope not in ("vars", "inputs") or not name:
+                raise AssertionError(f"only `vars.<name>` and `inputs.<name>` are supported, not {text!r}")
+            return self.variables.get(name if scope == "vars" else text)
         raise AssertionError(f"unexpected token {text!r}")
 
     @staticmethod
@@ -567,10 +582,34 @@ class ActionsExpression:
         return value != ""
 
     @staticmethod
-    def _equal(left, right) -> bool:
-        if left is None or right is None:
-            return left is right
-        return str(left) == str(right)
+    def _kind(value) -> str:
+        return "null" if value is None else "bool" if isinstance(value, bool) else "number" if isinstance(value, int) else "string"
+
+    @staticmethod
+    def _number(value) -> float:
+        if value is None or value == "":
+            return 0.0
+        try:
+            return float(value)
+        except ValueError:
+            return float("nan")
+
+    @classmethod
+    def _equal(cls, left, right) -> bool:
+        """GitHub's loose `==`: same kind compares as is (strings case-insensitively), mixed kinds as numbers,
+        so an unset ``vars.<name>`` (null) equals ``'0'`` (run 44234967120)."""
+        if cls._kind(left) == cls._kind(right):
+            return left.lower() == right.lower() if isinstance(left, str) else left == right
+        return cls._number(left) == cls._number(right)
+
+
+def test_the_expression_reader_compares_like_github():
+    """null == '0' is true on GitHub; that is why "xdist off" reads the variable through `|| '1'`."""
+    assert ActionsExpression("${{ vars.X == '0' }}", {}).value() is True
+    assert ActionsExpression("${{ (vars.X || '1') == '0' }}", {}).value() is False
+    assert ActionsExpression("${{ (vars.X || '1') == '0' }}", {"X": "0"}).value() is True
+    assert ActionsExpression("${{ vars.X == 'abc' }}", {"X": "ABC"}).value() is True
+    assert ActionsExpression("${{ vars.X == '1' }}", {"X": "x"}).value() is False
 
 
 # The merge window D4 round 5 sizes the xdist bound from: the runs
@@ -578,81 +617,135 @@ class ActionsExpression:
 WINDOW_LONGEST_WALL_S = 1134
 
 
+# The branches of "xdist off" (C3): the repository variable, the workflow_dispatch input, or neither.
+OFF = ({"VNX_CI_XDIST": "0"}, {"inputs.xdist_off": True}, {"VNX_CI_XDIST": "0", "inputs.xdist_off": False})
+ON = ({}, {"VNX_CI_XDIST": "1"}, {"inputs.xdist_off": False}, {"VNX_CI_XDIST": ""})
+C5_LONGEST_SHARD_MIN = 12.73  # 30 heavy runs to 44713236371, see the C5 PR
+XDIST_OFF = "((vars.VNX_CI_XDIST || '1') == '0' || inputs.xdist_off)"
+
+
 def test_profile_a_timeout_follows_the_switch_on_every_branch():
-    """The serial shape needs 80; the two-phase shape gets 38 (OI-2523, OI-2525)."""
+    """The aggregator: 80 for the serial sweep (OI-2523, OI-2525), 15 otherwise; each shard 26 (C5: twice the longest shard of 30 heavy runs)."""
     expression = _timeout_expression()
-    xdist = ActionsExpression(expression, {}).value()
-    serial = ActionsExpression(expression, {"VNX_CI_XDIST": "0"}).value()
-    assert xdist == 38, f"xdist branch of {expression!r} is {xdist!r}"
-    # Twice the longest shadow suite wall time of the merge window (1134 s, run
-    # 41827919472 on 2026-11-04), rounded up to whole minutes.
-    assert xdist >= 2 * WINDOW_LONGEST_WALL_S / 60
-    assert serial == 80, f"serial branch of {expression!r} is {serial!r}"
+    assert [ActionsExpression(expression, v).value() for v in OFF] == [80, 80, 80], expression
+    assert [ActionsExpression(expression, v).value() for v in ON] == [15, 15, 15, 15], expression
     # The serial Profile A takes 52, 52 and 54.8 minutes on main (OI-2523).
-    assert serial >= 55
-    assert ActionsExpression(expression, {"VNX_CI_XDIST": "1"}).value() == xdist
+    assert ActionsExpression(expression, OFF[0]).value() >= 55
+    for job in _profile_a().jobs_with_role(shape.ROLE_SHARD):
+        # C5: twice the longest shard of the last 30 heavy runs (12.73 min, to run 44713236371), rounded up.
+        assert job.timeout == 26 and job.timeout >= 2 * C5_LONGEST_SHARD_MIN, job.name
 
 
 def test_every_profile_a_step_timeout_fires_inside_both_job_bounds():
-    """D3c's rule (#2378), carried into D4: a step timeout must fire before the job's.
-
-    The two job bounds are read out of the workflow's own expression, so a
-    branch whose number is edited shows up here without a second copy of it.
-    """
+    """D3c's rule (#2378), carried into D4 and C3: in every job, the step timeouts fire before the job's."""
     expression = _timeout_expression()
-    bounds = {branch: ActionsExpression(expression, variables).value()
-              for branch, variables in (("xdist", {}), ("serial", {"VNX_CI_XDIST": "0"}))}
-    job = _jobs(WORKFLOW)["profile-a"]
-    bounded = [step["timeout-minutes"] for step in job["steps"] if "timeout-minutes" in step]
-    assert bounded, "no step of profile-a carries its own timeout"
-    assert all(isinstance(bound, int) for bound in bounded), bounded
-    step_sum = sum(bounded)
-    for branch, bound in bounds.items():
-        assert isinstance(bound, int), f"the {branch} branch of {expression!r} is not a number: {bound!r}"
-        assert step_sum < bound, f"{step_sum} min of step timeouts cannot fire inside the {branch} bound {bound}"
-    # A bound that does not even cover the window it was sized on guards nothing.
-    assert bounds["xdist"] >= 2 * WINDOW_LONGEST_WALL_S / 60, bounds
+    bounds = {"xdist": ActionsExpression(expression, ON[0]).value(), "serial": ActionsExpression(expression, OFF[0]).value()}
+    for job in _profile_a().jobs:
+        bounded = [step["timeout-minutes"] for step in job.steps if "timeout-minutes" in step]
+        assert all(isinstance(bound, int) for bound in bounded), (job.name, bounded)
+        for branch, bound in (bounds.items() if job.role == shape.ROLE_AGGREGATOR else [("job", job.timeout)]):
+            assert isinstance(bound, int), f"{job.name}: the {branch} bound is not a number: {bound!r}"
+            assert sum(bounded) < bound, f"{job.name}: {sum(bounded)} min of step timeouts cannot fire inside {bound}"
+    assert bounded and _profile_a().required_job.steps, "no step of Profile A carries its own timeout"
 
 
-def test_the_timeout_reads_the_same_variable_the_switch_reads():
-    """One variable answers both questions: which shape runs, and how long the job may take."""
-    timeout = _timeout_expression()
-    switch = re.fullmatch(r"\$\{\{\s*vars\.([A-Za-z_][A-Za-z0-9_]*)\s*\}\}",
-                          _step(_jobs(WORKFLOW)["profile-a"], "suite")["env"]["VNX_CI_XDIST"])
-    assert switch is not None, "the suite step no longer reads its switch from vars.<name>"
-    read = set(re.findall(r"\bvars\.([A-Za-z_][A-Za-z0-9_]*)", timeout))
-    assert read == {switch.group(1)}
-
-
-def test_the_profile_a_timeout_comment_names_the_serial_wall_time():
+def test_the_profile_a_timeout_comments_name_the_measured_wall_times():
     comment = _timeout_comment()
-    assert "1134" in comment, "the xdist sizing argument (2 x 1134 s) is gone"
-    assert "41827919472" in comment, "the window's longest run is gone from the comment"
-    assert "37.8" in comment and "983c944f" in comment, comment
-    assert "52" in comment and "54.8" in comment, comment
-    assert "OI-2523" in comment and "OI-2525" in comment, comment
-    assert "#2378" in comment, "the comment no longer says who set the 80-minute bridge"
+    for token in ("52", "54.8", "OI-2523", "OI-2525", "#2378"):
+        assert token in comment, (token, comment)
+    shard_comment = WORKFLOW.read_text(encoding="utf-8").split("\n  profile-a-shard-1:\n", 1)[0].rsplit("\n\n", 1)[1]
+    assert "763.6" in shard_comment and "44713236371" in shard_comment, shard_comment
 
 
-def test_the_completeness_check_is_a_required_step_after_both_phases():
-    profile_a = _jobs(WORKFLOW)["profile-a"]
-    step = _step(profile_a, "completeness")
+def _xdist_off_places() -> dict:
+    a = _profile_a()
+    places = {f"{job.job_id} if": job.body.get("if") for job in a.jobs_with_role(shape.ROLE_SHARD)}
+    places["aggregator timeout"] = a.required_job.timeout
+    places["--xdist-off flag"] = _step(a.required_job.body, "aggregate")["env"]["XDIST_OFF"]
+    return places
+
+
+def test_xdist_off_is_one_expression_in_the_shard_if_the_timeout_and_the_flag():
+    """Criterion 7 without the repository variable: the workflow_dispatch input is in each place the variable is."""
+    places = _xdist_off_places()
+    assert len(places) == 6, places
+    for where, text in places.items():
+        assert isinstance(text, str) and XDIST_OFF in text, f"{where}: {text!r}"
+        assert set(re.findall(r"\b(vars|inputs)\.([A-Za-z_]+)", text)) == {("vars", "VNX_CI_XDIST"), ("inputs", "xdist_off")}, where
+    flag = places["--xdist-off flag"]
+    assert [ActionsExpression(flag, v).value() for v in OFF + ON] == ["true"] * 3 + ["false"] * 4
+    trigger = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))[True]["workflow_dispatch"]["inputs"]["xdist_off"]
+    assert trigger["type"] == "boolean" and trigger["default"] is False
+
+
+def test_a_shard_runs_only_when_xdist_is_on():
+    for job in _profile_a().jobs_with_role(shape.ROLE_SHARD):
+        assert [ActionsExpression(job.body["if"], v).value() for v in OFF] == [False] * 3, job.name
+        assert [ActionsExpression(job.body["if"], v).value() for v in ON] == [True] * 4, job.name
+
+
+def test_the_aggregator_needs_all_five_and_always_runs():
+    a = _profile_a().required_job
+    assert a.job_id == "profile-a" and a.body["if"] == "${{ always() }}"
+    assert a.needs == [f"profile-a-shard-{k}" for k in range(1, 5)] + ["profile-a-guards"]
+    assert not a.body.get("continue-on-error")
+    decide = _step(a.body, "aggregate")
+    assert "--shard-jobs " + ",".join(a.needs[:4]) in decide["run"] and "--guards-job profile-a-guards" in decide["run"]
+    assert decide["env"]["NEEDS_JSON"] == "${{ toJSON(needs) }}" and "continue-on-error" not in decide
+
+
+def test_the_decision_comes_before_every_mode_step_and_each_mode_step_reads_its_mode():
+    a = _profile_a().required_job
+    ids = [s.get("id") for s in a.steps]
+    for mode_step, mode in (("light", "light"), ("completeness", "sharded"), ("serial-sweep", "serial")):
+        step = _step(a.body, mode_step)
+        assert ids.index("aggregate") < ids.index(mode_step), mode_step
+        assert f"steps.aggregate.outputs.mode == '{mode}'" in step["if"], mode_step
+        assert "always()" not in step["if"] and "continue-on-error" not in step, mode_step
+    assert _step(a.body, "completeness")["if"] == "${{ steps.aggregate.outputs.mode == 'sharded' }}"
+
+
+def test_the_completeness_check_is_a_required_step_over_the_four_shards():
+    step = _step(_profile_a().required_job.body, "completeness")
     assert not step.get("continue-on-error"), "a failing completeness check must fail the job"
-    assert not profile_a.get("continue-on-error")
     run = step["run"]
-    assert "check_xdist_parity.py\" completeness" in run or "check_xdist_parity.py completeness" in run
-    assert "xdist_expected_skips.txt" in run and "xdist-completeness-verdict.json" in run
-    assert "steps.suite.outputs.mode == 'xdist'" in step["if"]
-    ids = [s.get("id") for s in profile_a["steps"]]
-    assert ids.index("serial") < ids.index("completeness")
-    assert ids.index("parallel") < ids.index("completeness")
+    assert "check_xdist_parity.py\" completeness" in run and "--candidate" not in run
+    assert re.findall(r'--shard-dir "\$PROFILE_A_EVIDENCE/(shard-\d)"', run) == [f"shard-{k}" for k in range(1, 5)]
+    for arg in ("--constraints", "xdist_expected_skips.txt", "xdist-completeness-verdict.json", "--summary",
+                "--head-sha", "--tested-sha", "--run-id", "--run-attempt", "--event", "--ref"):
+        assert arg in run, arg
+
+
+def test_no_shard_has_needs_and_only_the_uploads_of_shards_and_guards_are_non_blocking():
+    a = _profile_a()
+    for job in a.jobs_with_role(shape.ROLE_SHARD) + a.jobs_with_role(shape.ROLE_GUARDS):
+        assert job.needs == [] and not job.body.get("continue-on-error"), job.name
+        soft = [s.get("name") for s in job.steps if s.get("continue-on-error") is not None]
+        assert all("actions/upload-artifact@" in (s.get("uses") or "") for s in job.steps if s.get("continue-on-error") is not None), soft
+    assert a.jobs_with_role(shape.ROLE_GUARDS)[0].timeout == 15 and "if" not in a.jobs_with_role(shape.ROLE_GUARDS)[0].body
+
+
+def test_every_shard_exports_its_profile_and_uploads_under_its_own_job_id():
+    shards = _profile_a().jobs_with_role(shape.ROLE_SHARD)
+    assert [j.job_id for j in shards] == [f"profile-a-shard-{k}" for k in range(1, 5)]
+    for job in shards:
+        assert job.body["outputs"] == {"profile": "${{ steps.prelude.outputs.profile }}"}, job.name
+        assert job.body["permissions"] == {"contents": "read", "actions": "read"} and job.body["runs-on"] == "ubuntu-24.04"
+        assert job.steps == shards[0].steps, f"{job.name} does not run the same steps as shard 1"
+    [upload] = [s for s in shards[0].steps if "actions/upload-artifact@" in (s.get("uses") or "")]
+    assert upload["with"]["name"] == "${{ github.job }}" and "always()" in upload["if"]
+    gh_steps = [s for s in shards[0].steps if "gh " in (s.get("run") or "")]
+    assert gh_steps and all(s["env"]["GH_TOKEN"] == "${{ github.token }}" for s in gh_steps)
 
 
 def test_profile_a_reads_the_switch_from_the_repository_variable():
-    profile_a = _jobs(WORKFLOW)["profile-a"]
-    suite = _step(profile_a, "suite")
-    assert suite["env"]["VNX_CI_XDIST"] == "${{ vars.VNX_CI_XDIST }}"
-    assert "profile_a_pytest_args.sh" in suite["run"]
+    """The shard selection reads the repository variable; the serial sweep sets 0 itself, so the input reaches it too."""
+    a = _profile_a()
+    args = _step(a.jobs_with_role(shape.ROLE_SHARD)[0].body, "args")
+    assert args["env"]["VNX_CI_XDIST"] == "${{ vars.VNX_CI_XDIST }}" and "profile_a_pytest_args.sh" in args["run"]
+    sweep = _step(a.required_job.body, "serial-sweep")
+    assert sweep["env"]["VNX_CI_XDIST"] == "0"
+    assert "profile_a_pytest_args.sh" in sweep["run"] and "profile_a_run_phase.sh\" full" in sweep["run"]
 
 
 def test_the_nightly_is_not_named_vnx_ci():
@@ -718,6 +811,29 @@ def test_the_merge_readers_see_every_check_run_not_only_the_vnx_ci_workflow():
     assert gate.ci_classification(gate.LocalContext(checks=[{"name": "VNX CI", "bucket": "pass"}]))["verdict"] == "pass"
 
 
+def test_the_serial_mode_s_skipped_shard_checks_pass_the_closure_verifier_and_the_ci_gate():
+    """Xdist off: the four shard check runs conclude `skipped` on the PR head (C3).
+
+    ``closure_verifier._rollup_all_green`` reads a skipped Profile A shard or guards check as green next to a green
+    aggregator, so the serial mode no longer blocks a closure that the run itself passes (OI-2993).
+    The CI gate of ``deterministic_gate`` and the run-level readers (``merge_preflight_ci_check``, ``pre_merge_gate``)
+    read a skipped check as advisory and the run's own conclusion.
+    """
+    sys.path.insert(0, str(REPO_ROOT / "scripts" / "lib"))
+    try:
+        gate = _load("deterministic_gate", REPO_ROOT / "scripts" / "lib" / "deterministic_gate.py")
+    finally:
+        sys.path.pop(0)
+    closure = _load("closure_verifier", REPO_ROOT / "scripts" / "closure_verifier.py")
+    names = [shape.REQUIRED_CHECK_NAME, "Profile A guards"] + [f"Profile A shard ({k}/4)" for k in range(1, 5)]
+    serial = {n: "SKIPPED" if "shard" in n else "SUCCESS" for n in names}
+    rollup = [{"__typename": "CheckRun", "name": n, "status": "COMPLETED", "conclusion": c} for n, c in serial.items()]
+    assert closure._rollup_all_green(rollup) is True
+    assert closure._rollup_all_green([dict(r, conclusion="SUCCESS") for r in rollup]) is True
+    checks = [{"name": n, "bucket": "skipping" if c == "SKIPPED" else "pass"} for n, c in serial.items()]
+    assert gate.ci_classification(gate.LocalContext(checks=checks))["verdict"] == "pass"
+
+
 # --- the nightly runs only on main, and the serial truth gets room for its measured wall time (OI-2521, OI-2523)
 
 
@@ -728,9 +844,9 @@ def _nightly_text() -> str:
 def test_every_nightly_job_runs_only_on_main():
     """A workflow_dispatch on a PR head would put these check runs on that SHA, where the merge readers look (OI-2521)."""
     jobs = _jobs(NIGHTLY)
-    for job_id in ("serial-truth", "xdist-shape", "parity"):
+    for job_id in ("serial-truth", "xdist-shape", "parity", "shard-shape", "shard-parity"):
         assert "github.ref == 'refs/heads/main'" in (jobs[job_id].get("if") or ""), job_id
-    assert "!cancelled()" in jobs["parity"]["if"], "the parity job still runs when a needed job failed"
+    assert all("!cancelled()" in jobs[j]["if"] for j in ("parity", "shard-parity")), "a parity job runs after a failed need"
 
 
 def test_every_job_of_the_nightly_carries_the_main_guard():
@@ -758,6 +874,7 @@ def test_the_serial_truth_job_allows_eighty_minutes_and_the_others_keep_theirs()
     assert jobs["serial-truth"]["timeout-minutes"] == 80
     assert jobs["xdist-shape"]["timeout-minutes"] == 35
     assert jobs["parity"]["timeout-minutes"] == 20
+    assert [jobs[j]["timeout-minutes"] for j in ("shard-parity", "shard-shape")] == [20, 26] == [20, _jobs(WORKFLOW)["profile-a-shard-1"]["timeout-minutes"]]
 
 
 def test_the_serial_truth_timeout_comment_names_the_measured_wall_time():
@@ -766,3 +883,107 @@ def test_the_serial_truth_timeout_comment_names_the_measured_wall_time():
     assert "52" in job and "54.8" in job, job
     assert "OI-2523" in job
     assert "35.4" not in job, "the comment still cites the pre-switch measurement"
+
+
+
+# --- C4b: the nightly also compares the serial truth with the four Profile A shards ----------------
+
+
+def test_the_nightly_runs_the_four_profile_a_shards_through_the_pr_shard_scripts():
+    shard = _jobs(NIGHTLY)["shard-shape"]
+    assert shard["name"] == "Shard shape (the four Profile A shards)" and "needs" not in shard
+    assert shard["strategy"] == {"fail-fast": False, "matrix": {"k": [1, 2, 3, 4]}}
+    nightly, pr = ("\n".join(s.get("run") or "" for s in job["steps"]) for job in (shard, _jobs(WORKFLOW)["profile-a-shard-1"]))
+    for call in ("test_shard_plan.py\" select-source", "--before \"$created\" --artifact profile-a-evidence",
+                 "VNX_CI_SHARD_SOURCE=", "profile_a_pytest_args.sh", "pytest_collection_manifest.py\" inactive",
+                 "profile_a_run_phase.sh\" serial", "profile_a_run_phase.sh\" shard"):
+        assert call in nightly and call in pr, call
+    plan = _step(shard, "plan")
+    assert 'VNX_CI_SHARD="$SHARD_K/4"' in plan["run"] and 'elif [ "$SHARD_K" = 1 ]' in plan["run"]
+    assert plan["env"]["SHARD_K"] == "${{ matrix.k }}" and plan["env"]["VNX_CI_XDIST"] == "1"
+    assert _step(shard, "parallel")["run"].endswith('profile_a_run_phase.sh" shard "$XDIST_TRUTH_EVIDENCE"')
+    assert shard["steps"][-1]["with"]["name"] == "vnx-shard-truth-evidence-${{ matrix.k }}"
+    assert shard["env"] == {"XDIST_PHASE": "shard"} and all(
+        _step(shard, s) == _step(_jobs(NIGHTLY)["xdist-shape"], s) for s in ("serial", "record"))
+
+
+def test_the_shard_parity_job_shares_every_step_but_the_download_with_the_two_phase_parity_job():
+    jobs = _jobs(NIGHTLY)  # one compare, record and report: criterion 6 covers both shapes under one label
+    job, parity = jobs["shard-parity"], jobs["parity"]
+    assert job["name"] == "Serial truth vs shard shape" and set(job["needs"]) == {"serial-truth", "shard-shape"}
+    assert job["env"] == {"RESULT_PROFILE_A": "${{ needs.serial-truth.result }}",
+                          "RESULT_SHADOW": "${{ needs.shard-shape.result }}", "PARITY_SHAPE": "shards"}
+    assert parity["env"]["RESULT_SHADOW"] == "${{ needs.xdist-shape.result }}" and parity["env"]["PARITY_SHAPE"] == "two_phase"
+    differ = [i for i, (a, b) in enumerate(zip(job["steps"], parity["steps"], strict=True)) if a != b]
+    assert [job["steps"][i]["id"] for i in differ] == ["download_candidate"]
+    assert job["steps"][differ[0]]["with"]["pattern"] == "vnx-shard-truth-evidence-*"
+    assert parity["steps"][-1]["with"]["name"] == "vnx-serial-truth-${{ github.job }}-verdict"
+    report = _step(parity, "report")["run"]
+    assert report.count("--label xdist-parity") == 2 and "candidate_shape" in report
+    names = [j["name"] for j in jobs.values()]  # never merge evidence: no name the merge readers select
+    assert not [n for n in names if n.startswith(("VNX CI", "Profile A", shape.REQUIRED_CHECK_NAME))], names
+
+
+def _bash_step(job: str, step_id: str, env: dict, written: Path) -> tuple:
+    base = {k: v for k, v in os.environ.items() if not k.startswith(("OUTCOME_", "XDIST_", "GITHUB_", "PARITY_", "RESULT_"))}
+    proc = subprocess.run(["bash", "-c", _step(_jobs(NIGHTLY)[job], step_id)["run"]], capture_output=True, text=True,
+                          env={**base, "GITHUB_WORKSPACE": str(REPO_ROOT), "GITHUB_RUN_ID": "7",
+                               "GITHUB_RUN_ATTEMPT": "1", "GITHUB_EVENT_NAME": "schedule", **env})
+    return proc, json.loads(written.read_text(encoding="utf-8")) if written.exists() else None
+
+
+def _compare(tmp_path: Path, shape_env: dict) -> tuple:
+    env = {"PARITY_WORK": str(tmp_path), "PARITY_PROFILE": "heavy", "PARITY_RUN_ID": "7", "PARITY_RUN_ATTEMPT": "1",
+           "PARITY_HEAD_SHA": "h", "PARITY_TESTED_SHA": "t", "PARITY_EVENT": "schedule", "PARITY_REF": "main",
+           "RESULT_PROFILE_A": "success", "RESULT_SHADOW": "success", **shape_env,
+           **{f"OUTCOME_{k}": "success" for k in ("CHECKOUT", "PRELUDE", "SELECTION", "DOWNLOAD_REFERENCE", "DOWNLOAD_CANDIDATE")}}
+    tmp_path.mkdir(exist_ok=True)
+    return _bash_step("shard-parity", "compare", env, tmp_path / "verdict" / "xdist-parity-verdict.json")
+
+
+def test_the_shards_shape_compares_four_shard_dirs_and_missing_shards_stay_invalid(tmp_path):
+    proc, verdict = _compare(tmp_path, {"PARITY_SHAPE": "shards"})
+    assert proc.returncode == 2 and (verdict["exit"], verdict["verdict"]) == (2, "invalid_evidence")
+    assert (verdict["candidate_shape"], verdict["shards"]) == ("shards", 4) and "shadow.record=missing" in verdict["step_failures"]
+
+
+@pytest.mark.parametrize("value", ["", "shard", "two-phase", "SHARDS"])
+def test_an_unknown_shape_writes_no_verdict_and_unset_is_the_two_phase_shape(tmp_path, value):
+    assert _compare(tmp_path / "unset", {})[1]["candidate_shape"] == "two_phase"
+    proc, verdict = _compare(tmp_path, {"PARITY_SHAPE": value})
+    assert proc.returncode == 2 and "is not two_phase or shards" in proc.stderr and verdict is None
+
+
+def _record(tmp_path: Path, phase: str | None, files: dict, outcomes: dict) -> tuple:
+    for name, text in files.items():
+        (tmp_path / name).write_text(text, encoding="utf-8")
+    env = {"XDIST_TRUTH_EVIDENCE": str(tmp_path), "XDIST_HEAD_SHA": "h", "XDIST_TESTED_SHA": "t",
+           **({"XDIST_PHASE": phase} if phase is not None else {}),
+           **{f"OUTCOME_{k.upper()}": v for k, v in outcomes.items()}}
+    return _bash_step("shard-shape", "record", env, tmp_path / "xdist-shadow.json")
+
+
+GREEN = {"plan": "success", "serial": "success", "parallel": "success"}
+
+
+def test_the_shard_record_names_the_shard_phase_and_the_two_phase_record_keeps_parallel(tmp_path):
+    proc, record = _record(tmp_path, "shard", {"exit-shard": "0\n", "duration-shard-s": "301\n"}, GREEN)
+    assert proc.returncode == 0 and record["verdict"] == "shadow_passed" and record["run_attempt"] == "1"
+    assert record["steps"] == {"plan": "success", "serial": "success", "shard": "success"}
+    assert record["exit_codes"] == {"serial": None, "shard": 0} and record["durations_s"] == {"serial": None, "shard": 301}
+    proc, record = _record(tmp_path, None, {"exit-parallel": "1\n"}, {**GREEN, "serial": ""})
+    assert (record["steps"]["serial"], record["exit_codes"]) == ("skipped", {"serial": None, "parallel": 1})
+
+
+@pytest.mark.parametrize("change", [{"parallel": "failure"}, {"parallel": ""}, {"parallel": "skipped"},
+                                    {"parallel": "bogus"}, {"plan": "cancelled"}, {"plan": ""},
+                                    {"serial": "failure"}, {"serial": "cancelled"}])
+def test_a_shard_step_that_did_not_succeed_records_a_failed_shadow(tmp_path, change):
+    proc, record = _record(tmp_path, "shard", {}, {**GREEN, **change})
+    assert proc.returncode == 0 and record["verdict"] == "shadow_failed"
+
+
+@pytest.mark.parametrize("phase", ["", "full", "../x", "shard/../parallel"])
+def test_an_unknown_phase_writes_no_record(tmp_path, phase):
+    proc, record = _record(tmp_path, phase, {}, GREEN)
+    assert proc.returncode == 2 and "is not parallel or shard" in proc.stderr and record is None

@@ -81,14 +81,14 @@ A row holds `number`, `title`, `branch`, `state` (`active` or `draft`), `head_sh
 | `running` | a run on the head is queued or in progress | none |
 | `no_run` | no run of the workflow exists for the head | none |
 | `undetermined` | two or more completed runs and their order cannot be established | none |
-| `overridden` | `VNX_MERGE_OVERRIDE_REASON` is set in the builder's environment; never shown as `success` | none |
+| `overridden` | the judge returned an override verdict; never shown as `success`. The builder passes the judge no override reason, so it does not produce this state itself | none |
 | `unmeasured` | CI was not judged for this row | the judge's code (`gh_run_list_failed`, `gh_unauthenticated`, `short_sha`, and so on), or the builder's own: `workflow_unreadable` (the workflow-name read failed, every measured row gets it), `cap`, `budget`, `judge_failed` |
 
 CI is measured for at most 8 rows (`PR_ROW_MEASURE_CAP`): PRs on a `dispatch/<id>` branch first, non-draft before draft, lowest PR number first. The other rows carry `unmeasured` with `reason: cap`. The CI step runs the workflow-name read and the judge calls in daemon threads, at most 4 at a time, and stops waiting 12 seconds after it started (`CI_STEP_DEADLINE_SECONDS`, the name read included). A row whose call has not returned by then carries `unmeasured` with `reason: budget`.
 
 The section itself carries `available` and `reason`. When `gh pr list` for the open PRs fails, `available` is `false`, `reason` holds the return code and the first 120 characters of stderr, and `open_prs` stays an empty list so every reader keeps its type. A failed read of the merged PRs adds `merged_today_error` and leaves `available` alone. A builder that is missing or raises gives `available: false` with `reason: builder_failed: <exception type>`. One unmeasured row does not make the section unavailable. The section also carries `register_error`: null when the dispatch register was read (or the caller passed the events in), else `<ExceptionType>: <message>`, meaning `gates_passed` and `blocked_on` on the rows are unmeasured and not empty.
 
-`t0_index.json` (schema `t0_index/1.3`) shows `queue.open_prs` as `null`, not `0`, when the section is unavailable, plus a top-level `pr_queue_unavailable` holding the reason. The key is absent when the read succeeded. `PROJECT_STATUS.md` prints `Open PRs: unknown (<reason>)` for the `null`.
+`t0_index.json` (schema `t0_index/1.4`) shows `queue.open_prs` as `null`, not `0`, when the section is unavailable, plus a top-level `pr_queue_unavailable` holding the reason. The key is absent when the read succeeded. `PROJECT_STATUS.md` prints `Open PRs: unknown (<reason>)` for the `null`.
 
 ### Future — authored intent
 The roadmap is the tracks database: `vnx horizon` (alias `vnx objective`) adds,
@@ -124,7 +124,7 @@ carries `feature_id`, `status`, `milestone`, `pr_queue[]`, and `depends_on[]`.
    `blocks` item gates the track out of `done` until resolved.
 5. **Merge.** A PR merges. The reconciler detects it from three evidence
    sources, in order: `pr_merged.ndjson` events → `t0_receipts.ndjson` →
-   (default-ON since OI-1155, opt out `VNX_RECONCILE_GIT=0`) live
+   (always on since OI-1155; `VNX_RECONCILE_GIT` is deleted) live
    `gh pr list --state merged` (10-min cache). A ROADMAP file is never read as
    merge evidence. No local receipt is required — git reality suffices.
 6. **Reconcile (derived refresh).** `track_reconciler` computes `derived_status`
@@ -201,8 +201,8 @@ automatically when wired into a cron or post-merge hook.
 
 One ergonomic improvement would tighten the fabric further (candidate track, not yet built):
 
-1. **`vnx open-item add --track <id> --title … --severity blocker`** — a single
-   command that writes straight to `track_open_items`, so a new issue is captured
+1. **`open_items_manager.py add` taking a `--track <id>`** — one
+   step that writes straight to `track_open_items`, so a new issue is captured
    the moment you hit it. Today it is two steps (`open_items_manager add` →
    `import_open_items_to_tracks`).
 

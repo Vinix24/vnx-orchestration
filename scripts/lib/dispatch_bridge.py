@@ -35,7 +35,7 @@ import logging
 import shutil
 import sys
 from pathlib import Path, PurePosixPath
-from typing import Optional
+from typing import Any, Mapping, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +58,8 @@ from dispatch_spec import (  # noqa: E402
     retired_gate_hint,
 )
 from skill_prefix import resolve_skill_dir, skill_search_paths  # noqa: E402
+from stage_origin import record_declared_edge  # noqa: E402
+from rework_attribution import ROUND_CAUSES  # noqa: E402
 
 # Legacy provider/mode strings → the closed Provider enum value. dispatch_deliver.sh
 # emits tmux-mode strings (e.g. "codex_cli"); normalize them here so the door's
@@ -230,6 +232,92 @@ def resolve_parent_dispatch(
     return explicit
 
 
+def _require_round_cause(raw: Optional[str]) -> Optional[str]:
+    """The round cause (ADR-071), stripped and lowercased; a value outside ROUND_CAUSES is refused."""
+    cause = (raw or "").strip().lower()
+    if not cause:
+        return None
+    if cause not in ROUND_CAUSES:
+        raise ValueError(f"round_cause {raw!r} is not one of {', '.join(ROUND_CAUSES)}")
+    return cause
+
+
+def _stage_lineage(
+    dispatch_id: str,
+    work_ref: Optional[str],
+    parent_dispatch: Optional[str],
+    origin_oi: Optional[str],
+    origin_pr: Optional[int],
+    root: Path,
+    round_cause: Optional[str] = None,
+) -> "tuple[Optional[str], Optional[str], dict, Optional[str]]":
+    """``(parent_dispatch, edge_kind, evidence, edge_parent)``: the named origin (ADR-071 besluit 3) first,
+    then ``resolve_parent_dispatch``'s one rule against ``work_ref``. ``edge_kind`` is None without an origin.
+    ``evidence`` carries the validated ``round_cause``. ``edge_parent`` is the spec's parent, else the
+    delivery of a round or split id (the spec itself keeps no parent then)."""
+    from rework_metrics import delivery_of
+    from stage_origin import merge_origin_into_parent, resolve_origin  # noqa: PLC0415
+
+    cause = _require_round_cause(round_cause)
+
+    origin, kind, evidence = resolve_origin(
+        origin_oi, origin_pr, state_dir=root / "state", project_root=_project_root(),
+    )
+    explicit = merge_origin_into_parent(dispatch_id, origin, parent_dispatch)
+    parent = resolve_parent_dispatch(dispatch_id, work_ref, explicit)
+    if parent and not evidence:
+        evidence = {"parent_dispatch": parent} if explicit else {"work_ref": (work_ref or "").strip()}
+    delivery = delivery_of(dispatch_id)
+    edge_parent = parent or (delivery if delivery != dispatch_id else None)
+    if edge_parent and not evidence:
+        evidence = {"delivery": edge_parent}
+    return parent, kind, ({**evidence, "round_cause": cause} if cause else evidence), edge_parent
+
+
+def _spec_origin_fields(origin_oi: Optional[str], origin_pr: Optional[int], round_cause: Optional[str],
+                        difficulty: Optional[dict] = None) -> dict:
+    """The optional origin and round-cause keys of the spec (each only when set), and its ``difficulty`` block."""
+    return {"difficulty": difficulty, **({"origin_oi": origin_oi.strip()} if origin_oi else {}),
+            **({"origin_pr": origin_pr} if origin_pr else {}),
+            **({"round_cause": round_cause} if round_cause else {})}
+
+
+DIFFICULTY_KEYS = ("line_budget", "plan_complexity", "route_reason", "file_count")
+PLAN_COMPLEXITIES = ("low", "medium", "high")
+ROUTE_REASON_MAX = 200
+
+
+def _is_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _require_difficulty(difficulty: Optional[Mapping[str, Any]], path_count: int, deadline_seconds: int) -> dict:
+    """The spec's ``difficulty`` block (herwerk ADR-071, decision rule part b), validated.
+
+    Every key is present (``None`` for a value not given); ``file_count`` defaults to the number of
+    dispatch paths. An unknown key, a wrong type or a value out of range is refused, never dropped.
+    """
+    _require_deadline_in_range(deadline_seconds)
+    given = dict(difficulty) if difficulty is not None else {}
+    unknown = sorted(str(k) for k in given if k not in DIFFICULTY_KEYS)
+    if unknown:
+        raise ValueError(f"difficulty has unknown keys {unknown}; allowed: {', '.join(DIFFICULTY_KEYS)}")
+    budget, cx = given.get("line_budget"), given.get("plan_complexity")
+    reason, count = given.get("route_reason"), given.get("file_count", path_count)
+    if budget is not None and not (_is_int(budget) and budget > 0):
+        raise ValueError(f"difficulty.line_budget must be an int > 0, got {budget!r}")
+    if cx is not None and cx not in PLAN_COMPLEXITIES:
+        raise ValueError(f"difficulty.plan_complexity must be one of {', '.join(PLAN_COMPLEXITIES)}, got {cx!r}")
+    if reason is not None and not (isinstance(reason, str) and reason.strip() and len(reason) <= ROUTE_REASON_MAX):
+        raise ValueError(f"difficulty.route_reason must be a non-empty str of at most {ROUTE_REASON_MAX} chars")
+    if count is None:
+        count = path_count
+    if not (_is_int(count) and count >= 0):
+        raise ValueError(f"difficulty.file_count must be an int >= 0, got {count!r}")
+    return {"schema": 1, "line_budget": budget, "plan_complexity": cx,
+            "route_reason": reason, "file_count": count}
+
+
 class UnknownSkillError(ValueError):
     """A staged spec named a skill that exists in neither of the two skill trees.
 
@@ -319,6 +407,111 @@ def policy_digest_for_role(role: str) -> Optional[str]:
         ) from exc
 
 
+def _make_bundle_dir(root: Path, staging_id: str) -> Path:
+    """Create ``<root>/dispatches/pending/<staging_id>``, refusing any symlink escape."""
+    pending = root / "dispatches" / "pending"
+    # anchor the pending root BEFORE writing (defense-in-depth vs symlink escape).
+    if pending.exists() and not pending.resolve().is_relative_to(root):
+        raise ValueError(
+            f"refusing to stage: pending root {pending} resolves outside data root "
+            f"{root} (symlink escape) — possible forged-promotion attempt"
+        )
+    bundle_dir = pending / staging_id
+    bundle_dir.mkdir(parents=True, exist_ok=True)
+    # bundle_dir itself must resolve inside pending (catch a pre-planted symlinked id dir).
+    if not bundle_dir.resolve().is_relative_to(pending.resolve()):
+        raise ValueError(
+            f"refusing to stage: bundle dir {bundle_dir} escapes pending root"
+        )
+    return bundle_dir
+
+
+def _require_staging_id(dispatch_id: str) -> str:
+    """The staging id (= the dispatch id) when it is a safe directory name, else ValueError."""
+    if not _ID_RE.match(dispatch_id or ""):
+        raise ValueError(
+            f"dispatch_id {dispatch_id!r} does not match the id regex; refusing to "
+            "stage a bundle with an unsafe directory name"
+        )
+    return dispatch_id
+
+
+_DOC_STYLE_KEY = "VNX_DOC_STYLE_FILE"
+_DOC_STYLE_HEADING = "## Writing style (VNX_DOC_STYLE_FILE)"
+_DOC_TASK_CLASSES = frozenset({"04_documentation", "06_design"})
+
+
+def _norm_dispatch_path(entry: dict) -> str:
+    """A dispatch-path entry as a plain posix string without a leading ``./``."""
+    text = str(PurePosixPath(str(entry["path"])))
+    return text[2:] if text.startswith("./") else text
+
+
+def is_docs_dispatch(task_class: Optional[str], dispatch_paths: tuple[dict, ...]) -> bool:
+    """True when a dispatch is documentation work, so staging appends the style file.
+
+    The task class ``04_documentation`` or ``06_design`` decides on its own. Otherwise at
+    least one path must lie outside ``changelog.d/`` and every such path must match
+    ``docs/**`` or ``*.md``: a changelog fragment alone never makes a dispatch a docs
+    dispatch, because every code dispatch carries one.
+    """
+    if (task_class or "").strip() in _DOC_TASK_CLASSES:
+        return True
+    paths = [_norm_dispatch_path(p) for p in dispatch_paths]
+    outside = [p for p in paths if not p.startswith("changelog.d/")]
+    return bool(outside) and all(p.startswith("docs/") or p.endswith(".md") for p in outside)
+
+
+def _read_doc_style(raw: str) -> tuple[str, str]:
+    """``(resolved path, content)`` of the configured style file; ValueError when unusable."""
+    path = Path(raw).expanduser()
+    if not path.is_absolute():
+        raise ValueError(f"{_DOC_STYLE_KEY} must be an absolute or ~-relative path, got {raw!r}; no spec staged")
+    try:
+        resolved = path.resolve()
+        content = resolved.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise ValueError(f"{_DOC_STYLE_KEY} {str(path)!r} cannot be read ({type(exc).__name__}); no spec staged") from exc
+    if not content.strip():
+        raise ValueError(f"{_DOC_STYLE_KEY} {str(resolved)!r} is empty; no spec staged")
+    return str(resolved), content
+
+
+def _doc_style_setting(project_id: str, root: Path) -> str:
+    """The key's value for the dispatch's project, read from its own store; error is refusal."""
+    import config_registry
+    import config_store_db
+
+    resolver = config_store_db.make_db_resolver(lambda _pid: root / "state", raise_on_error=True)
+    value, source = config_registry.resolve_with_source(
+        _DOC_STYLE_KEY, project_id, resolver, use_default_resolver=False, strict_resolver=True,
+    )
+    if source in config_registry.ERROR_SOURCES:  # unknown state is not "off" for a docs dispatch
+        raise ValueError(f"{_DOC_STYLE_KEY} cannot be read ({source}); no spec staged")
+    return (value or "").strip()
+
+
+def _apply_doc_style(
+    instruction_text: str, task_class: Optional[str], dispatch_paths: tuple[dict, ...],
+    project_id: str, root: Path,
+) -> tuple[str, dict]:
+    """Append the style file to a docs dispatch's instruction; ``(text, extra spec fields)``.
+
+    Unchanged (and no extra fields) when the dispatch is no docs dispatch or the key is
+    empty. A set key whose file cannot be used refuses staging with a ValueError.
+    """
+    if not is_docs_dispatch(task_class, dispatch_paths):
+        return instruction_text, {}
+    raw = _doc_style_setting(project_id, root)
+    if not raw:
+        return instruction_text, {}
+    path, content = _read_doc_style(raw)
+    lead = "" if instruction_text.endswith("\n\n") else ("\n" if instruction_text.endswith("\n") else "\n\n")
+    appended = f"{lead}{_DOC_STYLE_HEADING}\n\n{content}"
+    digest = hashlib.sha256(appended.encode("utf-8")).hexdigest()
+    return instruction_text + appended, {"doc_style_file": {"path": path, "sha256": digest}}
+
+
 def stage_spec_bundle(
     *,
     instruction_text: str,
@@ -365,65 +558,44 @@ def stage_spec_bundle(
     # stays default OFF (advisory-only absence) at the door; this parameter only
     # fixes the OVERDRACHT (transfer) so a caller who HAS a track_id can hand it off.
     track_id: Optional[str] = None,
+    origin_oi: Optional[str] = None,
+    origin_pr: Optional[int] = None,
+    round_cause: Optional[str] = None,
+    difficulty: Optional[Mapping[str, Any]] = None,
 ) -> Path:
     """Write a non-forgeable staged spec bundle; return the dispatch-spec.json path.
+    ``difficulty`` is validated and recorded on the spec; staging writes no ``dispatch_metadata`` row (ADR-071 besluit 2: the lane start births it).
 
     Bundle layout: <data_dir>/dispatches/pending/<dispatch_id>/{instruction.md,
     dispatch-spec.json}. The bundle is genuinely promoted (physically under
     pending/), so the door's D11 staging gate is satisfied honestly.
     """
     # 1. staging_id is DERIVED from dispatch_id and validated BEFORE any path join.
-    if not _ID_RE.match(dispatch_id or ""):
-        raise ValueError(
-            f"dispatch_id {dispatch_id!r} does not match the id regex; refusing to "
-            "stage a bundle with an unsafe directory name"
-        )
-    staging_id = dispatch_id
+    staging_id = _require_staging_id(dispatch_id)
 
-    # 1a. deadline bounds validated at the trust boundary — this module is the
-    # FIRST writer of a dispatch-spec.json bundle, so an out-of-range value must
-    # fail loud at staging (bridge_dispatch surfaces it as a clean reject) rather
-    # than drift silently downstream. The range is the consumer-door contract
-    # [DEADLINE_SECONDS_MIN, DEADLINE_SECONDS_MAX] — the same range validate()
-    # Rule 11 enforces, from the same constants (dispatch_spec).
-    _require_deadline_in_range(deadline_seconds)
-
-    # 1a-bis. resolve the lineage BEFORE any write (D2, dlv-e5bdf6c502cf): a
-    # fix-forward's work_ref already names the dispatch it continues, so derive
-    # parent_dispatch from it when the caller didn't supply one, and refuse a
-    # conflicting explicit value loud here rather than staging two lineages.
-    parent_dispatch = resolve_parent_dispatch(dispatch_id, work_ref, parent_dispatch)
-
+    # 1a. deadline and difficulty validated at the trust boundary (the FIRST writer of a dispatch-spec.json).
+    difficulty_block = _require_difficulty(difficulty, len(dispatch_paths), deadline_seconds)
     # 1a-ter. a named skill must exist in a skill tree BEFORE the bundle is written.
     skill = _require_known_skill(skill)
     permission_policy_digest = policy_digest_for_role(role)  # P5: proven BEFORE any write
 
-    # 1b. resolve the effective tenant ONCE, up front, so the physical staging store and
-    # the spec's declared project_id are the SAME. Staging into the ambient _data_dir()
-    # (vnx-dev in a central install) while stamping the spec with the real project_id is
-    # exactly what caused the fleet-wide hard-reject: the door derives the tenant from the
-    # bundle's physical location, so a bundle staged into vnx-dev but declaring
-    # sales-copilot fails validation.
+    # 1b. resolve the effective tenant ONCE: the door derives the tenant from the bundle's
+    # physical location, so the staging store and the spec's project_id must be the SAME.
     effective_project_id = project_id or _project_id()
 
     # 2. resolve the data root the SAME way the door does — anchored on the tenant.
     root = (data_dir or _data_dir(effective_project_id)).resolve()
-    pending = root / "dispatches" / "pending"
+    # 2-bis. a docs dispatch carries the configured style file (refused unreadable, BEFORE any write).
+    instruction_text, style_fields = _apply_doc_style(
+        instruction_text, task_class, dispatch_paths, effective_project_id, root)
 
-    # 3. anchor the pending root BEFORE writing (defense-in-depth vs symlink escape).
-    if pending.exists() and not pending.resolve().is_relative_to(root):
-        raise ValueError(
-            f"refusing to stage: pending root {pending} resolves outside data root "
-            f"{root} (symlink escape) — possible forged-promotion attempt"
-        )
+    # 2a. resolve the lineage BEFORE any write (D2, ADR-071 besluit 3): work_ref or a named origin fills parent_dispatch.
+    parent_dispatch, edge_kind, edge_evidence, edge_parent = _stage_lineage(
+        dispatch_id, work_ref, parent_dispatch, origin_oi, origin_pr, root, round_cause,
+    )
 
-    bundle_dir = pending / staging_id
-    bundle_dir.mkdir(parents=True, exist_ok=True)
-    # bundle_dir itself must resolve inside pending (catch a pre-planted symlinked id dir).
-    if not bundle_dir.resolve().is_relative_to(pending.resolve()):
-        raise ValueError(
-            f"refusing to stage: bundle dir {bundle_dir} escapes pending root"
-        )
+    # 3. anchor the pending root and create the bundle dir (symlink-escape guards).
+    bundle_dir = _make_bundle_dir(root, staging_id)
 
     # 4. write the instruction as a fresh regular file inside the bundle.
     instruction_file = bundle_dir / "instruction.md"
@@ -432,9 +604,7 @@ def stage_spec_bundle(
     # 5. pre-bind the content hash over the exact written bytes (closes TOCTOU pre-door).
     instruction_sha256 = hashlib.sha256(instruction_text.encode("utf-8")).hexdigest()
 
-    # 6. assemble + write the spec atomically. instruction_file is the literal
-    #    absolute child path — a real regular file, no symlink.
-    norm_reason = (headless_reason or "").strip() or None
+    # 6. assemble + write the spec atomically; instruction_file is the literal absolute child path.
     spec_payload = {
         "schema_version": 1,
         "project_id": effective_project_id,
@@ -474,14 +644,35 @@ def stage_spec_bundle(
         "tags": list(tags),
         "instruction_sha256": instruction_sha256,
         "allow_headless": bool(allow_headless),
-        "headless_reason": norm_reason,
+        "headless_reason": (headless_reason or "").strip() or None,
         "post_merge_verification": bool(post_merge_verification),
         "irreversible": bool(irreversible),
         "permission_policy_digest": permission_policy_digest,
+        **_spec_origin_fields(origin_oi, origin_pr, edge_evidence.get("round_cause"), difficulty_block),
+        **style_fields,
     }
     spec_file = bundle_dir / "dispatch-spec.json"
     atomic_write_json(spec_file, spec_payload)
+    record_declared_edge(
+        data_root=root, project_id=effective_project_id, dispatch_id=dispatch_id,
+        predecessor=edge_parent, kind=edge_kind, evidence=edge_evidence,
+    )
     return spec_file
+
+
+# Why a known failure class does not climb, one explanation per class (OI-2783): the
+# refusal used to carry the auth_rejected sentence for every one of them.
+_NO_CLIMB_REASONS = {
+    "auth_rejected": "auth_rejected — a higher tier has the same auth problem",
+    "tool_missing": "tool_missing — the provider CLI is missing on this host, "
+    "another model on the same host does not fix that",
+    "local_key_missing": "local_key_missing — the own provider key is absent on this "
+    "host, a local config error another model does not fix",
+    "provider_switched_off": "provider_switched_off — the operator switched this "
+    "provider family off, a climb would route around that decision",
+    "paid_lane_budget_exceeded": "paid_lane_budget_exceeded — the daily budget of the "
+    "paid lane is spent: restage on a subscription lane, or refire after 00:00Z UTC",
+}
 
 
 def stage_escalation_bundle(
@@ -550,7 +741,7 @@ def stage_escalation_bundle(
             )
         raise ValueError(
             f"refusing to stage escalation: failure_class={failure_class!r} does "
-            "not climb (auth_rejected — a higher tier has the same auth problem)"
+            f"not climb ({_NO_CLIMB_REASONS.get(failure_class, failure_class)})"
         )
     if escalation.tier_to is None:
         raise ValueError(
@@ -809,6 +1000,9 @@ def _main_stage(argv: list) -> int:
     # required by this command; the door's _check_track_link_verdict is the one place
     # that enforces existence/format, exactly as for a track_id staged any other way.
     parser.add_argument("--track", default=None, dest="track_id")
+    parser.add_argument("--origin-oi", default=None, dest="origin_oi")
+    parser.add_argument("--origin-pr", default=None, dest="origin_pr", type=int)
+    parser.add_argument("--round-cause", default=None, dest="round_cause")
     parser.add_argument("--data-dir", default=None, dest="data_dir", type=Path)
     args = parser.parse_args(argv)
 
@@ -848,6 +1042,9 @@ def _main_stage(argv: list) -> int:
             deadline_seconds=args.deadline_seconds,
             tags=tuple(args.tags),
             track_id=args.track_id,
+            origin_oi=args.origin_oi,
+            origin_pr=args.origin_pr,
+            round_cause=args.round_cause,
             data_dir=args.data_dir,
         )
     except (ValueError, OSError) as exc:
@@ -884,13 +1081,12 @@ def _main_legacy(argv: Optional[list] = None) -> int:
     parser.add_argument("--allow-headless", action="store_true", dest="allow_headless")
     parser.add_argument("--headless-reason", default=None, dest="headless_reason")
     parser.add_argument(
-        "--post-merge-verification",
-        action="store_true",
-        dest="post_merge_verification",
+        "--post-merge-verification", action="store_true", dest="post_merge_verification",
         help="Mark this dispatch as a post-merge verification: the door fails "
              "closed (refuses) while the local main checkout lags origin/main.",
     )
     parser.add_argument("--target-id-override", default=None, dest="target_id_override")
+    parser.add_argument("--round-cause", default=None, dest="round_cause")
     parser.add_argument("--dry-run", action="store_true", dest="dry_run")
     parser.add_argument(
         "--instruction-stdin", action="store_true", dest="instruction_stdin",
@@ -945,6 +1141,7 @@ def _main_legacy(argv: Optional[list] = None) -> int:
         headless_reason=args.headless_reason,
         post_merge_verification=args.post_merge_verification,
         target_id_override=args.target_id_override,
+        round_cause=args.round_cause,
         dry_run=args.dry_run,
     )
 

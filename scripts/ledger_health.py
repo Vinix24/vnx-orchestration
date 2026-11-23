@@ -98,6 +98,7 @@ if str(LIB_DIR) not in sys.path:
     sys.path.insert(0, str(LIB_DIR))
 
 from ndjson_hash_chain import verify_chain  # noqa: E402
+from ndjson_hash_chain import append_chains, read_ledger_tail
 from open_outcomes import build_open_outcomes
 from lifecycle_count import briefing_line, compute_lifecycle_count
 from receipt_outcome import noise_reason
@@ -147,13 +148,13 @@ EXIT_ACK_FAILED = 1
 EXIT_ACK_REFUSED = 2
 
 
-def _chain_receipts_configured() -> bool:
-    """Same truthy predicate as ``append_receipt_internals.idempotency.
-    _chain_receipts_enabled`` (1/true/yes/on, case-insensitive) — duplicated
-    as a two-line env read rather than importing another subsystem's
-    ``_internals`` package for one predicate."""
-    value = os.environ.get("VNX_CHAIN_RECEIPTS", "")
-    return value.strip().lower() in ("1", "true", "yes", "on")
+def _chain_receipts_configured(ledger_path: Path) -> Tuple[bool, str]:
+    """The append path's own decision (ADR-083, ``ndjson_hash_chain.append_chains``):
+    a ``chaining`` tail chains, otherwise ``VNX_CHAIN_RECEIPTS`` decides. Returns
+    ``(configured, tail_state)`` so a sealed ledger reads as configured without the
+    variable in this job's environment."""
+    tail_state, _hash = read_ledger_tail(ledger_path)
+    return append_chains(tail_state), tail_state
 
 
 def _read_unique_dispatch_ids(
@@ -420,16 +421,16 @@ def check_chain_status(state_dir: Path) -> Dict[str, Any]:
 
     try:
         ok, violations, chain_state = verify_chain(ledger_path)
+        configured, tail_state = _chain_receipts_configured(ledger_path)
     except OSError as exc:
         return {"status": SKIPPED_UNVERIFIED, "reason": f"could not read receipts ledger: {exc}"}
-
-    configured = _chain_receipts_configured()
 
     if chain_state == "broken":
         return {
             "status": STATUS_FINDING,
             "chain_state": chain_state,
             "chain_receipts_configured": configured,
+            "chain_tail": tail_state,
             "violation_count": len(violations),
             "violations_sample": violations[:5],
         }
@@ -697,7 +698,7 @@ def _run_acknowledge(args: argparse.Namespace) -> int:
         print(f"ledger_health acknowledge: state dir not found: {state_dir}", file=sys.stderr)
         return EXIT_ACK_REFUSED
 
-    actor = args.actor or os.environ.get("VNX_ACTOR", "").strip() or DEFAULT_ACKNOWLEDGE_ACTOR
+    actor = args.actor or DEFAULT_ACKNOWLEDGE_ACTOR
     try:
         record = acknowledge_gap(state_dir, args.dispatch_id, args.reason, actor)
     except ValueError as exc:
@@ -746,7 +747,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     ack.add_argument("--reason", required=True, help="why the gap is understood (must not be blank)")
     ack.add_argument(
         "--actor", default=None,
-        help=f"who acknowledges (default: $VNX_ACTOR, else '{DEFAULT_ACKNOWLEDGE_ACTOR}')",
+        help=f"who acknowledges (default: '{DEFAULT_ACKNOWLEDGE_ACTOR}')",
     )
     # SUPPRESS: a --state-dir given BEFORE the subcommand must survive the subparser's own default.
     ack.add_argument(

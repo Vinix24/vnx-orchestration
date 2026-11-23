@@ -17,6 +17,9 @@
 # spaces.)
 _SPR_TOO_OLD_LOGGED=" "
 _SPR_TOO_OLD_CYCLE_COUNT=0
+# OI-2903: same damping for "Already processed" — logged once per report name
+# per process instead of once per report per poll cycle.
+_SPR_ALREADY_LOGGED=" "
 
 # Emit the per-cycle aggregate of suppressed too-old skips (one line per
 # scan cycle instead of one line per historical report per cycle).
@@ -59,14 +62,21 @@ should_process_report() {
         return 1
     fi
 
-    log "DEBUG" "Report accepted: $report_name (age: $(( ($(date +%s) - file_mtime) / 60 ))m)"
-
     local report_hash
     report_hash=$(_sha256 "$report_file")
     if grep -q "^$report_hash$" "$PROCESSED_HASHES" 2>/dev/null; then
-        log "DEBUG" "Already processed: $report_name"
+        case "$_SPR_ALREADY_LOGGED" in
+            *" $report_name "*) ;;
+            *)
+                _SPR_ALREADY_LOGGED="${_SPR_ALREADY_LOGGED}${report_name} "
+                log "DEBUG" "Already processed: $report_name — first skip, further per-cycle repeats suppressed"
+                ;;
+        esac
         return 1
     fi
+
+    # Only a report that will really be processed is "accepted" (OI-2903).
+    log "DEBUG" "Report accepted: $report_name (age: $(( ($(date +%s) - file_mtime) / 60 ))m)"
 
     return 0  # Should process
 }

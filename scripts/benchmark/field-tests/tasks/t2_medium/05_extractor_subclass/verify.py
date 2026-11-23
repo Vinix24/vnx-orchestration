@@ -48,30 +48,7 @@ def verify(workdir: Path, task_meta: dict) -> dict[str, Any]:
 
         checks: list[tuple[str, bool, str]] = []
 
-        envelope_proc = subprocess.run(
-            [sys.executable, "-c",
-             "import sys; sys.path.insert(0, '.'); "
-             "from email_link_extractor import EmailLinkExtractor; "
-             "r = EmailLinkExtractor().extract('', 'https://example.com'); "
-             "import json; print(json.dumps(r))"],
-            cwd=tmp_dir, capture_output=True, text=True, timeout=30, check=False,
-        )
-        envelope_ok = False
-        if envelope_proc.returncode == 0:
-            try:
-                env = json.loads(envelope_proc.stdout.strip())
-                envelope_ok = (
-                    env.get("name") == "email_link"
-                    and isinstance(env.get("data"), dict)
-                    and isinstance(env.get("errors"), list)
-                )
-            except json.JSONDecodeError:
-                pass
-        checks.append((
-            "empty-html envelope shape correct",
-            envelope_ok,
-            f"stdout={envelope_proc.stdout[-200:]} stderr={envelope_proc.stderr[-200:]}",
-        ))
+        checks.append(_envelope_check(tmp_dir))
 
         pytest_proc = subprocess.run(
             [sys.executable, "-m", "pytest",
@@ -89,33 +66,7 @@ def verify(workdir: Path, task_meta: dict) -> dict[str, Any]:
             f"passed={pytest_pass} failed={pytest_fail}",
         ))
 
-        sample_proc = subprocess.run(
-            [sys.executable, "-c",
-             "import sys; sys.path.insert(0, '.'); "
-             "from email_link_extractor import EmailLinkExtractor; "
-             'html = \'<a href="mailto:A@Example.com">x</a>'
-             '<a href="mailto:a@example.com?subject=Hi">y</a>'
-             '<a href="mailto:b@example.com">z</a>\'; '
-             "r = EmailLinkExtractor().extract(html, 'https://x'); "
-             "import json; print(json.dumps(r['data']))"],
-            cwd=tmp_dir, capture_output=True, text=True, timeout=30, check=False,
-        )
-        smoke_ok = False
-        if sample_proc.returncode == 0:
-            try:
-                d = json.loads(sample_proc.stdout.strip())
-                smoke_ok = (
-                    d.get("total_links") == 3
-                    and d.get("unique_emails") == 2
-                    and sorted(d.get("emails", [])) == ["a@example.com", "b@example.com"]
-                )
-            except json.JSONDecodeError:
-                pass
-        checks.append((
-            "dedup + lowercase + subject-strip work",
-            smoke_ok,
-            f"stdout={sample_proc.stdout[-300:]}",
-        ))
+        checks.append(_smoke_check(tmp_dir))
 
     pass_count = sum(1 for _, ok, _ in checks if ok)
 
@@ -131,6 +82,64 @@ def verify(workdir: Path, task_meta: dict) -> dict[str, Any]:
             "checks": [{"name": n, "ok": ok, "note": note} for n, ok, note in checks],
         },
     }
+
+
+
+def _envelope_check(tmp_dir: Path) -> tuple[str, bool, str]:
+    envelope_proc = subprocess.run(
+        [sys.executable, "-c",
+         "import sys; sys.path.insert(0, '.'); "
+         "from email_link_extractor import EmailLinkExtractor; "
+         "r = EmailLinkExtractor().extract('', 'https://example.com'); "
+         "import json; print(json.dumps(r))"],
+        cwd=tmp_dir, capture_output=True, text=True, timeout=30, check=False,
+    )
+    envelope_ok = False
+    if envelope_proc.returncode == 0:
+        try:
+            env = json.loads(envelope_proc.stdout.strip())
+            envelope_ok = (
+                env.get("name") == "email_link"
+                and isinstance(env.get("data"), dict)
+                and isinstance(env.get("errors"), list)
+            )
+        except json.JSONDecodeError:
+            pass
+    return (
+        "empty-html envelope shape correct",
+        envelope_ok,
+        f"stdout={envelope_proc.stdout[-200:]} stderr={envelope_proc.stderr[-200:]}",
+    )
+
+
+def _smoke_check(tmp_dir: Path) -> tuple[str, bool, str]:
+    sample_proc = subprocess.run(
+        [sys.executable, "-c",
+         "import sys; sys.path.insert(0, '.'); "
+         "from email_link_extractor import EmailLinkExtractor; "
+         'html = \'<a href="mailto:A@Example.com">x</a>'
+         '<a href="mailto:a@example.com?subject=Hi">y</a>'
+         '<a href="mailto:b@example.com">z</a>\'; '
+         "r = EmailLinkExtractor().extract(html, 'https://x'); "
+         "import json; print(json.dumps(r['data']))"],
+        cwd=tmp_dir, capture_output=True, text=True, timeout=30, check=False,
+    )
+    smoke_ok = False
+    if sample_proc.returncode == 0:
+        try:
+            d = json.loads(sample_proc.stdout.strip())
+            smoke_ok = (
+                d.get("total_links") == 3
+                and d.get("unique_emails") == 2
+                and sorted(d.get("emails", [])) == ["a@example.com", "b@example.com"]
+            )
+        except json.JSONDecodeError:
+            pass
+    return (
+        "dedup + lowercase + subject-strip work",
+        smoke_ok,
+        f"stdout={sample_proc.stdout[-300:]}",
+    )
 
 
 if __name__ == "__main__":

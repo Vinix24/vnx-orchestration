@@ -1,12 +1,12 @@
 """Auto-dream memory consolidator (ADR-019).
 
 Reads success_patterns + antipatterns + intelligence_injections for a project,
-dispatches kimi K2.6 cheap-lane for consolidation, emits NDJSON event, and writes
+consolidates on the provider VNX_DREAM_PROVIDER names (default deepseek, or kimi), emits NDJSON event, and writes
 a pending-review.json for T0 approval.
 
 Per ADR-005: NDJSON emit BEFORE any DB write.
 Per ADR-007: project_id required on all DB operations.
-Per ADR-003: kimi via CLI subprocess only, no Anthropic SDK.
+Per ADR-003: providers via CLI subprocess only, no Anthropic SDK.
 
 Injection-probe gate (PR-17, revised): the injection-effectiveness probe decides
 whether a cycle may run. ``ok`` runs a normal cycle. ``degraded`` runs the cycle
@@ -25,8 +25,8 @@ started/completed events and the returned dict.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
-import os
 import sqlite3
 import subprocess
 import sys
@@ -39,8 +39,20 @@ from uuid import uuid4
 # proceed with consolidation. Below this threshold the cycle is skipped cleanly.
 _MIN_PATTERN_THRESHOLD: int = 1
 
-# Default kimi subprocess timeout in seconds; override via VNX_DREAM_KIMI_TIMEOUT.
-_DEFAULT_KIMI_TIMEOUT: int = 180
+# Timeout in seconds of one consolidation call, whichever provider runs it.
+_DEFAULT_TIMEOUT: int = 180
+
+# The provider that runs the consolidation is the config key VNX_DREAM_PROVIDER. An explicit
+# allow-list: any other value skips the cycle, it never falls back to kimi.
+_PROVIDER_KEY: str = "VNX_DREAM_PROVIDER"
+_DEFAULT_PROVIDER: str = "deepseek"
+_PROVIDERS: frozenset[str] = frozenset({"deepseek", "kimi"})
+_REASON_PROVIDER_UNKNOWN: str = "dream_provider_unknown"
+
+# Output-token ceiling handed to the DeepSeek provider. The prompt asks for one decision per
+# pattern (about 40 tokens each) over at most 50_000 payload characters, which is a few
+# hundred rows at worst: 8_000 tokens covers that with room for the summary.
+_DEEPSEEK_MAX_TOKENS: int = 8_000
 
 # Probe statuses that let a cycle run. An explicit allow-set, not a deny-set: a
 # new or misspelled status must fail closed rather than pass by not being listed.
@@ -52,10 +64,12 @@ _PROBE_HEALTH_RUNNABLE: frozenset[str] = frozenset(
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 import vnx_paths as _vnx_paths
+import config_registry
+import config_runtime
 import content_class
 import provider_switch
 
-# Character budget for the serialized pattern JSON inside one kimi prompt. Input
+# Character budget for the serialized pattern JSON inside one consolidation prompt. Input
 # that does not fit is split over several prompts, never cut off (OI-1821).
 _PROMPT_PAYLOAD_BUDGET: int = 50_000
 
@@ -158,13 +172,23 @@ def _check_receipt_completeness(
     return True, "ok"
 
 
+def _utc_timestamp() -> str:
+    """UTC ISO-8601 timestamp in the format the dream events already carry."""
+    return datetime.now(timezone.utc).isoformat()
+
+
 def _emit_dream_event(event: dict[str, Any], data_root: Path) -> None:
     """Emit NDJSON event BEFORE any DB mutation (ADR-005).
+
+    Every event is stamped here through `_utc_timestamp`, so a new event dict
+    cannot be written without one; an explicit ``timestamp`` is kept as-is.
 
     ``data_root`` must be the canonical VNX data root (from _resolve_data_root),
     NOT resolve_project_root(__file__)/.vnx-data — that path is the source repo
     and breaks on central installs.
     """
+    if not event.get("timestamp"):
+        event = {**event, "timestamp": _utc_timestamp()}
     events_dir = data_root / "events" / "dream"
     events_dir.mkdir(parents=True, exist_ok=True)
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -172,14 +196,34 @@ def _emit_dream_event(event: dict[str, Any], data_root: Path) -> None:
     with event_path.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(event) + "\n")
 
+# Per table the column that says a row changed; part of the input hash.
+_TABLE_UPDATED_COL: dict[str, str] = {
+    "success_patterns": "last_used", "antipatterns": "last_seen", "intelligence_injections": "injected_at"}
+_REASON_UNCHANGED_INPUT: str = "unchanged_input"
+
+
+def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    return {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+
+
+def _unfiltered_tables(conn: sqlite3.Connection) -> list[str]:
+    """Input tables that exist without ``valid_until``: read without the validity filter."""
+    return [t for t in _TABLE_SORT_COL
+            if (cols := _table_columns(conn, t)) and "valid_until" not in cols]
+
 
 def _fetch_patterns(conn: sqlite3.Connection, project_id: str) -> dict[str, list[dict]]:
-    """Fetch recent patterns for consolidation input, scoped to project_id (ADR-007)."""
+    """Fetch recent valid patterns, scoped to project_id (ADR-007).
+
+    A table with ``valid_until`` is read with ``AND valid_until IS NULL`` (approved rows drop
+    out); a table without it keeps the old query (``_unfiltered_tables`` names those).
+    """
     results: dict[str, list[dict]] = {}
     for table, sort_col in _TABLE_SORT_COL.items():
         try:
+            valid_filter = " AND valid_until IS NULL" if "valid_until" in _table_columns(conn, table) else ""
             rows = conn.execute(
-                f"SELECT * FROM {table} WHERE project_id = ?"
+                f"SELECT * FROM {table} WHERE project_id = ?{valid_filter}"
                 f" ORDER BY {sort_col} DESC LIMIT 200",
                 (project_id,),
             )
@@ -187,6 +231,58 @@ def _fetch_patterns(conn: sqlite3.Connection, project_id: str) -> dict[str, list
         except sqlite3.OperationalError:
             results[table] = []
     return results
+
+
+def _input_hash(patterns: dict[str, list[dict]]) -> str:
+    """sha256 over the sorted ``(table, id, sort col, updated col)`` of every input row."""
+    keys = sorted([t, r.get("id"), r.get(_TABLE_SORT_COL[t]), r.get(_TABLE_UPDATED_COL[t])]
+                  for t, rows in patterns.items() for r in rows)
+    return hashlib.sha256(_compact_json(keys).encode("utf-8")).hexdigest()
+
+
+def _review_with_hash(path: Path, project_id: str, digest: str) -> "dict | None":
+    """The ``project_id`` review at ``path`` whose string ``input_hash`` is ``digest``, else None.
+
+    Missing, unparseable, foreign or hash-less reviews never match: the cycle runs.
+    """
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (ValueError, OSError):
+        return None
+    if not isinstance(data, dict) or data.get("project_id") != project_id:
+        return None
+    stored = data.get("input_hash")
+    return data if isinstance(stored, str) and stored == digest else None
+
+
+def _matching_cycle(
+    conn: sqlite3.Connection, project_id: str, data_root: Path, digest: str
+) -> "str | None":
+    """The cycle_id of a waiting review or the last reviewed cycle with input hash ``digest``."""
+    state_dir = data_root / "state" / "dream"
+    for path in sorted(state_dir.glob("*-pending-review.json")):
+        review = _review_with_hash(path, project_id, digest)
+        if review is not None and review.get("requires_operator_review") is True:
+            return str(review.get("cycle_id") or path.name)
+    last = conn.execute(
+        "SELECT cycle_id FROM dream_cycles WHERE project_id = ? AND status = 'reviewed'"
+        " ORDER BY completed_at DESC LIMIT 1", (project_id,)).fetchone()
+    if last is not None and _review_with_hash(
+            state_dir / f"{last[0]}-pending-review.json", project_id, digest):
+        return str(last[0])
+    return None
+
+
+def _unchanged_input_skip(
+    conn: sqlite3.Connection, patterns: dict[str, list[dict]], cycle_id: str, project_id: str,
+    data_root: Path,
+) -> "dict[str, Any] | None":
+    """Skipped result when a waiting or the last reviewed cycle read the same input, else None."""
+    digest = _input_hash(patterns)
+    match = _matching_cycle(conn, project_id, data_root, digest)
+    return None if match is None else _skip_cycle(
+        cycle_id, project_id, data_root, _REASON_UNCHANGED_INPUT,
+        f"input_hash {digest[:12]} equals cycle {match}", matching_cycle_id=match, input_hash=digest)
 
 
 def _filter_restricted_rows(
@@ -210,31 +306,72 @@ def _filter_restricted_rows(
     return clean, dropped
 
 
+def _emit_skipped(
+    cycle_id: str,
+    project_id: str,
+    data_root: Path,
+    reason: str,
+    detail: str,
+    *,
+    event_extra: "dict[str, Any] | None" = None,
+    result_extra: "dict[str, Any] | None" = None,
+) -> dict[str, Any]:
+    """Emit a ``dream_cycle_skipped`` event and return the matching skipped result.
+
+    One builder for every skip path: `_emit_dream_event` stamps the event, and
+    ``event_extra``/``result_extra`` carry each caller's own fields (``outcome``,
+    ``probe_health``, ...) without widening the shared shape.
+    """
+    event: dict[str, Any] = {
+        "event_type": "dream_cycle_skipped",
+        "cycle_id": cycle_id,
+        "project_id": project_id,
+        "reason": reason,
+        "detail": detail,
+    }
+    event.update(event_extra or {})
+    _emit_dream_event(event, data_root)
+    result: dict[str, Any] = {"status": "skipped", "cycle_id": cycle_id, "reason": reason}
+    result.update(result_extra or {})
+    return result
+
+
 def _skip_cycle(
     cycle_id: str, project_id: str, data_root: Path, outcome: str, detail: str, **extra: Any
 ) -> dict[str, Any]:
     """Emit a ``dream_cycle_skipped`` event and return the skipped result, both carrying ``outcome``."""
-    _emit_dream_event(
-        {
-            "event_type": "dream_cycle_skipped",
-            "cycle_id": cycle_id,
-            "project_id": project_id,
-            "reason": outcome,
-            "outcome": outcome,
-            "detail": detail,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            **extra,
-        },
+    shared = {"outcome": outcome, **extra}
+    return _emit_skipped(
+        cycle_id,
+        project_id,
         data_root,
+        outcome,
+        detail,
+        event_extra=shared,
+        result_extra={"detail": detail, **shared},
     )
-    return {
-        "status": "skipped", "cycle_id": cycle_id, "reason": outcome, "outcome": outcome,
-        "detail": detail, **extra,
-    }
+
+
+def _provider_or_skip(
+    cycle_id: str, project_id: str, data_root: Path
+) -> "tuple[str, dict[str, Any] | None]":
+    """The provider ``VNX_DREAM_PROVIDER`` names for this project, or a fail-closed skip.
+
+    A value outside ``_PROVIDERS`` (empty included) skips the cycle with a reason that names
+    it. No provider is called and kimi is not the fallback.
+    """
+    raw = config_registry.get_for_project(_PROVIDER_KEY, project_id, data_root / "state")
+    provider = (raw or "").strip().lower()
+    if provider in _PROVIDERS:
+        return provider, None
+    return provider, _skip_cycle(
+        cycle_id, project_id, data_root, _REASON_PROVIDER_UNKNOWN,
+        f"{_PROVIDER_KEY}={raw!r} is not one of {sorted(_PROVIDERS)}", provider=raw,
+    )
 
 
 def _content_boundary_skip(
-    cycle_id: str, project_id: str, data_root: Path
+    cycle_id: str, project_id: str, data_root: Path, provider: str
 ) -> "tuple[content_class.Boundary, dict[str, Any] | None]":
     """Load the content boundary and return it with a skipped result when it forbids the cycle.
 
@@ -246,10 +383,11 @@ def _content_boundary_skip(
         return boundary, _skip_cycle(cycle_id, project_id, data_root,
                                      "content_boundary_unconfigured", boundary.reason)
     if (project_id in boundary.client_project_ids
-            and "kimi" not in content_class.allowed_exception_providers(project_id, boundary)):
+            and provider not in content_class.allowed_exception_providers(project_id, boundary)):
         return boundary, _skip_cycle(cycle_id, project_id, data_root,
                                      "content_restricted_project",
-                                     "client project without a kimi exception")
+                                     f"client project without a {provider} exception",
+                                     provider=provider)
     return boundary, None
 
 
@@ -270,42 +408,34 @@ def _unrestricted_patterns(
     return patterns, dropped, None
 
 
-def _pre_kimi_skip(
+def _pre_consolidation_skip(
     patterns: dict[str, list[dict]], cycle_id: str, project_id: str, data_root: Path,
-    restricted_rows_dropped: dict[str, int],
+    restricted_rows_dropped: dict[str, int], provider: str,
 ) -> "dict[str, Any] | None":
-    """Skipped result for the guards that sit directly before the kimi call, else None.
+    """Skipped result for the guards that sit directly before the provider call, else None.
 
     Insufficient-data guard: skip cleanly when there are no core patterns to consolidate
     (e.g. freshly-bootstrapped DB). Then the switch, which decides after the content
-    boundary; both must allow, neither widens the other. Kimi is NOT invoked. (GAP-7)
+    boundary; both must allow, neither widens the other. The provider is NOT invoked. (GAP-7)
     """
     core_count = len(patterns.get("success_patterns", [])) + len(
         patterns.get("antipatterns", [])
     )
     if core_count < _MIN_PATTERN_THRESHOLD:
-        _emit_dream_event(
-            {
-                "event_type": "dream_cycle_skipped",
-                "cycle_id": cycle_id,
-                "project_id": project_id,
-                "reason": "insufficient_data",
-                "detail": f"core_count={core_count} below threshold={_MIN_PATTERN_THRESHOLD}",
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-            },
+        return _emit_skipped(
+            cycle_id,
+            project_id,
             data_root,
+            "insufficient_data",
+            f"core_count={core_count} below threshold={_MIN_PATTERN_THRESHOLD}",
+            event_extra={"provider": provider},
+            result_extra={"detail": f"core_count={core_count}"},
         )
-        return {
-            "status": "skipped",
-            "cycle_id": cycle_id,
-            "reason": "insufficient_data",
-            "detail": f"core_count={core_count}",
-        }
-    decision = provider_switch.decide("kimi", consumer="dream", project_id=project_id)
+    decision = provider_switch.decide(provider, consumer="dream", project_id=project_id)
     if not decision.allowed:
         return _skip_cycle(
             cycle_id, project_id, data_root, provider_switch.REASON_SWITCHED_OFF,
-            decision.detail(), restricted_rows_dropped=restricted_rows_dropped,
+            decision.detail(), restricted_rows_dropped=restricted_rows_dropped, provider=provider,
         )
     return None
 
@@ -329,16 +459,16 @@ def _extract_kimi_text(stdout: str) -> str:
     return "".join(parts)
 
 
-def _parse_kimi_response(output: str) -> dict:
-    """Extract JSON object from kimi text output (skips preamble / postamble)."""
+def _parse_json_response(output: str) -> dict:
+    """Extract JSON object from provider text output (skips preamble / postamble)."""
     start = output.find("{")
     end = output.rfind("}")
     if start == -1 or end == -1:
-        raise ValueError(f"No JSON found in kimi output: {output[:300]!r}")
+        raise ValueError(f"No JSON found in model output: {output[:300]!r}")
     try:
         return json.loads(output[start : end + 1])
     except json.JSONDecodeError as exc:
-        raise ValueError(f"Invalid JSON in kimi output: {exc}") from exc
+        raise ValueError(f"Invalid JSON in model output: {exc}") from exc
 
 
 def _compact_json(obj: Any) -> str:
@@ -456,8 +586,29 @@ def _book_kimi_call(
     )
 
 
+def _merge_batches(patterns_input: dict, project_id: str, run_batch: Any) -> dict:
+    """Split the patterns, run ``run_batch(prompt)`` per batch and merge the parsed results.
+
+    ``run_batch`` returns the parsed JSON object of one batch; it raises when the provider
+    fails or answers without one, and that raise ends the consolidation.
+    """
+    batches, shrunk_rows = _split_patterns(patterns_input)
+    merged: dict[str, Any] = {"merged": [], "dropped": [], "archived": [], "flagged": []}
+    summaries: list[str] = []
+    for index, batch in enumerate(batches, start=1):
+        result = run_batch(_build_consolidation_prompt(batch, project_id, (index, len(batches))))
+        for key in merged:
+            merged[key].extend(result.get(key) or [])
+        if result.get("summary"):
+            summaries.append(str(result["summary"]))
+    merged["summary"] = " ".join(summaries)
+    merged["input_batches"] = len(batches)
+    merged["rows_shrunk_to_fit"] = shrunk_rows
+    return merged
+
+
 def _dispatch_kimi_consolidation(
-    patterns_input: dict, project_id: str, timeout: float = _DEFAULT_KIMI_TIMEOUT,
+    patterns_input: dict, project_id: str, timeout: float = _DEFAULT_TIMEOUT,
     data_root: "Path | None" = None,
 ) -> dict:
     """Dispatch the kimi cheap-lane for pattern consolidation and parse the result.
@@ -473,12 +624,9 @@ def _dispatch_kimi_consolidation(
     """
     from kimi_wrapper import kimi_exec  # noqa: PLC0415
 
-    batches, shrunk_rows = _split_patterns(patterns_input)
-    merged: dict[str, Any] = {"merged": [], "dropped": [], "archived": [], "flagged": []}
-    summaries: list[str] = []
     ref = f"dream-{project_id}"
-    for index, batch in enumerate(batches, start=1):
-        prompt = _build_consolidation_prompt(batch, project_id, (index, len(batches)))
+
+    def run_batch(prompt: str) -> dict:
         started = datetime.now(timezone.utc)
         try:
             stdout = kimi_exec(prompt, dispatch_id=ref, project_id=project_id, timeout=timeout)
@@ -490,15 +638,112 @@ def _dispatch_kimi_consolidation(
             raise
         _book_kimi_call(stdout, ref=ref, project_id=project_id, started=started,
                         ended=datetime.now(timezone.utc), data_root=data_root)
-        result = _parse_kimi_response(_extract_kimi_text(stdout) or stdout)
-        for key in merged:
-            merged[key].extend(result.get(key) or [])
-        if result.get("summary"):
-            summaries.append(str(result["summary"]))
-    merged["summary"] = " ".join(summaries)
-    merged["input_batches"] = len(batches)
-    merged["rows_shrunk_to_fit"] = shrunk_rows
-    return merged
+        return _parse_json_response(_extract_kimi_text(stdout) or stdout)
+
+    return _merge_batches(patterns_input, project_id, run_batch)
+
+
+def _dispatch_deepseek_consolidation(
+    patterns_input: dict, project_id: str, timeout: float = _DEFAULT_TIMEOUT,
+) -> dict:
+    """Run the consolidation through the key-auth DeepSeek provider and parse the result.
+
+    The provider books its own ledger line, so nothing is booked here. A result with
+    ``error`` raises (a provider timeout as ``subprocess.TimeoutExpired``, anything else as
+    ``RuntimeError``), and so does a result without a JSON object.
+    """
+    from classifier_providers import get_provider  # noqa: PLC0415
+
+    provider = get_provider("deepseek", project_id=project_id)
+    provider.timeout_seconds = int(timeout)
+
+    def run_batch(prompt: str) -> dict:
+        result = provider.classify(prompt, _max_tokens=_DEEPSEEK_MAX_TOKENS)
+        if result.error:
+            if result.error.startswith("timeout after "):
+                raise subprocess.TimeoutExpired("deepseek", timeout)
+            raise RuntimeError(f"deepseek consolidation failed: {result.error}")
+        if isinstance(result.parsed_json, dict):
+            return result.parsed_json
+        return _parse_json_response(result.raw_response or "")
+
+    return _merge_batches(patterns_input, project_id, run_batch)
+
+
+def _dispatch_consolidation(
+    patterns_input: dict, project_id: str, provider: str, timeout: float,
+    data_root: "Path | None" = None,
+) -> dict:
+    """Run the consolidation on ``provider``, one of ``_PROVIDERS``; anything else raises."""
+    if provider == "deepseek":
+        return _dispatch_deepseek_consolidation(patterns_input, project_id, timeout=timeout)
+    if provider == "kimi":
+        return _dispatch_kimi_consolidation(
+            patterns_input, project_id, timeout=timeout, data_root=data_root)
+    raise ValueError(f"unknown dream provider {provider!r}")
+
+
+def _run_consolidation(
+    patterns: dict, cycle_id: str, project_id: str, provider: str, timeout: float,
+    data_root: Path,
+) -> "tuple[dict | None, dict[str, Any] | None]":
+    """``(consolidation, None)``, or ``(None, timeout result)``; any other failure re-raises.
+
+    A failure writes ``dream_cycle_failed`` and a timeout ``dream_cycle_timeout``, both with
+    the provider. The timeout reason names the provider (``deepseek_timeout``, ``kimi_timeout``).
+    """
+    try:
+        return _dispatch_consolidation(
+            patterns, project_id, provider, timeout, data_root=data_root), None
+    except subprocess.TimeoutExpired:
+        _emit_dream_event(
+            {"event_type": "dream_cycle_timeout", "cycle_id": cycle_id, "project_id": project_id,
+             "provider": provider, "timeout_seconds": int(timeout)},
+            data_root,
+        )
+        return None, {"status": "timeout", "cycle_id": cycle_id, "reason": f"{provider}_timeout",
+                      "provider": provider, "timeout_seconds": int(timeout)}
+    except Exception as exc:
+        _emit_dream_event(
+            {"event_type": "dream_cycle_failed", "cycle_id": cycle_id, "project_id": project_id,
+             "provider": provider, "error": str(exc)[:500]},
+            data_root,
+        )
+        raise
+
+
+def _write_pending_review(
+    data_root: Path,
+    cycle_id: str,
+    project_id: str,
+    total_input: int,
+    restricted_rows_dropped: dict[str, int],
+    probe_health: str,
+    consolidation: dict[str, Any],
+    proposal_only: bool,
+    input_hash: str,
+    tables_without_valid_until: list[str],
+) -> Path:
+    """Write the pending-review JSON (stamped with ``created_at``) and return its path."""
+    review_dir = data_root / "state" / "dream"
+    review_dir.mkdir(parents=True, exist_ok=True)
+    review_path = review_dir / f"{cycle_id}-pending-review.json"
+    review: dict[str, Any] = {
+        "cycle_id": cycle_id,
+        "project_id": project_id,
+        "created_at": _utc_timestamp(),
+        "input_count": total_input,
+        "restricted_rows_dropped": restricted_rows_dropped,
+        "input_hash": input_hash,
+        "tables_without_valid_until": tables_without_valid_until,
+        "probe_health": probe_health,
+        "consolidation": consolidation,
+        "requires_operator_review": True,
+    }
+    if proposal_only:
+        review["mode"] = "proposal_only"
+    review_path.write_text(json.dumps(review, indent=2), encoding="utf-8")
+    return review_path
 
 
 def run_dream_cycle(
@@ -535,70 +780,36 @@ def run_dream_cycle(
     # review_gate.approve_cycle does). A degraded probe is the very state this
     # cycle exists to fix, so skipping on it deadlocked the remedy. Everything
     # outside _PROBE_HEALTH_RUNNABLE (produces_crap, unknown, unrecognised) skips.
-    if os.environ.get("VNX_DREAM_SCHEDULER_ENABLED", "0") != "1":
-        _emit_dream_event(
-            {
-                "event_type": "dream_cycle_skipped",
-                "cycle_id": cycle_id,
-                "project_id": project_id,
-                "reason": "scheduler_disabled",
-                "detail": "VNX_DREAM_SCHEDULER_ENABLED=0",
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-            },
-            _data_root,
+    if not config_runtime.get_bool("VNX_DREAM_SCHEDULER_ENABLED"):
+        detail = "VNX_DREAM_SCHEDULER_ENABLED=0"
+        return _emit_skipped(
+            cycle_id, project_id, _data_root, "scheduler_disabled", detail,
+            result_extra={"detail": detail},
         )
-        return {
-            "status": "skipped",
-            "cycle_id": cycle_id,
-            "reason": "scheduler_disabled",
-            "detail": "VNX_DREAM_SCHEDULER_ENABLED=0",
-        }
 
-    # Content boundary, before any kimi call.
-    boundary, skipped = _content_boundary_skip(cycle_id, project_id, _data_root)
+    # The provider, then the content boundary for it; both before any provider call.
+    provider, skipped = _provider_or_skip(cycle_id, project_id, _data_root)
+    if skipped is not None:
+        return skipped
+    boundary, skipped = _content_boundary_skip(cycle_id, project_id, _data_root, provider)
     if skipped is not None:
         return skipped
 
     probe_health = _injection_probe_health(db_path.parent)
     if probe_health not in _PROBE_HEALTH_RUNNABLE:
-        _emit_dream_event(
-            {
-                "event_type": "dream_cycle_skipped",
-                "cycle_id": cycle_id,
-                "project_id": project_id,
-                "reason": "probe_not_ok",
-                "detail": f"injection-effectiveness probe health={probe_health}",
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-            },
-            _data_root,
+        return _emit_skipped(
+            cycle_id, project_id, _data_root, "probe_not_ok",
+            f"injection-effectiveness probe health={probe_health}",
+            result_extra={"probe_health": probe_health},
         )
-        return {
-            "status": "skipped",
-            "cycle_id": cycle_id,
-            "reason": "probe_not_ok",
-            "probe_health": probe_health,
-        }
 
     # GAP-7: receipt-completeness preflight — skip cycle on empty/stale data
     complete, detail = _check_receipt_completeness(_data_root)
     if not complete:
-        _emit_dream_event(
-            {
-                "event_type": "dream_cycle_skipped",
-                "cycle_id": cycle_id,
-                "project_id": project_id,
-                "reason": "incomplete_data",
-                "detail": detail,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-            },
-            _data_root,
+        return _emit_skipped(
+            cycle_id, project_id, _data_root, "incomplete_data", detail,
+            result_extra={"detail": detail},
         )
-        return {
-            "status": "skipped",
-            "cycle_id": cycle_id,
-            "reason": "incomplete_data",
-            "detail": detail,
-        }
 
     proposal_only = probe_health == _PROBE_HEALTH_DEGRADED
 
@@ -607,15 +818,13 @@ def run_dream_cycle(
             "event_type": "dream_cycle_started",
             "cycle_id": cycle_id,
             "project_id": project_id,
+            "provider": provider,
             "probe_health": probe_health,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
         },
         _data_root,
     )
 
-    kimi_timeout = float(
-        os.environ.get("VNX_DREAM_KIMI_TIMEOUT", str(_DEFAULT_KIMI_TIMEOUT))
-    )
+    timeout = float(_DEFAULT_TIMEOUT)
 
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
@@ -624,118 +833,90 @@ def run_dream_cycle(
             conn, project_id, boundary, cycle_id, _data_root
         )
         if skipped is None:
-            skipped = _pre_kimi_skip(patterns, cycle_id, project_id, _data_root, restricted_rows_dropped)
+            skipped = _pre_consolidation_skip(
+                patterns, cycle_id, project_id, _data_root, restricted_rows_dropped, provider)
+        if skipped is None:
+            skipped = _unchanged_input_skip(conn, patterns, cycle_id, project_id, _data_root)
         if skipped is not None:
             return skipped
-        total_input = sum(len(v) for v in patterns.values())
 
-        try:
-            consolidation = _dispatch_kimi_consolidation(
-                patterns, project_id, timeout=kimi_timeout, data_root=_data_root
-            )
-        except subprocess.TimeoutExpired:
-            _emit_dream_event(
-                {
-                    "event_type": "dream_cycle_timeout",
-                    "cycle_id": cycle_id,
-                    "project_id": project_id,
-                    "timeout_seconds": int(kimi_timeout),
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                },
-                _data_root,
-            )
-            return {
-                "status": "timeout",
-                "cycle_id": cycle_id,
-                "reason": "kimi_timeout",
-                "timeout_seconds": int(kimi_timeout),
-            }
-        except Exception as exc:
-            _emit_dream_event(
-                {
-                    "event_type": "dream_cycle_failed",
-                    "cycle_id": cycle_id,
-                    "project_id": project_id,
-                    "error": str(exc)[:500],
-                },
-                _data_root,
-            )
-            raise
+        consolidation, timed_out = _run_consolidation(
+            patterns, cycle_id, project_id, provider, timeout, _data_root)
+        if timed_out is not None:
+            return timed_out
 
-        review_dir = _data_root / "state" / "dream"
-        review_dir.mkdir(parents=True, exist_ok=True)
-        review_path = review_dir / f"{cycle_id}-pending-review.json"
-        review: dict[str, Any] = {
-            "cycle_id": cycle_id,
-            "project_id": project_id,
-            "input_count": total_input,
-            "restricted_rows_dropped": restricted_rows_dropped,
-            "probe_health": probe_health,
-            "consolidation": consolidation,
-            "requires_operator_review": True,
-        }
-        if proposal_only:
-            review["mode"] = "proposal_only"
-        review_path.write_text(json.dumps(review, indent=2), encoding="utf-8")
-
-        merged_count = len(consolidation.get("merged", []))
-        dropped_count = len(consolidation.get("dropped", []))
-        archived_count = len(consolidation.get("archived", []))
-        flagged_count = len(consolidation.get("flagged", []))
-
-        _emit_dream_event(
-            {
-                "event_type": "dream_cycle_completed",
-                "cycle_id": cycle_id,
-                "project_id": project_id,
-                "probe_health": probe_health,
-                "input_count": total_input,
-                "restricted_rows_dropped": restricted_rows_dropped,
-                "merged_count": merged_count,
-                "dropped_count": dropped_count,
-                "archived_count": archived_count,
-                "flagged_count": flagged_count,
-                "review_path": str(review_path),
-            },
-            _data_root,
-        )
-
-        if not dry_run:
-            conn.execute(
-                """
-                INSERT INTO dream_cycles
-                    (cycle_id, project_id, completed_at, status, provider,
-                     insights_input, merged_count, dropped_count, archived_count,
-                     flagged_count, report_path)
-                VALUES (?, ?, ?, 'completed', 'kimi', ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    cycle_id,
-                    project_id,
-                    datetime.now(timezone.utc).isoformat(),
-                    total_input,
-                    merged_count,
-                    dropped_count,
-                    archived_count,
-                    flagged_count,
-                    str(review_path),
-                ),
-            )
-            conn.commit()
-
-        return {
-            "cycle_id": cycle_id,
-            "probe_health": probe_health,
-            "input_count": total_input,
-            "restricted_rows_dropped": restricted_rows_dropped,
-            "merged_count": merged_count,
-            "dropped_count": dropped_count,
-            "archived_count": archived_count,
-            "flagged_count": flagged_count,
-            "review_path": str(review_path),
-        }
+        return _complete_cycle(
+            conn, consolidation, patterns, cycle_id, project_id, provider, probe_health,
+            restricted_rows_dropped, proposal_only, dry_run, _data_root)
     finally:
         conn.close()
+
+
+def _insert_dream_cycle(
+    conn: sqlite3.Connection, cycle_id: str, project_id: str, provider: str, total_input: int,
+    counts: tuple[int, int, int, int], review_path: Path,
+) -> None:
+    """Insert the completed ``dream_cycles`` row; ``counts`` = merged, dropped, archived, flagged."""
+    conn.execute(
+        """
+        INSERT INTO dream_cycles
+            (cycle_id, project_id, completed_at, status, provider,
+             insights_input, merged_count, dropped_count, archived_count,
+             flagged_count, report_path)
+        VALUES (?, ?, ?, 'completed', ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (cycle_id, project_id, _utc_timestamp(), provider, total_input, *counts, str(review_path)),
+    )
+    conn.commit()
+
+
+def _complete_cycle(
+    conn: sqlite3.Connection, consolidation: dict[str, Any], patterns: dict[str, list[dict]],
+    cycle_id: str, project_id: str, provider: str, probe_health: str,
+    restricted_rows_dropped: dict[str, int], proposal_only: bool, dry_run: bool, data_root: Path,
+) -> dict[str, Any]:
+    """Write the review, emit ``dream_cycle_completed`` (before the DB write), book the row, return the result."""
+    total_input = sum(len(v) for v in patterns.values())
+    input_hash, tables_without_valid_until = _input_hash(patterns), _unfiltered_tables(conn)
+    review_path = _write_pending_review(
+        data_root, cycle_id, project_id, total_input,
+        restricted_rows_dropped, probe_health, consolidation, proposal_only,
+        input_hash, tables_without_valid_until,
+    )
+    counts = {
+        name: len(consolidation.get(key, []))
+        for name, key in (("merged_count", "merged"), ("dropped_count", "dropped"),
+                          ("archived_count", "archived"), ("flagged_count", "flagged"))
+    }
+    _emit_dream_event(
+        {
+            "event_type": "dream_cycle_completed",
+            "cycle_id": cycle_id,
+            "project_id": project_id,
+            "provider": provider,
+            "probe_health": probe_health,
+            "input_count": total_input,
+            "restricted_rows_dropped": restricted_rows_dropped,
+            "input_hash": input_hash,
+            "tables_without_valid_until": tables_without_valid_until,
+            **counts,
+            "review_path": str(review_path),
+        },
+        data_root,
+    )
+    if not dry_run:
+        _insert_dream_cycle(
+            conn, cycle_id, project_id, provider, total_input, tuple(counts.values()), review_path)
+    return {
+        "cycle_id": cycle_id,
+        "probe_health": probe_health,
+        "input_count": total_input,
+        "restricted_rows_dropped": restricted_rows_dropped,
+        "input_hash": input_hash,
+        "tables_without_valid_until": tables_without_valid_until,
+        **counts,
+        "review_path": str(review_path),
+    }
 
 
 def main() -> None:

@@ -56,9 +56,9 @@ ADDITIONAL_CONTEXT=""
 
 case "$TERMINAL" in
   T0)
-    # Gather live terminal states (best-effort, 2s timeout)
-    T0_TERMINAL_STATES=""
     T0_OPEN_ITEMS=""
+    # Set by the probe below; stays "unchecked" when the probe cannot run (never silent).
+    T0_ROLE_LINE="T0 ROLE UNCHECKED: the actor class of this session could not be determined (the role probe did not run); promote, grant and the worker skip may refuse it."
 
     # ── Resolve the CENTRAL state dir (ADR-026), same resolver as the runtime ──
     # The old resolver only checked ".vnx-data/state" / ".claude/vnx-data/state"
@@ -140,24 +140,20 @@ except Exception:
       _VNX_PARKED_BEACONS="$(printf '%s\n' "$_VNX_PATHS_OUT" | sed -n 4p)"
     fi
 
+    # Role check and inbox summary, one interpreter start (scripts/lib/sessionstart_t0_probe.py).
+    # Both must run in THIS process: the actor class is this session's, not a detached builder's.
+    T0_INBOX=""
+    _PROBE_OUT=""
+    if [ -n "$_VNX_PY" ] && [ -f "$_VNX_SCRIPTS_ROOT/lib/sessionstart_t0_probe.py" ]; then
+      _PROBE_OUT="$("$_VNX_PY" "$_VNX_SCRIPTS_ROOT/lib/sessionstart_t0_probe.py" "$_VNX_STATE_DIR" 2>/dev/null || true)"
+    fi
+    if [ -n "$_PROBE_OUT" ] && echo "$_PROBE_OUT" | jq -e 'type == "object"' >/dev/null 2>&1; then
+      T0_ROLE_LINE=$(echo "$_PROBE_OUT" | jq -r '.role_line // "T0 ROLE UNCHECKED: the probe returned no role_line"')
+      T0_INBOX=$(echo "$_PROBE_OUT" | jq -r '.inbox_text // "operator inbox: could not be read (the probe returned no inbox_text); NOT the same as no open questions"')
+    else
+      T0_INBOX="operator inbox: could not be read (the session probe did not run or returned no JSON); NOT the same as no open questions"
+    fi
     if [ -n "$_VNX_STATE_DIR" ] && [ -d "$_VNX_STATE_DIR" ]; then
-      # Terminal states from the shadow state file (scripts/lib/terminal_state_shadow.py).
-      # Golf 3A fix: this used to glob terminal_state_${_t}.json (a per-terminal
-      # suffixed filename) but the actual writer (TERMINAL_STATE_FILENAME in
-      # terminal_state_shadow.py) has only ever written the SINGULAR
-      # terminal_state.json, with a `.terminals.<id>` map inside it. The suffixed
-      # glob matched nothing, on any project — this section silently fell
-      # through to "No terminal state data" every session, discovered via this
-      # dispatch's own measurement discipline, not reported by anything.
-      _tsf="$_VNX_STATE_DIR/terminal_state.json"
-      if [ -f "$_tsf" ]; then
-        for _t in T1 T2 T3; do
-          _status=$(jq -r --arg t "$_t" '.terminals[$t].status // "unknown"' "$_tsf" 2>/dev/null || echo "unknown")
-          _last_activity=$(jq -r --arg t "$_t" '.terminals[$t].last_activity // "unknown"' "$_tsf" 2>/dev/null || echo "unknown")
-          T0_TERMINAL_STATES="${T0_TERMINAL_STATES}${_t}: ${_status} (last_activity: ${_last_activity})\n"
-        done
-      fi
-
       # Open items digest (compact)
       _oi_file="$_VNX_STATE_DIR/open_items.json"
       if [ -f "$_oi_file" ]; then
@@ -190,13 +186,20 @@ except Exception:
       # writes — absent, not zeroed, when that beacon was never written.
       T0_LIFECYCLE=$(jq -r '.lifecycle.line // empty' "$_ci_file" 2>/dev/null || true)
 
-      T0_STATE_SECTION="Terminals:
-$(echo -e "${T0_TERMINAL_STATES:-No terminal state data}")
-${T0_OPEN_ITEMS:-No open items data}
+      T0_STATE_SECTION="${T0_OPEN_ITEMS:-No open items data}
 ${T0_CONTRACT_INVALID}"
       if [ -n "$T0_LIFECYCLE" ]; then
         T0_STATE_SECTION="${T0_STATE_SECTION}
 ${T0_LIFECYCLE}"
+      fi
+
+      # operator-vragen-tot-antwoord Q5 (ADR-076 besluit 10): the open points come from the
+      # operator_inbox_summary.json the ledger writer keeps (current after every write; the
+      # t0_index.json block can be hours old since SS-2). This hook only READS: it writes no
+      # `presented` line and runs no `vnx inbox` command.
+      if [ -n "$T0_INBOX" ]; then
+        T0_STATE_SECTION="${T0_STATE_SECTION}
+${T0_INBOX}"
       fi
     else
       # Not-found is a DIFFERENT state than found-but-empty (a genuinely
@@ -204,7 +207,7 @@ ${T0_LIFECYCLE}"
       # "No open items data" default that would read as an ordinary quiet
       # project instead of an unresolved store — the exact fail-open this
       # fix closes.
-      T0_STATE_SECTION="VNX STATE STORE NOT FOUND — terminal states, open items, receipts and PR queue are UNAVAILABLE this session (UNMEASURED, not zero). Resolved path: ${_VNX_STATE_DIR:-<resolution failed: ${_VNX_RESOLVE_WHY}>}. Expected under ADR-026 at ~/.vnx-data/<project_id>/state — verify the receipt processor has run for this project."
+      T0_STATE_SECTION="VNX STATE STORE NOT FOUND — open items, receipts and PR queue are UNAVAILABLE this session (UNMEASURED, not zero). Resolved path: ${_VNX_STATE_DIR:-<resolution failed: ${_VNX_RESOLVE_WHY}>}. Expected under ADR-026 at ~/.vnx-data/<project_id>/state — verify the receipt processor has run for this project."
     fi
 
     # ── Beacon health digest (component heartbeats, D3b absence-is-loud) ──
@@ -319,7 +322,7 @@ $_PF_LINES"
 
     # ── State artifact freshness (golf 3A, absence-is-loud #1, OI-1512 fix-forward) ──
     # T0 reads a handful of point-in-time snapshots at SessionStart (t0_state.json,
-    # open_items.json, terminal_state.json, dashboard_status.json,
+    # open_items.json, dashboard_status.json,
     # t0_recommendations.json) with nothing surfacing how old they are. Measured
     # 2026-08-29: a session orchestrated a merge against a 22-day-old t0_state.json
     # (dashboard_status.json 63 days, t0_recommendations.json 73 days) and nobody
@@ -335,7 +338,6 @@ $_PF_LINES"
       if [ -n "$_FRESHNESS_JSON" ] && command -v jq &>/dev/null; then
         _FRESHNESS_PARSE_OK=$(echo "$_FRESHNESS_JSON" | jq -e '.artifacts | type == "object"' >/dev/null 2>&1 && echo yes || echo no)
         if [ "$_FRESHNESS_PARSE_OK" = "yes" ]; then
-          _FRESHNESS_THRESHOLD=$(echo "$_FRESHNESS_JSON" | jq -r '.threshold_hours')
           _FRESHNESS_ANY_STALE=$(echo "$_FRESHNESS_JSON" | jq -r '.any_stale')
           _FRESHNESS_ANY_PARKED=$(echo "$_FRESHNESS_JSON" | jq -r '.any_parked // false')
           # "parked" = the artifact's producer is parked by operator decision
@@ -347,18 +349,18 @@ $_PF_LINES"
             if .value.status == "missing" then "  - [missing] \(.key): not found"
             elif .value.status == "unknown" then "  - [unknown] \(.key): timestamp unreadable"
             elif .value.status == "parked" then "  - [PARKED] \(.key): \(if .value.age_human then "age \(.value.age_human)" else "not found" end) — \(.value.reason)"
-            elif .value.status == "stale" then "  - [STALE] \(.key): age \(.value.age_human) (source: \(.value.source))"
-            else "  - [fresh] \(.key): age \(.value.age_human) (source: \(.value.source))"
+            elif .value.status == "stale" then "  - [STALE] \(.key): age \(.value.age_human), limit \(.value.threshold_hours | tostring | sub("\\.0$"; ""))h (source: \(.value.source))"
+            else "  - [fresh] \(.key): age \(.value.age_human), limit \(.value.threshold_hours | tostring | sub("\\.0$"; ""))h (source: \(.value.source))"
             end
           ')
           if [ "$_FRESHNESS_ANY_STALE" = "true" ]; then
-            FRESHNESS_SECTION="STATE FRESHNESS: BLOCKED — one or more session-start artifacts are older than ${_FRESHNESS_THRESHOLD}h (one working session; see scripts/lib/session_state_freshness.py for the measured commit-cadence this threshold is based on). DO NOT dispatch, merge, or close deliverables on the strength of this state — refresh it, or independently re-verify the specific facts it claims, before acting on it.
+            FRESHNESS_SECTION="STATE FRESHNESS: BLOCKED — one or more session-start artifacts are older than their own limit (listed per artifact below; see scripts/lib/session_state_freshness.py for the measurements the limits are based on). DO NOT dispatch, merge, or close deliverables on the strength of this state — refresh it, or independently re-verify the specific facts it claims, before acting on it.
 $_FRESHNESS_LINES"
           elif [ "$_FRESHNESS_ANY_PARKED" = "true" ]; then
-            FRESHNESS_SECTION="STATE FRESHNESS: ok — no session-start artifact older than ${_FRESHNESS_THRESHOLD}h, except the PARKED ones below (an operator decision, each with its reason)
+            FRESHNESS_SECTION="STATE FRESHNESS: ok — no session-start artifact older than its own limit, except the PARKED ones below (an operator decision, each with its reason)
 $_FRESHNESS_LINES"
           else
-            FRESHNESS_SECTION="STATE FRESHNESS: ok — no session-start artifact older than ${_FRESHNESS_THRESHOLD}h
+            FRESHNESS_SECTION="STATE FRESHNESS: ok — no session-start artifact older than its own limit
 $_FRESHNESS_LINES"
           fi
         else
@@ -470,7 +472,8 @@ print('; '.join(r.probed))
     ADDITIONAL_CONTEXT="${ROLE_ALARM:+$ROLE_ALARM
 
 }T0 Master Orchestrator Active${PROJECT_NAME:+ — $PROJECT_NAME}${T0_PLAYBOOK_LINE:+
-$T0_PLAYBOOK_LINE}
+$T0_PLAYBOOK_LINE}${T0_ROLE_LINE:+
+$T0_ROLE_LINE}
 Model-invocable skills: @horizon @planner @panel @fabric-reference
 Operator-only skills (not model-invocable): @t0-orchestrator @architect
 Full registry: skills/skills.yaml (repo) or \$VNX_SKILLS_DIR/skills.yaml (consumer)

@@ -35,10 +35,12 @@ from typing import Any, Dict, List, Optional
 from dispatch_identity import _IDENTITY_UNRESOLVED  # single canonical sentinel (dispatch-20260804-190000)
 from envelope_types import EnvelopeSpec, _AdapterResult
 from envelope_prepare import _verify_role_application, _verify_skill_application
+from receipt_token_fields import receipt_token_fields
 from skill_application import skill_receipt_fields
 from envelope_govern_support import (
     _archive_dispatch_events,
     _clear_dispatch_events,
+    _name_transient_api_error,
     _publish_phantom_verdict,
     _receipt_exists_for_dispatch,
     _resolve_fix_forward_diff,
@@ -294,8 +296,15 @@ def _log_govern_outcome(
     effective_status: str,
     report_path: Optional[Path],
     receipt_path: Optional[Path],
+    contract_warnings: Optional[List[Dict[str, Any]]] = None,
 ) -> None:
     """Log the one closing status line of a GOVERN pass.
+
+    OI-2796: first names a transient API error (``transient_api_error: <line>``)
+    on an empty ``adapter_result.error`` when no valid report stands, so the
+    ERROR line below and the lane exit carry it instead of "(no error
+    captured)". After the receipt on purpose: failure classification still
+    reads the same inputs. The status is never changed.
 
     Three-way, exactly as ``_govern`` did inline: a failed/timeout/empty-
     completion receipt logs an ERROR (dispatch_cli returns only an integer exit
@@ -303,6 +312,7 @@ def _log_govern_outcome(
     error surfaces — printed in full), a contract override logs a WARNING, and
     a clean success logs an INFO.
     """
+    _name_transient_api_error(adapter_result, report_path, contract_warnings)
     if adapter_result.status != "success":
         # Fail-loud: a failure/timeout/empty-completion receipt must never be silent.
         # dispatch_cli returns only an integer exit code for the provider lane, so this
@@ -471,8 +481,13 @@ def _emit_govern_report(
     adapter_result: _AdapterResult,
     duration: float,
     emit_unified_report: Any,
+    start_time: Optional[datetime] = None,
 ) -> Optional[Path]:
     """Emit the unified report for this dispatch. Never fatal.
+
+    OI-3064: ``start_time`` is the attempt start. A report on disk older than it
+    belongs to an earlier attempt (a refire) and is rotated to
+    ``<id>.attempt-<n>.md`` so this attempt's output is not discarded.
 
     REPORT first — idempotent: worker-written file is preserved, not
     overwritten. OI-903: on failure/timeout, a killed worker's partial report
@@ -504,6 +519,7 @@ def _emit_govern_report(
             # lane (#1834, provider_dispatch._emit_governance).
             spawn_error=getattr(adapter_result, "error", None),
             preserve_partial=adapter_result.status != "success",
+            attempt_started_at=start_time,
         )
     except Exception as exc:
         logger.error(
@@ -625,7 +641,7 @@ def _govern(
 
     # REPORT first — idempotent: worker-written file is preserved, not overwritten.
     report_path = _emit_govern_report(
-        spec, adapter_result, duration, emit_unified_report,
+        spec, adapter_result, duration, emit_unified_report, start_time=start_time,
     )
 
     # OI-1017/OI-1048: binding body-contract validation on envelope lanes.
@@ -681,22 +697,7 @@ def _govern(
                 # default, OI-981), falls back to dispatch_metadata, then stamps
                 # identity_unresolved. FAIL-OPEN — a resolver error must never
                 # break receipt emission.
-                try:
-                    from dispatch_identity import resolve_effective_role  # noqa: PLC0415
-                    _project_id = getattr(spec, "project_id", None)
-                    if not _project_id:
-                        from dispatch_cli import _resolve_project_id  # noqa: PLC0415
-                        _project_id = _resolve_project_id()
-                    _role = resolve_effective_role(
-                        spec.role, spec.dispatch_id, _project_id, state_dir=spec.state_dir,
-                    )
-                except Exception:  # noqa: BLE001 — identity join is fail-open
-                    logger.debug(
-                        "envelope._govern: role resolution failed open dispatch=%s",
-                        spec.dispatch_id,
-                        exc_info=True,
-                    )
-                    _role = _IDENTITY_UNRESOLVED
+                _role = _resolve_receipt_role(spec)
 
                 # Deterministic role-applied control (dispatch-20260801-w10 +
                 # OI-983): did the resolved role source actually reach the enriched
@@ -709,27 +710,9 @@ def _govern(
                 # role — a spec-bound skill is proven, or its absence reasoned.
                 _skill_app = _verify_skill_application(spec.instruction, {"skill": spec.skill}, _role)
 
-                # receipt-quality PR-B2 fix-forward (Finding C): aggregate
-                # PreToolUse-hook tool-call signals for this dispatch
-                # (toolcall_signals.py), mirroring provider_dispatch._emit_
-                # governance's wiring so the claude/subprocess-adapter lane also
-                # populates these fields when VNX_TMUX_SIGNAL_DIR is set.
-                # FAIL-OPEN — an aggregation error or absent signal log must
-                # never break receipt emission; each field simply stays None
-                # (omitted by ReceiptV2).
+                # No signal dir exists any more (VNX_TMUX_SIGNAL_DIR deleted): the
+                # tool-call fields stay None and ReceiptV2 omits them.
                 _toolcall_signals: Dict[str, int] = {}
-                try:
-                    _signal_dir = os.environ.get("VNX_TMUX_SIGNAL_DIR")
-                    if _signal_dir:
-                        from toolcall_signals import aggregate_toolcall_signals  # noqa: PLC0415
-                        _toolcall_signals = aggregate_toolcall_signals(_signal_dir) or {}
-                except Exception:  # noqa: BLE001 — observability signal must never break receipt emission
-                    logger.debug(
-                        "envelope._govern: toolcall signal aggregation failed dispatch=%s (non-fatal)",
-                        spec.dispatch_id,
-                        exc_info=True,
-                    )
-                    _toolcall_signals = {}
 
                 # ADR-005: the receipt's cost — from this attempt's ledger line on
                 # a harness builder run, else from the old event, emitted here
@@ -743,99 +726,15 @@ def _govern(
                 # returns an empty failure_reason for a non-success status —
                 # a classify_failure regression can no longer land a receipt
                 # with the field silently unset.
-                _classification: Dict[str, Optional[str]] = {"failure_class": None, "failure_reason": None}
-                if adapter_result.status != "success":
-                    try:
-                        from failure_classification import classify_failure_safe  # noqa: PLC0415
-                        _classification = classify_failure_safe(
-                            status=adapter_result.status,
-                            error=adapter_result.error,
-                            completion_text=adapter_result.completion_text,
-                            timed_out=adapter_result.timed_out,
-                            provider=spec.provider,
-                            duration_seconds=duration,
-                            returncode=adapter_result.returncode,
-                            dispatch_id=spec.dispatch_id,
-                        )
-                    except Exception as _classify_exc:  # noqa: BLE001 — the failure_classification
-                        # module itself failing to import is the one thing
-                        # classify_failure_safe cannot guard against from
-                        # inside itself; keep the same never-empty guarantee.
-                        logger.debug(
-                            "envelope._govern: failure_classification unavailable dispatch=%s (non-fatal)",
-                            spec.dispatch_id,
-                            exc_info=True,
-                        )
-                        _classification = {
-                            "failure_class": "unknown",
-                            "failure_reason": (
-                                f"failure_classification unavailable: {_classify_exc!r} "
-                                f"(dispatch={spec.dispatch_id})"
-                            ),
-                        }
+                _classification = _classify_receipt_failure(spec, adapter_result, duration)
 
-                receipt_path = emit_dispatch_receipt(
-                    dispatch_id=spec.dispatch_id,
-                    terminal_id=spec.terminal_id,
-                    provider=spec.provider,
-                    model=_cost_model,
-                    pr_id=spec.pr_id,
-                    status=_effective_status,
-                    completion_pct=100 if _effective_status == "success" else 0,
-                    risk=0.0,
-                    findings=[],
-                    duration_seconds=duration,
-                    token_usage=adapter_result.token_usage,
-                    cost_usd=cost_usd, cost_source=cost_source, cost_ledger_run_ids=_run_ids,
-                    state_dir=spec.state_dir,
-                    report_path=str(report_path) if report_path else None,
-                    events_path=events_path,
-                    final_prompt_path=getattr(integrity, "final_prompt_path", None),
-                    final_prompt_sha256=getattr(integrity, "final_prompt_sha256", None),
-                    injection_reconstructs=(
-                        getattr(integrity, "injection_reconstructs", None)
-                        if integrity is not None
-                        else None
-                    ),
-                    # ADR-035 §3.1.1: envelope sub-path — the report is already
-                    # on disk (emit_unified_report ran above), so extract
-                    # verification{} from it via the shared regex extractor.
-                    verification=_verification_from_report(report_path),
-                    role=_role,
-                    receipt_kind="dispatch",
-                    role_applied=(
-                        getattr(_role_app, "role_applied", None) if _role_app is not None else None
-                    ),
-                    role_tier=(
-                        getattr(_role_app, "tier", None) if _role_app is not None else None
-                    ),
-                    role_not_applied_reason=(
-                        getattr(_role_app, "reason", None) if _role_app is not None else None
-                    ),
-                    role_source_path=(
-                        getattr(_role_app, "source_path", None) if _role_app is not None else None
-                    ),
-                    **skill_receipt_fields(_skill_app),
-                    session_id=adapter_result.session_id,
-                    model_resolved=getattr(adapter_result, "model_resolved", None),
-                    tool_call_count=_toolcall_signals.get("tool_call_count"),
-                    tool_call_failures=_toolcall_signals.get("tool_call_failures"),
-                    tool_call_retries=_toolcall_signals.get("tool_call_retries"),
-                    deadline_seconds=spec.deadline_seconds,
-                    failure_reason=_classification.get("failure_reason"),
-                    failure_class=_classification.get("failure_class"),
-                    # Chain-link (dispatch-20260802-model-ssot-en-ketenlink):
-                    # the door's values flow plan -> EnvelopeSpec -> receipt.
-                    parent_dispatch=spec.parent_dispatch,
-                    task_class=spec.task_class,
-                    tier_from=spec.tier_from,
-                    tier_to=spec.tier_to,
-                    # OI-1017/OI-1048: binding body-contract warnings.
-                    # None when the report passes or couldn't be read; a list
-                    # with a filterable warning code + severity=error when
-                    # violated.  The receipt status field is overridden to
-                    # "contract_invalid" above (binding, not observable).
-                    warnings=_contract_warnings or None, lifecycle_v3=lifecycle_v3,
+                receipt_path = _emit_govern_receipt(
+                    emit_dispatch_receipt, spec, adapter_result, duration=duration, cost_model=_cost_model,
+                    effective_status=_effective_status, cost_usd=cost_usd, cost_source=cost_source,
+                    run_ids=_run_ids, ledger_record=_ledger_record, report_path=report_path,
+                    events_path=events_path, integrity=integrity, role=_role, role_app=_role_app,
+                    skill_app=_skill_app, toolcall_signals=_toolcall_signals, classification=_classification,
+                    contract_warnings=_contract_warnings, lifecycle_v3=lifecycle_v3,
                 )
             except Exception as exc:
                 # OI-1179: a receipt-emit failure is a PROOF problem, not a WORK
@@ -852,23 +751,158 @@ def _govern(
                 _emit_failed = True
 
             if not _emit_failed:
-                if receipt_path is None:
-                    # emit returned nothing without raising — same proof-chain gap.
-                    _record_receipt_emit_failure(
-                        spec,
-                        "receipt_path is None after emit",
-                        work_status=adapter_result.status,
-                    )
-                elif not receipt_path.exists():
-                    _record_receipt_emit_failure(
-                        spec,
-                        f"receipt file absent on disk after emit path={receipt_path}",
-                        work_status=adapter_result.status,
-                    )
-                    receipt_path = None
+                    receipt_path = _check_emitted_receipt(spec, adapter_result, receipt_path)
     finally:
         _clear_archived_event_stream(spec, _events_archive_ok)
 
-    _log_govern_outcome(spec, adapter_result, _effective_status, report_path, receipt_path)
+    _log_govern_outcome(spec, adapter_result, _effective_status, report_path, receipt_path, _contract_warnings)
     _run_phantom_guard(spec, adapter_result, phantom_diff, base_ref)
     return report_path, receipt_path
+
+
+def _emit_govern_receipt(
+    emit_dispatch_receipt: Any, spec: EnvelopeSpec, adapter_result: _AdapterResult, *,
+    duration: float, cost_model: str, effective_status: str, cost_usd: Any, cost_source: Any,
+    run_ids: Any, ledger_record: Optional[Dict[str, Any]], report_path: Optional[Path],
+    events_path: Any, integrity: Optional[Any], role: Any, role_app: Any, skill_app: Any,
+    toolcall_signals: Dict[str, int], classification: Dict[str, Optional[str]],
+    contract_warnings: list, lifecycle_v3: bool,
+) -> Optional[Path]:
+    """The one ``emit_dispatch_receipt`` call of :func:`_govern`, on the values it resolved in order (R35 cut)."""
+    return emit_dispatch_receipt(
+        dispatch_id=spec.dispatch_id,
+        terminal_id=spec.terminal_id,
+        provider=spec.provider,
+        model=cost_model,
+        pr_id=spec.pr_id,
+        status=effective_status,
+        completion_pct=100 if effective_status == "success" else 0,
+        risk=0.0,
+        findings=[],
+        duration_seconds=duration,
+        token_usage=adapter_result.token_usage,
+        cost_usd=cost_usd, cost_source=cost_source, cost_ledger_run_ids=run_ids,
+        **receipt_token_fields(provider=spec.provider, role=spec.role, session_id=adapter_result.session_id, token_usage=adapter_result.token_usage, ledger_record=ledger_record),
+        state_dir=spec.state_dir,
+        report_path=str(report_path) if report_path else None,
+        events_path=events_path,
+        final_prompt_path=getattr(integrity, "final_prompt_path", None),
+        final_prompt_sha256=getattr(integrity, "final_prompt_sha256", None),
+        injection_reconstructs=(
+            getattr(integrity, "injection_reconstructs", None)
+            if integrity is not None
+            else None
+        ),
+        # ADR-035 §3.1.1: envelope sub-path — the report is already
+        # on disk (emit_unified_report ran above), so extract
+        # verification{} from it via the shared regex extractor.
+        verification=_verification_from_report(report_path),
+        role=role,
+        receipt_kind="dispatch",
+        role_applied=getattr(role_app, "role_applied", None) if role_app is not None else None,
+        role_tier=(
+            getattr(role_app, "tier", None) if role_app is not None else None
+        ),
+        role_not_applied_reason=(
+            getattr(role_app, "reason", None) if role_app is not None else None
+        ),
+        role_source_path=(
+            getattr(role_app, "source_path", None) if role_app is not None else None
+        ),
+        **skill_receipt_fields(skill_app),
+        session_id=adapter_result.session_id,
+        model_resolved=getattr(adapter_result, "model_resolved", None),
+        tool_call_count=toolcall_signals.get("tool_call_count"),
+        tool_call_failures=toolcall_signals.get("tool_call_failures"),
+        tool_call_retries=toolcall_signals.get("tool_call_retries"),
+        deadline_seconds=spec.deadline_seconds,
+        failure_reason=classification.get("failure_reason"),
+        failure_class=classification.get("failure_class"),
+        # Chain-link (dispatch-20260802-model-ssot-en-ketenlink):
+        # the door's values flow plan -> EnvelopeSpec -> receipt.
+        parent_dispatch=spec.parent_dispatch,
+        task_class=spec.task_class,
+        tier_from=spec.tier_from,
+        tier_to=spec.tier_to,
+        # OI-1017/OI-1048: binding body-contract warnings.
+        # None when the report passes or couldn't be read; a list
+        # with a filterable warning code + severity=error when
+        # violated.  The receipt status field is overridden to
+        # "contract_invalid" above (binding, not observable).
+        warnings=contract_warnings or None, lifecycle_v3=lifecycle_v3,
+    )
+
+
+def _resolve_receipt_role(spec: EnvelopeSpec) -> Any:
+    """The role stamped on the receipt; fail-open to ``_IDENTITY_UNRESOLVED`` (R35 cut of :func:`_govern`)."""
+    try:
+        from dispatch_identity import resolve_effective_role  # noqa: PLC0415
+        _project_id = getattr(spec, "project_id", None)
+        if not _project_id:
+            from dispatch_cli import _resolve_project_id  # noqa: PLC0415
+            _project_id = _resolve_project_id()
+        _role = resolve_effective_role(
+            spec.role, spec.dispatch_id, _project_id, state_dir=spec.state_dir,
+        )
+    except Exception:  # noqa: BLE001 — identity join is fail-open
+        logger.debug(
+            "envelope._govern: role resolution failed open dispatch=%s",
+            spec.dispatch_id,
+            exc_info=True,
+        )
+        _role = _IDENTITY_UNRESOLVED
+    return _role
+
+
+def _classify_receipt_failure(spec: EnvelopeSpec, adapter_result: _AdapterResult, duration: float) -> Dict[str, Optional[str]]:
+    """failure_class + failure_reason for the receipt, never empty on a non-success (R35 cut of :func:`_govern`)."""
+    _classification: Dict[str, Optional[str]] = {"failure_class": None, "failure_reason": None}
+    if adapter_result.status != "success":
+        try:
+            from failure_classification import classify_failure_safe  # noqa: PLC0415
+            _classification = classify_failure_safe(
+                status=adapter_result.status,
+                error=adapter_result.error,
+                completion_text=adapter_result.completion_text,
+                timed_out=adapter_result.timed_out,
+                provider=spec.provider,
+                duration_seconds=duration,
+                returncode=adapter_result.returncode,
+                dispatch_id=spec.dispatch_id,
+            )
+        except Exception as _classify_exc:  # noqa: BLE001 — the failure_classification
+            # module itself failing to import is the one thing
+            # classify_failure_safe cannot guard against from
+            # inside itself; keep the same never-empty guarantee.
+            logger.debug(
+                "envelope._govern: failure_classification unavailable dispatch=%s (non-fatal)",
+                spec.dispatch_id,
+                exc_info=True,
+            )
+            _classification = {
+                "failure_class": "unknown",
+                "failure_reason": (
+                    f"failure_classification unavailable: {_classify_exc!r} "
+                    f"(dispatch={spec.dispatch_id})"
+                ),
+            }
+    return _classification
+
+
+def _check_emitted_receipt(spec: EnvelopeSpec, adapter_result: _AdapterResult, receipt_path: Optional[Path]) -> Optional[Path]:
+    """Record the proof-chain gap of an emit that returned no file on disk (R35 cut of :func:`_govern`)."""
+    if receipt_path is None:
+        # emit returned nothing without raising — same proof-chain gap.
+        _record_receipt_emit_failure(
+            spec,
+            "receipt_path is None after emit",
+            work_status=adapter_result.status,
+        )
+    elif not receipt_path.exists():
+        _record_receipt_emit_failure(
+            spec,
+            f"receipt file absent on disk after emit path={receipt_path}",
+            work_status=adapter_result.status,
+        )
+        receipt_path = None
+    return receipt_path

@@ -30,7 +30,7 @@ version: 1
 checks:
   codex_gate_required:
     level: 2
-  kimi_gate_required:
+  deepseek_gate_required:
     level: 2
   ci_green_required:
     level: 3
@@ -71,21 +71,21 @@ def _run_cli(*args: str, extra: dict | None = None) -> subprocess.CompletedProce
 
 def test_no_config_standard_profile_is_the_default_review_stack(home):
     names, provenance = gate_profile.required_stack()
-    assert names == ["codex_gate", "kimi_gate"]
-    assert provenance == {"codex_gate": "default", "kimi_gate": "default"}
+    assert names == ["codex_gate", "deepseek_gate"]
+    assert provenance == {"codex_gate": "default", "deepseek_gate": "default"}
 
 
 def test_c6_lock_measured_dials_give_the_stack_the_door_asks_today(home):
     _dials(home, VNX_DEV_DIALS)
     names, provenance = gate_profile.required_stack()
-    assert names == ["codex_gate", "kimi_gate", "ci_gate"]
+    assert names == ["codex_gate", "deepseek_gate", "ci_gate"]
     assert provenance["ci_gate"] == "enforcement"
 
 
 def test_heavy_profile_names_three_seats_with_profile_provenance(home, monkeypatch):
     monkeypatch.setenv("VNX_GOVERNANCE_PROFILE", "heavy")
     names, provenance = gate_profile.required_stack()
-    assert names == ["codex_gate", "kimi_gate", "claude_gate"]
+    assert names == ["codex_gate", "deepseek_gate", "claude_gate"]
     assert set(provenance.values()) == {"profile"}
 
 
@@ -93,14 +93,14 @@ def test_enforcement_outranks_the_light_profile_and_adds_the_mandatory_seat(home
     monkeypatch.setenv("VNX_GOVERNANCE_PROFILE", "light")
     _dials(home, VNX_DEV_DIALS)
     names, provenance = gate_profile.required_stack()
-    assert names == ["codex_gate", "kimi_gate", "ci_gate"]
+    assert names == ["codex_gate", "deepseek_gate", "ci_gate"]
     assert set(provenance.values()) == {"enforcement"}  # the config defines the stack
 
 
 def test_level_1_is_advisory_and_keeps_the_review_stack_level_0_removes_the_seat(home):
-    _dials(home, "checks:\n  kimi_gate_required:\n    level: 1\n")
-    assert gate_profile.required_stack()[0] == ["codex_gate", "kimi_gate"]
-    _dials(home, "checks:\n  kimi_gate_required:\n    level: 0\n")
+    _dials(home, "checks:\n  deepseek_gate_required:\n    level: 1\n")
+    assert gate_profile.required_stack()[0] == ["codex_gate", "deepseek_gate"]
+    _dials(home, "checks:\n  deepseek_gate_required:\n    level: 0\n")
     assert gate_profile.required_stack()[0] == ["codex_gate"]
 
 
@@ -198,12 +198,26 @@ def test_show_json_equals_what_the_module_returns_field_by_field(home, monkeypat
         assert shown["values"][field]["source"]
 
 
+@pytest.mark.parametrize("profile, stack", [("light", ["codex_gate"]), ("standard", ["codex_gate", "deepseek_gate"]),
+                                            ("heavy", ["codex_gate", "deepseek_gate", "claude_gate"])])
+def test_show_gives_deepseek_seat_2_and_the_deepseek_claude_chain_per_profile(home, monkeypatch, profile, stack):
+    """Operator decision 2026-11-11 (Kimi cancelled), read through the function `show` prints."""
+    from gate_request_handler import review_gate_takeover_chain_raw
+    for key in ("VNX_REVIEW_GATE_TAKEOVER_CHAIN", "VNX_OVERRIDE_REVIEW_GATE_TAKEOVER_CHAIN"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("VNX_GOVERNANCE_PROFILE", profile)
+    report = gate_profile_cli.build_report()
+    assert report["profile"] == profile and report["request_stack"]["names"] == report["required_stack"]["names"] == stack
+    assert review_gate_takeover_chain_raw()[0] == "codex_gate,deepseek_gate,claude_gate"
+    assert "kimi_gate" not in gate_profile_cli.format_report(report)
+
+
 def test_show_plain_prints_both_stacks_and_the_two_sources_warning(home, capsys):
     _dials(home, VNX_DEV_DIALS)
     assert gate_profile_cli.main(["show"]) == 0
     out = capsys.readouterr().out
     assert "request_stack" in out and "required_stack" in out
-    assert "codex_gate,kimi_gate,ci_gate" in out
+    assert "codex_gate,deepseek_gate,ci_gate" in out
     assert "WARNING" in out and "added: ci_gate" in out
 
 
@@ -215,7 +229,7 @@ def test_show_prints_no_warning_when_the_stacks_agree(home, capsys):
 def test_value_required_stack_csv_is_one_line(home, capsys):
     _dials(home, VNX_DEV_DIALS)
     assert gate_profile_cli.main(["--value", "required_stack", "--csv"]) == 0
-    assert capsys.readouterr().out == "codex_gate,kimi_gate,ci_gate\n"
+    assert capsys.readouterr().out == "codex_gate,deepseek_gate,ci_gate\n"
 
 
 def test_value_of_a_standard_profile_field_is_empty_because_standard_contributes_nothing(home, capsys):

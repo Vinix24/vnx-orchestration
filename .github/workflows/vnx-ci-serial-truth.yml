@@ -20,7 +20,8 @@ name: VNX CI serial truth
 # green, so a skipped run on a PR head blocks the merge rather than passing it
 # (OI-2521, OI-2543). Dispatch it on main.
 #
-# It always runs the full sweep: no light/heavy classifier here.
+# It always runs the full sweep: no light/heavy classifier here. C4b: shard-shape
+# and shard-parity compare the four Profile A shards too; shared steps are anchors.
 
 on:
   schedule:
@@ -88,12 +89,14 @@ jobs:
     timeout-minutes: 35
 
     steps:
-      - name: Checkout
+      - &xdist-checkout
+        name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Profile A prelude
+      - &xdist-prelude
+        name: Profile A prelude
         id: prelude
         uses: ./.github/actions/profile-a-prelude
 
@@ -115,7 +118,8 @@ jobs:
               --phase serial --output "$XDIST_TRUTH_EVIDENCE/manifest-serial.json"
           fi
 
-      - name: Serial phase (serial list, xdist off)
+      - &xdist-serial
+        name: Serial phase (serial list, xdist off)
         id: serial
         if: ${{ !cancelled() && steps.plan.outputs.serial_active == 'true' }}
         env:
@@ -136,7 +140,9 @@ jobs:
       # The record check_xdist_parity.py reads for the profile and the suite
       # wall time, in the shape the removed shadow job wrote. Written with
       # if: always(), so a red phase still leaves evidence for the comparison.
-      - name: Record the xdist outcome
+      # Shared with shard-shape (XDIST_PHASE=shard, its shard step id `parallel`).
+      - &xdist-record
+        name: Record the xdist outcome
         id: record
         if: ${{ always() }}
         env:
@@ -149,6 +155,8 @@ jobs:
         run: |
           set -euo pipefail
           E="$XDIST_TRUTH_EVIDENCE"
+          P="${XDIST_PHASE-parallel}"
+          case "$P" in parallel|shard) ;; *) echo "XDIST_PHASE=$P is not parallel or shard" >&2; exit 2 ;; esac
           mkdir -p "$E"
           int_file() {
             local v=""
@@ -172,12 +180,12 @@ jobs:
             printf '  "event": "%s",\n' "$GITHUB_EVENT_NAME"
             printf '  "profile": "heavy",\n'
             printf '  "verdict": "%s",\n' "$verdict"
-            printf '  "steps": {"plan": "%s", "serial": "%s", "parallel": "%s"},\n' \
-              "$OUTCOME_PLAN" "${OUTCOME_SERIAL:-skipped}" "$OUTCOME_PARALLEL"
-            printf '  "exit_codes": {"serial": %s, "parallel": %s},\n' \
-              "$(int_file "$E/exit-serial")" "$(int_file "$E/exit-parallel")"
-            printf '  "durations_s": {"serial": %s, "parallel": %s}\n' \
-              "$(int_file "$E/duration-serial-s")" "$(int_file "$E/duration-parallel-s")"
+            printf '  "steps": {"plan": "%s", "serial": "%s", "%s": "%s"},\n' \
+              "$OUTCOME_PLAN" "${OUTCOME_SERIAL:-skipped}" "$P" "$OUTCOME_PARALLEL"
+            printf '  "exit_codes": {"serial": %s, "%s": %s},\n' \
+              "$(int_file "$E/exit-serial")" "$P" "$(int_file "$E/exit-$P")"
+            printf '  "durations_s": {"serial": %s, "%s": %s}\n' \
+              "$(int_file "$E/duration-serial-s")" "$P" "$(int_file "$E/duration-$P-s")"
             printf '}\n'
           } > "$E/xdist-shadow.json"
           cat "$E/xdist-shadow.json"
@@ -193,6 +201,84 @@ jobs:
           if-no-files-found: warn
           overwrite: true
 
+  # The shard jobs of vnx-ci.yml (&profile-a-shard-steps), same scripts; no light gate.
+  shard-shape:
+    name: Shard shape (the four Profile A shards)
+    runs-on: ubuntu-24.04
+    if: ${{ github.ref == 'refs/heads/main' }}
+    timeout-minutes: 26
+    permissions: {contents: read, actions: read}
+    strategy: {fail-fast: false, matrix: {k: [1, 2, 3, 4]}}
+    env:
+      XDIST_PHASE: shard
+
+    steps:
+      - *xdist-checkout
+      - *xdist-prelude
+
+      - name: Select the duration source
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          src="$RUNNER_TEMP/shard-source.json"
+          for attempt in 1 2 3; do
+            if created="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" --jq .created_at)" && [ -n "$created" ]; then
+              python3 "$GITHUB_WORKSPACE/scripts/ci/test_shard_plan.py" select-source --repo "$GITHUB_REPOSITORY" \
+                --workflow vnx-ci.yml --branch main --before "$created" --artifact profile-a-evidence \
+                --dest "$RUNNER_TEMP/shard-source-$attempt" > "$src" \
+                || printf '{"run_id": null, "junit": [], "reason": "select-source exit %s"}\n' "$?" > "$src"
+            else
+              printf '{"run_id": null, "junit": [], "reason": "created_at of run %s unreadable"}\n' "$GITHUB_RUN_ID" > "$src"
+            fi
+            grep -q '"run_id": null' "$src" || break
+            if [ "$attempt" -lt 3 ]; then sleep 10; fi
+          done
+          cat "$src"
+
+      - name: Shard selection
+        id: plan
+        env:
+          VNX_HOME: ${{ steps.prelude.outputs.vnx-home }}
+          VNX_DATA_DIR: ${{ steps.prelude.outputs.vnx-data-dir }}
+          VNX_CI_XDIST: "1"
+          SHARD_K: ${{ matrix.k }}
+          XDIST_TRUTH_EVIDENCE: ${{ runner.temp }}/xdist-truth-evidence
+        run: |
+          set -euo pipefail
+          VNX_CI_SHARD="$SHARD_K/4" VNX_CI_SHARD_SOURCE="$RUNNER_TEMP/shard-source.json" \
+            bash "$GITHUB_WORKSPACE/scripts/ci/profile_a_pytest_args.sh" "$XDIST_TRUTH_EVIDENCE/args"
+          if [ -f "$XDIST_TRUTH_EVIDENCE/args/serial.args" ]; then
+            echo "serial_active=true" >> "$GITHUB_OUTPUT"
+          elif [ "$SHARD_K" = 1 ]; then
+            python3 "$GITHUB_WORKSPACE/scripts/ci/pytest_collection_manifest.py" inactive \
+              --phase serial --output "$XDIST_TRUTH_EVIDENCE/manifest-serial.json"
+          fi
+
+      - *xdist-serial  # shard 1 only: the other shards have no serial.args
+
+      - name: Shard phase (its share, under pytest-xdist)
+        id: parallel
+        if: ${{ !cancelled() && steps.plan.outcome == 'success' }}
+        env:
+          VNX_HOME: ${{ steps.prelude.outputs.vnx-home }}
+          VNX_DATA_DIR: ${{ steps.prelude.outputs.vnx-data-dir }}
+          XDIST_TRUTH_EVIDENCE: ${{ runner.temp }}/xdist-truth-evidence
+        run: bash "$GITHUB_WORKSPACE/scripts/ci/profile_a_run_phase.sh" shard "$XDIST_TRUTH_EVIDENCE"
+
+      - *xdist-record
+
+      - name: Upload the shard evidence
+        if: ${{ always() }}
+        continue-on-error: true
+        timeout-minutes: 5
+        uses: actions/upload-artifact@v4
+        with:
+          name: vnx-shard-truth-evidence-${{ matrix.k }}
+          path: ${{ runner.temp }}/xdist-truth-evidence/
+          if-no-files-found: warn
+          overwrite: true
+
   parity:
     name: Serial truth vs xdist shape
     runs-on: ubuntu-24.04
@@ -202,19 +288,26 @@ jobs:
     permissions:
       contents: read
       issues: write
+    env:
+      RESULT_PROFILE_A: ${{ needs.serial-truth.result }}
+      RESULT_SHADOW: ${{ needs.xdist-shape.result }}
+      PARITY_SHAPE: two_phase
 
     steps:
-      - name: Checkout
+      - &parity-checkout
+        name: Checkout
         id: checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Profile A prelude
+      - &parity-prelude
+        name: Profile A prelude
         id: prelude
         uses: ./.github/actions/profile-a-prelude
 
-      - name: Emit this run's xdist selection
+      - &parity-selection
+        name: Emit this run's xdist selection
         id: selection
         env:
           VNX_HOME: ${{ steps.prelude.outputs.vnx-home }}
@@ -223,7 +316,8 @@ jobs:
           PARITY_WORK: ${{ runner.temp }}/nightly-parity
         run: bash "$GITHUB_WORKSPACE/scripts/ci/profile_a_pytest_args.sh" "$PARITY_WORK/args"
 
-      - name: Download the serial truth (reference)
+      - &parity-download-reference
+        name: Download the serial truth (reference)
         id: download_reference
         continue-on-error: true
         uses: actions/download-artifact@v4
@@ -239,7 +333,8 @@ jobs:
           name: vnx-xdist-truth-evidence
           path: ${{ runner.temp }}/nightly-parity/candidate
 
-      - name: Compare the two shapes
+      - &parity-compare
+        name: Compare the two shapes
         id: compare
         env:
           PARITY_WORK: ${{ runner.temp }}/nightly-parity
@@ -255,16 +350,18 @@ jobs:
           OUTCOME_SELECTION: ${{ steps.selection.outcome }}
           OUTCOME_DOWNLOAD_REFERENCE: ${{ steps.download_reference.outcome }}
           OUTCOME_DOWNLOAD_CANDIDATE: ${{ steps.download_candidate.outcome }}
-          RESULT_PROFILE_A: ${{ needs.serial-truth.result }}
-          RESULT_SHADOW: ${{ needs.xdist-shape.result }}
         run: |
           set -euo pipefail
+          S="$PARITY_WORK/shards/vnx-shard-truth-evidence"
+          case "${PARITY_SHAPE-two_phase}" in  # the job's shape; unset is the two-phase shape
+            two_phase) candidate=(--candidate "$PARITY_WORK/candidate" --args-dir "$PARITY_WORK/args"
+                                  --workspace-root "$GITHUB_WORKSPACE") ;;
+            shards) candidate=(--shard-dir "$S-1" --shard-dir "$S-2" --shard-dir "$S-3" --shard-dir "$S-4") ;;
+            *) echo "PARITY_SHAPE=$PARITY_SHAPE is not two_phase or shards" >&2; exit 2 ;;
+          esac
           python3 "$GITHUB_WORKSPACE/scripts/ci/check_xdist_parity.py" compare \
-            --reference "$PARITY_WORK/reference" \
-            --candidate "$PARITY_WORK/candidate" \
+            --reference "$PARITY_WORK/reference" "${candidate[@]}" \
             --constraints "$GITHUB_WORKSPACE/scripts/ci/profile_a_constraints.txt" \
-            --args-dir "$PARITY_WORK/args" \
-            --workspace-root "$GITHUB_WORKSPACE" \
             --output "$PARITY_WORK/verdict/xdist-parity-verdict.json" \
             --summary "${GITHUB_STEP_SUMMARY:-/dev/null}" \
             --profile "$PARITY_PROFILE" \
@@ -284,7 +381,8 @@ jobs:
       # scripts/ci/record_xdist_parity_verdict.py. Without a checkout that
       # script is absent, and the bash below writes the same exit-2 verdict;
       # tests/test_ci_record_xdist_parity_verdict.py holds the two equal.
-      - name: Record the parity verdict
+      - &parity-record
+        name: Record the parity verdict
         id: record
         if: ${{ always() }}
         continue-on-error: true
@@ -304,8 +402,6 @@ jobs:
           OUTCOME_DOWNLOAD_REFERENCE: ${{ steps.download_reference.outcome }}
           OUTCOME_DOWNLOAD_CANDIDATE: ${{ steps.download_candidate.outcome }}
           OUTCOME_PARITY: ${{ steps.compare.outcome }}
-          RESULT_PROFILE_A: ${{ needs.serial-truth.result }}
-          RESULT_SHADOW: ${{ needs.xdist-shape.result }}
         run: |
           set -euo pipefail
           V="$PARITY_WORK/verdict/xdist-parity-verdict.json"
@@ -383,7 +479,8 @@ jobs:
       # The verdict decides. Record never fails the job on a non-clean verdict
       # (it exits 0 with the verdict written); this step turns every non-clean
       # verdict into a red workflow step and one issue labelled xdist-parity.
-      - name: Fail on a difference and open the issue
+      - &parity-report
+        name: Fail on a difference and open the issue
         id: report
         if: ${{ always() && steps.checkout.outcome == 'success' }}
         env:
@@ -396,7 +493,7 @@ jobs:
           RECORD="$GITHUB_WORKSPACE/scripts/ci/record_xdist_parity_verdict.py"
           # exit 0 alone is not clean: the script reads step_failures too (OI-2521).
           if python3 "$RECORD" --report-clean --verdict "$V"; then
-            echo "serial truth vs xdist shape: parity holds"
+            echo "serial truth vs this shape: parity holds"
             exit 0
           fi
           BODY="$PARITY_WORK/verdict/xdist-parity-issue.md"
@@ -404,7 +501,8 @@ jobs:
           import json
           import sys
           verdict = json.load(open(sys.argv[1], encoding="utf-8"))
-          lines = [f"Nightly serial truth: **{verdict.get('verdict')}** (exit {verdict.get('exit')}) "
+          lines = [f"Nightly serial truth vs the {verdict.get('candidate_shape') or 'unknown'} shape: "
+                   f"**{verdict.get('verdict')}** (exit {verdict.get('exit')}) "
                    f"on `{verdict.get('tested_sha')}`, run {verdict.get('run_id')}.", ""]
           for kind, entries in (verdict.get("differences") or {}).items():
               if entries:
@@ -426,13 +524,45 @@ jobs:
           fi
           exit 1
 
-      - name: Upload the verdict
+      - &parity-upload
+        name: Upload the verdict
         if: ${{ always() }}
         continue-on-error: true
         timeout-minutes: 5
         uses: actions/upload-artifact@v4
         with:
-          name: vnx-serial-truth-parity-verdict
+          name: vnx-serial-truth-${{ github.job }}-verdict
           path: ${{ runner.temp }}/nightly-parity/verdict/
           if-no-files-found: warn
           overwrite: true
+
+  shard-parity:
+    name: Serial truth vs shard shape
+    runs-on: ubuntu-24.04
+    needs: [serial-truth, shard-shape]
+    if: ${{ !cancelled() && github.ref == 'refs/heads/main' }}
+    timeout-minutes: 20
+    permissions: {contents: read, issues: write}
+    env:
+      RESULT_PROFILE_A: ${{ needs.serial-truth.result }}
+      RESULT_SHADOW: ${{ needs.shard-shape.result }}
+      PARITY_SHAPE: shards
+
+    steps:
+      - *parity-checkout
+      - *parity-prelude
+      - *parity-selection
+      - *parity-download-reference
+
+      - name: Download the four shards (candidate)  # a missing shard is invalid evidence
+        id: download_candidate
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          pattern: vnx-shard-truth-evidence-*
+          path: ${{ runner.temp }}/nightly-parity/shards
+
+      - *parity-compare
+      - *parity-record
+      - *parity-report
+      - *parity-upload

@@ -137,7 +137,7 @@ def _patch(monkeypatch, manager, *, head=HEAD, pr_state="OPEN"):
     fake = types.ModuleType("review_gate_manager")
     fake._compute_changed_files = lambda branch: ["scripts/lib/foo.py"]
     monkeypatch.setitem(sys.modules, "review_gate_manager", fake)
-    monkeypatch.delenv("VNX_REVIEW_GATE_TAKEOVER_CHAIN", raising=False)
+    monkeypatch.setenv("VNX_REVIEW_GATE_TAKEOVER_CHAIN", "codex_gate,kimi_gate,claude_gate,deepseek_gate")  # the chain until 2026-11-11
     monkeypatch.delenv("VNX_OVERRIDE_VNX_REVIEW_GATE_TAKEOVER_CHAIN", raising=False)
 
 

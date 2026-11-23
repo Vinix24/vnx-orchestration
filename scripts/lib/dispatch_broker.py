@@ -83,10 +83,6 @@ class BrokerError(Exception):
     """Raised for broker-specific errors distinct from coordination errors."""
 
 
-class BrokerDisabledError(BrokerError):
-    """Raised when the broker is accessed but VNX_BROKER_ENABLED=0."""
-
-
 # ---------------------------------------------------------------------------
 # Result dataclasses
 # ---------------------------------------------------------------------------
@@ -732,8 +728,7 @@ def load_broker(
     """Return a DispatchBroker if VNX_BROKER_ENABLED=1 (default), else None.
 
     Shadow mode is determined by VNX_BROKER_SHADOW (default "1" = shadow ON).
-    Intelligence injection is determined by VNX_INTELLIGENCE_INJECTION
-    (default "1" = enabled).
+    Intelligence injection is always enabled.
 
     This function is the standard entry point for production code that
     needs to optionally use the broker without hard-failing when disabled.
@@ -773,9 +768,8 @@ def broker_config_from_env() -> Dict[str, Any]:
     """
     enabled = os.environ.get("VNX_BROKER_ENABLED", "1").strip() != "0"
     shadow_mode = os.environ.get("VNX_BROKER_SHADOW", "1").strip() != "0"
-    intelligence_enabled = os.environ.get("VNX_INTELLIGENCE_INJECTION", "1").strip() != "0"
     return {
         "enabled": enabled,
         "shadow_mode": shadow_mode,
-        "intelligence_enabled": intelligence_enabled,
+        "intelligence_enabled": True,
     }

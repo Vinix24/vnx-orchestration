@@ -155,8 +155,8 @@ def validate_rows(rows: Iterable[GateLaneRow]) -> Tuple[GateLaneRow, ...]:
 
 # The four harness-lane gates today. glm_gate runs glm-5.2 (deprecated-glm-models
 # allowlist, operator directive 2026-08-03) through the glm-harness lane;
-# kimi_gate runs kimi-k3 through the kimi CLI; deepseek_gate runs deepseek-flash
-# (V4.1-Flash, operator decision 2026-09-30, OI-1939), never the phased-out alias
+# kimi_gate runs kimi-k3 through the kimi CLI; deepseek_gate runs deepseek-v4-pro
+# (seat 2 since 2026-11-11; deepseek-flash before, OI-1939), never the phased-out alias
 # deepseek-v4-flash; claude_gate runs sonnet on the operator's subscription (R7,
 # operator decision 2026-10-22) through claude_gate_lane. glm_gate and kimi_gate
 # are the single-shot gates (R12): the diff in the prompt is what the run is held
@@ -179,7 +179,7 @@ GATE_LANE_ROWS: Tuple[GateLaneRow, ...] = validate_rows((
     GateLaneRow(
         gate="deepseek_gate", lane="deepseek-harness", request_provider="deepseek",
         dispatcher="provider_dispatch", billing=BILLING_METERED,
-        model_env="VNX_DEEPSEEK_GATE_MODEL", model_default="deepseek-flash",
+        model_env="VNX_DEEPSEEK_GATE_MODEL", model_default="deepseek-v4-pro",
         single_shot=False,
         family="deepseek",
     ),

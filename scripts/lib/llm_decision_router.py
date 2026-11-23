@@ -6,7 +6,7 @@ Routes governance decisions through configurable backends:
   - ollama    : local Ollama endpoint (HTTP)
   - claude-cli: subprocess `claude -p --output-format json`
 
-Backend selected via VNX_DECISION_BACKEND env var.
+Backend is the ``backend`` argument of ``DecisionRouter`` (default dry-run).
 
 BILLING SAFETY: No Anthropic SDK. claude-cli backend uses subprocess only.
 """
@@ -347,7 +347,7 @@ class DecisionRouter:
     """Route LLM decisions through configurable backends.
 
     Supports: ollama (local), claude-cli (subprocess), dry-run (no LLM).
-    Backend selected via VNX_DECISION_BACKEND env var.
+    Backend is the ``backend`` constructor argument (default dry-run).
     """
 
     def __init__(
@@ -359,10 +359,7 @@ class DecisionRouter:
         timeout: Optional[int] = None,
     ) -> None:
         self.data_dir = data_dir or _default_data_dir()
-        self.backend  = Backend(
-            backend
-            or os.environ.get("VNX_DECISION_BACKEND", _DEFAULT_BACKEND)
-        )
+        self.backend  = Backend(backend or _DEFAULT_BACKEND)
         self.ollama_model = (
             ollama_model
             or os.environ.get("VNX_OLLAMA_MODEL", _DEFAULT_OLLAMA_MODEL)
@@ -371,11 +368,7 @@ class DecisionRouter:
             ollama_host
             or os.environ.get("VNX_OLLAMA_HOST", _DEFAULT_OLLAMA_HOST)
         )
-        self.timeout = int(
-            timeout
-            if timeout is not None
-            else os.environ.get("VNX_DECISION_TIMEOUT", _DEFAULT_TIMEOUT)
-        )
+        self.timeout = int(timeout if timeout is not None else _DEFAULT_TIMEOUT)
 
     def decide(self, context: Dict[str, Any], question: str) -> DecisionResult:
         """Evaluate context and return a structured decision.
@@ -450,16 +443,8 @@ class DecisionRouter:
 
     def _shadow_judge(self):
         """Judge callable for Phase-2 shadow — a DISTINCT second opinion from this router's
-        own backend. Defaults to the deterministic rule-based decision (zero cost); set
-        ``VNX_DECISION_JUDGE_BACKEND=ollama|claude-cli`` to shadow an LLM judge. Calls the
-        backend function DIRECTLY (never ``decide()``) so shadow can't recurse into itself."""
-        backend = os.environ.get("VNX_DECISION_JUDGE_BACKEND")
-        if backend == "ollama":
-            return lambda ctx, q: _decide_ollama(
-                ctx, q, model=self.ollama_model, host=self.ollama_host, timeout=self.timeout
-            )
-        if backend == "claude-cli":
-            return lambda ctx, q: _decide_claude_cli(ctx, q, timeout=self.timeout)
+        own backend: the deterministic rule-based decision (zero cost), which never calls
+        ``decide()`` and so can't recurse into itself."""
         return _rule_based_decision
 
 

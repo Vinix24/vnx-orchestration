@@ -126,6 +126,8 @@ def _make_clean_project(tmp_path: Path, monkeypatch) -> Path:
     sqlite3.connect(str(state_dir / "quality_intelligence.db")).close()
     (data_root / "dispatches" / "pending").mkdir(parents=True, exist_ok=True)
     _write_ledger_health_beacon(data_root)
+    # The nightly dream step writes this report (ADR-072 decision 17); a project without one is WARN by design.
+    (state_dir / "steering_report.json").write_text('{"schema": "steering_report/1", "status": "ok"}', encoding="utf-8")
     subprocess.run(["git", "init", "-q", str(project)], check=True)
     (project / _engine.PROJECT_FILE_NAME).write_text("vnx-dev\n", encoding="utf-8")
     _inject_launchd(monkeypatch, "vnx-dev")
@@ -134,6 +136,10 @@ def _make_clean_project(tmp_path: Path, monkeypatch) -> Path:
     # measurement record (check `claude-cli`) must not decide the strict exit code.
     monkeypatch.setattr(doctor_module, "_claude_cli_version", lambda: None)
     monkeypatch.setattr(sys, "platform", "darwin")
+    # The dream job is a host fact too (an installed LaunchAgent, its events and log): a project
+    # without one is WARN by design (ADR-066). tests/test_cli_doctor_dream.py pins the real checks.
+    monkeypatch.setattr(doctor_module, "_check_dream", lambda _project_dir: [
+        doctor_module.Check(name, doctor_module.PASS, "pinned") for name in doctor_module._DREAM_NAMES])
     return project
 
 

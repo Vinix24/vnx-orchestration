@@ -50,6 +50,7 @@ import scout_prepass  # noqa: E402
 import vnx_tagger  # noqa: E402
 from classifier_providers.base import ClassifierResult, get_provider  # noqa: E402
 from classifier_providers.deepseek_provider import DeepSeekProvider  # noqa: E402
+from content_boundary_pin import pin_boundary
 
 PROJECT_X = "proj-x"
 PROJECT_Y = "proj-y"
@@ -401,7 +402,7 @@ def world(tmp_path, monkeypatch, switch, harness):
     boundary_file.write_text(json.dumps({"version": 1, "client_roots": [str(home / "clients")],
                                          "personal_roots": [str(home / "personal")]}))
     monkeypatch.setenv("HOME", str(home))
-    monkeypatch.setenv("VNX_CONTENT_BOUNDARY_FILE", str(boundary_file))
+    pin_boundary(monkeypatch, str(boundary_file))
     projects = tmp_path / "projects"
     projects.mkdir()
     monkeypatch.setattr(ca_pkg, "CLAUDE_PROJECTS_DIR", projects)

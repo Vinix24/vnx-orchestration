@@ -361,6 +361,7 @@ class TestVerdictOnlyReportPathEnforcement:
         # status is non-terminal ("requested") but verdict is terminal ("pass")
         result_data = {
             "pr_id": "PR-0",
+            "branch": "feature/test",  # closure scopes a result to the contract branch (ADR-005)
             "gate": "gemini_review",
             "status": "requested",
             "verdict": "pass",
@@ -373,14 +374,14 @@ class TestVerdictOnlyReportPathEnforcement:
         contract = _make_contract(pr_id="PR-0", review_stack=["gemini_review"])
         checks = cv._validate_review_evidence(contract, results_dir)
 
-        report_checks = [c for c in checks if c.name.startswith("report_")]
-        assert report_checks, "Expected at least one report_ check"
-        failing = [c for c in report_checks if c.status == "FAIL"]
-        assert failing, (
-            "report_path enforcement must trigger when verdict='pass' even when "
-            "status='requested' — the OR-priority escape must be closed"
+        # CFX-3 (632a44a1b): ``status`` is authoritative and ``verdict`` only a
+        # fallback when status is absent. A non-terminal status therefore keeps the
+        # record in flight: no report_ check, but closure stays blocked on the gate.
+        assert not [c for c in checks if c.name.startswith("report_")]
+        gate_check = next(c for c in checks if c.name == "gate_gemini_review")
+        assert gate_check.status == "FAIL", (
+            "status='requested' with verdict='pass' must not close the gate"
         )
-        assert any("missing required report_path" in c.detail for c in failing)
 
     def test_verdict_only_no_status_field_enforces_report_path(self, tmp_path):
         """
@@ -392,6 +393,7 @@ class TestVerdictOnlyReportPathEnforcement:
 
         result_data = {
             "pr_id": "PR-0",
+            "branch": "feature/test",  # closure scopes a result to the contract branch (ADR-005)
             "gate": "codex_gate",
             "verdict": "pass",
             # No status, no report_path
@@ -418,6 +420,7 @@ class TestVerdictOnlyReportPathEnforcement:
 
         result_data = {
             "pr_id": "PR-0",
+            "branch": "feature/test",  # closure scopes a result to the contract branch (ADR-005)
             "gate": "gemini_review",
             "status": "in_progress",
             "verdict": "fail",
@@ -429,10 +432,12 @@ class TestVerdictOnlyReportPathEnforcement:
         contract = _make_contract(pr_id="PR-0", review_stack=["gemini_review"])
         checks = cv._validate_review_evidence(contract, results_dir)
 
-        report_checks = [c for c in checks if c.name.startswith("report_")]
-        failing = [c for c in report_checks if c.status == "FAIL"]
-        assert failing, (
-            "verdict='fail' with non-terminal status must still enforce report_path"
+        # CFX-3 (632a44a1b): status wins over verdict, so the record is in flight
+        # (no report_ check) and closure stays blocked on the gate.
+        assert not [c for c in checks if c.name.startswith("report_")]
+        gate_check = next(c for c in checks if c.name == "gate_gemini_review")
+        assert gate_check.status == "FAIL", (
+            "status='in_progress' with verdict='fail' must not close the gate"
         )
 
     def test_non_terminal_status_and_no_verdict_does_not_require_report_path(self, tmp_path):
@@ -445,6 +450,7 @@ class TestVerdictOnlyReportPathEnforcement:
 
         result_data = {
             "pr_id": "PR-0",
+            "branch": "feature/test",  # closure scopes a result to the contract branch (ADR-005)
             "gate": "gemini_review",
             "status": "queued",
         }
@@ -476,6 +482,7 @@ class TestVerdictOnlyReportPathEnforcement:
 
         result_data = {
             "pr_id": "PR-0",
+            "branch": "feature/test",  # closure scopes a result to the contract branch (ADR-005)
             "gate": "gemini_review",
             "status": "pass",
             "report_path": str(report_file),

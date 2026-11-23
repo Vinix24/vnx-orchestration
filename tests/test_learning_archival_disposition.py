@@ -586,3 +586,35 @@ class TestCliVerbs:
         assert rc != 0
         _, err = capsys.readouterr()
         assert "already handled" in err
+
+
+
+# ---------------------------------------------------------------------------
+# 8. status shows the three queues and the access path (loop D4)
+# ---------------------------------------------------------------------------
+
+class TestStatusInventoryBlocks:
+    def _status_out(self, project_dir, monkeypatch, capsys):
+        monkeypatch.setattr(learning, "_resolve_state_dir", lambda _pd: project_dir / "state")
+        assert learning._cmd_status(argparse.Namespace(project_dir=str(project_dir))) == 0
+        return capsys.readouterr()[0].splitlines()
+
+    def test_status_queues_block_counts_pending_archival_with_age(
+            self, tmp_path, capsys, monkeypatch):
+        state_dir = tmp_path / "state"
+        state_dir.mkdir(parents=True)
+        _write_pending_archival(state_dir, [_archive_candidate()])
+        lines = self._status_out(tmp_path, monkeypatch, capsys)
+        archival = next(line for line in lines if line.startswith("  archival:"))
+        assert "1 pending" in archival and "oldest" in archival
+        assert any(line.startswith("access:") for line in lines)
+        assert any("pending_archival.json" in line for line in lines)
+
+    def test_status_reports_unreadable_archival_queue_not_zero(
+            self, tmp_path, capsys, monkeypatch):
+        state_dir = tmp_path / "state"
+        state_dir.mkdir(parents=True)
+        (state_dir / "pending_archival.json").write_text("{broken", encoding="utf-8")
+        lines = self._status_out(tmp_path, monkeypatch, capsys)
+        archival = next(line for line in lines if line.startswith("  archival:"))
+        assert "UNREADABLE" in archival and "0 pending" not in archival

@@ -64,6 +64,7 @@ import pr_merge
 import pr_ready
 import pr_readiness
 from review_seat_support import no_config_store, pin_review_stack
+from review_stack_support import pin_kimi_era_review_config
 
 PR = 2074
 PR_ID = str(PR)
@@ -100,6 +101,7 @@ def store(tmp_path, monkeypatch) -> Dict[str, Path]:
     }.items():
         monkeypatch.setenv(key, str(value))
     no_config_store(monkeypatch)
+    pin_kimi_era_review_config(monkeypatch)
     return {
         "tmp": tmp_path,
         "state": state,

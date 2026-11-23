@@ -1,1 +1,0 @@
-- hooks: the SessionStart hook injects the T0 playbook from the ADR-058 source (`t0_playbook.resolve()`), names its path and source (and DEGRADED), and prints one MISSING line with every probed step instead of reading the stale `.claude/skills` copy (skills-port SP-2)

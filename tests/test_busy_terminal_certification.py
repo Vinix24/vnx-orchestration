@@ -370,41 +370,32 @@ class TestC3SkillValidationPreDelivery(unittest.TestCase):
         self.assertTrue(is_valid)
 
     def test_skill_validation_runs_before_terminal_operations(self):
-        """Dispatcher validates skill before rc_check_terminal.
+        """validate_skill.py runs in _validate_stuck_files, which the dispatch
+        path calls (`|| return 1`) before any terminal operation.
 
-        Architecture: the dispatch processing loop (line ~1598 "Processing dispatch:")
-        calls validate_skill.py inline at line ~1612. If the skill is invalid, the
-        loop `continue`s — it never calls the dispatch function that contains
-        rc_check_terminal (line ~1359). So skill validation gates terminal operations.
-
-        We verify: validate_skill.py appears in the loop body, and the loop
-        `continue`s on invalid skill before reaching the function that calls
-        rc_check_terminal.
+        The loop that once held this check was decomposed (5db80c5b4); the
+        registry check now lives in _validate_stuck_files and the canonical
+        lease check (rc_check_terminal) in scripts/lib/dispatch_lifecycle.sh.
         """
-        dispatcher = REPO_ROOT / "scripts" / "dispatcher_minimal.sh"
-        content = dispatcher.read_text(encoding="utf-8")
+        content = (REPO_ROOT / "scripts" / "dispatcher_minimal.sh").read_text(encoding="utf-8")
 
-        # Skill validation must exist in the dispatch processing loop
-        loop_start = content.find("Processing dispatch:")
-        self.assertGreater(loop_start, 0, "Dispatch processing loop not found")
+        fn_start = content.find("_validate_stuck_files() {")
+        self.assertGreater(fn_start, 0, "_validate_stuck_files not found")
+        fn_end = content.find("\n}\n", fn_start)
+        self.assertIn("validate_skill.py", content[fn_start:fn_end],
+            "validate_skill.py not in _validate_stuck_files")
 
-        skill_in_loop = content.find("validate_skill.py", loop_start)
-        self.assertGreater(skill_in_loop, 0, "validate_skill.py not in dispatch loop")
+        call = content.find('_validate_stuck_files "$dispatch" "$agent_role" || return 1')
+        self.assertGreater(call, 0, "_validate_stuck_files call must return 1 on failure")
+        processing = content.find("Processing dispatch:")
+        self.assertGreater(processing, 0, "Processing dispatch log line not found")
+        self.assertGreater(call, processing)
 
-        # After invalid skill detection, the loop must `continue` (skip dispatch)
-        skill_section = content[skill_in_loop:skill_in_loop + 600]
-        self.assertIn("continue", skill_section,
-            "Invalid skill must trigger 'continue' to skip dispatch delivery")
-
-        # rc_check_terminal exists in a function that is called LATER in the same
-        # loop iteration — verify it's in a separate function, not before skill check
-        rc_check_pos = content.find("_rc_canonical_check=$(rc_check_terminal")
-        self.assertGreater(rc_check_pos, 0, "rc_check_terminal call not found")
-        # This call is inside a function defined earlier in the file, called after
-        # skill validation passes — so skill validation is the first gate
-        self.assertLess(rc_check_pos, loop_start,
-            "rc_check_terminal should be in a function defined before the loop, "
-            "called only after skill validation passes in the loop")
+        lifecycle = (SCRIPT_DIR / "lib" / "dispatch_lifecycle.sh").read_text(encoding="utf-8")
+        self.assertGreater(lifecycle.find("_rc_canonical_check=$(rc_check_terminal"), 0,
+            "rc_check_terminal call not found in dispatch_lifecycle.sh")
+        self.assertNotIn("_rc_canonical_check=$(rc_check_terminal", content,
+            "terminal operations must stay out of the validation file")
 
     def test_skill_invalid_marker_blocks_reprocessing(self):
         """Dispatch with [SKILL_INVALID] marker is skipped on re-processing."""
@@ -454,13 +445,13 @@ class TestC4ClearContextExplicitOnly(unittest.TestCase):
         finally:
             os.unlink(path)
 
-    def test_absent_clear_context_defaults_to_false(self):
-        """When ClearContext field is absent, default must be 'false'."""
+    def test_absent_clear_context_defaults_to_true(self):
+        """When ClearContext is absent the default is 'true' (a119d8001 flipped it on purpose)."""
         value = self._extract_clear_context(
             "[[TARGET:C]]\nRole: quality-engineer\nTrack: C\n"
         )
-        self.assertEqual(value, "false",
-            "ClearContext must default to 'false' — Claude terminals must not be implicitly cleared")
+        self.assertEqual(value, "true",
+            "ClearContext must default to 'true' (a119d8001)")
 
     def test_explicit_true_returns_true(self):
         """Explicit ClearContext: true is respected."""
@@ -481,10 +472,10 @@ class TestC4ClearContextExplicitOnly(unittest.TestCase):
 
     def test_dispatcher_verifies_ready_state_after_clear(self):
         """Dispatcher checks terminal ready state after explicit clear-context."""
-        dispatcher = REPO_ROOT / "scripts" / "dispatcher_minimal.sh"
+        dispatcher = SCRIPT_DIR / "lib" / "pane_injection.sh"
         content = dispatcher.read_text(encoding="utf-8")
 
-        # Verify: after clear context, dispatcher checks for prompt readiness
+        # Verify: after clear context, the pane helper checks for prompt readiness
         self.assertIn("Was this conversation helpful", content,
             "Dispatcher must handle feedback modal after clear-context")
         self.assertIn("terminal may not be ready after clear", content,
@@ -492,7 +483,7 @@ class TestC4ClearContextExplicitOnly(unittest.TestCase):
 
     def test_dispatcher_does_not_clear_by_default(self):
         """Clear-context code path is conditional on explicit 'true' value."""
-        dispatcher = REPO_ROOT / "scripts" / "dispatcher_minimal.sh"
+        dispatcher = SCRIPT_DIR / "lib" / "dispatch_deliver.sh"
         content = dispatcher.read_text(encoding="utf-8")
 
         # The clear-context block must be guarded by explicit check
@@ -566,56 +557,40 @@ class TestC6ConjunctionRule(unittest.TestCase):
     """FC-6: both canonical and legacy checks must independently pass.
     Either blocking means dispatch is blocked."""
 
+    def _lifecycle(self) -> str:
+        return (SCRIPT_DIR / "lib" / "dispatch_lifecycle.sh").read_text(encoding="utf-8")
+
     def test_dispatcher_checks_both_layers(self):
-        """Dispatcher calls rc_check_terminal AND terminal_lock_allows_dispatch."""
-        dispatcher = REPO_ROOT / "scripts" / "dispatcher_minimal.sh"
-        content = dispatcher.read_text(encoding="utf-8")
-
-        # Find the dispatch processing section (after canonical check)
+        """Dispatch path calls rc_check_terminal AND terminal_lock_allows_dispatch."""
+        content = self._lifecycle()
         rc_check = content.find('_rc_canonical_check=$(rc_check_terminal')
-        legacy_check = content.find('terminal_lock_allows_dispatch "$terminal_id"')
-
         self.assertGreater(rc_check, 0, "rc_check_terminal call not found")
-        self.assertGreater(legacy_check, 0, "terminal_lock_allows_dispatch call not found")
-
-        # Both must be present and sequential
-        # rc_check happens first, then legacy check
-        # Find the ones in the main dispatch path (after "canonical lease check")
-        main_rc = content.find('_rc_canonical_check=$(rc_check_terminal', rc_check)
-        main_legacy = content.find('terminal_lock_allows_dispatch "$terminal_id"', main_rc)
-        self.assertGreater(main_legacy, main_rc,
+        legacy_check = content.find('terminal_lock_allows_dispatch "$terminal_id"', rc_check)
+        self.assertGreater(legacy_check, rc_check,
             "Legacy check must follow canonical check in dispatch path")
 
     def test_canonical_block_returns_before_legacy_check(self):
-        """When canonical check blocks, dispatcher returns 1 before legacy check."""
-        dispatcher = REPO_ROOT / "scripts" / "dispatcher_minimal.sh"
-        content = dispatcher.read_text(encoding="utf-8")
-
-        # After canonical check BLOCK, there's a return 1 within the if-block
-        block_section_start = content.find('_rc_canonical_check=$(rc_check_terminal')
-        # The return 1 is at the end of the BLOCK:* if-block (~1500 chars)
-        block_section = content[block_section_start:block_section_start + 1600]
-        self.assertIn("return 1", block_section,
-            "Canonical block must trigger return 1 to prevent delivery")
-        # Verify return 1 comes before terminal_lock_allows_dispatch
-        ret_pos = block_section.find("return 1")
-        legacy_pos = block_section.find("terminal_lock_allows_dispatch")
-        self.assertGreater(ret_pos, 0)
+        """When canonical check blocks, the helper returns 1 before the legacy check."""
+        content = self._lifecycle()
+        block_start = content.find('_rc_canonical_check=$(rc_check_terminal')
+        self.assertGreater(block_start, 0)
+        ret_pos = content.find("return 1", block_start)
+        legacy_pos = content.find('terminal_lock_allows_dispatch "$terminal_id"', block_start)
+        self.assertGreater(ret_pos, 0, "Canonical block must trigger return 1")
         self.assertGreater(legacy_pos, 0)
         self.assertLess(ret_pos, legacy_pos,
             "return 1 must come before legacy check in the dispatch path")
+        self.assertIn('_adl_check_canonical_lease "$terminal_id" "$dispatch_id" || return 1',
+            content, "caller must propagate the canonical block")
 
     def test_legacy_block_also_returns_failure(self):
         """Legacy lock check failure blocks dispatch with return 1."""
-        dispatcher = REPO_ROOT / "scripts" / "dispatcher_minimal.sh"
-        content = dispatcher.read_text(encoding="utf-8")
-
-        # terminal_lock_allows_dispatch failure triggers return 1
-        legacy_section_start = content.find('if ! terminal_lock_allows_dispatch')
-        self.assertGreater(legacy_section_start, 0)
-        legacy_section = content[legacy_section_start:legacy_section_start + 200]
-        self.assertIn("return 1", legacy_section,
-            "Legacy lock failure must also trigger return 1")
+        self.assertIn('terminal_lock_allows_dispatch "$terminal_id" "$dispatch_id" || return 1',
+            self._lifecycle(), "Legacy lock failure must also trigger return 1")
+        content = (SCRIPT_DIR / "dispatcher_minimal.sh").read_text(encoding="utf-8")
+        start = content.find('if ! terminal_lock_allows_dispatch')
+        self.assertGreater(start, 0)
+        self.assertIn("return 1", content[start:start + 300])
 
 
 # ===========================================================================

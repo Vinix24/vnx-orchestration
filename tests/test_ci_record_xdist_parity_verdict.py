@@ -195,8 +195,9 @@ def test_every_fixture_carries_one_field_set():
     names = sorted(p.stem for p in FIXTURES.glob("*.json"))
     assert names == ["emergency", "heavy-differences", "heavy-parity", "light", "parity-step-failed-after-exit-0",
                      "written-heavy-differences", "written-heavy-parity"]
-    field_sets = {name: tuple(sorted(fixture(name))) for name in names}
+    field_sets = {name: tuple(sorted(set(fixture(name)) - set(rec.OPTIONAL_VERDICT_FIELDS))) for name in names}
     assert len(set(field_sets.values())) == 1, field_sets
+    assert fixture("light")["candidate_shape"] == "two_phase" and "candidate_shape" not in fixture("emergency")
 
 
 def _workflow_step(step_id: str) -> str:

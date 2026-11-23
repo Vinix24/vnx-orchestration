@@ -27,7 +27,7 @@ Architecture:
 from __future__ import annotations
 
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -100,31 +100,6 @@ class SupervisionDecision:
         }
 
 
-@dataclass
-class SupervisionSummary:
-    """Summary of a workflow supervision pass."""
-    run_at: str
-    incidents_recorded: int = 0
-    escalations_emitted: int = 0
-    dead_lettered: int = 0
-    retries_permitted: int = 0
-    halted: int = 0
-    decisions: List[SupervisionDecision] = field(default_factory=list)
-    errors: List[str] = field(default_factory=list)
-
-    def summary(self) -> str:
-        lines = [
-            f"Workflow supervision at {self.run_at}",
-            f"  Incidents recorded:  {self.incidents_recorded}",
-            f"  Escalations emitted: {self.escalations_emitted}",
-            f"  Dead-lettered:       {self.dead_lettered}",
-            f"  Retries permitted:   {self.retries_permitted}",
-            f"  Halted:              {self.halted}",
-            f"  Errors:              {len(self.errors)}",
-        ]
-        return "\n".join(lines)
-
-
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
@@ -195,19 +170,10 @@ class WorkflowSupervisor:
             max_retries = contract.retry_budget.max_retries
 
             # Check for repeated failure loop (only for dead-letter-eligible classes)
-            effective_class = incident_class
-            effective_contract = contract
-            if (
-                dispatch_id
-                and attempts_used >= REPEATED_FAILURE_THRESHOLD
-                and incident_class in DEAD_LETTER_ELIGIBLE_CLASSES
-            ):
-                loop_detected = self._detect_repeated_failure_loop(
-                    conn, dispatch_id=dispatch_id, incident_class=incident_class
-                )
-                if loop_detected:
-                    effective_class = IncidentClass.REPEATED_FAILURE_LOOP
-                    effective_contract = get_contract(effective_class)
+            effective_class, effective_contract = self._resolve_effective_class(
+                conn, dispatch_id=dispatch_id, incident_class=incident_class,
+                contract=contract, attempts_used=attempts_used,
+            )
 
             # Can this attempt proceed within budget?
             effective_max = effective_contract.retry_budget.max_retries
@@ -220,16 +186,10 @@ class WorkflowSupervisor:
             halt = effective_contract.escalation.halt_auto_recovery and do_escalate
 
             # Check dead-letter eligibility
-            do_dead_letter = False
-            dispatch_state = None
-            if dispatch_id:
-                dispatch = get_dispatch(conn, dispatch_id)
-                if dispatch:
-                    dispatch_state = dispatch["state"]
-                    do_dead_letter = (
-                        not can_retry
-                        and should_dead_letter(effective_class, attempts_used, dispatch_state)
-                    )
+            do_dead_letter, dispatch_state = self._check_dead_letter(
+                conn, dispatch_id=dispatch_id, effective_class=effective_class,
+                attempts_used=attempts_used, can_retry=can_retry,
+            )
 
             # Determine if retry is permitted
             do_retry = (
@@ -249,61 +209,15 @@ class WorkflowSupervisor:
                 halt=halt,
             )
 
-            # Record the incident
-            incident_record = record_incident(
-                conn,
-                incident_class=effective_class,
-                severity=effective_contract.default_severity,
-                dispatch_id=dispatch_id,
-                terminal_id=terminal_id,
-                component=component,
-                attempt_number=attempts_used + 1,
-                recovery_action=action_taken,
-                recovery_outcome="pending",
-                reason=reason,
-                budget_remaining=budget_remaining,
-                escalated=do_escalate,
-                dead_lettered=do_dead_letter,
-                metadata=metadata,
+            incident_record, escalation_record = self._write_incident_outcome(
+                conn, incident_class=incident_class, effective_class=effective_class,
+                effective_contract=effective_contract, dispatch_id=dispatch_id,
+                terminal_id=terminal_id, component=component, reason=reason,
+                metadata=metadata, attempts_used=attempts_used, action_taken=action_taken,
+                budget_remaining=budget_remaining, can_retry=can_retry,
+                do_escalate=do_escalate, do_dead_letter=do_dead_letter, halt=halt,
+                dispatch_state=dispatch_state,
             )
-
-            # Update retry state
-            if dispatch_id:
-                self._increment_retry(
-                    conn,
-                    dispatch_id=dispatch_id,
-                    incident_class=incident_class,
-                    budget_exhausted=(not can_retry),
-                    escalated=do_escalate,
-                    halted=halt,
-                )
-
-            # Apply dead-letter transition
-            if do_dead_letter and dispatch_id and dispatch_state:
-                apply_dead_letter(
-                    conn,
-                    dispatch_id=dispatch_id,
-                    incident_class=effective_class,
-                    reason=reason,
-                    incident_id=incident_record.incident_id,
-                )
-
-            # Record escalation
-            escalation_record = None
-            if do_escalate:
-                escalation_record = record_escalation(
-                    conn,
-                    incident_id=incident_record.incident_id,
-                    dispatch_id=dispatch_id,
-                    terminal_id=terminal_id,
-                    incident_class=effective_class,
-                    severity=effective_contract.default_severity,
-                    reason=reason,
-                    retry_count=attempts_used,
-                    budget_exhausted=(not can_retry),
-                    auto_recovery_halted=halt,
-                    metadata=metadata,
-                )
 
             cooldown = get_cooldown_seconds(effective_class, attempts_used) if do_retry else 0
 
@@ -325,6 +239,112 @@ class WorkflowSupervisor:
         )
 
         return decision
+
+    def _resolve_effective_class(
+        self, conn, *, dispatch_id: Optional[str], incident_class: IncidentClass,
+        contract, attempts_used: int,
+    ):
+        """Return (effective_class, effective_contract), promoting to REPEATED_FAILURE_LOOP."""
+        effective_class = incident_class
+        effective_contract = contract
+        if (
+            dispatch_id
+            and attempts_used >= REPEATED_FAILURE_THRESHOLD
+            and incident_class in DEAD_LETTER_ELIGIBLE_CLASSES
+        ):
+            loop_detected = self._detect_repeated_failure_loop(
+                conn, dispatch_id=dispatch_id, incident_class=incident_class
+            )
+            if loop_detected:
+                effective_class = IncidentClass.REPEATED_FAILURE_LOOP
+                effective_contract = get_contract(effective_class)
+        return effective_class, effective_contract
+
+    def _check_dead_letter(
+        self, conn, *, dispatch_id: Optional[str], effective_class: IncidentClass,
+        attempts_used: int, can_retry: bool,
+    ):
+        """Return (do_dead_letter, dispatch_state) for this incident."""
+        do_dead_letter = False
+        dispatch_state = None
+        if dispatch_id:
+            dispatch = get_dispatch(conn, dispatch_id)
+            if dispatch:
+                dispatch_state = dispatch["state"]
+                do_dead_letter = (
+                    not can_retry
+                    and should_dead_letter(effective_class, attempts_used, dispatch_state)
+                )
+        return do_dead_letter, dispatch_state
+
+    def _write_incident_outcome(
+        self, conn, *, incident_class: IncidentClass, effective_class: IncidentClass,
+        effective_contract, dispatch_id: Optional[str], terminal_id: Optional[str],
+        component: Optional[str], reason: str, metadata: Optional[Dict[str, Any]],
+        attempts_used: int, action_taken: str, budget_remaining: int, can_retry: bool,
+        do_escalate: bool, do_dead_letter: bool, halt: bool, dispatch_state: Optional[str],
+    ):
+        """Record the incident, update retry state, dead-letter and escalate, in that order.
+
+        Returns (incident_record, escalation_record).
+        """
+        # Record the incident
+        incident_record = record_incident(
+            conn,
+            incident_class=effective_class,
+            severity=effective_contract.default_severity,
+            dispatch_id=dispatch_id,
+            terminal_id=terminal_id,
+            component=component,
+            attempt_number=attempts_used + 1,
+            recovery_action=action_taken,
+            recovery_outcome="pending",
+            reason=reason,
+            budget_remaining=budget_remaining,
+            escalated=do_escalate,
+            dead_lettered=do_dead_letter,
+            metadata=metadata,
+        )
+
+        # Update retry state
+        if dispatch_id:
+            self._increment_retry(
+                conn,
+                dispatch_id=dispatch_id,
+                incident_class=incident_class,
+                budget_exhausted=(not can_retry),
+                escalated=do_escalate,
+                halted=halt,
+            )
+
+        # Apply dead-letter transition
+        if do_dead_letter and dispatch_id and dispatch_state:
+            apply_dead_letter(
+                conn,
+                dispatch_id=dispatch_id,
+                incident_class=effective_class,
+                reason=reason,
+                incident_id=incident_record.incident_id,
+            )
+
+        # Record escalation
+        escalation_record = None
+        if do_escalate:
+            escalation_record = record_escalation(
+                conn,
+                incident_id=incident_record.incident_id,
+                dispatch_id=dispatch_id,
+                terminal_id=terminal_id,
+                incident_class=effective_class,
+                severity=effective_contract.default_severity,
+                reason=reason,
+                retry_count=attempts_used,
+                budget_exhausted=(not can_retry),
+                auto_recovery_halted=halt,
+                metadata=metadata,
+            )
+
+        return incident_record, escalation_record
 
     # ------------------------------------------------------------------
     # Resume path validation

@@ -201,6 +201,7 @@ class TestInstallableByReloadPlist:
         register_engine(home, engine, self.PROJECT)
         env = {
             "HOME": str(home),
+            "VNX_LAUNCHD_GUARD_TEMP_ROOTS": os.environ["VNX_LAUNCHD_GUARD_TEMP_ROOTS"],
             "PATH": f"{stub_dir}{os.pathsep}{os.environ['PATH']}",
             "VNX_HOME": str(engine),
             "VNX_PROJECT_ID": self.PROJECT,
@@ -250,6 +251,7 @@ class TestDashboardSingletonLockHolds:
     def _env(self, data_home: Path) -> Dict[str, str]:
         return {
             "HOME": os.environ["HOME"],
+            "VNX_LAUNCHD_GUARD_TEMP_ROOTS": os.environ["VNX_LAUNCHD_GUARD_TEMP_ROOTS"],
             "PATH": os.environ["PATH"],
             "VNX_HOME": str(REPO),
             "VNX_PROJECT_ID": "lockprobe",

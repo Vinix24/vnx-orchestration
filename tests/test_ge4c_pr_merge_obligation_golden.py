@@ -27,7 +27,7 @@ for _p in (str(VNX_ROOT / "scripts"), str(VNX_ROOT / "scripts" / "lib")):
 
 import gate_obligations
 import pr_merge
-from review_seat_support import no_config_store
+from review_seat_support import pin_review_stack
 
 PR, PR_ID, BRANCH, HEAD = 4409, "4409", "dispatch/ge-4c-golden", "e" * 40
 DISPATCH = "codex-gate-pr4409-1"
@@ -60,7 +60,7 @@ def _store(tmp_path, monkeypatch) -> dict:
         "VNX_DB_DIR": data_dir / "database",
     }.items():
         monkeypatch.setenv(key, str(value))
-    no_config_store(monkeypatch)
+    pin_review_stack(monkeypatch, ",".join(STACK))  # the golden's stack, the default until 2026-11-11
     return {"state": state, "results": state / "review_gates" / "results", "reports": data_dir / "unified_reports"}
 
 

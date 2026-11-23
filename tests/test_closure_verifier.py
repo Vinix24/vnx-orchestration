@@ -1291,3 +1291,69 @@ class TestTrackClosureFromTracksDb:
         _, checks = _track_closure(verifier_env, monkeypatch, tmp_path)
 
         assert checks["stale_staging"]["status"] == ("FAIL" if stale else "PASS")
+
+
+# --- skipped Profile A shards next to a green aggregator (OI-2993)
+
+_AGG = "Profile A (doctor + core tests)"
+_SHARDS = [f"Profile A shard ({k}/4)" for k in range(1, 5)]
+
+
+def _cr(name, conclusion="SUCCESS", status="COMPLETED"):
+    return {"__typename": "CheckRun", "name": name, "status": status, "conclusion": conclusion}
+
+
+def _serial(agg_conclusion="SUCCESS", skipped=None):
+    skipped = _SHARDS + ["Profile A guards"] if skipped is None else skipped
+    return [_cr(_AGG, agg_conclusion)] + [_cr(n, "SKIPPED") for n in skipped]
+
+
+def test_skipped_profile_a_jobs_next_to_a_green_aggregator_are_green():
+    assert cv._rollup_all_green(_serial()) is True
+    assert cv._rollup_all_green(_serial(skipped=_SHARDS[:1])) is True
+
+
+def test_skipped_shard_without_a_green_aggregator_is_not_green():
+    assert cv._rollup_all_green(_serial("FAILURE")) is False
+    assert cv._rollup_all_green(_serial("SKIPPED")) is False
+    assert cv._rollup_all_green(_serial("CANCELLED")) is False
+    assert cv._rollup_all_green(_serial(None)) is False
+    assert cv._rollup_all_green([_cr(_AGG, "SUCCESS", "IN_PROGRESS")] + [_cr(n, "SKIPPED") for n in _SHARDS]) is False
+    assert cv._rollup_all_green([_cr(n, "SKIPPED") for n in _SHARDS]) is False  # aggregator missing
+
+
+def test_a_skipped_check_with_another_name_is_not_green():
+    for name in ("VNX CI", "Profile A shard (5/4)", "Profile A", None):
+        rollup = _serial() + [_cr(name, "SKIPPED")]
+        assert cv._rollup_all_green(rollup) is False, name
+
+
+def test_a_skipped_shard_that_is_not_completed_is_not_green():
+    rollup = [_cr(_AGG)] + [_cr(_SHARDS[0], "SKIPPED", "IN_PROGRESS")]
+    assert cv._rollup_all_green(rollup) is False
+
+
+def test_other_conclusions_of_a_shard_stay_not_green_next_to_a_green_aggregator():
+    for conclusion in ("NEUTRAL", "CANCELLED", "FAILURE", "", None, "SOMETHING_NEW"):
+        rollup = [_cr(_AGG), _cr(_SHARDS[0], conclusion)]
+        assert cv._rollup_all_green(rollup) is False, conclusion
+    assert cv._rollup_all_green([_cr(_AGG), _cr(_SHARDS[0], None, "PENDING")]) is False
+
+
+def test_an_empty_rollup_stays_not_green():
+    assert cv._rollup_all_green([]) is False
+
+
+def test_the_profile_a_names_match_the_workflow():
+    import yaml
+
+    jobs = yaml.safe_load((VNX_ROOT / ".github" / "workflows" / "vnx-ci.yml").read_text(encoding="utf-8"))["jobs"]
+    aggregator = next(j for j in jobs.values() if j.get("name") == cv._PROFILE_A_AGGREGATOR)
+    needed = {jobs[job_id]["name"] for job_id in aggregator["needs"]}
+    assert needed == set(cv._PROFILE_A_NEEDED_JOBS)
+    sys.path.insert(0, str(VNX_ROOT / "tests"))
+    try:
+        import ci_workflow_shape as shape
+    finally:
+        sys.path.pop(0)
+    assert cv._PROFILE_A_AGGREGATOR == shape.REQUIRED_CHECK_NAME

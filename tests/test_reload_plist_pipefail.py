@@ -50,6 +50,7 @@ def _setup(tmp_path: Path) -> tuple[Path, dict]:
     stub.chmod(0o755)
     env = {
         "HOME": str(home),
+        "VNX_LAUNCHD_GUARD_TEMP_ROOTS": os.environ["VNX_LAUNCHD_GUARD_TEMP_ROOTS"],
         "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
     }
     return home, env

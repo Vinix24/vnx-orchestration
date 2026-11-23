@@ -115,3 +115,13 @@ Het verandert geen code en geen gedrag: P0 tot en met P8 zijn gemerged en dit is
 - **Negatief:** de twee views kunnen verschillen zodra de `checks.*_required`-dials afwijken van de profielstapel. Dat verschil is zichtbaar in `vnx gate-profile show` en niet stil: de dials gaan vóór, en de waarschuwing noemt wat er bij kwam en af ging.
 - **Open:** clausule 2 (profielgedreven pensionering) en de brede vorm van clausule 5 (hertoetsing van een expliciet gezette stapel) zijn niet gebouwd. Wie een profiel verlicht, houdt openstaande verplichtingen; wie een stapel expliciet zette, houdt die stapel. Beide staan hier als grens, niet als garantie.
 - **Opvolging:** een wijziging aan de tabel, de ondergrens, de fail-closed-regel of de herkomstsets is een amendement op dit ADR. De spiegelregel van ADR-008 ("Transition of obligations") geldt onverkort voor wat wél bestaat: een open verplichting wordt nooit stilzwijgend ingetrokken of vervuld.
+
+## Amendement 10-11-2026: de profielsleutel `VNX_REVIEW_SCOPE` (ADR-064, levering DR-0)
+
+Dit amendement voegt één sleutel aan het poortprofiel toe. De tekst hierboven blijft ongewijzigd. De sleutel bepaalt of een vervolgronde van de codex-stoel een volle review of een deltareview is. De mechaniek, de drempel en de reden staan in ADR-064; hier staat wat het profielcontract erover zegt.
+
+- **Waarden:** `full`, `delta_shadow` en `delta`. `full` is de standaard en het gedrag van vandaag. Bij `delta_shadow` beslist de volle ronde en boekt de deltaronde alleen in `review_gates/shadow/delta.ndjson`. Bij `delta` is de deltaronde de beslissende ronde voor een vervolgkop die aan besluit 2 van ADR-064 voldoet.
+- **Fail-closed lezing:** een onbekende waarde, een lege waarde en elke leesfout geven `full`. Een `delta` zonder approval-id geeft ook `full`. Het resultaat is nooit zwakker dan de volle review en de reden staat in de uitvoer, in de lijn van § 3 hierboven.
+- **Wie hem zet:** een rij in `project_config` met een approval-id. De rij wordt geweigerd zonder een geslaagde DR-5-meting (0 gemiste blockers in 20 paren en 10 van 10 geplante blockers, ADR-064 § Drempel) en zonder een gemergde DR-7 waarvan de reconstructietest op `main` groen is. `delta_shadow` heeft dezelfde rij maar vraagt geen meting.
+- **Rollback:** de sleutel op `full` zetten of de rij weghalen. Dat werkt voor elke toekomstige aanvraag, zonder revert, migratie of herschreven record, zoals § 7 hierboven voor de andere profielsleutel.
+- **Einde van `delta_shadow`:** de waarde bestaat tot de afsluiting van fase 2 van de track `deltareview-met-ouderketen` (DR-8b gemerged en de schaduwruns van carry en pruning gemeten). Op dat moment verwijdert een eigen PR de waarde uit de lezer; een rij die haar dan nog draagt leest als `full`.

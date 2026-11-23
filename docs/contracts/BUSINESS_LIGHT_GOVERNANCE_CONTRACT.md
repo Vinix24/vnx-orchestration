@@ -243,8 +243,8 @@ The pilot must be rolled back if any of these occur:
 # Immediate disable — all business dispatches stop, coding unaffected
 export VNX_BUSINESS_LIGHT_ENABLED=0
 
-# Full revert — remove business-light capability registration
-vnx domain disable business
+# Full revert — remove the business-light capability registration from the
+# capability matrix and revert the change that added it
 ```
 
 ---

@@ -1,7 +1,8 @@
 # Architectural Decisions
 
 **Status**: Active  
-**Purpose**: Concise, public record of core design choices and their tradeoffs.
+**Purpose**: Concise, public record of core design choices and their tradeoffs.  
+**Verified against `origin/main` at c41411fea on 2026-11-12.**
 
 ---
 
@@ -28,7 +29,7 @@
 
 ## 3b) One Reviewer Per Seat, Rejection Always Blocks
 **Context**: A merge that one reviewer passed while another rejected is a silent hole in review.  
-**Decision**: Every seat of the review stack (default `codex_gate,kimi_gate`) is filled by a distinct reviewer, any review peer's rejection on the head blocks, and a reviewer that is out is absence, not a vote (ADR-008, ADR-037). A seat whose reviewer is out passes along the takeover chain `codex_gate,kimi_gate,deepseek_gate`; `glm_gate` is no longer in the default chain. Seats and chain: `docs/core/00_VNX_ARCHITECTURE.md` (Review Seats), `docs/core/PROVIDER_LANES.md` (Takeover chain). On main, not yet released.  
+**Decision**: Every seat of the review stack (default `codex_gate,kimi_gate`) is filled by a distinct reviewer, any review peer's rejection on the head blocks, and a reviewer that is out is absence, not a vote (ADR-008, ADR-037). A seat whose reviewer is out passes along the takeover chain `codex_gate,kimi_gate,deepseek_gate`; `glm_gate` is no longer in the default chain. Seats and chain: `docs/core/00_VNX_ARCHITECTURE.md` (Review Seats), `docs/core/PROVIDER_LANES.md` (Takeover chain). Shipped in 1.8.0.  
 **Tradeoff**: A PR can wait on a seat that has no distinct reviewer left, and the seat then ends as `chain_exhausted`.
 
 ---
@@ -64,7 +65,7 @@
 
 ## 7) Track-Agnostic Terminals (Legacy Track Mapping)
 **Context**: Track A/B/C originally mapped to T1/T2/T3 for simplicity.  
-**Decision**: T1/T2/T3 are role labels on dispatches, not standing panes; a worker is ephemeral and per dispatch (ADR-024). Terminal-pinned workers remain opt-in (`VNX_ADAPTER_T{n}=subprocess`).  
+**Decision**: T1/T2/T3 are role labels on dispatches, not standing panes; a worker is ephemeral and per dispatch (ADR-024). The terminal-pinned path (`scripts/lib/subprocess_dispatch.py`) stays as the rollback route; the per-terminal selector `VNX_ADAPTER_T{n}` is gone for T1-T3 since 2026-10-27 and only T0 opts in with `VNX_ADAPTER_T0=subprocess`.  
 **Tradeoff**: Requires clearer dispatch metadata, but supports scale and flexibility.
 
 ---
@@ -80,3 +81,110 @@
 **Context**: External dependencies add failure modes and lock-in.  
 **Decision**: File system is the message bus; no required external services.  
 **Tradeoff**: Not designed for distributed or hosted deployment yet.
+
+---
+
+## 10) Learning and Dreaming Propose, a Human Decides
+**Context**: A loop that rewrites its own rules from receipts can drift without anyone seeing it.  
+**Decision**: The learning loop runs in shadow mode unless `VNX_LEARNING_LOOP_PERSIST=1`. With `VNX_LEARNING_LOOP_QUEUE=1` its proposals go to a queue and nothing is activated (ADR-065). Steering proposals carry a decision record: `approved` applies nothing, `applied` needs a reference to the change (`scripts/lib/steering_proposal_store.py`, ADR-072). The dream scheduler is off by default (`VNX_DREAM_SCHEDULER_ENABLED=0`, ADR-019, ADR-066). On main, not yet released.  
+**Tradeoff**: The loop does not close itself. A proposal waits for me, and an unread queue is a loop that does nothing.
+
+---
+
+## Index of all ADRs
+
+One line per file in `docs/governance/decisions/` on `origin/main` at c41411fea, 70 files, grouped by theme. The status is the one the ADR file itself carries. Numbers 033 and 070 do not exist. Several ADRs of the learning wave still say `Proposed` in their own file although their code is on main; the file wins here, not my reading of it. Titles of ADRs written in Dutch are given in English.
+
+### Audit trail and receipts
+
+- ADR-005: Append-only NDJSON ledger as the primary observability surface. Accepted.
+- ADR-023: Receipt hash chain (experimental, opt-in). Accepted.
+- ADR-029: Hash-chain epoch rotation. Accepted.
+- ADR-034: External chain-origin anchor. Accepted.
+- ADR-035: Receipt v2. Accepted.
+- ADR-038: One outcome identity for both booking routes. Accepted.
+- ADR-045: The ledger records every dispatch: start line, end line, sweep. Accepted.
+- ADR-054: The envelope governance record is not an end line. Accepted.
+- ADR-055: Receipt processor liveness heartbeat. Accepted.
+
+### Dispatch: the door, lanes, workers
+
+- ADR-003: OAuth-only Claude routing through `claude -p`, no SDK. Accepted.
+- ADR-010: `claude -p` subprocess adapter as canonical Claude routing. Accepted, superseded in part by ADR-024.
+- ADR-011: Manager and worker hierarchy with explicit depth above one. Accepted.
+- ADR-012: Hybrid interactive and headless execution. Accepted.
+- ADR-013: Worker pool size as configuration. Accepted.
+- ADR-014: Autonomous mode is pre-approved chain dispatch, never a gate bypass. Accepted.
+- ADR-017: Control Centre for several projects. Accepted.
+- ADR-018: Elastic worker pool. Accepted.
+- ADR-020: Parallel multi-track execution. Accepted.
+- ADR-024: Single-entry door as the default dispatch lane. Accepted, its section on ADR-010 superseded 2026-09-18.
+- ADR-025: Raw-file dispatch deprecation. Accepted.
+- ADR-030: Plan-first gate enforcement. Accepted.
+- ADR-062: The capacity store: slots, admission, ownership of the workload. Accepted.
+
+### Review, gates and merge
+
+- ADR-006: Staging, then a mandatory human approval gate. Accepted.
+- ADR-008: Dual-LLM adversarial review with `contract_hash` binding. Accepted.
+- ADR-027: Signed-attestation enforcement at merge. Accepted.
+- ADR-037: A gate outage is absence, not a vote against. Accepted.
+- ADR-041: Tiebreaker at the review cap. Accepted.
+- ADR-046: One gate engine: one outcome, one writer, three adapter kinds. Accepted.
+- ADR-060: Gate profile per project. Accepted.
+- ADR-061: The door's guarantee is a permit. Accepted.
+- ADR-064: Delta review: a fresh verdict on the exact head, with a parent chain. Proposed.
+- ADR-071: Rework per builder model and per review seat. Proposed.
+
+### Planning layer and tracks
+
+- ADR-028: Target orchestration architecture: folder per agent, two-tier judge. Superseded by ADR-031.
+- ADR-031: Ratification of the folder-per-agent target architecture. Accepted.
+- ADR-047: The tracks database is the only plan source. Proposed.
+- ADR-049: A deliverable moves or is withdrawn, never booked off. Proposed.
+- ADR-056: Autonomy as a measurable notion. Accepted.
+- ADR-063: The daily throughput measurement. Proposed.
+
+### State, stores and multi-tenancy
+
+- ADR-001: No external Redis or other always-on network daemon. Accepted.
+- ADR-007: Multi-tenant `project_id` stamping. Accepted.
+- ADR-009: Schema-first migrations through PRAGMA introspection. Accepted.
+- ADR-016: Unified event shape (`CanonicalEvent`). Accepted.
+- ADR-026: Per-project store with governance federation. Accepted.
+- ADR-032: Fabric artifacts in consumer repos (A/B/C manifest). Accepted.
+- ADR-040: Dated price versions in the model registry. Accepted.
+- ADR-043: The cost ledger: one line per run, a source for every amount. Accepted.
+- ADR-053: A test may leave Profile A when a blocking CI step runs it. Accepted.
+
+### Providers, models and permissions
+
+- ADR-004: Positioning against managed agents. Accepted.
+- ADR-015: DeepSeek, Kimi and GLM through LiteLLM. Accepted.
+- ADR-022: Provider-agnostic skill injection. Accepted.
+- ADR-036: Model identity from the registry. Accepted.
+- ADR-042: The harness contract. Accepted.
+- ADR-044: The provider switch: one operator file, fail-closed. Accepted.
+- ADR-048: A skill is not a role: one `skill` field, one seam. Proposed.
+- ADR-050: Agent layout phase 1: `VNX_AGENT_LAYOUT`, shadow copy, context manifest. Accepted.
+- ADR-057: One permission policy, bound to every dispatch. Accepted.
+- ADR-058: Source of the T0 playbook and the reference block. Accepted.
+- ADR-059: Native materialisation of an agent's skill set. Accepted.
+
+### Learning, dreaming and intelligence
+
+- ADR-019: Auto-dream memory consolidation. Accepted.
+- ADR-065: Learning proposes: failure classes, counting contract, decision record. Proposed.
+- ADR-066: Dream liveness watch. Proposed.
+- ADR-067: Learning capture routing: four buckets, one home each. Proposed.
+- ADR-068: Learning signal attribution. Proposed.
+- ADR-069: Effect measurement of intelligence injection. Proposed.
+- ADR-072: Operator steering feeds learning (proposals only). Proposed.
+
+### Engineering discipline
+
+- ADR-002: Context rotation as a standalone module. Accepted.
+- ADR-021: Exception discipline: narrow catches, marked silent catches. Accepted.
+- ADR-039: The claude lane stops self-healing synthesis; never-success is a shared invariant. Accepted.
+- ADR-051: A scheduled task follows the pin at runtime; a release proves itself. Accepted.
+- ADR-052: No function under `scripts/` above 200 executable lines. Accepted.

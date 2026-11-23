@@ -379,7 +379,7 @@ def test_a_codex_run_that_timed_out_or_stalled_records_its_model_and_effort(
     runner, tmp_registry, tmp_path, no_effort_env, monkeypatch, reason, timeout, stall, risk, effort,
 ):
     monkeypatch.setenv("VNX_CODEX_GATE_TIMEOUT", timeout)
-    monkeypatch.setenv("VNX_CODEX_STALL_THRESHOLD", stall)
+    monkeypatch.setitem(sys.modules["headless_adapter"].GATE_STALL_DEFAULTS, "codex_gate", int(stall))
     payload = {"prompt": "review", "branch": "dispatch/x", "pr_number": 7, "risk_class": risk}
 
     result = _run_codex_that_never_answers(runner, tmp_path, payload)
@@ -412,7 +412,6 @@ def test_a_degenerate_codex_run_records_its_model_and_effort(
 def test_an_effort_env_set_for_the_run_lands_on_its_failure_record(runner, tmp_registry, tmp_path, monkeypatch):
     monkeypatch.setenv(EFFORT_ENV, "xhigh")
     monkeypatch.setenv("VNX_CODEX_GATE_TIMEOUT", "1")
-    monkeypatch.setenv("VNX_CODEX_STALL_THRESHOLD", "300")
     payload = {"prompt": "review", "branch": "dispatch/x", "pr_number": 7, "risk_class": "low"}
 
     _run_codex_that_never_answers(runner, tmp_path, payload)
@@ -870,7 +869,7 @@ def _run_dispatch_via_envelope(args):
 def _adapter_plan(model="default"):
     return types.SimpleNamespace(
         provider=Provider.CODEX, model=model, role=None, dispatch_id="r3-codex",
-        target_id="T1", dispatch_paths=(),
+        target_id="T1", dispatch_paths=(), deadline_seconds=600,
     )
 
 

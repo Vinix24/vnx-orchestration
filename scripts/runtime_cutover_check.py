@@ -87,10 +87,6 @@ def _gate_checklist(result: dict) -> None:
         "Existing governance workflows remain functional without completion-authority regression",
     )
     gate_item(
-        Path(_SCRIPT_DIR / ".." / "docs" / "operations" / "RUNTIME_CORE_ROLLBACK.md").exists(),
-        "Rollback path to legacy transport is documented and tested",
-    )
-    gate_item(
         Path(_SCRIPT_DIR / ".." / "tests" / "test_runtime_cutover.py").exists(),
         "All tests pass for cutover compatibility and receipt linkage",
     )

@@ -24,7 +24,7 @@ if str(_FIXTURES) not in sys.path:
     sys.path.insert(0, str(_FIXTURES))
 
 from pool_state_repo import PoolStateRepository  # noqa: E402
-from pool_state_fixtures import create_test_db_file  # noqa: E402
+from pool_state_fixtures import create_test_db_file, seed_leases  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -55,6 +55,7 @@ def _read_ledger_events(db_path: Path) -> list:
 def test_add_member_emits_ledger_event(tmp_path):
     (tmp_path / "state").mkdir()
     db = create_test_db_file(tmp_path / "state" / "runtime_coordination.db")
+    seed_leases(db, "T-test-01")
     repo = _make_repo(db)
 
     now = time.time()
@@ -79,6 +80,7 @@ def test_add_member_emits_ledger_event(tmp_path):
 def test_mark_reaped_emits_ledger_event(tmp_path):
     (tmp_path / "state").mkdir()
     db = create_test_db_file(tmp_path / "state" / "runtime_coordination.db")
+    seed_leases(db, "T-test-02")
     repo = _make_repo(db)
 
     now = time.time()
@@ -106,6 +108,7 @@ def test_mark_reaped_emits_ledger_event(tmp_path):
 def test_add_then_reap_emits_two_events(tmp_path):
     (tmp_path / "state").mkdir()
     db = create_test_db_file(tmp_path / "state" / "runtime_coordination.db")
+    seed_leases(db, "T-seq-01")
     repo = _make_repo(db)
 
     now = time.time()
@@ -129,6 +132,7 @@ def test_ledger_file_created_on_first_emit(tmp_path):
 
     assert not events_file.exists(), "Ledger file should not exist yet"
 
+    seed_leases(db, "T-new")
     repo = _make_repo(db)
     repo.add_member("default", "T-new", "claude", "backend-developer", time.time())
 
@@ -143,6 +147,8 @@ def test_ledger_file_atomic_append(tmp_path):
     """Concurrent add_member calls must each produce exactly one valid JSON line."""
     (tmp_path / "state").mkdir()
     db = create_test_db_file(tmp_path / "state" / "runtime_coordination.db")
+
+    seed_leases(db, *(f"T-concurrent-{i}" for i in range(4)))
 
     errors: list = []
     barrier = threading.Barrier(4)
@@ -252,6 +258,7 @@ def test_mark_reaped_no_match_no_ledger_emit(tmp_path):
 def test_mark_reaped_event_id_in_payload(tmp_path):
     (tmp_path / "state").mkdir()
     db = create_test_db_file(tmp_path / "state" / "runtime_coordination.db")
+    seed_leases(db, "T-oi1484-01")
     repo = _make_repo(db)
 
     now = time.time()

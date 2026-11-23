@@ -59,7 +59,6 @@ def test_json_output_contains_expected_subsystems_and_health(tmp_path, capsys):
         "intelligence-self-learning-loop",
         "governance-enforcement-stack",
         "plan-gate-panel",
-        "plan-gate-task-class-scope",
     ):
         assert expected in names, f"missing subsystem row: {expected}"
 

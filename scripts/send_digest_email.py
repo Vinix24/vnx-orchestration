@@ -38,6 +38,8 @@ except Exception as exc:
     raise SystemExit(f"Failed to load vnx_paths: {exc}")
 
 from digest_text import smart_truncate, decision_grade
+from permission_chain import digest_section as _permission_section
+from vnx_paths import project_id_from_state_dir
 
 PATHS = ensure_env()
 STATE_DIR = Path(PATHS["VNX_STATE_DIR"])
@@ -156,7 +158,7 @@ def _format_pending_edits(edits_data: dict) -> str:
         "\nReview: vnx suggest review\n"
         "Accept: vnx suggest accept <ids>\n"
         "Reject: vnx suggest reject <ids>\n"
-        "Apply:  vnx suggest apply"
+        "Accept: vnx suggest accept <ids> (stages a dispatch the T0 fires)"
     )
 
     return "\n".join(lines) + "\n"
@@ -223,6 +225,7 @@ def build_digest() -> tuple[str, str]:
         "─── Voorgestelde Wijzigingen ───",
         "",
         _format_pending_edits(edits_data),
+        _permission_section(STATE_DIR, project_id_from_state_dir(STATE_DIR) or None),
         "─── Analyzer Log (laatste regels) ───",
         "",
         _get_log_tail(),

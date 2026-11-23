@@ -52,7 +52,7 @@ NO-GO ("kan de volgorde ... niet vaststellen"), never a silent fall-through to
 
 Escape hatch (OI-1216 merge-gate): an operator may override the gate by
 supplying a non-empty reason via ``override_reason`` /
-``--override-reason`` / ``VNX_MERGE_OVERRIDE_REASON``. The reason IS the
+``--override-reason``. The reason IS the
 override: an empty/whitespace reason is a refusal, never a silent bypass, and
 every overridden verdict carries ``overridden=True`` plus the reason so it is
 visible in the output rather than hidden.
@@ -60,7 +60,7 @@ visible in the output rather than hidden.
 This is the merge-preflight counterpart to ``pre_merge_gate.check_ci_workflow``
 (OI-931), which enforces the same invariant at gate time. The two share the
 same workflow-name resolution order (explicit arg > ``ci_workflow`` from the
-project's ``branch_protection.yaml`` on main > ``VNX_CI_WORKFLOW_NAME`` > "VNX CI");
+project's ``branch_protection.yaml`` on main > "VNX CI");
 they differ in verdict vocabulary (GO/NO-GO here) and messaging (merge-preflight
 terms).
 
@@ -80,7 +80,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import shutil
 import subprocess
 import sys
@@ -88,15 +87,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-# CI workflow name queried via `gh run list --workflow`. Overridable per repo
-# via VNX_CI_WORKFLOW_NAME — same resolution order as pre_merge_gate.
+# CI workflow name queried via `gh run list --workflow` when neither the caller
+# nor the project names one — same resolution order as pre_merge_gate.
 DEFAULT_CI_WORKFLOW_NAME = "VNX CI"
-CI_WORKFLOW_NAME_ENV_VAR = "VNX_CI_WORKFLOW_NAME"
-
-# Escape-hatch env var. The value is the required reason: a non-empty value
-# overrides the gate (visibly), an empty value is a refusal, an unset variable
-# means no override is attempted.
-OVERRIDE_ENV_VAR = "VNX_MERGE_OVERRIDE_REASON"
 
 # How many recent runs to pull for the commit. Matching is by exact head SHA,
 # so a head older than the limit would read as "not run". The same limit is
@@ -120,7 +113,7 @@ REASON_CODES = frozenset({
 
 def _resolve_workflow_name(workflow_name: Optional[str], project_workflow: Optional[str] = None) -> str:
     """Resolve the workflow name: explicit arg > the project's ``ci_workflow`` >
-    env var > fabric default.
+    fabric default.
 
     Mirrors pre_merge_gate._resolve_ci_workflow_name(). Keep the two in sync
     (tests/test_ci_workflow_resolution_parity.py holds them to it).
@@ -129,14 +122,11 @@ def _resolve_workflow_name(workflow_name: Optional[str], project_workflow: Optio
         return workflow_name
     if project_workflow:
         return project_workflow
-    env_name = os.environ.get(CI_WORKFLOW_NAME_ENV_VAR)
-    if env_name:
-        return env_name
     return DEFAULT_CI_WORKFLOW_NAME
 
 
 def _resolve_override_reason(override_reason: Optional[str]) -> Optional[str]:
-    """Resolve the escape-hatch reason: explicit arg > env var > None.
+    """Resolve the escape-hatch reason from the explicit argument only.
 
     Returns the stripped reason string, or one of two sentinels that the caller
     must distinguish:
@@ -146,9 +136,6 @@ def _resolve_override_reason(override_reason: Optional[str]) -> Optional[str]:
     """
     if override_reason is not None:
         return override_reason.strip()
-    env_reason = os.environ.get(OVERRIDE_ENV_VAR)
-    if env_reason is not None:
-        return env_reason.strip()
     return None
 
 
@@ -274,26 +261,18 @@ def check_ci_run_for_head(
 
     ``override_reason`` is the escape hatch: a non-empty value skips the check
     with a visible GO (``overridden=True``), an empty/whitespace value is a
-    refusal, and None (or an unset env var) runs the normal check.
+    refusal, and None runs the normal check.
 
     ``project_workflow`` is the ``ci_workflow`` the project declares in its
     ``branch_protection.yaml`` (OI-1849), as read by the caller; it ranks below
-    ``workflow_name`` and above ``VNX_CI_WORKFLOW_NAME``.
+    ``workflow_name`` and above the fabric default.
     """
     resolved_workflow = _resolve_workflow_name(workflow_name, project_workflow)
 
     # ── Escape hatch ──────────────────────────────────────────────────────
     reason = _resolve_override_reason(override_reason)
     if reason is not None:
-        if not reason:
-            return _no_go("override_without_reason",
-                "override zonder reden geweigerd: een override vereist een niet-lege reden "
-                "(geen stille bypass)",
-                workflow_name=resolved_workflow,
-                overridden=True,
-                override_reason=reason,
-            )
-        return _overridden_go(reason, head_sha, resolved_workflow)
+        return _override_verdict(reason, head_sha, resolved_workflow)
 
     # ── gh availability ────────────────────────────────────────────────────
     if shutil.which(gh_bin) is None:
@@ -327,6 +306,31 @@ def check_ci_run_for_head(
         )
 
     # ── gh authentication ──────────────────────────────────────────────────
+    refusal = _check_gh_auth(project_root, gh_bin, head_sha, resolved_workflow)
+    if refusal is not None:
+        return refusal
+
+    runs, refusal = _query_commit_runs(project_root, gh_bin, head_sha, resolved_workflow)
+    if refusal is not None:
+        return refusal
+    return _verdict_from_runs(runs, head_sha, resolved_workflow)
+
+
+def _override_verdict(reason: str, head_sha: Optional[str], resolved_workflow: str) -> Dict[str, Any]:
+    """Verdict for an attempted override: refused without a reason, else a visible GO."""
+    if not reason:
+        return _no_go("override_without_reason",
+            "override zonder reden geweigerd: een override vereist een niet-lege reden "
+            "(geen stille bypass)",
+            workflow_name=resolved_workflow,
+            overridden=True,
+            override_reason=reason,
+        )
+    return _overridden_go(reason, head_sha, resolved_workflow)
+
+
+def _check_gh_auth(project_root: Path, gh_bin: str, head_sha: str, resolved_workflow: str) -> Optional[Dict[str, Any]]:
+    """NO-GO when ``gh auth status`` is missing, hangs or fails; None when authenticated."""
     auth, auth_err = _capture([gh_bin, "auth", "status"], timeout=GH_AUTH_TIMEOUT, cwd=str(project_root))
     if auth_err == "missing":
         return _no_go("gh_missing",
@@ -346,8 +350,17 @@ def check_ci_run_for_head(
             head_sha=head_sha,
             workflow_name=resolved_workflow,
         )
+    return None
 
-    # ── Query workflow runs, scoped to the exact commit (OI-1387) ──────────
+
+def _query_commit_runs(
+    project_root: Path, gh_bin: str, head_sha: str, resolved_workflow: str,
+) -> Tuple[Any, Optional[Dict[str, Any]]]:
+    """Query workflow runs scoped to the exact commit (OI-1387).
+
+    Returns ``(runs, None)`` with the parsed gh output, or ``(None, verdict)``
+    with the NO-GO for a missing, hanging, failing or unparseable query.
+    """
     run_list, run_err = _capture(
         [
             gh_bin, "run", "list",
@@ -360,20 +373,20 @@ def check_ci_run_for_head(
         cwd=str(project_root),
     )
     if run_err == "missing":
-        return _no_go("gh_missing",
+        return None, _no_go("gh_missing",
             "gh CLI niet beschikbaar: deze merge is niet toetsbaar",
             head_sha=head_sha,
             workflow_name=resolved_workflow,
         )
     if run_err == "timeout":
-        return _no_go("gh_run_list_timeout",
+        return None, _no_go("gh_run_list_timeout",
             f"gh run list liep vast voor workflow '{resolved_workflow}': deze merge is niet toetsbaar",
             head_sha=head_sha,
             workflow_name=resolved_workflow,
         )
     if run_list is None or run_list.returncode != 0:
         stderr = (run_list.stderr if run_list else "").strip()
-        return _no_go("gh_run_list_failed",
+        return None, _no_go("gh_run_list_failed",
             f"gh run list faalde voor workflow '{resolved_workflow}': deze merge is niet toetsbaar"
             + (f" ({stderr[:120]})" if stderr else ""),
             head_sha=head_sha,
@@ -381,14 +394,17 @@ def check_ci_run_for_head(
         )
 
     try:
-        runs = json.loads(run_list.stdout)
+        return json.loads(run_list.stdout), None
     except json.JSONDecodeError:
-        return _no_go("unparseable",
+        return None, _no_go("unparseable",
             f"gh-uitvoer niet te parsen voor workflow '{resolved_workflow}': deze merge is niet toetsbaar",
             head_sha=head_sha,
             workflow_name=resolved_workflow,
         )
 
+
+def _verdict_from_runs(runs: Any, head_sha: str, resolved_workflow: str) -> Dict[str, Any]:
+    """Verdict from the parsed run list: no run, still running, or the deciding completed run."""
     # ── Match runs to the exact HEAD SHA ────────────────────────────────────
     # ``--commit`` already scopes gh's response to head_sha; this filter is a
     # defensive no-op against a gh quirk returning extra entries.
@@ -431,6 +447,11 @@ def check_ci_run_for_head(
             return _fail(resolved_workflow, head_sha, run_id, conclusion, f"run {run_id}")
         return _go(resolved_workflow, head_sha, run_id, f"run {run_id}")
 
+    return _latest_completed_verdict(completed, head_sha, resolved_workflow)
+
+
+def _latest_completed_verdict(completed: List[Any], head_sha: str, resolved_workflow: str) -> Dict[str, Any]:
+    """Verdict from two or more completed runs on one commit: the LATEST decides."""
     # ── Multiple completed runs on the same commit: the LATEST decides ─────
     # (OI-1613). A stale failing run next to a newer successful one on the
     # same head (the tmux-spawn lane's reopen-to-retrigger pattern) must not
@@ -482,14 +503,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument(
         "--workflow",
         help="CI workflow name (default: ci_workflow from the project's branch_protection.yaml on main, "
-             "else VNX_CI_WORKFLOW_NAME, else 'VNX CI')",
+             "else 'VNX CI')",
     )
     parser.add_argument("--gh-bin", default="gh", help="Path/name of the gh binary")
     parser.add_argument(
         "--override-reason",
         default=None,
-        help="Escape hatch: skip the check with this required reason (empty is refused). "
-             "Also read from VNX_MERGE_OVERRIDE_REASON.",
+        help="Escape hatch: skip the check with this required reason (empty is refused).",
     )
     parser.add_argument("--json", action="store_true", help="Emit the full result as JSON")
     args = parser.parse_args(argv)

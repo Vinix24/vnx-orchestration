@@ -90,5 +90,5 @@ In April 2026 an audit (finding W-2) flagged `T1.ndjson` and `T2.ndjson` as "par
 
 - [Receipt Pipeline](RECEIPT_PIPELINE.md) — how receipts flow from archived events to the audit trail
 - [Receipt Format](../core/11_RECEIPT_FORMAT.md) — the receipt schema, including the `events_path` field
-- [Subprocess Adapter Feature Flag](SUBPROCESS_ADAPTER_FEATURE_FLAG.md) — how the per-terminal routing is selected
+- [Subprocess lane rule](../core/DISPATCH_RULES.md) — how the per-terminal routing is selected
 - ADR-005 — Append-only NDJSON ledger (why receipt → stream linkage is an explicit pointer)

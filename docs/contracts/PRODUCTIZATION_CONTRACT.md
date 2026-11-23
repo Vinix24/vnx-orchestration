@@ -114,15 +114,14 @@ All 47 commands are available in operator mode. The public command surface must 
 #### Tier 2: Starter + Operator
 | Command | Description |
 |---------|-------------|
-| `vnx staging-list` | List pending dispatches |
-| `vnx queue-status` | Show PR queue status |
+| `vnx staging-list` | List staged spec bundles (`pending/<id>/dispatch-spec.json`), oldest first; `--json` for a list |
+| `vnx queue-status` | Show the horizon queue (alias of `planning_cli.py horizon queue`) |
 | `vnx gate-check` | Run quality gate check |
 | `vnx suggest` | Get dispatch suggestions |
 | `vnx cost-report` | Show session cost report |
 | `vnx analyze-sessions` | Analyze session data |
 | `vnx intelligence-export` | Export intelligence DB |
 | `vnx intelligence-import` | Import intelligence DB |
-| `vnx init-feature` | Initialize a new feature |
 | `vnx bootstrap-*` | Bootstrap sub-commands |
 | `vnx regen-settings` | Regenerate settings |
 | `vnx patch-agent-files` | Patch CLAUDE.md / AGENTS.md |

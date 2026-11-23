@@ -57,6 +57,37 @@ def _extract_codex_text(stdout: str) -> str:
     return "\n".join(texts).strip() if texts else stdout.strip()
 
 
+_AGENT_MESSAGE_TYPES = frozenset({"agent_message", "assistant_message", "output_text"})
+
+
+def _stream_events(stdout: str) -> Iterator[Dict[str, Any]]:
+    for line in stdout.splitlines():
+        try:
+            payload = json.loads(line.strip()) if line.strip() else None
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict):
+            yield payload
+
+
+def extract_final_agent_message(stdout: str) -> str:
+    """The text of the LAST agent message of a ``codex exec --json`` stream.
+
+    Same message shapes as :func:`_extract_codex_text`, which joins them all; a reader that wants the seat's final
+    answer (the delta shadow) must not see the earlier messages. A stream with no agent message is plain text and is
+    returned as it is.
+    """
+    last = ""
+    for payload in _stream_events(stdout):
+        item = payload.get("item") if isinstance(payload.get("item"), dict) else None
+        source = item if item and item.get("type") in _AGENT_MESSAGE_TYPES else (
+            payload if payload.get("type") in _AGENT_MESSAGE_TYPES else None)
+        text = (source.get("text") if source else None) or ""
+        if isinstance(text, str) and text:
+            last = text
+    return last.strip() if last else stdout.strip()
+
+
 def _extract_codex_verdict(text: str) -> Dict[str, Any]:
     """Try to parse a JSON verdict from codex output text.
 

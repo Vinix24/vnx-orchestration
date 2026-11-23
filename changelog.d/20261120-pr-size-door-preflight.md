@@ -1,0 +1,1 @@
+- PR size at the merge door: `pr_merge.py` runs a `pr_size` preflight after `ci` and before `review` (ADR-088). Under `VNX_PR_SIZE_ENFORCE=refuse` a PR above its limit, an unmeasurable head or an unreadable store is refused; `warn` (the default) merges with the reason on the receipt; `off` measures nothing. Every preflight record and receipt carries the `pr_size` block.

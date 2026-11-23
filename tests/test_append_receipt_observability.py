@@ -6,7 +6,7 @@ Covers:
 - _stamp_observability_tier is a no-op for receipts without provider field
 - Each expected provider gets the correct tier stamped
 - Unknown provider gets a safe default (no crash)
-- Gemini tier follows VNX_GEMINI_STREAM env var
+- Gemini tier is 3 (streaming is off)
 """
 from __future__ import annotations
 
@@ -31,14 +31,13 @@ class TestStampObservabilityTier:
         _stamp_observability_tier(receipt)
         assert receipt["observability_tier"] == 1
 
-    def test_stamps_gemini_streaming_as_tier_1(self, monkeypatch):
+    def test_stamps_gemini_as_tier_3_even_with_the_deleted_stream_variable(self, monkeypatch):
         monkeypatch.setenv("VNX_GEMINI_STREAM", "1")
         receipt = {"provider": "gemini", "event_type": "task_complete"}
         _stamp_observability_tier(receipt)
-        assert receipt["observability_tier"] == 1
+        assert receipt["observability_tier"] == 3
 
     def test_stamps_gemini_legacy_as_tier_3(self, monkeypatch):
-        monkeypatch.setenv("VNX_GEMINI_STREAM", "0")
         receipt = {"provider": "gemini", "event_type": "task_complete"}
         _stamp_observability_tier(receipt)
         assert receipt["observability_tier"] == 3

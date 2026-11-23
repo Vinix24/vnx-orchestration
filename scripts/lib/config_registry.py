@@ -19,12 +19,15 @@ activation like this one, not an accident to guard against.
 
 Precedence (highest first), implemented by `get()`:
   1. ``VNX_OVERRIDE_<BARE>`` env var — the operator emergency brake (e.g. VNX_OVERRIDE_SCOUT_PREPASS).
-  2. ``project_config`` DB value — the UI-set value (wired in a later PR; injected via ``db_resolver``).
-  3. ``VNX_<BARE>`` env var — the process-start value (today's behaviour; never broken).
-  4. the registry default.
+  2. ``project_config`` DB value — the UI-set value (injected via ``db_resolver``); skipped for a
+     key with scope ``global``.
+  3. ``global_config`` — the machine-wide value in ``~/.vnx/config.json`` (``config_global``,
+     ADR-087; ``VNX_GLOBAL_CONFIG_FILE`` moves it). Needs no store.
+  4. ``VNX_<BARE>`` env var — the process-start value.
+  5. the registry default.
 
-Until the DB layer lands, ``db_resolver`` is None and step 2 is skipped — so this module is a
-behaviour-preserving overlay on the env-only world.
+A stored value (project or global) beats an exported env value; ``VNX_OVERRIDE_<BARE>`` overrules
+one process. Without a wired store step 2 is skipped; without a global file step 3 is.
 
 SUBSYSTEM COCKPIT METADATA. ``subsystem`` and ``status`` are pure display metadata for the
 framework-status cockpit (`docs/core/SUBSYSTEMS.md`): which subsystem a flag belongs to, and that
@@ -35,18 +38,20 @@ dedicated flag (e.g. ``phantom_guard``, ``dispatch-plan``) are not represented h
 """
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Tuple
 
 # The only status values a cockpit row may declare (dispatch: framework-status-audit-and-cockpit PR-1).
 ALLOWED_STATUSES = frozenset(("LIVE", "PARK", "CUT", "ACTIVATE", "SCOPE", "COCKPIT"))
+ALLOWED_SCOPES = frozenset(("project", "global"))
 
 
 @dataclass(frozen=True)
 class ConfigEntry:
     key: str
-    type: str  # "bool" | "string" | "enum"
+    type: str  # "bool" | "string" | "enum" | "integer" | "float"
     default: str
     category: str  # "intelligence" | "dispatch" | "gate"
     description: str
@@ -65,12 +70,26 @@ class ConfigEntry:
     # or canonical_flags() raises rather than silently picking by dict order.
     read_site_wired: bool = True
     cockpit_canonical: bool = False
+    # ADR-087 decision 2. "project" (every key today): a project_config row beats the global
+    # value. "global": only the global file counts; the resolver ignores a project row.
+    scope: str = "project"
+    # Enum keys only; None means no check. The write-side check is G3 (config_store_db._coerce).
+    allowed_values: Optional[Tuple[str, ...]] = None
+
+    def __post_init__(self) -> None:
+        if self.scope not in ALLOWED_SCOPES:
+            raise ValueError(f"{self.key}: scope {self.scope!r} is not one of {sorted(ALLOWED_SCOPES)}")
+        if self.allowed_values is not None and (
+                not isinstance(self.allowed_values, tuple) or not self.allowed_values
+                or not all(isinstance(v, str) for v in self.allowed_values)):
+            raise ValueError(f"{self.key}: allowed_values must be a non-empty tuple of strings")
 
 
 def _e(key, type_, default, category, description, *, writable=True, approval=False, planned=False,
-       subsystem=None, status=None, read_site_wired=True, cockpit_canonical=False):
+       subsystem=None, status=None, read_site_wired=True, cockpit_canonical=False, scope="project",
+       allowed_values=None):
     return ConfigEntry(key, type_, default, category, description, writable, approval, planned,
-                        subsystem, status, read_site_wired, cockpit_canonical)
+                        subsystem, status, read_site_wired, cockpit_canonical, scope, allowed_values)
 
 
 # The inventory. Defaults verified against the read-sites (codex review finding: defaults must
@@ -81,10 +100,136 @@ def _e(key, type_, default, category, description, *, writable=True, approval=Fa
 # flag-BACKED subsystems; the flag-LESS kernel subsystems (dispatch-plan, phantom_guard, etc.) live
 # in CONFIG_REGISTRY_SUBSYSTEMS below so the two sets never collide on the same subsystem name.
 CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
+    # config-een-oppervlak PR-1 (ADR-087): rows for the keys the reader PRs move onto config_runtime.
+    # Placed first on purpose: _canonical_flags lets the last-inserted key per subsystem win, so these
+    # rows must stay before the existing master flags to leave the cockpit ledger unchanged.
+    # Behaviour-neutral: every default equals what the reader uses today and every reader still
+    # reads os.environ, so read_site_wired=False until its own PR. The scope of a key follows plan V2.1.
+    "VNX_ANALYZER_LLM": _e(
+        "VNX_ANALYZER_LLM", "string", "ollama-only", "intelligence",
+        "Conversation-analyzer LLM strategy: auto | ollama-only | claude-only | deepseek-harness. "
+        "Governs unrestricted sessions only.", scope="global", subsystem="intelligence-self-learning-loop", status="ACTIVATE", read_site_wired=False,
+        allowed_values=("auto", "ollama-only", "claude-only", "deepseek-harness")),
+    "VNX_ANALYZER_RESTRICTED_CLAUDE_CAP": _e(
+        "VNX_ANALYZER_RESTRICTED_CLAUDE_CAP", "integer", "", "intelligence",
+        "Nightly cap on restricted sessions sent to Claude. Empty means the reader's own default (20).",
+        scope="global", subsystem="intelligence-self-learning-loop", status="ACTIVATE", read_site_wired=False),
+    "VNX_OLLAMA_HOST": _e(
+        "VNX_OLLAMA_HOST", "string", "http://localhost:11434", "intelligence",
+        "Ollama base URL.", scope="global", subsystem="intelligence-self-learning-loop", status="ACTIVATE", read_site_wired=False),
+    "VNX_OLLAMA_MODEL": _e(
+        "VNX_OLLAMA_MODEL", "string", "qwen2.5-coder:14b", "intelligence",
+        "Ollama model of the conversation analyzer. The ollama adapter and the classifier provider "
+        "still carry other defaults of their own (PR-4a unifies them).",
+        scope="global", subsystem="intelligence-self-learning-loop", status="ACTIVATE", read_site_wired=False),
+    "VNX_DIGEST_EMAIL": _e(
+        "VNX_DIGEST_EMAIL", "string", "", "intelligence",
+        "Recipient of the nightly digest email; empty skips the email phase.",
+        scope="global", subsystem="intelligence-self-learning-loop", status="ACTIVATE", read_site_wired=False),
+    "VNX_SMTP_HOST": _e(
+        "VNX_SMTP_HOST", "string", "smtp.gmail.com", "intelligence",
+        "SMTP server of the digest email.", scope="global", subsystem="intelligence-self-learning-loop", status="ACTIVATE", read_site_wired=False),
+    "VNX_RECEIPT_CLASSIFIER_ENABLED": _e(
+        "VNX_RECEIPT_CLASSIFIER_ENABLED", "bool", "0", "intelligence",
+        "Receipt classifier opt-in.", subsystem="intelligence-self-learning-loop", status="ACTIVATE", read_site_wired=False),
+    "VNX_RECEIPT_CLASSIFIER_MODE": _e(
+        "VNX_RECEIPT_CLASSIFIER_MODE", "string", "batch", "intelligence",
+        "Receipt classifier mode: batch (default), per_receipt or failures_direct.",
+        subsystem="intelligence-self-learning-loop", status="ACTIVATE", read_site_wired=False),
+    "VNX_RECEIPT_CLASSIFIER_PROVIDER": _e(
+        "VNX_RECEIPT_CLASSIFIER_PROVIDER", "string", "haiku", "intelligence",
+        "Provider of the receipt classifier.",
+        subsystem="intelligence-self-learning-loop", status="ACTIVATE", read_site_wired=False),
+    "VNX_RECEIPT_CLASSIFIER_DAILY_COST_USD": _e(
+        "VNX_RECEIPT_CLASSIFIER_DAILY_COST_USD", "float", "0.20", "intelligence",
+        "Daily USD spend cap of the receipt classifier. Raising it waives the 0.20 USD/day classifier cost cap.",
+        approval=True, subsystem="intelligence-self-learning-loop", status="ACTIVATE", read_site_wired=False),
+    "VNX_AUTO_REPORT": _e(
+        "VNX_AUTO_REPORT", "bool", "1", "dispatch",
+        "Auto-report Stop hook gate. Default on: the value every fabric process saw while "
+        "vnx_paths.sh exported it.", subsystem="headless-dispatch-routing", status="ACTIVATE"),
+    "VNX_ENFORCE_WORKER_PERMISSIONS": _e(
+        "VNX_ENFORCE_WORKER_PERMISSIONS", "bool", "0", "gate",
+        "Worker permission enforcement (off by default).", subsystem="governance-enforcement-stack", status="ACTIVATE", read_site_wired=False),
+    "VNX_PROVENANCE_ENFORCEMENT": _e(
+        "VNX_PROVENANCE_ENFORCEMENT", "bool", "0", "gate",
+        "Provenance (trace token) check: 0 warns, 1 blocks.", subsystem="governance-enforcement-stack", status="ACTIVATE", read_site_wired=False),
+    "VNX_PROVENANCE_LEGACY_ACCEPTED": _e(
+        "VNX_PROVENANCE_LEGACY_ACCEPTED", "bool", "1", "gate",
+        "1 accepts legacy trace-token formats, 0 only the preferred one.", subsystem="governance-enforcement-stack", status="ACTIVATE", read_site_wired=False),
+    "VNX_SLUG_ENFORCEMENT": _e(
+        "VNX_SLUG_ENFORCEMENT", "bool", "0", "gate",
+        "CI slug match: 0 warns, 1 blocks.", subsystem="governance-enforcement-stack", status="ACTIVATE", read_site_wired=False),
+    "VNX_QUEUE_POPUP_ENABLED": _e(
+        "VNX_QUEUE_POPUP_ENABLED", "bool", "1", "dispatch",
+        "Queue popup of the start and resume commands; 0 turns it off.", subsystem="headless-dispatch-routing", status="ACTIVATE", read_site_wired=False),
+    "VNX_T1_PROVIDER": _e(
+        "VNX_T1_PROVIDER", "string", "", "dispatch",
+        "Provider of terminal T1 (layer 2 of the worker pair, ADR-091). Empty: this layer delivers "
+        "nothing and the worker registry decides.", subsystem="headless-dispatch-routing", status="ACTIVATE", read_site_wired=False),
+    "VNX_T2_PROVIDER": _e(
+        "VNX_T2_PROVIDER", "string", "", "dispatch",
+        "Provider of terminal T2 (layer 2 of the worker pair, ADR-091). Empty: this layer delivers "
+        "nothing and the worker registry decides.", subsystem="headless-dispatch-routing", status="ACTIVATE", read_site_wired=False),
+    "VNX_T3_PROVIDER": _e(
+        "VNX_T3_PROVIDER", "string", "", "dispatch",
+        "Provider of terminal T3 (layer 2 of the worker pair, ADR-091). Empty: this layer delivers "
+        "nothing and the worker registry decides.", subsystem="headless-dispatch-routing", status="ACTIVATE", read_site_wired=False),
+    "VNX_T0_PROVIDER": _e(
+        "VNX_T0_PROVIDER", "string", "claude_code", "dispatch",
+        "Provider of terminal T0.",
+        subsystem="headless-dispatch-routing", status="ACTIVATE", read_site_wired=False),
+    "VNX_T0_SKIP_PERMISSIONS": _e(
+        "VNX_T0_SKIP_PERMISSIONS", "bool", "0", "dispatch",
+        "Launch terminal T0 with the CLI permission prompts skipped. Setting 1 waives the permission prompts "
+        "(--dangerously-skip-permissions) for that terminal.",
+        approval=True, subsystem="headless-dispatch-routing", status="ACTIVATE", read_site_wired=False),
+    "VNX_T1_SKIP_PERMISSIONS": _e(
+        "VNX_T1_SKIP_PERMISSIONS", "bool", "0", "dispatch",
+        "Launch terminal T1 with the CLI permission prompts skipped. Setting 1 waives the permission prompts "
+        "(--dangerously-skip-permissions) for that terminal.",
+        approval=True, subsystem="headless-dispatch-routing", status="ACTIVATE", read_site_wired=False),
+    "VNX_T2_SKIP_PERMISSIONS": _e(
+        "VNX_T2_SKIP_PERMISSIONS", "bool", "0", "dispatch",
+        "Launch terminal T2 with the CLI permission prompts skipped. Setting 1 waives the permission prompts "
+        "(--dangerously-skip-permissions) for that terminal.",
+        approval=True, subsystem="headless-dispatch-routing", status="ACTIVATE", read_site_wired=False),
+    "VNX_T3_SKIP_PERMISSIONS": _e(
+        "VNX_T3_SKIP_PERMISSIONS", "bool", "0", "dispatch",
+        "Launch terminal T3 with the CLI permission prompts skipped. Setting 1 waives the permission prompts "
+        "(--dangerously-skip-permissions) for that terminal.",
+        approval=True, subsystem="headless-dispatch-routing", status="ACTIVATE", read_site_wired=False),
+    "VNX_PAID_LANE_DAILY_BUDGET_USD": _e(
+        "VNX_PAID_LANE_DAILY_BUDGET_USD", "float", "5.00", "dispatch",
+        "Daily USD cap of the paid provider lanes. Raising it waives the 5 USD/day paid-lane cost cap.",
+        approval=True, subsystem="headless-dispatch-routing", status="ACTIVATE", read_site_wired=False),
+    "VNX_REQUIRE_DISPATCH_TRACK": _e(
+        "VNX_REQUIRE_DISPATCH_TRACK", "bool", "0", "dispatch",
+        "Require a track_id on a dispatch. Off (default): the door only warns; on: a dispatch without a track is refused.",
+        subsystem="headless-dispatch-routing", status="ACTIVATE", read_site_wired=True),
+    "VNX_SUPERVISOR_MODE": _e(
+        "VNX_SUPERVISOR_MODE", "string", "legacy", "dispatch",
+        "Unified supervisor opt-in: unified switches on auto-respawn, lease sweep and runtime supervision; legacy leaves them off.",
+        subsystem="headless-dispatch-routing", status="ACTIVATE", read_site_wired=False,
+        allowed_values=("legacy", "unified")),
+    "VNX_ENFORCEMENT_PROFILE": _e(
+        "VNX_ENFORCEMENT_PROFILE", "string", "shadow", "gate",
+        "Enforcement profile: shadow (default) | enforced.", approval=True, subsystem="governance-enforcement-stack", status="ACTIVATE", read_site_wired=True,
+        allowed_values=("shadow", "enforced")),
+    "VNX_ACCOUNT_DIRS": _e(
+        "VNX_ACCOUNT_DIRS", "string", "[]", "dispatch",
+        "Claude account directories as a JSON list (ADR-090). The reader validates the content.",
+        scope="global", approval=True, subsystem="headless-dispatch-routing", status="ACTIVATE", read_site_wired=False),
+
+    "VNX_SCOUT_PROVIDER": _e(
+        "VNX_SCOUT_PROVIDER", "string", "deepseek", "intelligence",
+        "Provider of the scout recon pre-pass; a value outside the allowed set falls back to deepseek.",
+        subsystem="cheap-recon-scout", status="ACTIVATE", read_site_wired=True,
+        allowed_values=("codex", "deepseek", "gemini", "ollama")),
     "VNX_SCOUT_PREPASS": _e(
         "VNX_SCOUT_PREPASS", "bool", "0", "intelligence",
         "Cheap-model scout recon pre-pass in the door (fail-open).",
-        subsystem="cheap-recon-scout", status="ACTIVATE"),
+        subsystem="cheap-recon-scout", status="ACTIVATE", cockpit_canonical=True),
     "VNX_TAGGER_ENABLED": _e(
         "VNX_TAGGER_ENABLED", "bool", "0", "intelligence",
         "Persist-time LLM tagging over the closed VNX vocabulary.",
@@ -112,19 +257,37 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
     "VNX_HEADLESS_ROUTING": _e(
         "VNX_HEADLESS_ROUTING", "string", "0", "dispatch",
         "Headless dispatch routing mode.",
-        subsystem="headless-dispatch-routing", status="ACTIVATE"),
+        subsystem="headless-dispatch-routing", status="ACTIVATE", cockpit_canonical=True),
+    "VNX_BUILDER_SETTING_SOURCES": _e(
+        "VNX_BUILDER_SETTING_SOURCES", "string", "project,local", "dispatch",
+        "Comma list passed as --setting-sources to headless claude builders (the claude_headless "
+        "lane). Default project,local: the builder starts without the operator's user-level "
+        "CLAUDE.md, rules, skills, plugins and hooks. It carries cleanupPeriodDays from the user "
+        "settings file and claudeMdExcludes for the user-level CLAUDE.md and rules that the "
+        "walk-up from the worktree to ~ would load as project memory; effortLevel is not carried. "
+        "user,project,local restores today's "
+        "argv exactly (no flag). An invalid value falls back to the default and is logged.",
+        approval=True, subsystem="headless-builder-context", status="ACTIVATE",
+        read_site_wired=True, cockpit_canonical=True),
+    "VNX_DOC_STYLE_FILE": _e(
+        "VNX_DOC_STYLE_FILE", "string", "", "dispatch",
+        "Absolute or ~-relative path of a Markdown file with writing rules that staging appends "
+        "to every docs dispatch (task class 04_documentation or 06_design, or paths that are all "
+        "docs/** or *.md outside changelog.d/). Empty means off. A set path that cannot be read "
+        "(missing, not a file, empty) refuses staging of a docs dispatch.",
+        approval=True, subsystem="docs-style-file", status="ACTIVATE",
+        read_site_wired=True),
     "VNX_DEFAULT_REVIEW_STACK": _e(
-        "VNX_DEFAULT_REVIEW_STACK", "string", "codex_gate,kimi_gate", "gate",
-        "Comma-separated default review-gate stack. Operator decision 2026-09-26: a review "
-        "gate always chooses a SUBSCRIPTION reviewer first (codex_gate on the codex CLI, "
-        "kimi_gate on the kimi CLI OAuth). glm_gate (OpenRouter credit) and deepseek_gate "
-        "(API credit) are not standing seats: they read a seat only when a subscription "
-        "reviewer is out, through VNX_REVIEW_GATE_TAKEOVER_CHAIN. Since OI-2058 (R5a) every "
-        "seat gets its own reviewer: when kimi_gate takes codex_gate's seat, kimi_gate's own "
+        "VNX_DEFAULT_REVIEW_STACK", "string", "codex_gate,deepseek_gate", "gate",
+        "Comma-separated default review-gate stack. Operator decision 2026-11-11: the Kimi "
+        "subscription is cancelled, so seat 2 is deepseek_gate (API credit, deepseek-v4-pro); "
+        "seat 1 stays a SUBSCRIPTION reviewer (codex_gate on the codex CLI). kimi_gate stays "
+        "registered and an explicit stack may still name it. Since OI-2058 (R5a) every "
+        "seat gets its own reviewer: when deepseek_gate takes codex_gate's seat, its own "
         "seat walks on to the next distinct gate in the chain. Since R5b the merge door "
-        "requires every seat of this stack, each filled by a distinct reviewer. Do not "
-        "put an API-credit gate before a subscription gate here or in the chain "
-        "(gate_billing_table.GATE_BILLING classifies every gate; a guard test pins both). "
+        "requires every seat of this stack, each filled by a distinct reviewer. Seat 1 is a "
+        "subscription gate (gate_billing_table.GATE_BILLING classifies every gate; a guard "
+        "test pins it); seat 2 and the takeover chain may be metered. "
         "History: the default was gemini_review,codex_gate,claude_github_optional until "
         "20260914, when gemini_review (binary never on PATH) and claude_github_optional "
         "(never configured) were dropped and glm_gate was added as a second standing seat "
@@ -140,16 +303,14 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         subsystem="governance-enforcement-stack", status="LIVE"),
     "VNX_REVIEW_GATE_TAKEOVER_CHAIN": _e(
         "VNX_REVIEW_GATE_TAKEOVER_CHAIN", "string",
-        "codex_gate,kimi_gate,claude_gate,deepseek_gate", "gate",
+        "codex_gate,deepseek_gate,claude_gate", "gate",
         "Ordered review-gate takeover chain (BETA3-E1, 26-08 operator decision; order "
-        "changed 2026-10-04, OI-1984, and 2026-10-22, R7). On lane_exhausted a seat rolls "
-        "over to the NEXT gate named here. The order is subscription reviewers first "
-        "(codex_gate, kimi_gate, claude_gate on the operator's claude subscription), then "
-        "deepseek_gate (API credit), the last link of the default chain. glm_gate left "
-        "the default chain on 2026-10-17 (operator decision); it stays registered and can "
-        "still be named explicitly here, always behind every subscription gate. The "
-        "API-credit gates are a fallback only, never a project default reviewer; a guard "
-        "test fails when an API-credit gate is placed before a subscription gate. A seat "
+        "changed 2026-10-04, OI-1984, 2026-10-22, R7, and 2026-11-11). On lane_exhausted a "
+        "seat rolls over to the NEXT gate named here. Since 2026-11-11 (Kimi cancelled) the "
+        "default is codex_gate, deepseek_gate (deepseek-v4-pro), then claude_gate as the last "
+        "link: claude_gate failed its calibration run on sonnet and on opus, so it reads "
+        "only when deepseek is out or passed over. kimi_gate and glm_gate left the default "
+        "chain; both stay registered and can still be named explicitly here. A seat "
         "never gets a reviewer of the builder's vendor (R7): such a reviewer is passed over "
         "like an unavailable one (review_vendor). Since "
         "OI-1714/OI-1838 deepseek_gate is a real harness-lane gate (available by "
@@ -161,6 +322,13 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         "outside the known gate set, or a name repeated (a cycle), fails loud at read time. "
         "Must match gate_request_handler._DEFAULT_REVIEW_GATE_TAKEOVER_CHAIN verbatim "
         "(pinned by test_beta3_e1_review_gate_chain.py).", approval=True,
+        subsystem="governance-enforcement-stack", status="LIVE"),
+    "VNX_SALVAGE_PUSH_TIMEOUT_S": _e(
+        "VNX_SALVAGE_PUSH_TIMEOUT_S", "string", "900", "dispatch",
+        "Seconds the door's push of a dispatch branch may take (OI-2744). A project whose "
+        "pre-push hook runs its CI script needs more than the old 120 s; on a timeout the "
+        "worktree with the salvage commit is kept. A value that is not a positive int falls back to 900.",
+        approval=True,
         subsystem="governance-enforcement-stack", status="LIVE"),
     # OI-2288: the codex review seat's reasoning effort, read by
     # gate_runner.resolve_codex_review_effort at every codex_gate launch. Listed
@@ -234,6 +402,106 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         "row with an approval id since 2026-11-09; every other project has no row and "
         "keeps the risk rule.", approval=True,
         subsystem="governance-enforcement-stack", status="ACTIVATE"),
+    # Track reviews-zonder-uitkomst D1. Both keys change what the codex review seat runs the
+    # PR's tests with, so what a review sees: approval=True like VNX_REVIEW_SEAT_RULE, written
+    # to project_config with an approval id. Read by gate_runner.resolve_review_interpreter and
+    # gate_runner._review_tests_block; unset keeps the fabric's OI-2591 interpreter chain.
+    "VNX_REVIEW_PYTHON": _e(
+        "VNX_REVIEW_PYTHON", "string", "", "gate",
+        "Absolute path of the interpreter the codex review seat runs this project's tests with "
+        "(first rule of gate_runner.resolve_review_interpreter). It must import pytest, or the "
+        "next rule applies: <projectroot>/.venv/bin/python, then the fabric's interpreter chain. "
+        "Unset keeps that chain.", approval=True,
+        subsystem="governance-enforcement-stack", status="LIVE"),
+    "VNX_REVIEW_PYTHONPATH": _e(
+        "VNX_REVIEW_PYTHONPATH", "string", "", "gate",
+        "Comma-separated paths, relative to the gate worktree root (for example src), that the "
+        "codex review seat puts first in PYTHONPATH when it runs the PR's tests. An entry that is "
+        "absolute, holds .., whitespace or a shell metacharacter is left out of the command and "
+        "named as text in the prompt. Unset adds no PYTHONPATH.", approval=True,
+        subsystem="governance-enforcement-stack", status="LIVE"),
+    # Deltareview DR-6 (ADR-064 "De schakelaar", ADR-060 amendment). Read by review_scope.active_review_scope.
+    "VNX_REVIEW_SCOPE": _e(
+        "VNX_REVIEW_SCOPE", "string", "", "gate",
+        "Review scope. full (default): every round is a full review. delta_shadow: the shadow delta runs next to "
+        "the full round. delta: the delta decides; writing it is refused without a passed DR-5 measurement, a merged "
+        "DR-7 and a green main CI. Unset, unknown or unreadable reads as full.", approval=True,
+        subsystem="governance-enforcement-stack", status="ACTIVATE"),
+    # The PR-size thresholds of scripts/pre_merge_gate.check_pr_size, per project (operator
+    # decision 2026-11-09: the limit is configurable, not a hard 450). Same resolution path as
+    # VNX_REVIEW_SEAT_RULE. The defaults here are the only copy of both thresholds; a value that is
+    # not a positive integer, or a WARN above HOLD, falls back to both defaults and is named
+    # in the gate's detail line. It never disables the check.
+    "VNX_PR_SIZE_WARN": _e(
+        "VNX_PR_SIZE_WARN", "integer", "450", "gate",
+        "PR size (lines added + removed) above which pre_merge_gate reports a large PR. Not "
+        "blocking. A value that is not a positive integer, or above VNX_PR_SIZE_HOLD, falls "
+        "back to 450 and is named in the gate detail.", approval=True,
+        subsystem="governance-enforcement-stack", status="LIVE"),
+    # ADR-088 besluit 9: HOLD 600 -> 450, equal to WARN, so gate-check has no soft band above 450.
+    "VNX_PR_SIZE_HOLD": _e(
+        "VNX_PR_SIZE_HOLD", "integer", "450", "gate",
+        "PR size (lines added + removed) above which pre_merge_gate holds the merge. A value "
+        "that is not a positive integer, or below VNX_PR_SIZE_WARN, falls back to 450 and is "
+        "named in the gate detail.", approval=True,
+        subsystem="governance-enforcement-stack", status="LIVE"),
+    # ADR-088 besluit 1, 3 and 8 (track pr-grootte-afgedwongen PG-0). Read by the pr_size
+    # preflight of the merge door since PG-1d (pr_size_policy.read_policy). The door reads
+    # the floor (layers=("project_config", "default")) and the full chain and compares; an override only tightens.
+    "VNX_PR_SIZE_ENFORCE": _e(
+        "VNX_PR_SIZE_ENFORCE", "string", "warn", "gate",
+        "How the merge door treats a PR above the size limit: off (not measured), warn (a line "
+        "on the receipt) or refuse (NO-GO). Read by the merge door's pr_size preflight (ADR-088, "
+        "PG-1d). The reader validates the value until the registry carries allowed values: any "
+        "other value reads as refuse and is named.", approval=True,
+        subsystem="governance-enforcement-stack", status="ACTIVATE"),
+    "VNX_PR_SIZE_HOLD_SECURITY": _e(
+        "VNX_PR_SIZE_HOLD_SECURITY", "integer", "300", "gate",
+        "PR size limit (lines added + removed) when one changed path is a security path "
+        "(ADR-088 besluit 8). Read by the merge door's pr_size preflight (PG-1d).",
+        approval=True,
+        subsystem="governance-enforcement-stack", status="ACTIVATE"),
+    "VNX_SECURITY_PATHS": _e(
+        "VNX_SECURITY_PATHS", "string", "", "gate",
+        "Comma-separated path prefixes this project adds to the security set of the PR-size "
+        "check. It only adds to the set built from code; a shorter list removes nothing. Read "
+        "by the merge door's pr_size preflight (ADR-088 besluit 8, PG-1d).", approval=True,
+        subsystem="governance-enforcement-stack", status="ACTIVATE"),
+    # The admission contract of the main window (ADR-073 besluit 3 and 6), read by
+    # main_window.read_admission_config. Unset N is mode off: the gate records GO and the
+    # merge behaviour is unchanged.
+    "VNX_MAIN_UNVERIFIED_MAX": _e(
+        "VNX_MAIN_UNVERIFIED_MAX", "integer", "", "gate",
+        "Merges on main whose VNX CI run may still be running before the door refuses another "
+        "(ADR-073). Unset: mode off. A value that is not a positive integer reads as unset "
+        "(never 0) and is named in the record as invalid_config.", approval=True,
+        subsystem="governance-enforcement-stack", status="ACTIVATE"),
+    "VNX_MAIN_RUN_MAX_AGE_MIN": _e(
+        "VNX_MAIN_RUN_MAX_AGE_MIN", "integer", "40", "gate",
+        "Minutes after which a queued or in-progress main run, or a merge commit without a "
+        "run, is a NO-GO (stale_run, no_run) instead of running. A value that is not a "
+        "positive integer falls back to 40 and is named.", approval=True,
+        subsystem="governance-enforcement-stack", status="ACTIVATE"),
+    # OI-2701 (option a), read by review_seat_evaluation.approved_full_fill_pairs. Empty by
+    # default: no project approves a takeover, so every project keeps today's behaviour.
+    "VNX_REVIEW_TAKEOVER_FULL_FILL": _e(
+        "VNX_REVIEW_TAKEOVER_FULL_FILL", "string", "", "gate",
+        "Comma-separated gate:model pairs (e.g. deepseek_gate:deepseek-v4-pro) whose takeover "
+        "of seat 1 counts as a direct seat-1 PASS under the signal seat rule, given a PASS, zero "
+        "blocking findings and both warning counts known on the exact head. Empty (the default) "
+        "approves nobody, as does a malformed entry (logged); any other takeover keeps every "
+        "seat.", approval=True,
+        subsystem="governance-enforcement-stack", status="ACTIVATE"),
+    # ADR-074 (impactselectie in schaduw). No production code reads this key until PR 3 of the track
+    # impactselectie-in-schaduw: the hook contract is fixed in the ADR first. Empty means every PR
+    # runs the full suite.
+    "VNX_CI_IMPACT_CMD": _e(
+        "VNX_CI_IMPACT_CMD", "string", "", "gate",
+        "Per-project impact-selection hook (ADR-074). Changed paths in; test files plus graph "
+        "version out; exit 0. Any other outcome (non-zero exit, unparseable output, time-out) means "
+        "the full run. The VNX value points to scripts/ci/impact_select.py. Empty (the default) "
+        "selects nothing and every PR runs the full suite.", approval=True,
+        subsystem="governance-enforcement-stack", status="ACTIVATE", read_site_wired=False),
     "VNX_CI_GATE_REQUIRED": _e(
         "VNX_CI_GATE_REQUIRED", "bool", "1", "gate",
         "Require the CI gate before merge.", approval=True,
@@ -260,7 +528,8 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         "VNX_PLAN_GATE_ENFORCE", "enum", "advisory", "gate",
         "Plan-first-gate enforcement mode: off | advisory | required (ADR-030). "
         "Advisory warns when a track-linked dispatch has an unresolved plan gate; required blocks it. "
-        "The process env var overrides this; operator override VNX_OVERRIDE_PLAN_GATE=1. Default advisory.",
+        "A stored value beats the env var; VNX_OVERRIDE_PLAN_GATE_ENFORCE beats both. "
+        "Operator override VNX_OVERRIDE_PLAN_GATE=1. Default advisory.",
         approval=True,
         subsystem="plan-gate-panel", status="SCOPE"),
     "VNX_USE_CENTRAL_DB": _e(
@@ -298,14 +567,41 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         # pre-existing last-wins winner now that canonical_flags() no longer picks by dict
         # order. Not re-audited by this dispatch — out of scope.
         cockpit_canonical=True),
+    "VNX_DREAM_PROVIDER": _e(
+        "VNX_DREAM_PROVIDER", "string", "deepseek", "intelligence",
+        "Provider that runs the dream consolidation: deepseek or kimi. Any other value skips the cycle.",
+        subsystem="dream-consolidation", status="ACTIVATE"),
     "VNX_DREAM_SCHEDULER_ENABLED": _e(
         "VNX_DREAM_SCHEDULER_ENABLED", "bool", "0", "intelligence",
         "Nightly memory consolidation + pending review dispatch.",
-        subsystem="dream-consolidation", status="ACTIVATE"),
+        subsystem="dream-consolidation", status="ACTIVATE", cockpit_canonical=True),
     "VNX_INJECTION_FEEDBACK_ENABLED": _e(
         "VNX_INJECTION_FEEDBACK_ENABLED", "bool", "0", "intelligence",
         "Instrument why intelligence injections are ignored before tuning generation.",
         subsystem="injection-effectiveness-eval-loop", status="ACTIVATE"),
+    # intelligence-effect-measurable PR-1: the A/B window as registered, audited configuration
+    # (project_config rows) instead of a plist edit. Every default is off or empty: registering
+    # these keys opens no window. They sit BEFORE VNX_INJECTION_WHY_ENABLED on purpose: the
+    # SUBSYSTEMS.md ledger generator takes the last-inserted entry of a subsystem, and that
+    # must stay VNX_INJECTION_WHY_ENABLED (also the cockpit_canonical flag).
+    "VNX_INTEL_AB_TEST": _e(
+        "VNX_INTEL_AB_TEST", "bool", "0", "intelligence",
+        "Open the intelligence-injection A/B window: dispatches are assigned a treatment or "
+        "control arm. Off = no assignment, every dispatch injects as before.",
+        subsystem="injection-effectiveness-eval-loop", status="ACTIVATE",
+        read_site_wired=False),
+    "VNX_INTEL_PLACEBO_ARM": _e(
+        "VNX_INTEL_PLACEBO_ARM", "bool", "0", "intelligence",
+        "Give the control arm of the A/B window a placebo section instead of nothing. "
+        "Off = the control arm receives no intelligence section.",
+        subsystem="injection-effectiveness-eval-loop", status="ACTIVATE",
+        read_site_wired=False),
+    "VNX_INTEL_AB_WINDOW": _e(
+        "VNX_INTEL_AB_WINDOW", "string", "", "intelligence",
+        "The frozen A/B window configuration (window id, salt, bounds) as one JSON document. "
+        "Empty = no window is open.",
+        subsystem="injection-effectiveness-eval-loop", status="ACTIVATE",
+        read_site_wired=False),
     "VNX_INJECTION_WHY_ENABLED": _e(
         "VNX_INJECTION_WHY_ENABLED", "bool", "0", "intelligence",
         "Persist a per-offer used/ignored-reason row (pattern_injection_outcome) at delivery "
@@ -315,19 +611,8 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         "activate the learning loop.",
         subsystem="injection-effectiveness-eval-loop", status="ACTIVATE",
         # Explicit canonical pick (OI-1385): preserves the pre-existing last-wins winner for
-        # this subsystem's 2 flags. Not re-audited by this dispatch — out of scope.
+        # this subsystem's 5 entries. Not re-audited by this dispatch — out of scope.
         cockpit_canonical=True),
-    "VNX_PLAN_GATE_COMPLEX_ONLY": _e(
-        "VNX_PLAN_GATE_COMPLEX_ONLY", "bool", "0", "gate",
-        "Flag with no effect since P1: plan_gate_enforcement.complex_only_active() "
-        "still reads it, but nothing consults that result to change a plan-gate run "
-        "(the LIGHT/HEAVY scope-skip and its reduced 2-seat panel were removed). "
-        "Kept until P4 reworks the effectiveness probe.",
-        # subsystem matches the docs/core/SUBSYSTEMS.md seed row
-        # "plan-gate-task-class-scope" (framework-status-audit-and-cockpit PR-3
-        # fix) — distinct from "plan-gate-panel" (VNX_PLAN_GATE_ENFORCE), so the
-        # cockpit generator has exactly one canonical flag per ledger row.
-        subsystem="plan-gate-task-class-scope", status="SCOPE"),
     "VNX_HASH_CHAIN_REQUIRED": _e(
         "VNX_HASH_CHAIN_REQUIRED", "bool", "0", "gate",
         "Tamper-evident NDJSON hash-chain requirement (display metadata only; no read-site wired).",
@@ -424,8 +709,8 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         "N-slot concurrency cap for the claude-tmux serial lock "
         "(scripts/lib/dispatch_serialization.py). ACCOUNT-wide: shared with every "
         "other project and worktree running on the same Claude subscription, not "
-        "scoped to this project. The process env var still wins over this "
-        "config-store value as an explicit per-session override.",
+        "scoped to this project. A stored value beats the env var; "
+        "VNX_OVERRIDE_TMUX_MAX_CONCURRENT beats both.",
         approval=True,
         subsystem="claude-tmux-serialization", status="ACTIVATE"),
 
@@ -593,13 +878,50 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         "types). Purely deterministic: no model call sits in the write path.",
         subsystem="ledger-lifecycle", status="LIVE"),
     # agent layout: `off` (default), `shadow` and `on`; any unknown value reads as `off` with one
-    # WARNING (scripts/lib/agent_layout.py). Independent of VNX_AGENT_FOLDERS (agent_resolver).
+    # WARNING (scripts/lib/agent_layout.py). Independent of agent-folder resolution (agent_resolver).
     "VNX_AGENT_LAYOUT": _e(
         "VNX_AGENT_LAYOUT", "string", "off", "dispatch",
         "Agent-as-folder skill layout: off (default), shadow (a non-discovered copy under "
         ".vnx-agent-skills/) or on (the skills at the provider's native, discovered destination, "
         "set per project by the operator). An unknown value reads as off.",
         subsystem="agent-layout", status="SCOPE"),
+    # morning round (ADR-095): morning_pause.py reads these through a getter; since D1b the door
+    # (stop_conditions.check_morning_pause) and pr_merge read them (morning_pause_gate.py), so all
+    # four are wired. VNX_MORNING_PAUSE_ENABLED is the subsystem's canonical flag, inserted last
+    # so the CLI's last-inserted rule agrees.
+    "VNX_MORNING_PAUSE_START": _e(
+        "VNX_MORNING_PAUSE_START", "string", "07:00", "dispatch",
+        "Morning pause start, HH:MM in VNX_MORNING_PAUSE_TZ.",
+        subsystem="morning-pause", status="PARK"),
+    "VNX_MORNING_PAUSE_DEADLINE": _e(
+        "VNX_MORNING_PAUSE_DEADLINE", "string", "09:00", "dispatch",
+        "Morning pause deadline, HH:MM in VNX_MORNING_PAUSE_TZ; after it the pause never holds.",
+        subsystem="morning-pause", status="PARK"),
+    "VNX_MORNING_PAUSE_TZ": _e(
+        "VNX_MORNING_PAUSE_TZ", "string", "Europe/Amsterdam", "dispatch",
+        "IANA timezone of the morning pause window.",
+        subsystem="morning-pause", status="PARK"),
+    "VNX_MORNING_PAUSE_ENABLED": _e(
+        "VNX_MORNING_PAUSE_ENABLED", "bool", "true", "dispatch",
+        "Morning pause (ADR-095): firing and merging stop from the start time until the morning "
+        "points are decided, at the latest at the deadline. On by default (D4b); no snapshot for today inside the window means not started, not paused.",
+        subsystem="morning-pause", status="PARK", cockpit_canonical=True),
+    # ADR-096 B2: the door reads it through config_runtime (dispatch_cli._check_predecessor_verdict).
+    "VNX_DELIVERABLE_PREDECESSOR_MODE": _e(
+        "VNX_DELIVERABLE_PREDECESSOR_MODE", "string", "refuse", "dispatch",
+        "Deliverable predecessors (ADR-096): the door refuses (refuse), reports (warn) or skips (off) a fire "
+        "whose hard predecessor has no pr_merged receipt.",
+        subsystem="deliverable-predecessor", status="ACTIVATE", cockpit_canonical=True,
+        allowed_values=("off", "warn", "refuse")),
+    # ADR-096 B4b: the door reads it through config_runtime (dispatch_cli._check_blast_radius_verdict).
+    "VNX_BLAST_RADIUS_MODE": _e(
+        "VNX_BLAST_RADIUS_MODE", "string", "warn", "dispatch",
+        "Blast radius (ADR-096): overlap of a fire's paths with live work or an open PR warns (warn), "
+        "refuses unless --override-overlap REASON is given (refuse), or is not read (off); "
+        "an unknown value reads as refuse.",
+        subsystem="blast-radius", status="ACTIVATE", cockpit_canonical=True,
+        allowed_values=("off", "warn", "refuse")),
+
 }
 
 # Flag-LESS subsystems from the cockpit ledger (docs/core/SUBSYSTEMS.md) — kernel/meta subsystems
@@ -678,51 +1000,135 @@ def set_default_project_id(project_id: Optional[str]) -> None:
     _default_project_id = project_id
 
 
+# The layers of the precedence chain, highest first, by the source name resolve_with_source
+# returns for each. One constant, so a new layer (config-een-oppervlak G2 adds a global one)
+# lands in the chain walk and in every ``layers=`` subset a reader names at the same time.
+CHAIN_LAYERS: "tuple[str, ...]" = ("override", "project_config", "global_config", "env", "default")
+
+# The sources a strict read returns for a layer it could not read: never a value, never "off".
+ERROR_SOURCES = frozenset(("project_config_error", "global_config_error"))
+
+# One WARNING per unreadable global file (path, reason) and per ignored project row (project, key).
+_WARNED_GLOBAL_UNREADABLE: set = set()
+_WARNED_IGNORED_PROJECT_ROW: set = set()
+
+
+def _checked_layers(layers) -> frozenset:
+    """The set of ``layers``; raises ``ValueError`` on an empty set or an unknown name."""
+    if isinstance(layers, str):
+        raise ValueError(f"layers must be a sequence of layer names, not the string {layers!r}")
+    walked = frozenset(layers)
+    unknown = sorted(walked - frozenset(CHAIN_LAYERS))
+    if unknown or not walked:
+        raise ValueError(
+            f"unknown or empty layers {sorted(walked)!r}: each must be one of {CHAIN_LAYERS!r}")
+    return walked
+
+
 def _bare(key: str) -> str:
     return key[len("VNX_"):] if key.startswith("VNX_") else key
 
 
 def resolve_with_source(
     key: str, project_id: Optional[str] = None, resolver: Optional[DbResolver] = None,
-    *, use_default_resolver: bool = True,
+    *, use_default_resolver: bool = True, strict_resolver: bool = False,
+    layers: "tuple[str, ...]" = CHAIN_LAYERS,
 ) -> "tuple[Optional[str], str]":
     """``(value, source)`` through the one precedence chain :func:`_resolve` is built on.
 
     ``source`` is ``override`` (``VNX_OVERRIDE_<BARE>``), ``project_config`` (the DB layer),
-    ``env`` (``VNX_<BARE>`` as the process started), ``default`` (the registry default) or
-    ``unset`` (an unknown key with no value anywhere). With no ``resolver`` and
+    ``global_config`` (``~/.vnx/config.json`` via ``config_global``, ADR-087), ``env``
+    (``VNX_<BARE>`` as the process started), ``default`` (the registry default) or
+    ``unset`` (no value in any layer walked). With no ``resolver`` and
     ``use_default_resolver`` the process's wired store and default project are used, as
     :func:`get` does.
+
+    ``strict_resolver`` (default ``False``) changes what a raising DB resolver means. Off, it is
+    treated as "no row" and the chain falls through to env/default, as :func:`get` always did.
+    On, the chain stops there and returns ``(None, "project_config_error")``: the DB state is
+    unknown, so a caller whose safe answer is "off" can tell that apart from "no row". The
+    override is still read first, before the DB is consulted. An unreadable global file is
+    handled the same way: strict stops on ``(None, "global_config_error")``; not strict falls
+    through to env with one WARNING per process. A missing global file is no value. A key with
+    scope ``global`` skips the project layer; a project row for it is ignored with a WARNING.
+
+    ``layers`` (default :data:`CHAIN_LAYERS`, the full chain) names the layers walked, always
+    in chain order whatever order they are given in. A reader that must tell the approved
+    floor apart from a loose override (ADR-088 besluit 3) resolves once with the floor layers
+    and once with the full chain. An empty ``layers`` or a name outside :data:`CHAIN_LAYERS`
+    raises ``ValueError``.
     """
+    walked = _checked_layers(layers)
     entry = CONFIG_REGISTRY.get(key)
     override = os.environ.get(f"VNX_OVERRIDE_{_bare(key)}")
-    if override is not None:
+    if "override" in walked and override is not None:
         return override, "override"
-    if resolver is None and use_default_resolver:
-        resolver = _db_resolver
-        project_id = project_id if project_id is not None else _default_project_id
-    if resolver is not None:
+    if "project_config" in walked:
+        if resolver is None and use_default_resolver:
+            resolver = _db_resolver
+            project_id = project_id if project_id is not None else _default_project_id
+        if resolver is not None and entry is not None and entry.scope == "global":
+            _warn_ignored_project_row(key, project_id, resolver)
+        elif resolver is not None:
+            try:
+                db_val = resolver(project_id, key)
+            except Exception as exc:
+                if strict_resolver:
+                    logging.getLogger(__name__).warning(
+                        "config_registry: project_config resolver failed for %s (%s: %s)",
+                        key, type(exc).__name__, exc)
+                    return None, "project_config_error"
+                db_val = None
+            if db_val is not None:
+                return db_val, "project_config"
+    if "global_config" in walked and entry is not None:
+        import config_global
         try:
-            db_val = resolver(project_id, key)
-        except Exception:
-            db_val = None
-        if db_val is not None:
-            return db_val, "project_config"
+            global_val = config_global.get(key)
+        except config_global.GlobalConfigUnreadable as exc:
+            if strict_resolver:
+                logging.getLogger(__name__).warning("config_registry: %s", exc)
+                return None, "global_config_error"
+            if (str(exc.path), exc.reason) not in _WARNED_GLOBAL_UNREADABLE:
+                _WARNED_GLOBAL_UNREADABLE.add((str(exc.path), exc.reason))
+                logging.getLogger(__name__).warning(
+                    "config_registry: %s; falling through to env and the default", exc)
+            global_val = None
+        if global_val is not None:
+            return global_val, "global_config"
     env_val = os.environ.get(key)
-    if env_val is not None:
+    if "env" in walked and env_val is not None:
         return env_val, "env"
-    if entry is not None:
+    if "default" in walked and entry is not None:
         return entry.default, "default"
     return None, "unset"
 
 
+def _warn_ignored_project_row(key: str, project_id: Optional[str], resolver: DbResolver) -> None:
+    """One WARNING per (project, key) when a scope-global key has a project row; never raises."""
+    if (project_id, key) in _WARNED_IGNORED_PROJECT_ROW:
+        return
+    try:
+        row = resolver(project_id, key)
+    except Exception as exc:
+        # Only a diagnostic: the project layer does not apply to a global key either way.
+        logging.getLogger(__name__).debug("config_registry: no project-row check for global key %s "
+                                          "(%s: %s)", key, type(exc).__name__, exc)
+        return
+    if row is not None:
+        _WARNED_IGNORED_PROJECT_ROW.add((project_id, key))
+        logging.getLogger(__name__).warning(
+            "config_registry: project %s has a project_config row for %s, which has scope "
+            "global; the row is ignored (only the global file counts)", project_id, key)
+
+
 def _resolve(key: str, project_id: Optional[str], resolver: Optional[DbResolver]) -> Optional[str]:
-    """The precedence chain: override > ``resolver``'s DB value > env > registry default.
+    """The precedence chain: override > ``resolver``'s DB value > global file > env > default.
 
     ``resolver`` is the step-2 DB layer in play, or ``None`` for the env-only
     world. Shared by :func:`get` (the process's wired store) and
     :func:`get_for_project` (a store the caller names), so the order of the
-    four sources cannot drift between them. The order lives in
+    five sources cannot drift between them. The order lives in
     :func:`resolve_with_source`; this returns its value.
     """
     return resolve_with_source(key, project_id, resolver, use_default_resolver=False)[0]

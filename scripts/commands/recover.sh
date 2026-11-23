@@ -50,11 +50,6 @@ Options:
   --json           Output runtime recovery report as JSON
   --legacy         Skip runtime recovery, only run legacy cleanup
   -h, --help       Show this help
-
-Rollback guidance:
-  If runtime recovery causes issues, disable it with:
-    python scripts/rollback_runtime_core.py rollback
-  Then run: vnx recover --legacy
 HELP
         return 0
         ;;
@@ -125,7 +120,7 @@ HELP
       "--dispatch-dir" "${VNX_DISPATCH_DIR:-$VNX_DATA_DIR/dispatches}"
       "--state-dir" "${VNX_STATE_DIR:-$VNX_DATA_DIR/state}"
       "--data-dir" "${VNX_DATA_DIR:-}"
-      "--max-lock-age" "${VNX_LOCK_MAX_AGE:-3600}"
+      "--max-lock-age" "3600"
     )
     [ "$dry_run" = true ] && legacy_args+=("--dry-run")
     [ "$legacy_only" = true ] && legacy_args+=("--legacy-only")
@@ -169,7 +164,6 @@ HELP
   if [ "${VNX_RUNTIME_PRIMARY:-1}" = "1" ] && [ "$legacy_only" != true ]; then
     log ""
     log " Runtime core: ACTIVE — canonical recovery ran above"
-    log " Rollback: python scripts/rollback_runtime_core.py rollback"
   fi
 
   log "════════════════════════════════════════════════════════════════"

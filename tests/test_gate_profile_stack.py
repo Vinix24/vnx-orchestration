@@ -18,7 +18,7 @@ import gate_profile
 from gate_profile import GateProfileConfigError
 from review_seats import resolve_review_seats
 
-TODAY = ("codex_gate", "kimi_gate")
+TODAY = ("codex_gate", "deepseek_gate")
 
 
 @pytest.fixture(autouse=True)
@@ -71,7 +71,7 @@ class TestHeavyAndLight:
     def test_heavy_gives_three_seats_and_names_itself_in_the_record(self, project_config):
         project_config["VNX_GOVERNANCE_PROFILE"] = "heavy"
         seats = resolve_review_seats()
-        assert seats.seats == ("codex_gate", "kimi_gate", "claude_gate")
+        assert seats.seats == ("codex_gate", "deepseek_gate", "claude_gate")
         assert (seats.profile, seats.profile_source, seats.profile_error) == ("heavy", "project_config", None)
 
     def test_heavy_from_the_environment_names_env_as_source(self, monkeypatch):
@@ -92,7 +92,7 @@ class TestHeavyAndLight:
         resolution = gate_profile.resolve()
         assert resolution.value("round_cap") == 5
         assert resolution.value("plan_gate_seats") == 2
-        assert resolution.value("takeover_chain") == "codex_gate,kimi_gate,claude_gate,deepseek_gate"
+        assert resolution.value("takeover_chain") == "codex_gate,deepseek_gate,claude_gate"
 
     def test_an_unknown_field_is_refused(self):
         with pytest.raises(KeyError):
@@ -157,6 +157,15 @@ class TestPrecedence:
         project_config["VNX_GOVERNANCE_PROFILE"] = "heavy"
         project_config["VNX_DEFAULT_REVIEW_STACK"] = "codex_gate"
         assert resolve_review_seats().seats == ("codex_gate",)
+
+    def test_a_project_row_naming_kimi_still_wins_over_the_new_default(self, project_config):
+        """mission-control's project rows (2026-11-11) still win: the explicit layer is unchanged."""
+        from gate_request_handler import review_gate_takeover_chain_raw
+        project_config["VNX_DEFAULT_REVIEW_STACK"] = "codex_gate,kimi_gate"
+        project_config["VNX_REVIEW_GATE_TAKEOVER_CHAIN"] = "codex_gate,kimi_gate,claude_gate,deepseek_gate"
+        seats = resolve_review_seats()
+        assert (seats.seats, seats.stack_source) == (("codex_gate", "kimi_gate"), "project_config")
+        assert review_gate_takeover_chain_raw() == ("codex_gate,kimi_gate,claude_gate,deepseek_gate", "project_config")
 
     def test_an_override_stack_wins_over_heavy(self, monkeypatch):
         monkeypatch.setenv("VNX_GOVERNANCE_PROFILE", "heavy")

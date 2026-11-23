@@ -34,6 +34,7 @@ for _p in (str(VNX_ROOT / "scripts"), str(VNX_ROOT / "scripts" / "lib")):
         sys.path.insert(0, _p)
 
 import config_registry as cr  # after the sys.path insert above
+from review_stack_support import pin_kimi_era_review_config
 
 HEAD = "c" * 40
 OTHER_HEAD = "d" * 40
@@ -102,6 +103,7 @@ def store(tmp_path, monkeypatch):
                         lambda event, **fields: receipts.append({"event": event, **fields}))
     # A landed result is published as a GitHub check-run; never from a test.
     monkeypatch.setattr(gate_recorder, "publish_forge_check_run", lambda payload, **kw: None)
+    pin_kimi_era_review_config(monkeypatch)
     return {
         "state_dir": state_dir, "reports_dir": reports_dir,
         "requests_dir": state_dir / "review_gates" / "requests",
@@ -214,8 +216,7 @@ def test_kimi_off_codex_plus_claude_takeover_and_no_kimi_launch(store, launches)
 
 def test_kimi_deepseek_off_the_default_chain_still_reads_claude(store, launches, monkeypatch):
     """R7: the switch never refuses claude (ADR-044 v1), so with kimi and deepseek off the
-    default chain still has a reader for the second seat."""
-    monkeypatch.delenv("VNX_REVIEW_GATE_TAKEOVER_CHAIN", raising=False)
+    pinned pre-2026-11-11 chain still has a reader for the second seat."""
     set_switches(kimi=False, deepseek=False)
 
     result = request(["codex_gate", "kimi_gate"])

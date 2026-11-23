@@ -722,8 +722,15 @@ def test_run_repairs_then_walks_to_head(tmp_path: Path, monkeypatch: pytest.Monk
     assert mfs._has_composite_unique(conn, _dispatch_cols(conn)) is True
     assert mfs._has_solo_dispatch_id_unique(conn, _dispatch_cols(conn)) is False
     assert "ux_solo_did" not in _unique_index_names(conn)
-    # Head moved 30 -> 31 when migration 0031 (runtime tenant FK repair) landed.
-    assert schema_migration_user_version(conn) == 31
+    # Head = highest numbered up-migration on disk; auto_apply walks past 0031
+    # (OI-1169, #1477 / #2009), so a hard-coded 31 goes stale with every new migration.
+    migrations_dir = Path(__file__).resolve().parent.parent / "schemas" / "migrations"
+    head = max(
+        int(p.name.split("_")[0])
+        for p in migrations_dir.glob("00[0-9][0-9]_*.sql")
+        if "_down" not in p.name
+    )
+    assert schema_migration_user_version(conn) == head
     conn.close()
 
 

@@ -418,10 +418,10 @@ class TestResumeApiHandler:
         """API returns error for missing session_id."""
         db_path, roots = api_setup
 
-        with patch("serve_dashboard.CLAUDE_INDEX_DB", Path(db_path)), \
-             patch("serve_dashboard.PROJECT_ROOT", Path(roots[0])), \
-             patch("serve_dashboard.RECEIPTS_PATH", Path("/nonexistent")):
-            from serve_dashboard import _resume_conversation
+        with patch("api_operator.CLAUDE_INDEX_DB", Path(db_path)), \
+             patch("api_operator.PROJECT_ROOT", Path(roots[0])), \
+             patch("api_operator.RECEIPTS_PATH", Path("/nonexistent")):
+            from api_operator import _resume_conversation
             result = _resume_conversation({})
 
         assert result["ok"] is False
@@ -432,10 +432,10 @@ class TestResumeApiHandler:
         """API returns command for valid session."""
         db_path, roots = api_setup
 
-        with patch("serve_dashboard.CLAUDE_INDEX_DB", Path(db_path)), \
-             patch("serve_dashboard.PROJECT_ROOT", Path(roots[0])), \
-             patch("serve_dashboard.RECEIPTS_PATH", Path("/nonexistent")):
-            from serve_dashboard import _resume_conversation
+        with patch("api_operator.CLAUDE_INDEX_DB", Path(db_path)), \
+             patch("api_operator.PROJECT_ROOT", Path(roots[0])), \
+             patch("api_operator.RECEIPTS_PATH", Path("/nonexistent")):
+            from api_operator import _resume_conversation
             result = _resume_conversation({
                 "session_id": "api-sess-001",
                 "cwd": os.path.join(roots[0], ".claude", "terminals", "T0"),
@@ -449,10 +449,10 @@ class TestResumeApiHandler:
         """API returns error for cross-worktree attempt."""
         db_path, roots = api_setup
 
-        with patch("serve_dashboard.CLAUDE_INDEX_DB", Path(db_path)), \
-             patch("serve_dashboard.PROJECT_ROOT", Path(roots[0])), \
-             patch("serve_dashboard.RECEIPTS_PATH", Path("/nonexistent")):
-            from serve_dashboard import _resume_conversation
+        with patch("api_operator.CLAUDE_INDEX_DB", Path(db_path)), \
+             patch("api_operator.PROJECT_ROOT", Path(roots[0])), \
+             patch("api_operator.RECEIPTS_PATH", Path("/nonexistent")):
+            from api_operator import _resume_conversation
             result = _resume_conversation({
                 "session_id": "api-sess-001",
                 "cwd": os.path.join(roots[1], ".claude", "terminals", "T0"),
@@ -467,10 +467,10 @@ class TestResumeApiHandler:
         if dashboard_dir not in sys.path:
             sys.path.insert(0, dashboard_dir)
 
-        with patch("serve_dashboard.CLAUDE_INDEX_DB", Path(os.path.join(tmp_dir, "nonexistent.db"))), \
-             patch("serve_dashboard.PROJECT_ROOT", Path(worktree_roots[0])), \
-             patch("serve_dashboard.RECEIPTS_PATH", Path("/nonexistent")):
-            from serve_dashboard import _resume_conversation
+        with patch("api_operator.CLAUDE_INDEX_DB", Path(os.path.join(tmp_dir, "nonexistent.db"))), \
+             patch("api_operator.PROJECT_ROOT", Path(worktree_roots[0])), \
+             patch("api_operator.RECEIPTS_PATH", Path("/nonexistent")):
+            from api_operator import _resume_conversation
             result = _resume_conversation({"session_id": "any-id"})
 
         assert result["ok"] is False

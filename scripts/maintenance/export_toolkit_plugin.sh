@@ -4,7 +4,10 @@
 # clone of the public toolkit repo, on a branch, as one reviewable commit.
 #
 # Usage:
-#   export_toolkit_plugin.sh --commit <sha> --target <toolkit-clone> --tag <plugin>-v<version> [--plugin <plugin>] [--source <repo>]
+#   export_toolkit_plugin.sh --commit <sha> --target <toolkit-clone> --tag <plugin>-v<version> [--plugin <plugin>] [--source <repo>] [--owner <name>]
+#
+# --owner names the marketplace owner of a NEW marketplace file; the default is the
+# owner part of the target clone's origin remote, and with neither the export refuses.
 #
 # Exit status: 0 exported, or nothing to export; 1 refused or failed, with the
 # target back exactly as it was found; 2 usage; 3 failed and the target could
@@ -52,7 +55,7 @@ die() {
 }
 
 usage() {
-    echo "usage: $0 --commit <sha> --target <toolkit-clone> --tag <plugin>-v<version> [--plugin <$(echo "$PLUGINS" | tr ' ' '|')>] [--source <repo>]" >&2
+    echo "usage: $0 --commit <sha> --target <toolkit-clone> --tag <plugin>-v<version> [--plugin <$(echo "$PLUGINS" | tr ' ' '|')>] [--source <repo>] [--owner <name>]" >&2
     exit 2
 }
 
@@ -88,10 +91,10 @@ PY
 # only the entry of the plugin being exported. Every other byte of an existing file stays;
 # a missing file is created. Prints created, updated or unchanged.
 merge_marketplace() {
-    python3 -I - "$1" "$2" "$3" <<'PY'
+    python3 -I - "$1" "$2" "$3" "$4" <<'PY'
 import json, os, sys
 
-market_path, plugin_path, shown = sys.argv[1], sys.argv[2], sys.argv[3]
+market_path, plugin_path, shown, owner = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
 meta = json.load(open(plugin_path, encoding="utf-8"))
 entry = {
     "name": meta["name"],
@@ -183,7 +186,9 @@ if os.path.exists(market_path):
         sys.exit("cannot merge into %s: %s" % (shown, exc))
     status = "unchanged" if new == old else "updated"
 else:
-    doc = {"name": "claude-code-toolkit", "owner": {"name": "Vinix24"}, "plugins": [entry]}
+    if not owner:
+        sys.exit("cannot create %s: no owner (the target has no origin remote); pass --owner <name>" % shown)
+    doc = {"name": "claude-code-toolkit", "owner": {"name": owner}, "plugins": [entry]}
     new = json.dumps(doc, indent=2, ensure_ascii=False) + "\n"
     status = "created"
 if status != "unchanged":
@@ -302,8 +307,7 @@ def lines(path):
     return path.read_text(encoding="utf-8", errors="replace").splitlines()
 
 
-skip_parts = {"__pycache__", ".pytest_cache"}
-files = [(p, None) for p in folder.rglob("*") if p.is_file() and not skip_parts & set(p.parts) and p.suffix != ".pyc"]
+files = [(p, None) for p in folder.rglob("*") if p.is_file()]
 files += [(p, before) for p, before in extras if p.is_file()]
 hits = []
 for path, before in files:
@@ -354,6 +358,13 @@ for record in filter(None, run("ls-tree", "-r", "-z", "--full-tree", rev, "--", 
     if mode not in (b"100644", b"100755") or not name.startswith(prefix):
         sys.exit("%s at %s is not a regular file below %s" % (os.fsdecode(name), rev, top))
     entries.append((mode, oid, name[len(prefix):]))
+artefacts = [
+    "build artefact in the export source at %s: %s" % (rev, os.fsdecode(prefix + rel))
+    for _, _, rel in entries
+    if {b"__pycache__", b".pytest_cache"} & set(rel.split(b"/")) or rel.endswith((b".pyc", b".pyo"))
+]
+if artefacts:
+    sys.exit("\n".join(artefacts))
 blobs = run("cat-file", "--batch", data=b"".join(oid + b"\n" for _, oid, _ in entries))
 pos, records = 0, []
 for mode, oid, rel in entries:
@@ -649,6 +660,7 @@ TARGET=""
 TAG=""
 SRC=""
 CHOSEN=""
+OWNER=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --commit) [ $# -ge 2 ] || usage; COMMIT=$2; shift 2 ;;
@@ -656,6 +668,7 @@ while [ $# -gt 0 ]; do
         --tag) [ $# -ge 2 ] || usage; TAG=$2; shift 2 ;;
         --source) [ $# -ge 2 ] || usage; SRC=$2; shift 2 ;;
         --plugin) [ $# -ge 2 ] || usage; CHOSEN=$2; shift 2 ;;
+        --owner) [ $# -ge 2 ] || usage; OWNER=$2; shift 2 ;;
         -h | --help) usage ;;
         *) echo "unknown argument: $1" >&2; usage ;;
     esac
@@ -789,7 +802,11 @@ for rel in "$MARKET_REL" "$README_REL"; do
         cp "$copy" "$TMP/base-$(basename "$rel")"
     fi
 done
-merge_marketplace "$TMP/marketplace.json" "$PLUGIN_JSON" "$MARKET_REL on $BASE_NAME" >"$TMP/market.status" ||
+if [ -z "$OWNER" ]; then
+    # The owner part of origin (https or ssh form); empty when there is no origin.
+    OWNER=$(tgit remote get-url origin 2>/dev/null | sed -n -e 's#^[a-z+]*://[^/]*/\([^/]*\)/.*#\1#p' -e 's#^[^:/@]*@[^:]*:\([^/]*\)/.*#\1#p' | head -n 1) || OWNER=""
+fi
+merge_marketplace "$TMP/marketplace.json" "$PLUGIN_JSON" "$MARKET_REL on $BASE_NAME" "$OWNER" >"$TMP/market.status" ||
     die "could not merge the marketplace entry"
 add_readme_row "$TMP/README.md" "$PLUGIN_JSON" >"$TMP/readme.status" || die "could not add the README row"
 ENTRY_VERSION=$(python3 -I -c '

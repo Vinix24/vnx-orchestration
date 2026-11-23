@@ -10,7 +10,7 @@ Design:
   - Incident records are durable, typed, and tied to dispatch/terminal/component.
   - Retry budgets persist across process restarts (SQLite-backed).
   - Shadow mode: records incidents from the existing supervisor without changing
-    its behavior. Controlled by VNX_INCIDENT_SHADOW env var (default "1" = on).
+    its behavior. Shadow mode is always on.
   - All helpers are idempotent and safe to call from the supervisor monitor loop.
 
 Governance references:
@@ -44,7 +44,6 @@ from runtime_coordination import get_connection, project_id_stamp
 # Constants
 # ---------------------------------------------------------------------------
 
-SHADOW_MODE_ENV = "VNX_INCIDENT_SHADOW"
 """Environment variable that enables shadow mode. Default "1" (on)."""
 
 _OPEN_STATES = frozenset({"open", "escalated"})
@@ -75,20 +74,6 @@ def _budget_key(entity_type: str, entity_id: str, incident_class: str) -> str:
 
 def _dump(obj: Any) -> str:
     return json.dumps(obj) if obj is not None else "{}"
-
-
-# ---------------------------------------------------------------------------
-# Shadow mode guard
-# ---------------------------------------------------------------------------
-
-def is_shadow_mode() -> bool:
-    """Return True if VNX_INCIDENT_SHADOW is enabled (default on).
-
-    Shadow mode means the incident log records supervisor outcomes without
-    influencing recovery decisions. The existing supervisor behavior is
-    authoritative while shadow mode is active.
-    """
-    return os.environ.get(SHADOW_MODE_ENV, "1") == "1"
 
 
 # ---------------------------------------------------------------------------

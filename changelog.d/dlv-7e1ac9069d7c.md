@@ -1,1 +1,0 @@
-- Preflight (OI-2613): a project without a pin reports `hooks` as unmeasured and no longer runs a render from the running tree, so the fabric source repo no longer blocks `vnx preflight`.

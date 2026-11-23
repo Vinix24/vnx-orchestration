@@ -325,6 +325,17 @@ def main(argv: Optional[list] = None) -> int:
                   f"re-run with --apply to write it")
         return EXIT_OK
 
+    return _apply_reanchor(
+        args, record, results_dir=results_dir, new_sha=new_sha, new_branch=new_branch,
+        decision=decision, payload_out=payload_out,
+    )
+
+
+def _apply_reanchor(
+    args, record: Dict[str, Any], *, results_dir: Path, new_sha: str, new_branch: str,
+    decision, payload_out: Dict[str, Any],
+) -> int:
+    """``main``'s ``--apply`` tail: the guarded write, then the register line."""
     from gate_recorder import ResultOverwriteRefused, record_terminal_result  # noqa: PLC0415
 
     payload = build_reanchored_payload(

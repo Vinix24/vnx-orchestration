@@ -11,6 +11,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent / "dashboard"))
 sys.path.insert(0, str(Path(__file__).parent.parent / "scripts" / "lib"))
 
+import api_operator as ao
 import serve_dashboard as sd
 
 
@@ -72,11 +73,11 @@ class TestContractAlignment:
 
     def test_read_gate_config_returns_dict(self, tmp_path: Path) -> None:
         cfg = tmp_path / "gates.yaml"
-        result = sd._read_gate_config(cfg)
+        result = ao._read_gate_config(cfg)
         assert isinstance(result, dict)
 
     def test_write_read_round_trip(self, tmp_path: Path) -> None:
         cfg = tmp_path / "gates.yaml"
-        sd._write_gate_config({"gates": {"proj": {"g1": {"enabled": True}}}}, cfg)
-        result = sd._read_gate_config(cfg)
+        ao._write_gate_config({"gates": {"proj": {"g1": {"enabled": True}}}}, cfg)
+        result = ao._read_gate_config(cfg)
         assert "gates" in result

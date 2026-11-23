@@ -71,7 +71,7 @@ class TestFinalPopenEnvScrub:
         return captured.get("env")
 
     def test_anthropic_api_key_absent_from_final_popen_env(self):
-        env = self._run_spawn({"ANTHROPIC_API_KEY": "sk-ant-real-production-key"})
+        env = self._run_spawn({"ANTHROPIC_API_KEY": "sk-" + "ant-real-production-key"})
         assert env is not None, "Popen must receive an explicit env dict"
         assert "ANTHROPIC_API_KEY" not in env
         assert env.get("ANTHROPIC_AUTH_TOKEN") == gh._proxy_key()

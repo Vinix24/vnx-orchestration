@@ -8,7 +8,7 @@ Source of truth: `scripts/lib/exit_classifier.py`.
 | Class | Retryable | Meaning | Operator action |
 |-------|-----------|---------|-----------------|
 | `SUCCESS` | No | Exit code 0, no error conditions | Check output artifact for results |
-| `TIMEOUT` | Yes | Subprocess exceeded time limit | Increase `VNX_HEADLESS_TIMEOUT` or simplify the prompt |
+| `TIMEOUT` | Yes | Subprocess exceeded time limit | Simplify the prompt or split the task |
 | `TOOL_FAIL` | Yes | Transient tool/network error | Retry is safe — check stderr for details |
 | `INFRA_FAIL` | Yes | Binary missing, OOM, or infrastructure problem | Check CLI binary install or system resources |
 | `NO_OUTPUT` | Yes | Subprocess produced no output (hung or crashed silently) | Check for deadlocks or oversized prompts |
@@ -43,6 +43,25 @@ Exit `4` is the deliberate D3 tradeoff: events are emitted **after** the commit,
 so a ledger-emit failure leaves the DB correct (at-most-once, never orphaned) and
 the missing event is reconcile-compensated. Exactly-once via a transactional
 outbox is deferred to 1.x (#867). See ADR-005 and `docs/MIGRATION_GUIDE.md`.
+
+### Intelligence corpus quarantine (`scripts/vnx_intelligence_corpus_quarantine.py`)
+
+The quarantine tool defines five contract-bound exit codes so an operator can tell
+a refusal from an unwinding failure. Source of truth: the `return` statements in
+`main` (`scripts/vnx_intelligence_corpus_quarantine.py:110-115`); policy in
+`docs/governance/decisions/ADR-070-intelligence-corpus-quarantine.md`; the operator
+view in `docs/operations/INTELLIGENCE_CORPUS_QUARANTINE.md`.
+
+| Code | Meaning | Operator action |
+|------|---------|-----------------|
+| `0` | Done | Continue with the next step |
+| `1` | Unexpected error, or a failed audit line in `verify` (nothing was committed); see stderr | Read stderr, fix the cause, re-run the step |
+| `2` | Misuse: an argument is missing or `--out` does not exist | Correct the command; nothing was measured |
+| `3` | Refused: the permit, the decoy check, the invariant or the manifest does not hold — **nothing changed** | Read the reason (stderr and the `refused` audit line); repair with `baseline --reuse-snapshot` or a new `quarantine` |
+| `4` | After the commit or the seal: the after-check, the `VACUUM`, an audit line or a rehearsal verdict that is not fully true failed — the corpus is gone and the artifact is the restore path | Do not clean up; read the error and restore from the artifact |
+
+Exit `3` is a refusal before the first write. Exit `4` is never "try again": the
+store is already changed or the artifact is already sealed.
 
 ## Notes
 

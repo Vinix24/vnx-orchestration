@@ -9,12 +9,15 @@ Marked ``integration`` (matches ``test_wheel_build.py``) — it builds a wheel a
 spins up a virtualenv, so it is slower and network-touching on a cold cache.
 """
 
+import importlib.metadata
 import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
+
+from wheel_build_lock import wheel_build_lock
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SMOKE_SCRIPT = REPO_ROOT / "scripts" / "test_wheel_install.sh"
@@ -25,12 +28,14 @@ PREFLIGHT_EXIT = 2
 
 
 def _build_toolchain_available() -> bool:
-    try:
-        import build  # noqa: F401
-        import setuptools  # noqa: F401
-        import wheel  # noqa: F401
-    except ImportError:
-        return False
+    # The build (`python -m build --no-isolation`) checks installed distributions,
+    # not importable modules: setuptools vendors `wheel`, so `import wheel` can
+    # succeed with no wheel distribution installed (OI-2830).
+    for name in ("build", "setuptools", "wheel"):
+        try:
+            importlib.metadata.distribution(name)
+        except importlib.metadata.PackageNotFoundError:
+            return False
     return True
 
 
@@ -44,13 +49,14 @@ def test_wheel_install_smoke():
     if not _build_toolchain_available():
         pytest.skip("build toolchain (build/setuptools/wheel) not installed")
 
-    result = subprocess.run(
-        ["bash", str(SMOKE_SCRIPT)],
-        capture_output=True,
-        text=True,
-        timeout=600,
-        env={**_smoke_env(), "SMOKE_PYTHON": sys.executable},
-    )
+    with wheel_build_lock():
+        result = subprocess.run(
+            ["bash", str(SMOKE_SCRIPT)],
+            capture_output=True,
+            text=True,
+            timeout=600,
+            env={**_smoke_env(), "SMOKE_PYTHON": sys.executable},
+        )
 
     if result.returncode == PREFLIGHT_EXIT:
         pytest.skip(f"smoke preflight failed (env-specific):\n{result.stdout}\n{result.stderr}")

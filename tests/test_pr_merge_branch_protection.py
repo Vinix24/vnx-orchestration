@@ -123,16 +123,7 @@ class TestDoorBlobHashCoversTheWholeDoor:
 
     #: The files whose content decides what the door refuses. Mutating any of
     #: them changes a verdict without touching scripts/pr_merge.py.
-    DOOR_FILES = (
-        "scripts/pr_merge.py",
-        "scripts/lib/forge_protection_drift.py",
-        "scripts/lib/merge_preflight_adr_check.py",
-        "scripts/lib/merge_preflight_ci_check.py",
-        "scripts/lib/contract_invalid_ledger.py",
-        "scripts/lib/merge_target.py",
-        "scripts/lib/vnx_paths.py",
-        "scripts/lib/ci_contexts.py",
-    )
+    DOOR_FILES = tuple(pr_merge._DOOR_INTEGRITY_PATHS)
 
     def _fake_run(self, *, local_overrides: Optional[Dict[str, str]] = None,
                   remote_overrides: Optional[Dict[str, str]] = None,
@@ -165,13 +156,7 @@ class TestDoorBlobHashCoversTheWholeDoor:
         assert set(seen) == set(self.DOOR_FILES)
 
     @pytest.mark.parametrize("mutated", [
-        "scripts/lib/forge_protection_drift.py",
-        "scripts/lib/merge_preflight_adr_check.py",
-        "scripts/lib/merge_preflight_ci_check.py",
-        "scripts/lib/contract_invalid_ledger.py",
-        "scripts/lib/merge_target.py",
-        "scripts/lib/vnx_paths.py",
-        "scripts/lib/ci_contexts.py",
+        p for p in pr_merge._DOOR_INTEGRITY_PATHS if p != "scripts/pr_merge.py"
     ])
     def test_a_mutated_library_file_refuses_and_is_named(self, monkeypatch, mutated):
         monkeypatch.setattr(

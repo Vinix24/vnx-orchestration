@@ -193,6 +193,13 @@ class TestJumpAPI(unittest.TestCase):
         import serve_dashboard
         return serve_dashboard
 
+    def _import_api_operator(self):
+        """Import api_operator (where _jump_terminal runs) with path setup."""
+        if str(DASHBOARD_DIR) not in sys.path:
+            sys.path.insert(0, str(DASHBOARD_DIR))
+        import api_operator
+        return api_operator
+
     def test_jump_valid_terminal_set(self):
         """VALID_TERMINALS contains T0-T3."""
         mod = self._import_serve_dashboard()
@@ -212,7 +219,7 @@ class TestJumpAPI(unittest.TestCase):
 
     def test_jump_terminal_function_calls_tmux(self):
         """_jump_terminal calls tmux has-session, select-window, select-pane."""
-        mod = self._import_serve_dashboard()
+        mod = self._import_api_operator()  # _jump_terminal runs in api_operator
 
         # Mock subprocess.run: first call = has-session (success), rest = select-window/pane (success)
         mock_result = MagicMock()
@@ -220,7 +227,7 @@ class TestJumpAPI(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir, \
              patch.object(mod, "CANONICAL_STATE_DIR", Path(tmpdir)), \
-             patch("serve_dashboard.subprocess") as mock_sub:
+             patch("api_operator.subprocess") as mock_sub:
             mock_sub.run.return_value = mock_result
             mock_sub.CalledProcessError = subprocess.CalledProcessError
             result = mod._jump_terminal("T2")
@@ -232,13 +239,14 @@ class TestJumpAPI(unittest.TestCase):
 
     def test_jump_terminal_no_tmux_session(self):
         """_jump_terminal raises RuntimeError when tmux session doesn't exist."""
-        mod = self._import_serve_dashboard()
+        mod = self._import_api_operator()
 
         mock_result = MagicMock()
         mock_result.returncode = 1
 
-        with patch("serve_dashboard.subprocess") as mock_sub:
+        with patch("api_operator.subprocess") as mock_sub:
             mock_sub.run.return_value = mock_result
+            mock_sub.CalledProcessError = subprocess.CalledProcessError
             with self.assertRaises(RuntimeError) as ctx:
                 mod._jump_terminal("T1")
         self.assertIn("not found", str(ctx.exception))
@@ -453,8 +461,8 @@ class TestDispatchesAPI(unittest.TestCase):
     def _import_serve_dashboard(self):
         if str(DASHBOARD_DIR) not in sys.path:
             sys.path.insert(0, str(DASHBOARD_DIR))
-        import serve_dashboard
-        return serve_dashboard
+        import api_operator
+        return api_operator
 
     def test_scan_dispatches_empty_directory(self):
         """Empty or missing dispatch directories return empty stages."""
@@ -583,6 +591,23 @@ class TestComputeTerminalAttention(unittest.TestCase):
     def setUpClass(cls):
         scripts_lib = str(SCRIPTS_LIB)
         scripts_dir = str(PROJECT_ROOT / "scripts")
+
+        # Restore sys.path and the purged modules when the class is done, so
+        # later test files that import from scripts/ do not depend on order.
+        saved_path = list(sys.path)
+        saved_mods = {
+            name: sys.modules[name]
+            for name in ("terminal_state_core", "terminal_state_reconciler", "canonical_state_views")
+            if name in sys.modules
+        }
+
+        def _restore():
+            sys.path[:] = saved_path
+            for name in ("terminal_state_core", "terminal_state_reconciler", "canonical_state_views"):
+                sys.modules.pop(name, None)
+            sys.modules.update(saved_mods)
+
+        cls.addClassCleanup(_restore)
 
         # Remove scripts/ so the lib modules resolve from scripts/lib/ only.
         # test_vnx_process_ux.py adds scripts/ at module load time, which can re-introduce
@@ -926,8 +951,8 @@ class TestFormatDuration(unittest.TestCase):
     def _import_serve_dashboard(self):
         if str(DASHBOARD_DIR) not in sys.path:
             sys.path.insert(0, str(DASHBOARD_DIR))
-        import serve_dashboard
-        return serve_dashboard
+        import api_operator
+        return api_operator
 
     def test_seconds(self):
         mod = self._import_serve_dashboard()
@@ -952,8 +977,8 @@ class TestParseDispatchHeader(unittest.TestCase):
     def _import_serve_dashboard(self):
         if str(DASHBOARD_DIR) not in sys.path:
             sys.path.insert(0, str(DASHBOARD_DIR))
-        import serve_dashboard
-        return serve_dashboard
+        import api_operator
+        return api_operator
 
     def test_parses_standard_header(self):
         mod = self._import_serve_dashboard()

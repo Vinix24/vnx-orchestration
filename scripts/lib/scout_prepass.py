@@ -2,7 +2,7 @@
 
 The scout pre-pass is a cheap-model recon that ranks the deterministic
 code-anchor candidates for a dispatch into INCLUDE/MAYBE/EXCLUDE verdicts plus a
-short plan sketch, written to a per-dispatch ``scout_context.json`` sidecar
+short plan sketch, written to a per-dispatch ``<dispatch_id>.json`` sidecar
 BEFORE the permit is issued. This module owns both ends: the producer
 (``maybe_run_scout`` — the door pre-pass + key-auth provider invocation, 5b) and
 the consumer (sidecar location, fail-open read, and the rendering of the injected
@@ -275,8 +275,8 @@ _CODE_EXTS = frozenset({
 _MIN_INSTRUCTION_CHARS = 40
 # task_classes where a code-anchor recon adds little (no source to rank).
 _SKIP_TASK_CLASSES = frozenset({"docs_synthesis", "channel_response", "ops_watchdog"})
-# Dispatch lanes the scout skips — claude_headless is the rare API-metered opt-in
-# path; do not spend a scout call there.
+# Dispatch lanes the scout skips: claude_headless is the default claude lane
+# (resolve_claude_lane) and runs on the subscription; do not spend a scout call there.
 _SKIP_LANES = frozenset({"claude_headless"})
 # Allowlist of cheap key-auth classifier lanes the scout may use. Default-deny so
 # a subscription lane (e.g. 'haiku') can NEVER run the scout, per the hard

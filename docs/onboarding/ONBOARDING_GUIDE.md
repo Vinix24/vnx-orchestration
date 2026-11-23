@@ -142,7 +142,7 @@ main session.
 ./bin/vnx analyze-sessions
 ./bin/vnx suggest review
 ./bin/vnx suggest accept 1,3,5
-./bin/vnx suggest apply
+./bin/vnx suggest accept <ids>   # stages a dispatch with the exact diff; the T0 fires it
 ```
 
 ---
@@ -187,7 +187,7 @@ Doctor output is actionable. Common fixes:
 - **Architecture**: [docs/manifesto/ARCHITECTURE.md](../manifesto/ARCHITECTURE.md)
 - **Dispatch guide**: [docs/DISPATCH_GUIDE.md](../DISPATCH_GUIDE.md)
 - **Limitations**: [docs/manifesto/LIMITATIONS.md](../manifesto/LIMITATIONS.md)
-- **Comparisons**: [VNX vs Claude Code](../comparisons/vnx_vs_claude_code.md) | [VNX vs Frameworks](../comparisons/vnx_vs_frameworks.md)
+- **Comparisons**: [VNX vs Claude Code](../_archive/comparisons/vnx_vs_claude_code.md) | [VNX vs Frameworks](../_archive/comparisons/vnx_vs_frameworks.md)
 
 ## Appendix A: Two binaries and the full pip CLI surface
 

@@ -1,1 +1,0 @@
-- Tests (track `provider-agnostic-review-lane`, P7): `tests/test_provider_agnostic_review_lane_e2e.py` pins end to end that a `kimi_gate` obligation declared by the door is fulfilled by the obligation runner with `contract_hash`, `report_path` on disk and `commit_sha` equal to the PR head.

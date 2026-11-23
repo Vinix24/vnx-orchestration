@@ -1,1 +1,0 @@
-- The dispatcher and the provider kind of a harness-lane gate come from its row in `GATE_LANE_ROWS`: `LANE_DISPATCHER_KEYS` and `GATE_PROVIDERS` are derived, the dispatcher column now holds `provider_dispatch` / `claude_gate_lane`, and a row with an unknown `family` is refused when built (review-lane P9b, OI-2655, OI-2656).

@@ -22,7 +22,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from vnx_mode import VNXMode, write_mode, check_mode_feature_enabled
+from vnx_mode import VNXMode, write_mode
 from vnx_paths import ensure_env, resolve_paths
 
 
@@ -61,19 +61,6 @@ class StarterConfig:
         )
 
 
-@dataclass
-class StarterDispatchResult:
-    """Result of a starter-mode dispatch execution."""
-    dispatch_id: str
-    status: str  # success | error | timeout
-    terminal_id: str = STARTER_TERMINAL_ID
-    started_at: str = ""
-    completed_at: str = ""
-    duration_seconds: float = 0.0
-    receipt_path: Optional[str] = None
-    error: Optional[str] = None
-
-
 # ---------------------------------------------------------------------------
 # Atomic I/O (consistent with codebase pattern)
 # ---------------------------------------------------------------------------
@@ -110,12 +97,6 @@ def init_starter(data_dir: Optional[str] = None) -> StarterConfig:
     This is called by ``vnx init --starter``. It sets up the runtime layout
     for single-terminal operation.
     """
-    if not check_mode_feature_enabled(VNXMode.STARTER):
-        raise RuntimeError(
-            "Starter mode is disabled (VNX_STARTER_MODE_ENABLED=0). "
-            "Set VNX_STARTER_MODE_ENABLED=1 or use 'vnx init --operator'."
-        )
-
     paths = ensure_env()
     if data_dir:
         paths["VNX_DATA_DIR"] = data_dir

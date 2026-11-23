@@ -433,24 +433,19 @@ def test_sessionstart_hook_is_valid_bash_and_visible_failure():
     #    $STATE (not the repo-local .vnx-data split-brain, OI-859), an explicit
     #    interpreter is used, and the hook never blocks (exit 0).
     assert "BASH_SOURCE" in wrapper, "hook must resolve the engine via BASH_SOURCE, not a hardcoded path"
-    assert "$ENGINE_ROOT/scripts/build_t0_state.py" in wrapper
     assert "ENGINE_ROOT" in wrapper and '"$ROOT/scripts/' not in wrapper
-    assert 'build_t0_state.py" --output "$STATE/t0_state.json"' in wrapper
+    assert (
+        '"$ENGINE_ROOT/scripts/lib/state_rebuild_trigger.py" --event session_start --wait'
+        in wrapper
+    ), "hook must start the detached background trigger"
     assert '"$ROOT/.vnx-data/state/t0_state.json"' not in wrapper
-    assert "build_t0_state.err" in wrapper, "builder stderr must go to the central log, not /dev/null"
     assert "exit 0" in wrapper, "a broken state file must never block a session (non-fatal)"
-    assert ".venv/bin/python" in wrapper or "python3.12" in wrapper
-    # 5) OI-1073 defect 2: a FAILED build is VISIBLE, not swallowed. The hook
-    #    surfaces the failure to its own stderr (the mechanism the harness
-    #    surfaces on the session that fired it), not only into a 0-byte log
-    #    nobody opens. The old hook did `exit 0` UNCONDITIONALLY with no signal.
-    assert "build_t0_state_hook FAILED" in wrapper, (
-        "hook must surface a failed build visibly (OI-1073 defect 2), not swallow it"
-    )
-    assert ">&2" in wrapper, "failure message must go to the hook's own stderr"
-    # The conditional: the failure line is only printed when BUILD_RC != 0,
-    # so the hook does not noise up a healthy session.
-    assert "BUILD_RC" in wrapper
+    assert 'vnx_hook_python "$ENGINE_ROOT"' in wrapper, "hook must resolve its interpreter through the shared helper"
+    # 5) Failure logging lives in the trigger's reaper (OI-3056), not in the
+    #    wrapper: the hook has returned long before the build ends.
+    trigger = (_ROOT / "scripts" / "lib" / "state_rebuild_trigger.py").read_text(encoding="utf-8")
+    assert "build_t0_state.err" in trigger, "the trigger's reaper must log a failed build to build_t0_state.err"
+    assert "BUILD_RC" not in wrapper
 
 
 # ---------------------------------------------------------------------------
@@ -469,7 +464,7 @@ def test_system_health_includes_beacon_data_when_beacons_exist(tmp_path: Path) -
     data_dir = tmp_path / "data"
     state_dir = data_dir / "state"
     state_dir.mkdir(parents=True)
-    (state_dir / "terminal_state.json").write_text("{}", encoding="utf-8")
+    (state_dir / "t0_receipts.ndjson").write_text("", encoding="utf-8")
 
     # Write a beacon under data_dir/health/
     HealthBeacon(data_dir, "test_comp", expected_interval_seconds=3600).heartbeat(
@@ -495,7 +490,7 @@ def test_system_health_graceful_when_no_beacons(tmp_path: Path) -> None:
     """_build_system_health does not crash when no beacons directory exists."""
     state_dir = tmp_path / "state"
     state_dir.mkdir(parents=True)
-    (state_dir / "terminal_state.json").write_text("{}", encoding="utf-8")
+    (state_dir / "t0_receipts.ndjson").write_text("", encoding="utf-8")
 
     health = bts._build_system_health(state_dir, db_initialized=True)
     # beacon_health is absent when no beacons exist (beacon_summary returns
@@ -511,7 +506,7 @@ def test_system_health_surfaces_stale_beacon(tmp_path: Path) -> None:
     data_dir = tmp_path / "data"
     state_dir = data_dir / "state"
     state_dir.mkdir(parents=True)
-    (state_dir / "terminal_state.json").write_text("{}", encoding="utf-8")
+    (state_dir / "t0_receipts.ndjson").write_text("", encoding="utf-8")
 
     # Write a manually-aged stale beacon directly (bypass HealthBeacon so we
     # can set an old timestamp).

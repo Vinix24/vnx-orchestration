@@ -15,7 +15,7 @@ import config_registry as cr
 
 @pytest.fixture(autouse=True)
 def _clean_env(monkeypatch):
-    for key in ("VNX_AGENT_LAYOUT", "VNX_OVERRIDE_AGENT_LAYOUT", "VNX_AGENT_FOLDERS"):
+    for key in ("VNX_AGENT_LAYOUT", "VNX_OVERRIDE_AGENT_LAYOUT"):
         monkeypatch.delenv(key, raising=False)
     cr.set_db_resolver(None)
     cr.set_default_project_id(None)
@@ -81,21 +81,3 @@ def test_off_logs_nothing(monkeypatch, caplog):
     with caplog.at_level(logging.WARNING, logger=agent_layout.logger.name):
         assert agent_layout.layout_mode() == "off"
     assert not caplog.records
-
-
-def test_off_leaves_agent_folders_enabled_true(monkeypatch):
-    import agent_layout
-    import agent_resolver
-
-    monkeypatch.setenv("VNX_AGENT_LAYOUT", "off")
-    assert agent_layout.layout_mode() == "off"
-    assert agent_resolver.agent_folders_enabled() is True
-    monkeypatch.setenv("VNX_AGENT_FOLDERS", "0")
-    assert agent_resolver.agent_folders_enabled() is False
-
-
-def test_shadow_does_not_change_agent_folders_enabled(monkeypatch):
-    import agent_resolver
-
-    monkeypatch.setenv("VNX_AGENT_LAYOUT", "shadow")
-    assert agent_resolver.agent_folders_enabled() is True

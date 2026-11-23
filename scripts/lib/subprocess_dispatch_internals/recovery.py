@@ -7,7 +7,6 @@ that ``unittest.mock.patch("subprocess_dispatch.X")`` intercepts the call.
 from __future__ import annotations
 
 import logging
-import os
 import sys
 import time
 from datetime import datetime, timezone
@@ -25,93 +24,6 @@ logger = logging.getLogger(__name__)
 # this lane writes, one per delivery attempt:
 # <project_id>:subprocess_recovery:<dispatch_id>:<attempt>.
 COST_LEDGER_PRODUCER = "subprocess_recovery"
-
-
-def _shared_govern_enabled() -> bool:
-    """VNX_SHARED_GOVERN gate for the subprocess lane (default off — safe ship).
-
-    dispatch_govern.py's own docstring names tmux AND subprocess as its intended
-    callers; the tmux lane already routes through govern() unconditionally. This
-    flag lets the subprocess lane opt in the same way VNX_SHARED_PREPARE gated its
-    PREPARE-side adoption before tmux made it unconditional.
-    """
-    return os.environ.get("VNX_SHARED_GOVERN", "0").strip().lower() in (
-        "1", "true", "yes", "on",
-    )
-
-
-def _govern_report(
-    *,
-    dispatch_id: str,
-    terminal_id: str,
-    instruction: str,
-    status: str,
-    dispatch_start_ts: str,
-    pre_sha: str,
-    model: "str | None",
-    role: "str | None",
-    pr_id: "str | None",
-    token_usage: "dict | None",
-    cost_usd: "float | None",
-    cost_source: "str | None" = None,
-) -> None:
-    """Emit the unified report via the shared dispatch_govern.govern() step.
-
-    Mirrors the tmux lane's GOVERN wiring. govern() checks unified_reports/ for a
-    worker-authored report (including the legacy "<id>_report.md" subprocess-lane
-    filename) and falls back to a git-diff synthesis (base_sha=pre_sha) with
-    schema-complete frontmatter and contract validation — a strict upgrade over the
-    prior stub-only ``_ensure_unified_report`` (success path) / no report at all
-    (failure path).
-
-    Receipt writing is untouched: ``_write_receipt`` still runs unconditionally
-    after this call. Passing a non-None ``GovernRaw.receipt`` makes govern()'s
-    ``ensure_receipt`` fallback a no-op, so there is no double-receipt-append.
-
-    govern() is documented to never raise; only the import is defended here.
-    """
-    import subprocess_dispatch as _sd
-    try:
-        from dispatch_govern import GovernRaw, GovernSpec, govern  # noqa: PLC0415
-    except ImportError as exc:
-        logger.error(
-            "deliver_with_recovery: dispatch_govern import failed for dispatch=%s: %s",
-            dispatch_id, exc,
-        )
-        return
-
-    state_dir = _sd._default_state_dir()
-    repo_cwd = Path(__file__).resolve().parents[3]
-    try:
-        started = datetime.fromisoformat(dispatch_start_ts)
-        duration_seconds = (datetime.now(timezone.utc) - started).total_seconds()
-    except ValueError:
-        duration_seconds = 0.0
-
-    spec = GovernSpec(
-        dispatch_id=dispatch_id,
-        terminal_id=terminal_id,
-        instruction=instruction,
-        data_dir=state_dir.parent,
-        state_dir=state_dir,
-        pr_id=pr_id,
-        base_sha=pre_sha,
-        worktree_path=repo_cwd,
-        model=model,
-        role=role,
-    )
-    raw = GovernRaw(
-        receipt={
-            "status": status,
-            "model": model,
-            "token_usage": token_usage,
-            "cost_usd": cost_usd,
-            "cost_source": cost_source,
-        },
-        duration_seconds=duration_seconds,
-    )
-    govern(spec, raw, lane="subprocess")
-
 
 
 def _read_dispatch_path_manifest(dispatch_id: str) -> "list[str] | None":
@@ -339,23 +251,15 @@ def _handle_success(
         dispatch_id, sub_result, model, role, emit_old_event=True,
     )
 
-    if _shared_govern_enabled():
-        _govern_report(
-            dispatch_id=dispatch_id, terminal_id=terminal_id, instruction=instruction,
-            status="done", dispatch_start_ts=dispatch_start_ts, pre_sha=pre_sha,
-            model=model, role=role, pr_id=pr_id,
-            token_usage=token_usage, cost_usd=cost_usd, cost_source=cost_source,
-        )
-    else:
-        # The worker wrote no report of its own: write a contract-valid close-out
-        # report. The model the dispatch actually ran with must reach the report's
-        # identity block or the receipt converter refuses the dispatch report.
-        _sd._ensure_unified_report(
-            dispatch_id, terminal_id, "done",
-            model=model,
-            provider="claude",
-            changed_files=sorted(getattr(sub_result, "touched_files", None) or ()),
-        )
+    # The worker wrote no report of its own: write a contract-valid close-out
+    # report. The model the dispatch actually ran with must reach the report's
+    # identity block or the receipt converter refuses the dispatch report.
+    _sd._ensure_unified_report(
+        dispatch_id, terminal_id, "done",
+        model=model,
+        provider="claude",
+        changed_files=sorted(getattr(sub_result, "touched_files", None) or ()),
+    )
     _sd._write_receipt(
         dispatch_id, terminal_id, "done",
         event_count=sub_result.event_count,
@@ -430,17 +334,6 @@ def _handle_final_failure(
             manifest_paths=manifest_paths,
         )
     token_usage, cost_usd, cost_source, run_ids = _resolve_receipt_cost(dispatch_id, sub_result, model, role, emit_old_event=False)
-    if _shared_govern_enabled():
-        # Genuinely new coverage: pre-wiring, the subprocess lane emitted no unified
-        # report at all on the budget-exhausted failure path (only _write_receipt ran).
-        # govern() gives failed dispatches the same honest synthesized body the tmux
-        # lane always produces, instead of an audit-trail gap.
-        _govern_report(
-            dispatch_id=dispatch_id, terminal_id=terminal_id, instruction=instruction,
-            status="failed", dispatch_start_ts=dispatch_start_ts, pre_sha=pre_sha,
-            model=model, role=role, pr_id=pr_id,
-            token_usage=token_usage, cost_usd=cost_usd, cost_source=cost_source,
-        )
     _sd._write_receipt(
         dispatch_id, terminal_id, "failed",
         event_count=sub_result.event_count,
@@ -485,6 +378,20 @@ def _handle_final_failure(
     )
 
 
+def _stamp_subprocess_start(
+    dispatch_id: str, terminal_id: str, model: str, role: "str | None",
+    pr_id: "str | None", parent_dispatch: "str | None",
+) -> None:
+    """ADR-071 besluit 2: the subprocess lane's one ``dispatch_metadata`` row, at the start."""
+    import subprocess_dispatch as _sd
+    from dispatch_metadata_db import stamp_lane_start
+    stamp_lane_start(
+        _sd._default_state_dir(), dispatch_id=dispatch_id, terminal=terminal_id,
+        provider="claude", model=model, role=role, pr_id=pr_id,
+        parent_dispatch=parent_dispatch,
+    )
+
+
 def _init_recovery_state(
     dispatch_id: str,
     instruction: str,
@@ -493,6 +400,8 @@ def _init_recovery_state(
     role: "str | None",
     repo_map: "str | None",
     dispatch_paths: "list[str] | None" = None,
+    pr_id: "str | None" = None,
+    parent_dispatch: "str | None" = None,
 ) -> tuple[str, str, "frozenset | set | list", "list[str] | None"]:
     """Capture dispatch_start_ts, commit_hash, pre-dispatch dirty files, manifest paths.
 
@@ -506,6 +415,7 @@ def _init_recovery_state(
     # This call's attempts start a fresh list: an earlier call for the same id
     # in this process already had its receipt.
     _dispatch_cost_records.pop(dispatch_id, None)
+    _stamp_subprocess_start(dispatch_id, terminal_id, model, role, pr_id, parent_dispatch)
     dispatch_start_ts = datetime.now(timezone.utc).isoformat()
     commit_hash_before = _sd._get_commit_hash()
     repo_cwd = Path(__file__).resolve().parents[3]
@@ -643,6 +553,7 @@ def deliver_with_recovery(
     pr_id: "str | None" = None,
     mandate_id: "str | None" = None,
     skill: "str | None" = None,
+    parent_dispatch: "str | None" = None,
 ) -> bool:
     """Deliver with automatic retry; success -> "done" receipt, final fail -> "failed".
 
@@ -657,15 +568,16 @@ def deliver_with_recovery(
 
     skill (OI-2372): the spec-bound skill, forwarded to the prompt assembly seam
     on every attempt. None = no skill, the prompt unchanged.
+
+    parent_dispatch (ADR-071 besluit 2): written fill-once to the dispatch's
+    ``dispatch_metadata`` row at the start; None leaves any existing parent alone.
     """
     import subprocess_dispatch as _sd
     chunk_timeout, total_deadline = apply_runtime_overrides(chunk_timeout, total_deadline)
 
-    dispatch_start_ts, commit_hash_before, pre_dispatch_dirty, manifest_paths = (
-        _init_recovery_state(
-            dispatch_id, instruction, terminal_id, model, role, repo_map,
-            dispatch_paths=dispatch_paths,
-        )
+    dispatch_start_ts, commit_hash_before, pre_dispatch_dirty, manifest_paths = _init_recovery_state(
+        dispatch_id, instruction, terminal_id, model, role, repo_map,
+        dispatch_paths=dispatch_paths, pr_id=pr_id, parent_dispatch=parent_dispatch,
     )
     pre_sha = commit_hash_before
     monitor = _sd.WorkerHealthMonitor(terminal_id, dispatch_id)

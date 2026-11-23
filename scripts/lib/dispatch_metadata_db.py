@@ -109,6 +109,23 @@ def _log_tenant_stamp_skip(
 DEFAULT_LOCK_TIMEOUT_SECONDS = 5.0
 
 
+def _probe_columns(conn: sqlite3.Connection) -> tuple:
+    """Which optional ``dispatch_metadata`` columns this store has.
+
+    Order: provider, model, project_id, outcome_report_path, outcome_status,
+    completed_at, session_id, parent_dispatch, difficulty_json. A column-less (old) store reads
+    False for the missing ones and is left untouched.
+    """
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(dispatch_metadata)").fetchall()}
+    return tuple(
+        name in cols for name in (
+            "provider", "model", "project_id", "outcome_report_path",
+            "outcome_status", "completed_at", "session_id", "parent_dispatch",
+            "difficulty_json",
+        )
+    )
+
+
 def upsert_dispatch_provider_row(
     db_path: Path | str,
     *,
@@ -124,6 +141,8 @@ def upsert_dispatch_provider_row(
     report_path: Optional[str] = None,
     project_id: Optional[str] = None,
     session_id: Optional[str] = None,
+    parent_dispatch: Optional[str] = None,
+    difficulty_json: Optional[str] = None,
     timeout: float = DEFAULT_LOCK_TIMEOUT_SECONDS,
 ) -> bool:
     """Create-if-absent and provider/model-stamp a ``dispatch_metadata`` row.
@@ -139,6 +158,11 @@ def upsert_dispatch_provider_row(
                may omit it.
         session_id: Pre-assigned worker session UUID (F1.1). Stamped when the
                ``session_id`` column exists. Optional — ignored when absent/None.
+        parent_dispatch: The dispatch this one continues (ADR-071 besluit 2).
+               Fill-once: ``COALESCE(parent_dispatch, ?)`` never overwrites an
+               existing parent, and a write without a parent never clears one.
+               Ignored when the column is absent.
+        difficulty_json: Difficulty recorded at staging; fill-once, ignored below v37.
         timeout: Total seconds to wait for sqlite locks before giving up on the
                whole write. Passed to ``sqlite3.connect`` as the initial busy
                timeout, then re-armed via ``PRAGMA busy_timeout`` before every
@@ -159,12 +183,7 @@ def upsert_dispatch_provider_row(
         ValueError: ``dispatch_id``, ``terminal``, or ``provider`` is empty —
             these are programmer-contract violations, not runtime conditions.
     """
-    if not (dispatch_id or "").strip():
-        raise ValueError("upsert_dispatch_provider_row: dispatch_id is required")
-    if not (terminal or "").strip():
-        raise ValueError("upsert_dispatch_provider_row: terminal is required")
-    if not (provider or "").strip():
-        raise ValueError("upsert_dispatch_provider_row: provider is required")
+    _require_upsert_args(dispatch_id, terminal, provider)
 
     # Receipt-quality PR-4: never persist the fake backend-developer default —
     # normalize it to NULL at write time so the emit-side resolver stamps
@@ -198,54 +217,14 @@ def upsert_dispatch_provider_row(
     # the measurement behind this.
     deadline = time.monotonic() + timeout
 
-    def _rearm_busy_timeout(conn: sqlite3.Connection) -> bool:
-        """Reset the connection's busy timeout to the seconds left on the
-        deadline, clamped to zero. Always writes the PRAGMA — even down to
-        0 — so a later contend point (the next statement, or an implicit
-        rollback during teardown) never inherits a stale, larger value left
-        over from an earlier arm. Returns False once the deadline has
-        already passed — the caller must give up immediately."""
-        remaining = deadline - time.monotonic()
-        conn.execute(f"PRAGMA busy_timeout = {max(0, int(remaining * 1000))}")
-        return remaining > 0
-
     conn = None
     try:
         conn = sqlite3.connect(str(db_path), timeout=timeout)
 
-        def _bail(stage: str) -> bool:
-            """Give up because the deadline is exhausted before `stage`.
-            Rolls back any transaction opened so far — best-effort: a
-            rollback that can't get the lock in time (busy_timeout is
-            already re-armed to the remaining, possibly zero, budget) is
-            swallowed, matching the fail-open contract that a bail must
-            never propagate to the dispatch. A no-op when no transaction is
-            open yet (e.g. bailing before BEGIN)."""
-            logger.debug(
-                "upsert_dispatch_provider_row: deadline exhausted before %s "
-                "for dispatch=%s — skipping", stage, dispatch_id,
-            )
-            try:
-                conn.rollback()
-            except sqlite3.Error:
-                logger.debug(
-                    "upsert_dispatch_provider_row: rollback after deadline "
-                    "exhaustion failed (non-fatal)", exc_info=True,
-                )
-            return False
-
-        if not _rearm_busy_timeout(conn):
-            return _bail("schema probe")
-        table_cols = {
-            row[1] for row in conn.execute("PRAGMA table_info(dispatch_metadata)").fetchall()
-        }
-        has_provider = "provider" in table_cols
-        has_model = "model" in table_cols
-        has_project = "project_id" in table_cols
-        has_report_path = "outcome_report_path" in table_cols
-        has_outcome = "outcome_status" in table_cols
-        has_completed = "completed_at" in table_cols
-        has_session_id = "session_id" in table_cols
+        if not _rearm_busy_timeout(conn, deadline):
+            return _bail_upsert(conn, "schema probe", dispatch_id)
+        (has_provider, has_model, has_project, has_report_path, has_outcome,
+         has_completed, has_session_id, has_parent, has_difficulty) = _probe_columns(conn)
 
         # Tenant-stamp only when the column exists (old column-less stores are
         # left untouched). Fail-closed: an unresolvable tenant logs + skips the
@@ -259,21 +238,15 @@ def upsert_dispatch_provider_row(
                 _log_tenant_stamp_skip(db_path, dispatch_id, terminal, exc)
                 return False
 
-        # --- create-if-absent (never clobber a richer dispatcher-written row) ---
-        insert_cols = ["dispatch_id", "terminal", "track", "role", "gate", "pr_id", "dispatched_at"]
-        insert_vals = [dispatch_id, terminal, track, role or None, gate or None, pr_id or None, now_iso]
-        if has_provider:
-            insert_cols.append("provider")
-            insert_vals.append(provider)
-        if has_model and model:
-            insert_cols.append("model")
-            insert_vals.append(model)
-        if has_session_id and session_id:
-            insert_cols.append("session_id")
-            insert_vals.append(session_id)
-        if has_project:
-            insert_cols.append("project_id")
-            insert_vals.append(resolved_project_id)
+        # Optional, fill-once columns: written only when the store has them and a value is given.
+        fills = [("model", has_model, model), ("session_id", has_session_id, session_id),
+                 ("parent_dispatch", has_parent, parent_dispatch),
+                 ("difficulty_json", has_difficulty, difficulty_json)]
+        insert_cols, insert_vals = _insert_columns(
+            [dispatch_id, terminal, track, role or None, gate or None, pr_id or None, now_iso],
+            provider if has_provider else None, fills,
+            has_project, resolved_project_id,
+        )
         placeholders = ", ".join("?" for _ in insert_cols)
 
         # Explicit BEGIN IMMEDIATE: makes acquiring the write lock its own
@@ -285,12 +258,12 @@ def upsert_dispatch_provider_row(
         # window instead of the intended 1x. Starting the transaction here,
         # under its own deadline check, means the INSERT's own re-arm below
         # only ever has to bound the INSERT itself.
-        if not _rearm_busy_timeout(conn):
-            return _bail("BEGIN")
+        if not _rearm_busy_timeout(conn, deadline):
+            return _bail_upsert(conn, "BEGIN", dispatch_id)
         conn.execute("BEGIN IMMEDIATE")
 
-        if not _rearm_busy_timeout(conn):
-            return _bail("INSERT")
+        if not _rearm_busy_timeout(conn, deadline):
+            return _bail_upsert(conn, "INSERT", dispatch_id)
         conn.execute(
             f"INSERT OR IGNORE INTO dispatch_metadata ({', '.join(insert_cols)}) "
             f"VALUES ({placeholders})",
@@ -298,51 +271,18 @@ def upsert_dispatch_provider_row(
         )
 
         # --- authoritative provider/model stamp + non-clobbering field fills ---
-        set_clauses = []
-        params: list = []
-        if has_provider:
-            set_clauses.append("provider = ?")
-            params.append(provider)
-        if has_model and model:
-            set_clauses.append("model = COALESCE(model, ?)")
-            params.append(model)
-        if has_session_id and session_id:
-            set_clauses.append("session_id = COALESCE(session_id, ?)")
-            params.append(session_id)
-        set_clauses.append("role = COALESCE(role, ?)")
-        params.append(role or None)
-        set_clauses.append("gate = COALESCE(gate, ?)")
-        params.append(gate or None)
-        set_clauses.append("pr_id = COALESCE(pr_id, ?)")
-        params.append(pr_id or None)
-        if outcome_status and has_outcome:
-            set_clauses.append("outcome_status = COALESCE(outcome_status, ?)")
-            params.append(outcome_status)
-        if report_path and has_report_path:
-            set_clauses.append("outcome_report_path = COALESCE(outcome_report_path, ?)")
-            params.append(report_path)
-        if completed_at and has_completed:
-            set_clauses.append("completed_at = COALESCE(completed_at, ?)")
-            params.append(completed_at)
+        set_clauses, params = _update_clauses(
+            provider if has_provider else None, fills, role, gate, pr_id,
+            [("outcome_status", outcome_status if has_outcome else None),
+             ("outcome_report_path", report_path if has_report_path else None),
+             ("completed_at", completed_at if has_completed else None)],
+        )
 
-        if not _rearm_busy_timeout(conn):
-            return _bail("UPDATE")
+        if not _rearm_busy_timeout(conn, deadline):
+            return _bail_upsert(conn, "UPDATE", dispatch_id)
 
-        # ADR-007: scope UPDATE by (project_id, dispatch_id) to prevent cross-tenant overwrite.
-        if has_project:
-            params.append(resolved_project_id)
-            params.append(dispatch_id)
-            conn.execute(
-                f"UPDATE dispatch_metadata SET {', '.join(set_clauses)} "
-                f"WHERE project_id = ? AND dispatch_id = ?",
-                params,
-            )
-        else:
-            params.append(dispatch_id)
-            conn.execute(
-                f"UPDATE dispatch_metadata SET {', '.join(set_clauses)} WHERE dispatch_id = ?",
-                params,
-            )
+        _run_scoped_update(conn, set_clauses, params, has_project,
+                           resolved_project_id, dispatch_id)
 
         # commit() upgrades the connection's lock to EXCLUSIVE to flush the
         # transaction to disk — exactly as contendable as the INSERT/UPDATE
@@ -351,8 +291,8 @@ def upsert_dispatch_provider_row(
         # (the codex BLOCK on the prior round: a commit that contends after
         # the earlier statements already spent most of the budget must not
         # get a fresh window layered on top of it).
-        if not _rearm_busy_timeout(conn):
-            return _bail("commit")
+        if not _rearm_busy_timeout(conn, deadline):
+            return _bail_upsert(conn, "commit", dispatch_id)
         conn.commit()
         logger.debug(
             "upsert_dispatch_provider_row: stamped dispatch=%s provider=%s model=%s outcome=%s",
@@ -379,3 +319,158 @@ def upsert_dispatch_provider_row(
                     "upsert_dispatch_provider_row: connection close failed "
                     "for dispatch=%s (non-fatal)", dispatch_id, exc_info=True,
                 )
+
+
+def _require_upsert_args(dispatch_id: str, terminal: str, provider: str) -> None:
+    """Raise ``ValueError`` for the first empty required argument, in order."""
+    if not (dispatch_id or "").strip():
+        raise ValueError("upsert_dispatch_provider_row: dispatch_id is required")
+    if not (terminal or "").strip():
+        raise ValueError("upsert_dispatch_provider_row: terminal is required")
+    if not (provider or "").strip():
+        raise ValueError("upsert_dispatch_provider_row: provider is required")
+
+
+def _rearm_busy_timeout(conn: sqlite3.Connection, deadline: float) -> bool:
+    """Reset the connection's busy timeout to the seconds left on the deadline,
+    clamped to zero. Always writes the PRAGMA — even down to 0 — so a later contend
+    point (the next statement, or an implicit rollback during teardown) never inherits
+    a stale, larger value left over from an earlier arm. Returns False once the
+    deadline has already passed — the caller must give up immediately."""
+    remaining = deadline - time.monotonic()
+    conn.execute(f"PRAGMA busy_timeout = {max(0, int(remaining * 1000))}")
+    return remaining > 0
+
+
+def _bail_upsert(conn: sqlite3.Connection, stage: str, dispatch_id: str) -> bool:
+    """Give up because the deadline is exhausted before `stage`. Rolls back any
+    transaction opened so far — best-effort: a rollback that can't get the lock in
+    time (busy_timeout is already re-armed to the remaining, possibly zero, budget)
+    is swallowed, matching the fail-open contract that a bail must never propagate
+    to the dispatch. A no-op when no transaction is open yet (e.g. bailing before BEGIN)."""
+    logger.debug(
+        "upsert_dispatch_provider_row: deadline exhausted before %s "
+        "for dispatch=%s — skipping", stage, dispatch_id,
+    )
+    try:
+        conn.rollback()
+    except sqlite3.Error:
+        logger.debug(
+            "upsert_dispatch_provider_row: rollback after deadline "
+            "exhaustion failed (non-fatal)", exc_info=True,
+        )
+    return False
+
+
+def _insert_columns(
+    base_vals: list, provider: Optional[str], fills: list,
+    has_project: bool, resolved_project_id: Optional[str],
+) -> tuple:
+    """Columns + values of the create-if-absent INSERT; ``provider`` None = no column."""
+    insert_cols = ["dispatch_id", "terminal", "track", "role", "gate", "pr_id", "dispatched_at"]
+    insert_vals = list(base_vals)
+    if provider is not None:
+        insert_cols.append("provider")
+        insert_vals.append(provider)
+    for col, present, value in fills:
+        if present and value:
+            insert_cols.append(col)
+            insert_vals.append(value)
+    if has_project:
+        insert_cols.append("project_id")
+        insert_vals.append(resolved_project_id)
+    return insert_cols, insert_vals
+
+
+def _update_clauses(
+    provider: Optional[str], fills: list, role: Optional[str], gate: Optional[str],
+    pr_id: Optional[str], outcome_fills: list,
+) -> tuple:
+    """SET clauses + params of the UPDATE: provider authoritative, the rest fill-once.
+    ``outcome_fills``/``provider`` carry None when the store lacks the column."""
+    set_clauses = []
+    params: list = []
+    if provider is not None:
+        set_clauses.append("provider = ?")
+        params.append(provider)
+    for col, present, value in fills:
+        if present and value:
+            set_clauses.append(f"{col} = COALESCE({col}, ?)")
+            params.append(value)
+    set_clauses.append("role = COALESCE(role, ?)")
+    params.append(role or None)
+    set_clauses.append("gate = COALESCE(gate, ?)")
+    params.append(gate or None)
+    set_clauses.append("pr_id = COALESCE(pr_id, ?)")
+    params.append(pr_id or None)
+    for col, value in outcome_fills:
+        if value:
+            set_clauses.append(f"{col} = COALESCE({col}, ?)")
+            params.append(value)
+    return set_clauses, params
+
+
+def _run_scoped_update(
+    conn: sqlite3.Connection, set_clauses: list, params: list,
+    has_project: bool, resolved_project_id: Optional[str], dispatch_id: str,
+) -> None:
+    """ADR-007: scope UPDATE by (project_id, dispatch_id) to prevent cross-tenant overwrite."""
+    if has_project:
+        params.append(resolved_project_id)
+        params.append(dispatch_id)
+        conn.execute(
+            f"UPDATE dispatch_metadata SET {', '.join(set_clauses)} "
+            f"WHERE project_id = ? AND dispatch_id = ?",
+            params,
+        )
+    else:
+        params.append(dispatch_id)
+        conn.execute(
+            f"UPDATE dispatch_metadata SET {', '.join(set_clauses)} WHERE dispatch_id = ?",
+            params,
+        )
+
+
+_TERMINAL_TRACK = {"T1": "A", "T2": "B", "T3": "C"}
+
+
+def stamp_lane_start(
+    state_dir: Path | str,
+    *,
+    dispatch_id: str,
+    terminal: str,
+    provider: str,
+    model: Optional[str] = None,
+    role: Optional[str] = None,
+    pr_id: Optional[str] = None,
+    parent_dispatch: Optional[str] = None,
+    gate: Optional[str] = None,
+    difficulty_json: Optional[str] = None,
+) -> bool:
+    """Write the dispatch's ``dispatch_metadata`` row at the start of a lane.
+
+    ADR-071 besluit 2: the claude-headless lane and the subprocess lane each call
+    this once, before the worker runs. Best-effort exactly like the writer it
+    wraps: a missing DB, a sqlite error, an unresolvable tenant or an empty
+    required field returns ``False`` and never raises into the dispatch.
+    """
+    try:
+        return upsert_dispatch_provider_row(
+            Path(state_dir) / "quality_intelligence.db",
+            dispatch_id=dispatch_id,
+            terminal=terminal,
+            provider=provider,
+            model=model or None,
+            track=_TERMINAL_TRACK.get(terminal, "headless"),
+            role=role,
+            gate=gate or None,
+            pr_id=pr_id,
+            parent_dispatch=(parent_dispatch or "").strip() or None,
+            difficulty_json=(difficulty_json or "").strip() or None,
+        )
+    except Exception as exc:  # vnx-silent-except: the lane start must never fail on a metadata write
+        logger.warning(
+            "stamp_lane_start: failed for dispatch=%s provider=%s (non-fatal): %s",
+            dispatch_id, provider, exc,
+        )
+        return False

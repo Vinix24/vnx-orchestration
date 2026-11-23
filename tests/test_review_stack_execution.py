@@ -26,7 +26,7 @@ from pathlib import Path
 import pytest
 
 import review_stack_support  # noqa: F401  (puts scripts/ and scripts/lib on sys.path)
-from review_stack_support import BRANCH, HEAD_SHA, PR, build_project_store, isolate_config_registry
+from review_stack_support import BRANCH, HEAD_SHA, PR, build_project_store, isolate_config_registry, pin_kimi_era_review_config
 
 import gate_recorder
 from gate_recorder import GATE_PROVIDERS
@@ -106,7 +106,9 @@ def _clean_config_registry(monkeypatch):
 
 @pytest.fixture
 def env(tmp_path, monkeypatch):
-    return build_project_store(tmp_path, monkeypatch)
+    store = build_project_store(tmp_path, monkeypatch)
+    pin_kimi_era_review_config(monkeypatch)
+    return store
 
 
 @pytest.fixture(autouse=True)
@@ -352,13 +354,11 @@ def default_stack(env, monkeypatch):
     left out so no test path reaches for ``gh``; codex counted as installed."""
     import review_gate_manager as rgm
     import gate_request_handler
-    import profile_gate_resolver
 
     monkeypatch.setenv("VNX_CI_GATE_REQUIRED", "0")
     stack = rgm._build_default_review_stack()
     assert stack == ["codex_gate", "kimi_gate"]
     monkeypatch.setattr(rgm, "DEFAULT_REVIEW_STACK", stack)
-    monkeypatch.setattr(profile_gate_resolver, "resolve_gate_stack", lambda _files: None)
     monkeypatch.setattr(gate_request_handler.GateRequestHandlerMixin, "_codex_headless_available", lambda self: True)
     return stack
 

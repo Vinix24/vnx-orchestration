@@ -1,7 +1,7 @@
 """
 scout_sketch source — cheap-model scout pre-pass grounding.
 
-Direct-injection builder that reads a per-dispatch ``scout_context.json`` sidecar
+Direct-injection builder that reads a per-dispatch ``<dispatch_id>.json`` sidecar
 (written by the scout pre-pass in the door) and renders it as a ranked
 INCLUDE/MAYBE pointer block + plan sketch. Fail-open: no sidecar → None, and the
 worker falls back to the deterministic code_anchor injection.

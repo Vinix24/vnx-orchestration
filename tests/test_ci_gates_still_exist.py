@@ -4,8 +4,8 @@
 Four whole-tree scans ran twice per PR: in their own blocking ``profile-a`` step and
 again in the parallel pytest phase (~40 s). tsk-5 removed the parallel copies, so the
 step is now the only thing that runs the check; this file guards it — parse the
-workflow as YAML, find the step in the ``profile-a`` job, and fail, naming the removed
-test, when the step, its command, its ``set -euo pipefail`` or its blocking nature (no
+workflow as YAML, find the step in Profile A (via tests/ci_workflow_shape.py: one job or the
+aggregator shape), and fail, naming the removed test, when the step, its command, its ``set -euo pipefail`` or its blocking nature (no
 ``continue-on-error``) is gone. Without it, dropping step and test together is silent.
 
 Fail-closed on evidence: an unreadable or malformed workflow, a missing job, a missing
@@ -21,9 +21,13 @@ from pathlib import Path
 import pytest
 import yaml
 
+import ci_workflow_shape as shape
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "vnx-ci.yml"
 PROFILE_A_JOB = "profile-a"
+# Since C3 the gates run in the guards job, which the required check needs (ADR C3a).
+GUARDS_JOB = "profile-a-guards"
 PIPE_FAIL = "set -euo pipefail"
 # GitHub accepts a boolean or an expression string here; only these spell "still blocking".
 _BLOCKING_VALUES = frozenset({"false", "0", "no"})
@@ -79,22 +83,6 @@ def _disables_blocking(value: object) -> bool:
     return True
 
 
-def _load_workflow(path: Path) -> tuple[dict | None, str]:
-    try:
-        text = path.read_text(encoding="utf-8")
-    except OSError as exc:
-        return None, f"{path}: unreadable workflow ({exc})"
-    except UnicodeDecodeError as exc:
-        return None, f"{path}: undecodable workflow ({exc})"
-    try:
-        document = yaml.safe_load(text)
-    except yaml.YAMLError as exc:
-        return None, f"{path}: malformed YAML ({exc})"
-    if not isinstance(document, dict):
-        return None, f"{path}: workflow document is not a mapping (got {type(document).__name__})"
-    return document, ""
-
-
 def _gate_names() -> str:
     return "; ".join(f"{gate.step!r} guards {', '.join(gate.removed_tests)}" for gate in GATES)
 
@@ -124,24 +112,21 @@ def _gate_violations(steps: list, gate: CiGate, path: Path) -> list[str]:
 
 def gate_violations(path: Path = WORKFLOW) -> list[str]:
     """Every way the four blocking steps fall short of the ADR-053 contract."""
-    document, error = _load_workflow(path)
-    if error:
-        return [f"{error}; unmeasured: {_gate_names()}"]
-    jobs = document.get("jobs")
-    if not isinstance(jobs, dict):
-        return [f"{path}: no jobs mapping; unmeasured: {_gate_names()}"]
-    job = jobs.get(PROFILE_A_JOB)
-    if not isinstance(job, dict):
-        return [f"{path}: no {PROFILE_A_JOB!r} job step; unmeasured: {_gate_names()}"]
+    try:
+        profile_a = shape.profile_a(path)
+    except shape.WorkflowShapeError as exc:
+        return [f"{path}: {exc}; unmeasured: {_gate_names()}"]
     violations = []
-    if _disables_blocking(job.get("continue-on-error")):
-        violations.append(
-            f"{path}: the {PROFILE_A_JOB!r} job sets continue-on-error "
-            f"{job.get('continue-on-error')!r}; every step below it is non-blocking"
-        )
-    steps = job.get("steps")
-    if not isinstance(steps, list):
-        return violations + [f"{path}: {PROFILE_A_JOB!r} has no steps list; unmeasured: {_gate_names()}"]
+    for job in profile_a.jobs:
+        if _disables_blocking(job.body.get("continue-on-error")):
+            violations.append(
+                f"{path}: the {job.name!r} job sets continue-on-error "
+                f"{job.body.get('continue-on-error')!r}; every step below it is non-blocking"
+            )
+    try:
+        steps = [entry.step for entry in profile_a.steps]
+    except shape.WorkflowShapeError as exc:
+        return violations + [f"{path}: {exc}; unmeasured: {_gate_names()}"]
     for gate in GATES:
         violations.extend(_gate_violations(steps, gate, path))
     return violations
@@ -172,13 +157,11 @@ _MISSING = object()
 
 
 def _document() -> dict:
-    document, error = _load_workflow(WORKFLOW)
-    assert not error, error
-    return document
+    return shape.load_workflow(WORKFLOW)
 
 
 def _steps(document: dict) -> list:
-    return document["jobs"][PROFILE_A_JOB]["steps"]
+    return document["jobs"][GUARDS_JOB]["steps"]
 
 
 def _step(document: dict, name: str) -> dict:
@@ -262,12 +245,12 @@ def test_a_missing_blank_or_non_string_run_turns_the_gate_red(tmp_path: Path, ru
 
 STRUCTURAL_BREAKS = {
     "no-jobs-mapping": (lambda doc: doc.pop("jobs"), "no jobs mapping"),
-    "no-profile-a-job": (lambda doc: doc["jobs"].pop(PROFILE_A_JOB), PROFILE_A_JOB),
+    "no-profile-a-job": (lambda doc: doc["jobs"].pop(PROFILE_A_JOB), shape.REQUIRED_CHECK_NAME),
     "job-continue-on-error": (
-        lambda doc: doc["jobs"][PROFILE_A_JOB].__setitem__("continue-on-error", True),
+        lambda doc: doc["jobs"][GUARDS_JOB].__setitem__("continue-on-error", True),
         "job sets continue-on-error",
     ),
-    "steps-not-a-list": (lambda doc: doc["jobs"][PROFILE_A_JOB].__setitem__("steps", None), "no steps list"),
+    "steps-not-a-list": (lambda doc: doc["jobs"][GUARDS_JOB].__setitem__("steps", None), "no steps list"),
     "duplicate-step": (
         lambda doc: _steps(doc).append(dict(_step(doc, GATES[1].step))),
         "appears 2 times",

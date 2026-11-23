@@ -1,1 +1,0 @@
-- The daily `rounds_per_pr` now comes from the round ledger over exactly the day's merged PRs (track `doorloop-en-effectiviteit-dagelijks`, PR-5b): one codex-seat verdict per distinct head is a round, and a merged PR the ledger does not cover makes the metric `None` with `rounds_missing_for_<n>_prs` instead of 0.

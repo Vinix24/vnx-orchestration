@@ -9,6 +9,7 @@ import os
 import re
 import sqlite3
 import sys
+import time
 import json
 import yaml
 from datetime import datetime
@@ -40,7 +41,6 @@ def _get_project_id() -> str:
     return _current_project_id()
 
 
-ROLLBACK_ENV_FLAG = "VNX_STATE_SIMPLIFICATION_ROLLBACK"
 PR_QUEUE_RESULT_EXIT_CODE_MAP = {
     "missing_argument": 10,
     "invalid_argument": 10,
@@ -51,24 +51,97 @@ PR_QUEUE_RESULT_EXIT_CODE_MAP = {
 }
 
 
-def _env_flag(name: str) -> Optional[bool]:
-    value = os.environ.get(name)
-    if value is None:
-        return None
-    return value.strip().lower() in {"1", "true", "yes", "on"}
-
-
-def _rollback_mode_flag() -> Optional[bool]:
-    value = _env_flag(ROLLBACK_ENV_FLAG)
-    if value is None:
-        value = _env_flag("VNX_STATE_DUAL_WRITE_LEGACY")
-    return value
-
 try:
     from state_integrity import write_checksum
 except ImportError:
     # Non-critical in minimal runtime environments; queue state writes still proceed.
     write_checksum = None
+
+STAGING_LIST_USAGE = (
+    "Usage: pr_queue_manager.py staging-list [--json]\n"
+    "  Lists the staged spec bundles (pending/<id>/dispatch-spec.json) in the\n"
+    "  resolved dispatch dir, oldest first. --json prints the same as a JSON list."
+)
+
+
+def _fmt_age(seconds: float) -> str:
+    seconds = max(0, int(seconds))
+    if seconds < 3600:
+        return f"{seconds // 60}m"
+    if seconds < 86400:
+        return f"{seconds // 3600}h{(seconds % 3600) // 60:02d}m"
+    return f"{seconds // 86400}d{(seconds % 86400) // 3600:02d}h"
+
+
+def list_staged_bundles(dispatch_dir: Path, now: Optional[float] = None) -> List[Dict[str, Any]]:
+    """One entry per ``pending/<id>/dispatch-spec.json``, oldest mtime first.
+
+    An unreadable or invalid file becomes an entry with ``error`` set, never an
+    exception: a broken bundle must stay visible in the listing.
+    """
+    now = time.time() if now is None else now
+    entries: List[Dict[str, Any]] = []
+    for spec_path in (Path(dispatch_dir) / "pending").glob("*/dispatch-spec.json"):
+        entry: Dict[str, Any] = {"dispatch_id": spec_path.parent.name}
+        try:
+            mtime = spec_path.stat().st_mtime
+            spec = json.loads(spec_path.read_text(encoding="utf-8"))
+            if not isinstance(spec, dict):
+                raise ValueError(f"top level is {type(spec).__name__}, not an object")
+        except (OSError, ValueError) as exc:  # JSONDecodeError and UnicodeDecodeError are ValueErrors
+            try:
+                mtime = spec_path.stat().st_mtime
+            except OSError:
+                mtime = now
+            entry.update({"mtime": mtime, "age_seconds": max(0, now - mtime),
+                          "error": f"{type(exc).__name__}: {exc}"})
+        else:
+            entry.update({
+                "dispatch_id": spec.get("dispatch_id") or spec_path.parent.name,
+                "mtime": mtime,
+                "age_seconds": max(0, now - mtime),
+                "track_id": spec.get("track_id"),
+                "role": spec.get("role"),
+                "provider": spec.get("provider"),
+                "model": spec.get("model"),
+                "pr_id": spec.get("pr_id"),
+                "parent_dispatch": spec.get("parent_dispatch"),
+            })
+        entries.append(entry)
+    entries.sort(key=lambda e: (e["mtime"], e["dispatch_id"]))
+    return entries
+
+
+def run_staging_list(argv: List[str]) -> int:
+    """``staging-list`` entry: reads nothing for --help, never raises on a bad bundle."""
+    if "--help" in argv or "-h" in argv:
+        print(STAGING_LIST_USAGE)
+        return 0
+    unknown = [a for a in argv if a != "--json"]
+    if unknown:
+        print(f"staging-list: unknown argument {unknown[0]!r}\n{STAGING_LIST_USAGE}", file=sys.stderr)
+        return 2
+    dispatch_dir = Path(_resolve_vnx_paths()["VNX_DISPATCH_DIR"])
+    entries = list_staged_bundles(dispatch_dir)
+    if "--json" in argv:
+        print(json.dumps(entries, indent=2))
+        return 0
+    if not entries:
+        print(f"No staged spec bundles in {dispatch_dir / 'pending'}.")
+        return 0
+    for e in entries:
+        age = _fmt_age(e["age_seconds"])
+        if "error" in e:
+            print(f"{e['dispatch_id']}  age={age}  INVALID: {e['error']}")
+            continue
+        engine = "/".join(x for x in (e["provider"], e["model"]) if x) or "-"
+        print(
+            f"{e['dispatch_id']}  age={age}  track={e['track_id'] or '-'}  "
+            f"role={e['role'] or '-'}  engine={engine}  pr={e['pr_id'] or '-'}  "
+            f"parent={e['parent_dispatch'] or '-'}"
+        )
+    return 0
+
 
 class PRQueueManager:
     """
@@ -79,11 +152,9 @@ class PRQueueManager:
 
         # Resolve dispatch paths via vnx_paths (Phase P packaging)
         vnx_paths = _resolve_vnx_paths()
-        vnx_root = Path(vnx_paths["VNX_HOME"]).expanduser().resolve()
         project_root = Path(vnx_paths["PROJECT_ROOT"]).expanduser().resolve()
         self.dispatch_dir = Path(vnx_paths["VNX_DISPATCH_DIR"])
         self.vnx_state_dir = Path(vnx_paths["VNX_STATE_DIR"]).expanduser().resolve()
-        self.legacy_state_dir = (vnx_root / "state").resolve()
 
         # w19c/OI-934: PRQueueManager exists to write PR queue state and
         # dispatch-staging files — construction is the earliest point that
@@ -92,20 +163,6 @@ class PRQueueManager:
         # test isolation (see tests/test_pr_dispatch_integration.py history).
         _refuse_real_store_write(self.vnx_state_dir)
         _refuse_real_store_write(self.dispatch_dir)
-        rollback_flag = _rollback_mode_flag()
-        self.rollback_mode = bool(rollback_flag)
-        dual_write_flag = _env_flag("VNX_PR_QUEUE_DUAL_WRITE_LEGACY")
-        if dual_write_flag is None:
-            dual_write_flag = _env_flag("VNX_STATE_DUAL_WRITE_LEGACY")
-        if dual_write_flag is None:
-            dual_write_flag = self.rollback_mode
-        self.dual_write_legacy = bool(dual_write_flag)
-        if self.dual_write_legacy:
-            print(
-                "[CUTOVER] WARNING: legacy PR queue mirror writes enabled "
-                "(rollback mode). Canonical state remains primary.",
-                file=sys.stderr,
-            )
 
         # Store state in project's VNX_STATE_DIR (not script-relative) to prevent
         # cross-project contamination when multiple projects share the same vnx-system.
@@ -194,11 +251,6 @@ class PRQueueManager:
         event_log.parent.mkdir(parents=True, exist_ok=True)
         with open(event_log, 'a') as f:
             f.write(json.dumps(event_record, separators=(',', ':')) + '\n')
-        if self.dual_write_legacy:
-            legacy_log = self.legacy_state_dir / "queue_event_log.jsonl"
-            legacy_log.parent.mkdir(parents=True, exist_ok=True)
-            with open(legacy_log, 'a') as f:
-                f.write(json.dumps(event_record, separators=(',', ':')) + '\n')
 
 
     def save_vnx_state(self):
@@ -219,20 +271,6 @@ class PRQueueManager:
                 write_checksum(self.vnx_queue_json)
             except Exception as exc:
                 print(f"Warning: failed to write checksum for pr_queue.json: {exc}")
-
-        if self.dual_write_legacy:
-            self.legacy_state_dir.mkdir(parents=True, exist_ok=True)
-            legacy_yaml = self.legacy_state_dir / "pr_queue_state.yaml"
-            legacy_json = self.legacy_state_dir / "pr_queue.json"
-            with open(legacy_yaml, 'w') as f:
-                yaml.dump(vnx_state, f, default_flow_style=False, sort_keys=False)
-            with open(legacy_json, 'w') as f:
-                json.dump(vnx_state, f, indent=2)
-            if write_checksum:
-                try:
-                    write_checksum(legacy_json)
-                except Exception as exc:
-                    print(f"Warning: failed to write checksum for legacy pr_queue.json: {exc}")
 
     def add_pr(self, pr_data: Dict):
         """
@@ -496,13 +534,6 @@ class PRQueueManager:
             json.dump(entry, f)
             f.write('\n')
 
-        if self.dual_write_legacy:
-            legacy_log = self.legacy_state_dir / "dispatch_audit.jsonl"
-            legacy_log.parent.mkdir(parents=True, exist_ok=True)
-            with open(legacy_log, 'a') as f:
-                json.dump(entry, f)
-                f.write('\n')
-
     def extract_v2_metadata(self, dispatch_file: Path) -> Dict[str, str]:
         """
         Extract metadata from Manager Block v2 dispatch file
@@ -641,8 +672,6 @@ class PRQueueManager:
         Returns:
             True if patched successfully
         """
-        import re
-
         # Normalize dispatch_id
         if not dispatch_id.endswith('.md'):
             dispatch_id_file = f"{dispatch_id}.md"
@@ -662,84 +691,7 @@ class PRQueueManager:
             changes = []
 
             for field, new_value in patches.items():
-
-                # === INSTRUCTION BODY: replace entirely ===
-                if field == 'instruction':
-                    match = re.search(
-                        r'(Instruction:\n)(.+?)(\n\nDependencies:|\n\n\[\[DONE\]\])',
-                        content, re.DOTALL
-                    )
-                    if match:
-                        old_body = match.group(2).strip()
-                        content = content[:match.start(2)] + new_value + '\n' + content[match.end(2):]
-                        changes.append(f"instruction: replaced ({len(old_body)} → {len(new_value)} chars)")
-                    else:
-                        print(f"⚠️  Could not locate Instruction body in dispatch")
-
-                # === INSTRUCTION BODY: append ===
-                elif field == 'append-instruction':
-                    match = re.search(
-                        r'(Instruction:\n.+?)(\n\nDependencies:|\n\n\[\[DONE\]\])',
-                        content, re.DOTALL
-                    )
-                    if match:
-                        insert_pos = match.end(1)
-                        content = content[:insert_pos] + '\n\n' + new_value + content[insert_pos:]
-                        changes.append(f"instruction: appended {len(new_value)} chars")
-                    else:
-                        print(f"⚠️  Could not locate Instruction body in dispatch")
-
-                # === INSTRUCTION BODY: prepend ===
-                elif field == 'prepend-instruction':
-                    match = re.search(r'Instruction:\n', content)
-                    if match:
-                        insert_pos = match.end()
-                        content = content[:insert_pos] + new_value + '\n\n' + content[insert_pos:]
-                        changes.append(f"instruction: prepended {len(new_value)} chars")
-                    else:
-                        print(f"⚠️  Could not locate Instruction header in dispatch")
-
-                # === INSTRUCTION FROM FILE ===
-                elif field == 'instruction-file':
-                    file_path = Path(new_value)
-                    if not file_path.is_absolute():
-                        file_path = self.project_root / new_value
-                    if not file_path.exists():
-                        print(f"❌ Instruction file not found: {new_value}")
-                        continue
-                    file_content = file_path.read_text().strip()
-                    match = re.search(
-                        r'(Instruction:\n)(.+?)(\n\nDependencies:|\n\n\[\[DONE\]\])',
-                        content, re.DOTALL
-                    )
-                    if match:
-                        content = content[:match.start(2)] + file_content + '\n' + content[match.end(2):]
-                        changes.append(f"instruction: replaced from file {file_path.name} ({len(file_content)} chars)")
-                    else:
-                        print(f"⚠️  Could not locate Instruction body in dispatch")
-
-                # === HEADER FIELDS (any Manager Block field) ===
-                else:
-                    field_capitalized = field.replace('-', ' ').title().replace(' ', '-')
-                    pattern = f"{field_capitalized}: (.+)"
-                    match = re.search(pattern, content)
-                    if match:
-                        old_value = match.group(1)
-                        content = content.replace(
-                            f"{field_capitalized}: {old_value}",
-                            f"{field_capitalized}: {new_value}",
-                            1  # only first occurrence
-                        )
-                        changes.append(f"{field}: {old_value} → {new_value}")
-                    else:
-                        # Field not found - insert it before Dispatch-ID line
-                        insert_match = re.search(r'(Dispatch-ID:)', content)
-                        if insert_match:
-                            insert_line = f"{field_capitalized}: {new_value}\n"
-                            content = content[:insert_match.start()] + insert_line + content[insert_match.start():]
-                            changes.append(f"{field}: (added) {new_value}")
-                        else:
-                            print(f"⚠️  Field '{field}' not found and could not insert")
+                content = self._patch_apply_field(content, field, new_value, changes)
 
             if not changes:
                 print("❌ No changes applied")
@@ -773,78 +725,95 @@ class PRQueueManager:
             traceback.print_exc()
             return False
 
-    def list_staging_dispatches(self) -> None:
-        """
-        List all staging dispatches with dependency status
-        """
-        staging_dir = self.dispatch_dir / "staging"
+    def _patch_apply_field(self, content: str, field: str, new_value: str, changes: list) -> str:
+        """Apply one patch field to dispatch text; append to `changes`, return new text."""
+        import re
 
-        if not staging_dir.exists():
-            print("📭 No staging directory found")
-            return
-
-        dispatch_files = sorted(staging_dir.glob("*.md"))
-
-        if not dispatch_files:
-            print("📭 No dispatches in staging")
-            return
-
-        print(f"\n📋 Staging Dispatches ({len(dispatch_files)} total)\n")
-
-        ready = []
-        waiting = []
-
-        for dispatch_file in dispatch_files:
-            metadata = self.extract_v2_metadata(dispatch_file)
-            pr_id = metadata.get('pr_id', 'Unknown')
-
-            # Check dependencies
-            pr = self.get_pr(pr_id)
-            if pr:
-                deps_met, msg = self.check_pr_dependencies(pr_id)
-
-                info = {
-                    'pr_id': pr_id,
-                    'file': dispatch_file.name,
-                    'role': metadata.get('role', 'Unknown'),
-                    'priority': metadata.get('priority', 'Unknown'),
-                    'deps_met': deps_met,
-                    'msg': msg
-                }
-
-                if deps_met:
-                    ready.append(info)
-                else:
-                    waiting.append(info)
+        # === INSTRUCTION BODY: replace entirely ===
+        if field == 'instruction':
+            match = re.search(
+                r'(Instruction:\n)(.+?)(\n\nDependencies:|\n\n\[\[DONE\]\])',
+                content, re.DOTALL
+            )
+            if match:
+                old_body = match.group(2).strip()
+                content = content[:match.start(2)] + new_value + '\n' + content[match.end(2):]
+                changes.append(f"instruction: replaced ({len(old_body)} → {len(new_value)} chars)")
             else:
-                # PR not in queue, probably orphaned
-                print(f"⚠️  {pr_id}: No PR in queue (orphaned dispatch)")
+                print(f"⚠️  Could not locate Instruction body in dispatch")
 
-        # Print ready dispatches
-        if ready:
-            print("✅ Ready to Promote (dependencies met):\n")
-            for d in ready:
-                print(f"   {d['pr_id']}")
-                print(f"      File: {d['file']}")
-                print(f"      Role: {d['role']} | Priority: {d['priority']}")
-                print(f"      Status: {d['msg']}")
-                print()
+        # === INSTRUCTION BODY: append ===
+        elif field == 'append-instruction':
+            match = re.search(
+                r'(Instruction:\n.+?)(\n\nDependencies:|\n\n\[\[DONE\]\])',
+                content, re.DOTALL
+            )
+            if match:
+                insert_pos = match.end(1)
+                content = content[:insert_pos] + '\n\n' + new_value + content[insert_pos:]
+                changes.append(f"instruction: appended {len(new_value)} chars")
+            else:
+                print(f"⚠️  Could not locate Instruction body in dispatch")
 
-        # Print waiting dispatches
-        if waiting:
-            print("⏳ Waiting (dependencies not met):\n")
-            for d in waiting:
-                print(f"   {d['pr_id']}")
-                print(f"      File: {d['file']}")
-                print(f"      Role: {d['role']} | Priority: {d['priority']}")
-                print(f"      Blocked by: {d['msg']}")
-                print()
+        # === INSTRUCTION BODY: prepend ===
+        elif field == 'prepend-instruction':
+            match = re.search(r'Instruction:\n', content)
+            if match:
+                insert_pos = match.end()
+                content = content[:insert_pos] + new_value + '\n\n' + content[insert_pos:]
+                changes.append(f"instruction: prepended {len(new_value)} chars")
+            else:
+                print(f"⚠️  Could not locate Instruction header in dispatch")
 
-        # Summary
-        print(f"📊 Summary:")
-        print(f"   Ready: {len(ready)}")
-        print(f"   Waiting: {len(waiting)}")
-        print(f"   Total: {len(dispatch_files)}\n")
+        # === INSTRUCTION FROM FILE ===
+        elif field == 'instruction-file':
+            file_path = Path(new_value)
+            if not file_path.is_absolute():
+                file_path = self.project_root / new_value
+            if not file_path.exists():
+                print(f"❌ Instruction file not found: {new_value}")
+                return content
+            file_content = file_path.read_text().strip()
+            match = re.search(
+                r'(Instruction:\n)(.+?)(\n\nDependencies:|\n\n\[\[DONE\]\])',
+                content, re.DOTALL
+            )
+            if match:
+                content = content[:match.start(2)] + file_content + '\n' + content[match.end(2):]
+                changes.append(f"instruction: replaced from file {file_path.name} ({len(file_content)} chars)")
+            else:
+                print(f"⚠️  Could not locate Instruction body in dispatch")
+
+        # === HEADER FIELDS (any Manager Block field) ===
+        else:
+            content = self._patch_header_field(content, field, new_value, changes)
+        return content
+
+    def _patch_header_field(self, content: str, field: str, new_value: str, changes: list) -> str:
+        """Replace or insert a Manager Block header field."""
+        import re
+
+        field_capitalized = field.replace('-', ' ').title().replace(' ', '-')
+        pattern = f"{field_capitalized}: (.+)"
+        match = re.search(pattern, content)
+        if match:
+            old_value = match.group(1)
+            content = content.replace(
+                f"{field_capitalized}: {old_value}",
+                f"{field_capitalized}: {new_value}",
+                1  # only first occurrence
+            )
+            changes.append(f"{field}: {old_value} → {new_value}")
+        else:
+            # Field not found - insert it before Dispatch-ID line
+            insert_match = re.search(r'(Dispatch-ID:)', content)
+            if insert_match:
+                insert_line = f"{field_capitalized}: {new_value}\n"
+                content = content[:insert_match.start()] + insert_line + content[insert_match.start():]
+                changes.append(f"{field}: (added) {new_value}")
+            else:
+                print(f"⚠️  Field '{field}' not found and could not insert")
+        return content
 
     def reject_dispatch(self, dispatch_id: str, reason: Optional[str] = None, defer_pr: Optional[str] = None) -> bool:
         """
@@ -1236,10 +1205,7 @@ if __name__ == "__main__":
             )
 
         elif sys.argv[1] == "staging-list":
-            # NEW: List all staging dispatches with dependency status
-            manager = PRQueueManager()
-            manager.list_staging_dispatches()
-            _exit_from_result(_ok_result())
+            raise SystemExit(run_staging_list(sys.argv[2:]))
 
         else:
             print(f"Unknown command: {sys.argv[1]}")
@@ -1261,7 +1227,7 @@ if __name__ == "__main__":
         print("  python pr_queue_manager.py complete PR-X # Mark PR as completed")
         print("")
         print("  🆕 Staging Workflow:")
-        print("  python pr_queue_manager.py staging-list  # List staging with dependency status")
+        print("  python pr_queue_manager.py staging-list [--json]  # List staged spec bundles (pending/<id>/dispatch-spec.json), oldest first")
         print("  python pr_queue_manager.py show <id>    # Show staging dispatch details")
         print("  python pr_queue_manager.py patch <id> --set key=value  # Patch staging dispatch fields")
         print("  python pr_queue_manager.py reject <id> --reason \"...\" [--defer PR-X]  # Reject staging dispatch")

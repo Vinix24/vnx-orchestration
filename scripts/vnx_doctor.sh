@@ -28,10 +28,12 @@ if command -v rg >/dev/null 2>&1; then
     --glob '!**/intelligence_export.py' \
     --glob '!**/intelligence_import.py' \
     --glob '!**/vnx_install.py' \
+    --glob '!**/slot/host_paths.py' \
     --glob '!**/commands/merge_preflight.sh' \
     --glob '!**/*.deprecated' \
     --glob '!**/*.log' \
-    --glob '!**/check_installer_no_template_leak.sh' || true)
+    --glob '!**/check_installer_no_template_leak.sh' \
+    --glob '!**/check_docs_stale_refs.py' || true)
   # Also check bin/vnx (no extension, so glob won't match it)
   if [ -f "$BIN_DIR/vnx" ]; then
     local_matches=$(rg -n "$PATTERN" "$BIN_DIR/vnx" || true)
@@ -55,10 +57,12 @@ else
     --exclude='intelligence_export.py' \
     --exclude='intelligence_import.py' \
     --exclude='vnx_install.py' \
+    --exclude='host_paths.py' \
     --exclude='merge_preflight.sh' \
     --exclude='*.deprecated' \
     --exclude='*.log' \
-    --exclude='check_installer_no_template_leak.sh' || true)
+    --exclude='check_installer_no_template_leak.sh' \
+    --exclude='check_docs_stale_refs.py' || true)
   # Also check bin/vnx
   if [ -f "$BIN_DIR/vnx" ]; then
     local_matches=$(grep -n -E "$PATTERN" "$BIN_DIR/vnx" || true)

@@ -1,1 +1,0 @@
-- `scripts/permission_posture_report.py` is a read-only posture report per lane and flip gate for worker-permission enforcement: five conditions (qualification, fallback roles, unsupported restrictions, consecutive digest matches, operator decision), exit 0 flip-allowed, 1 blocked, 2 unreadable input; it never sets the flag (permissions P8).

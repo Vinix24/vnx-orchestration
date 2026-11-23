@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.vnx.rework-attribution</string>
+    <!-- ADR-071 besluit 7: nightly rework attribution (blame edges from the watermark,
+         then the rework report) at 05:30 local. The job always exits 0; a failing
+         step is the `degraded` state of the rework_attribution beacon.
+         Pinned start (same rule as ledger-health): every start goes through
+         vnx_pinned_launcher.sh in VNX_HOME, which resolves the project's
+         .vnx-version and runs the script from the pinned release. Install this
+         from the release the project pins, so VNX_HOME is that release and not
+         the rolling `current` link. -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>{{ vnx_home }}/scripts/launchd/vnx_pinned_launcher.sh</string>
+        <string>{{ project_id }}</string>
+        <string>scripts/rework_attribution_job.py</string>
+        <string>run</string>
+        <string>--project-id</string>
+        <string>{{ project_id }}</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>VNX_HOME</key>
+        <string>{{ vnx_home }}</string>
+        <key>VNX_PROJECT_ID</key>
+        <string>{{ project_id }}</string>
+        <key>PATH</key>
+        <string>{{ path_env }}</string>
+    </dict>
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>5</integer>
+        <key>Minute</key>
+        <integer>30</integer>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>{{ log_dir }}/launchd.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>{{ log_dir }}/launchd.err.log</string>
+</dict>
+</plist>

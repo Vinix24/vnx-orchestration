@@ -100,7 +100,7 @@ class _FakePaths:
 
 
 @pytest.fixture
-def loop_env(tmp_path):
+def loop_env(tmp_path, approve_learning_persist):
     """LearningLoop bound to a tmp state dir via patched ensure_env."""
     state_dir = tmp_path / "vnx-data" / "vnx-dev" / "state"
     state_dir.mkdir(parents=True)
@@ -108,6 +108,7 @@ def loop_env(tmp_path):
     vnx_home.mkdir()
 
     fake = _FakePaths(state_dir, vnx_home)
+    approve_learning_persist(state_dir)
     with patch.object(ll, "ensure_env", return_value=fake):
         loop = ll.LearningLoop()
         yield loop, state_dir
@@ -192,20 +193,6 @@ def test_supersede_does_not_auto_apply_without_operator(loop_env):
         if c.get("source_table") == "success_patterns" and c.get("pattern_id") == str(pat_id)
     ]
     assert len(sp_candidates) == 1, "second call must not duplicate the pending entry"
-
-
-def test_supersede_off_switch(loop_env, monkeypatch):
-    """VNX_LEARN_SUPERSEDE=0 skips the entire step."""
-    loop, state_dir = loop_env
-    _bootstrap_schema(loop.conn)
-    _seed_success_pattern(loop, title="off-switch-pat", confidence=0.05)
-
-    monkeypatch.setenv("VNX_LEARN_SUPERSEDE", "0")
-    count = loop._supersede_stale_patterns()
-    assert count == 0
-
-    pending_path = state_dir / "pending_archival.json"
-    assert not pending_path.exists(), "pending_archival.json must not be written when off"
 
 
 # ---------------------------------------------------------------------------
@@ -402,7 +389,7 @@ def test_real_history_produces_at_least_one_proposal():
 
     fake = _FakePaths(state_dir, vnx_home)
     with _patch.object(ll, "ensure_env", return_value=fake):
-        loop = ll.LearningLoop()
+        loop = ll.LearningLoop(persist=False)  # reads the live store: never writable
         try:
             failures = loop.extract_failure_patterns(
                 start_time=datetime(2000, 1, 1, tzinfo=timezone.utc)

@@ -33,7 +33,7 @@ import pretooluse_spawn_detector as det  # noqa: E402
 # ── Helpers (same pattern as test_pretooluse_spawn_detector.py) ───────────────
 
 def _classify(cmd: str, enforce: bool = False) -> str:
-    env = {"VNX_HOOK_ENFORCE": "1" if enforce else "0"}
+    env = {"VNX_OVERRIDE_ENFORCEMENT_PROFILE": "enforced" if enforce else "shadow"}
     with mock.patch.dict(os.environ, env):
         return det.classify(cmd)
 
@@ -45,7 +45,7 @@ def _run_main(cmd: str, tmp_path: Path, enforce: bool = False) -> tuple[str, lis
     env = {
         "VNX_DATA_DIR": str(data_dir),
         "VNX_DATA_DIR_EXPLICIT": "1",
-        "VNX_HOOK_ENFORCE": "1" if enforce else "0",
+        "VNX_OVERRIDE_ENFORCEMENT_PROFILE": "enforced" if enforce else "shadow",
     }
     captured = io.StringIO()
     with mock.patch.dict(os.environ, env):

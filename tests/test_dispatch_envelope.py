@@ -878,7 +878,7 @@ class TestClaudeEnvelopeToolcallSignals:
 
         return result, mock_receipt
 
-    def test_toolcall_signals_aggregated_onto_receipt(self, spec_claude, monkeypatch, tmp_path):
+    def test_deleted_signal_dir_variable_no_longer_feeds_the_receipt(self, spec_claude, monkeypatch, tmp_path):
         from toolcall_signals import record_toolcall_event
 
         signal_dir = tmp_path / "tmux-signal"
@@ -892,9 +892,9 @@ class TestClaudeEnvelopeToolcallSignals:
         _, mock_receipt = self._run(spec_claude, claude_result)
 
         mock_receipt.assert_called_once()
-        assert mock_receipt.call_args[1]["tool_call_count"] == 4
-        assert mock_receipt.call_args[1]["tool_call_failures"] == 1
-        assert mock_receipt.call_args[1]["tool_call_retries"] == 1
+        assert mock_receipt.call_args[1]["tool_call_count"] is None
+        assert mock_receipt.call_args[1]["tool_call_failures"] is None
+        assert mock_receipt.call_args[1]["tool_call_retries"] is None
 
     def test_toolcall_signals_absent_when_signal_dir_unset(self, spec_claude, monkeypatch):
         monkeypatch.delenv("VNX_TMUX_SIGNAL_DIR", raising=False)
@@ -929,7 +929,8 @@ class TestEnvelopeCostUsd:
         self.projects.mkdir()
         monkeypatch.setenv("VNX_DATA_DIR", str(self.store))
         monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
-        monkeypatch.setenv("VNX_CLAUDE_PROJECTS_DIR", str(self.projects))
+        import token_harvest
+        monkeypatch.setattr(token_harvest, "_default_claude_projects_dir", lambda: self.projects)
 
     def _transcript(self, session_id, model, input_tokens, output_tokens, cache_read=0):
         """One assistant message on a weekday inside the DeepSeek peak window."""

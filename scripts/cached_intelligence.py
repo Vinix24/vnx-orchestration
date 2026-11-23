@@ -22,6 +22,7 @@ try:
     from vnx_paths import ensure_env
 except Exception as exc:
     raise SystemExit(f"Failed to load vnx_paths: {exc}")
+from pattern_activation import injectable_clause
 
 
 @dataclass
@@ -284,26 +285,26 @@ class CachedIntelligence:
             print(f"⚠️ Pattern query error: {e}")
             return []
 
-    @cached_query('prevention_cache')
     def query_prevention_rules(self, tags: List[str], min_confidence: float = 0.5) -> List[Dict]:
-        """Query prevention rules with caching"""
+        """Query prevention rules. Not cached: the activation guard must see a deactivation on the next read."""
         if not self.conn or not tags:
             return []
 
         try:
             tag_pattern = '%' + '%'.join(tags) + '%'
-
-            query = '''
+            guard_sql, guard_params = injectable_clause(self.conn, self.db_path.parent)
+            query = f'''
                 SELECT tag_combination, rule_type, description,
                        recommendation, confidence
                 FROM prevention_rules
                 WHERE tag_combination LIKE ?
                 AND confidence >= ?
+                AND {guard_sql}
                 ORDER BY confidence DESC, triggered_count DESC
                 LIMIT 10
             '''
 
-            cursor = self.conn.execute(query, (tag_pattern, min_confidence))
+            cursor = self.conn.execute(query, (tag_pattern, min_confidence, *guard_params))
             rules = []
 
             for row in cursor:

@@ -122,7 +122,6 @@ def switch_file(tmp_path, monkeypatch) -> Path:
     monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
     for key in ("DEEPSEEK_API_KEY", "OPENROUTER_API_KEY", "MOONSHOT_API_KEY"):
         monkeypatch.setenv(key, "sk-test-not-a-real-key")
-    monkeypatch.setenv("VNX_VERTEX_PROJECT", "test-project")
     return path
 
 
@@ -189,7 +188,7 @@ def _gemini_adapter_legacy(tmp_path, monkeypatch):
 
 def _gemini_adapter_stream(tmp_path, monkeypatch):
     from adapters.gemini_adapter import GeminiAdapter
-    monkeypatch.setenv("VNX_GEMINI_STREAM", "1")
+    monkeypatch.setattr("provider_spawns.gemini_spawn.gemini_stream_enabled", lambda: True)
     return lambda: list(GeminiAdapter("T1").stream_events("x", {"dispatch_id": "d-1"}))
 
 
@@ -225,13 +224,6 @@ def _local_gemma_ollama(tmp_path, monkeypatch):
 def _local_gemma_spawn(tmp_path, monkeypatch):
     from providers.local_gemma import spawn
     return lambda: spawn.spawn_local_gemma(instruction="x", dispatch_id="d-1")
-
-
-def _vertex(tmp_path, monkeypatch):
-    import vertex_ai_runner
-    return lambda: vertex_ai_runner.run_vertex_ai(
-        "x", subprocess_run=subprocess.run, urlopen=urllib.request.urlopen,
-    )
 
 
 def _llm_benchmark_api(tmp_path, monkeypatch):
@@ -327,7 +319,6 @@ INVOCATIONS: Dict[str, Tuple[str, Callable]] = {
     "scripts/lib/gemini_wrapper.py:gemini_exec": ("gemini", _gemini_wrapper),
     "scripts/lib/kimi_wrapper.py:kimi_exec": ("kimi", _kimi_wrapper),
     "scripts/lib/providers/local_gemma/spawn.py:_run_ollama_fallback": ("local", _local_gemma_ollama),
-    "scripts/lib/vertex_ai_runner.py:run_vertex_ai": ("gemini", _vertex),
     "scripts/llm_benchmark.py:_ollama_api": ("local", _llm_benchmark_api),
     "scripts/llm_benchmark.py:_ollama_stream": ("local", _llm_benchmark_stream),
     "scripts/lib/provider_spawns/claude_spawn.py:spawn_claude": ("deepseek", _claude_spawn),
@@ -499,10 +490,10 @@ def test_spawn_claude_refuses_a_label_that_is_not_a_switchable_family(label, swi
 @pytest.mark.parametrize("proxy_url", ["http://127.0.0.1:5151", "https://glm-gateway.example.internal:8443"])
 def test_a_configured_glm_proxy_reaches_its_launch_with_glm_on(proxy_url, switch_file, primitives,
                                                                tmp_path, monkeypatch):
-    """The operator's VNX_GLM_PROXY_URL, on a loopback port other than 4141 or on a custom
+    """A configured glm proxy URL, on a loopback port other than 4141 or on a custom
     gateway host, is decided as glm, never refused as a host the map does not know."""
     from provider_spawns import glm_harness_spawn
-    monkeypatch.setenv("VNX_GLM_PROXY_URL", proxy_url)
+    monkeypatch.setattr(glm_harness_spawn, "_proxy_url", lambda: proxy_url)
     monkeypatch.setattr(glm_harness_spawn, "_proxy_reachable", lambda url, timeout=3.0: True)
     switch_off(switch_file, "deepseek")
 

@@ -50,7 +50,7 @@ class TestDecideShadowWiring:
         monkeypatch.setenv("VNX_DECISION_JUDGE_SHADOW", "1")
         # point the shadow judge at a backend that will fail to import/execute cleanly;
         # decide() must still return the authoritative rule-based decision.
-        monkeypatch.setenv("VNX_DECISION_JUDGE_BACKEND", "ollama")
+        monkeypatch.setattr(DecisionRouter, "_shadow_judge", lambda self: (lambda ctx, q: 1 / 0))
         router = DecisionRouter(data_dir=tmp_path, backend="dry-run")
         result = router.decide(CTX_FAILED, "re_dispatch")
         assert result.action == "re_dispatch"  # unaffected, fail-open

@@ -6,6 +6,7 @@ You are a VNX headless worker executing a dispatch instruction.
 - No TODO comments — complete all implementations to working state
 - No mock objects, placeholder data, or stub implementations
 - No partial features — start it means finish it
+- A PR that changes behaviour a document under `docs/` describes updates that document in the same PR (ADR-079, `docs/governance/decisions/ADR-079-documentatie-volgt-de-code.md`)
 - Remove temporary files and scripts after operations. Do NOT use `rm -rf`/`rmdir`
   for this: Claude Code has a built-in dangerous-rm safety check that requires
   interactive approval whenever it cannot statically prove the target is a safe,

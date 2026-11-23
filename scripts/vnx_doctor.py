@@ -146,7 +146,7 @@ def check_path_resolution(paths: Dict[str, str]) -> List[CheckResult]:
     else:
         results.append(CheckResult("path", WARN,
                                    "Node path not resolved. MCP servers may fail in tmux.",
-                                   "Set VNX_NODE_PATH or install nvm"))
+                                   "Install node or nvm"))
 
     # Python venv
     venv_path = _resolve_venv_path(paths)
@@ -161,8 +161,6 @@ def check_path_resolution(paths: Dict[str, str]) -> List[CheckResult]:
 
 def _resolve_node_path() -> Optional[str]:
     """Find node binary directory."""
-    if os.environ.get("VNX_NODE_PATH"):
-        return os.environ["VNX_NODE_PATH"]
     node = shutil.which("node")
     if node:
         return str(Path(node).parent)
@@ -807,103 +805,55 @@ def check_state_root_location(paths: Dict[str, str]) -> List[CheckResult]:
 # Dream-cycle health check
 # ---------------------------------------------------------------------------
 
-def _parse_dream_event_ts(value: object) -> Optional[datetime]:
-    """Parse a dream-event timestamp; None on missing/unparseable input."""
-    if not value:
-        return None
-    try:
-        ts = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    if ts.tzinfo is None:
-        ts = ts.replace(tzinfo=timezone.utc)
-    return ts
-
-
 def check_dream_cycle(paths: Dict[str, str]) -> List[CheckResult]:
-    """Surface the latest dream-cycle event so a silently-skipping scheduled job
-    becomes visible where the operator actually looks.
+    """Project the `dream_liveness/1` document (ADR-066) as one check.
 
-    OI-1088: the consolidator skips cleanly (stale ledger, probe not ok,
-    scheduler disabled) and records every skip as an NDJSON event under
-    events/dream/ — but nothing surfaced those events, so a preflight that
-    measured the wrong directory no-opt'd for six weeks before anyone noticed.
-    The event stream already exists; this check is the cheapest possible reader:
-    it reports the most recent dream event and WARNs on any skip that is not the
-    deliberate scheduler_disabled arm-switch.
+    The calculation lives in scripts/lib/dream_liveness.py and nowhere else.
+    PASS only when `state == "ok"` and no finding is `measured: true`; anything
+    else is WARN carrying the finding ids (ADR-066, doctor mapping). A degraded
+    latest cycle (OI-1822) also WARNs, from the review JSON the doctor reads.
     """
-    events_dir = Path(paths["VNX_DATA_DIR"]) / "events" / "dream"
-    if not events_dir.is_dir():
-        return [CheckResult("dream", PASS,
-                            "No dream events recorded (dream scheduler has not run yet)")]
+    import dream_liveness
+    from vnx_paths import resolve_project_id
 
-    latest: Optional[dict] = None
-    latest_ts: Optional[datetime] = None
-    fallback: Optional[dict] = None  # last parseable line of the newest file, ts or not
-    for event_file in sorted(events_dir.glob("*.ndjson")):
-        try:
-            lines = event_file.read_text(encoding="utf-8").splitlines()
-        except OSError:
-            continue
-        for line in lines:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                event = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            fallback = event
-            ts = _parse_dream_event_ts(event.get("timestamp"))
-            if ts is not None and (latest_ts is None or ts > latest_ts):
-                latest_ts = ts
-                latest = event
+    data_root = Path(paths["VNX_DATA_DIR"])
+    try:
+        project_id = resolve_project_id() or "unknown"
+    except Exception:  # vnx-silent-except: the id only labels the document; the data root is explicit
+        project_id = "unknown"
+    doc = dream_liveness.assess(
+        dream_liveness.load_sources(project_id, data_root=data_root), project_id=project_id)
+    outcome = doc["outcome"] or {}
+    latest = (f"{outcome['event_type']}"
+              + (f" {outcome['reason']}" if outcome.get("reason") else "")
+              + (f" - {outcome['detail']}" if outcome.get("detail") else "")
+              + (f" (cycle {outcome['cycle_id']}, {doc['attempts']['age_hours']}h ago)"
+                 if outcome.get("cycle_id") else "")) if outcome else "no dated attempt event"
+    degraded = (_dream_completed_degradation(outcome, data_root)
+                if outcome.get("event_type") == "dream_cycle_completed" else "")
+    measured = any(f.get("measured") is not False for f in doc["findings"])  # fail-closed: only an explicit false is unmeasured
+    if doc["state"] == "ok" and not measured and not degraded:
+        return [CheckResult("dream", PASS, f"Dream liveness ok. Latest: {latest}")]
+    ids = ", ".join(f["id"] for f in doc["findings"]) or "none"
+    message = f"Dream liveness {doc['state']} [{ids}]. Latest: {latest}"
+    if degraded:
+        message += f". Latest cycle completed DEGRADED: {degraded}"
+    return [CheckResult(
+        "dream", WARN, message,
+        "Silence is not a pass. Read the findings in the dream_liveness/1 document "
+        "(scripts/lib/dream_liveness.py, ADR-066); a degraded cycle only proposes.",
+    )]
 
-    if latest is None:
-        latest = fallback
-    if latest is None:
-        return [CheckResult("dream", PASS,
-                            "No dream events recorded (dream scheduler has not run yet)")]
 
-    event_type = str(latest.get("event_type") or "unknown")
-    reason = str(latest.get("reason") or "")
-    detail = str(latest.get("detail") or "")
-    cycle_id = str(latest.get("cycle_id") or "")
-    age = ""
-    if latest_ts is not None:
-        age_h = (datetime.now(timezone.utc) - latest_ts).total_seconds() / 3600
-        age = f", {age_h:.1f}h ago"
+def check_steering_report(paths: Dict[str, str]) -> List[CheckResult]:
+    """The steering report's own consumer (ADR-072 decision 17): stale, absent or `status: "error"` is a WARN, never a FAIL."""
+    try:
+        import operator_steering_dream
 
-    if event_type == "dream_cycle_skipped":
-        if reason == "scheduler_disabled":
-            return [CheckResult(
-                "dream", PASS,
-                f"Dream scheduler deliberately disabled (VNX_DREAM_SCHEDULER_ENABLED=0{age})",
-            )]
-        return [CheckResult(
-            "dream", WARN,
-            f"Latest dream cycle SKIPPED: {reason} — {detail} (cycle {cycle_id}{age})",
-            "A scheduled job that keeps no-op'ing must not stay invisible. "
-            f"Inspect {events_dir} for the skip history and fix the stated reason.",
-        )]
-    if event_type in ("dream_cycle_timeout", "dream_cycle_failed"):
-        return [CheckResult(
-            "dream", WARN,
-            f"Latest dream cycle {event_type.replace('dream_cycle_', '').upper()}: "
-            f"{detail or latest.get('error') or reason} (cycle {cycle_id}{age})",
-            f"Inspect {events_dir} for details.",
-        )]
-    if event_type == "dream_cycle_completed":
-        degraded = _dream_completed_degradation(latest, Path(paths["VNX_DATA_DIR"]))
-        if degraded:
-            return [CheckResult(
-                "dream", WARN,
-                f"Latest dream cycle completed DEGRADED: {degraded} (cycle {cycle_id}{age})",
-                "A degraded cycle only proposes: it changes no patterns until the operator "
-                "approves the review. Fix the injection-effectiveness probe, then run a "
-                "normal cycle.",
-            )]
-    return [CheckResult("dream", PASS, f"Latest dream event: {event_type} ({cycle_id}{age})")]
+        fresh, message = operator_steering_dream.assess_report(Path(paths["VNX_DATA_DIR"]) / "state")
+    except Exception as exc:  # fail-closed: an unmeasurable report is a WARN, never a PASS and never a crash
+        return [CheckResult("steering", WARN, f"unmeasured: {exc}", "The steering step could not be loaded")]
+    return [CheckResult("steering", PASS if fresh else WARN, message, "" if fresh else "The nightly `vnx dream run` writes state/steering_report.json")]
 
 
 def _dream_completed_degradation(event: dict, data_root: Path) -> str:
@@ -1041,6 +991,21 @@ def check_cost_ledger_files(paths: Dict[str, str]) -> List[CheckResult]:
             details=[files.summary()],
         )]
     return [CheckResult("cost_ledger", PASS, f"known files: {files.summary()}")]
+
+
+# ---------------------------------------------------------------------------
+# Check: refusals for an unresolved project id (AG-1o)
+# ---------------------------------------------------------------------------
+
+def check_project_id_refusals(paths: Dict[str, str]) -> List[CheckResult]:
+    """Per context the refusals of the last 24 hours, plus the unattributed cost ledger."""
+    from project_id_refusals import format_section, project_id_refusal_section
+
+    try:
+        status, detail = format_section(project_id_refusal_section(Path(paths["VNX_DATA_DIR"])))
+    except Exception as exc:
+        return [CheckResult("project_id_refusals", WARN, f"could not read the counter: {exc}")]
+    return [CheckResult("project_id_refusals", WARN if status == "warn" else PASS, detail)]
 
 
 # ---------------------------------------------------------------------------
@@ -1246,8 +1211,10 @@ def run_doctor(paths: Dict[str, str], *,
     results.extend(check_contamination(paths))
     results.extend(check_state_root_location(paths))
     results.extend(check_dream_cycle(paths))
+    results.extend(check_steering_report(paths))
     results.extend(check_learning_loop_beacon(paths))
     results.extend(check_cost_ledger_files(paths))
+    results.extend(check_project_id_refusals(paths))
     results.extend(check_t0_state_freshness(paths))
     results.extend(check_branch_protection_drift(paths))
 

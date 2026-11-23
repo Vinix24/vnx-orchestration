@@ -217,19 +217,9 @@ def normalize_kimi_event(raw: dict, terminal_id: str, dispatch_id: str) -> Canon
 
     event_type = (raw.get("event_type") or raw.get("type") or "")
 
-    # Detect HTTP-error-like JSON responses (e.g. {"status": 403, "message": "quota exceeded"})
-    # that kimi CLI may emit before or instead of stream-json events.
-    http_status = raw.get("status") or raw.get("code") or raw.get("error_code") or 0
-    try:
-        http_status = int(http_status)
-    except (TypeError, ValueError):
-        http_status = 0
-    raw_msg = raw.get("message") or raw.get("msg") or raw.get("error") or ""
-    if http_status in (401, 403, 429) or (not event_type and _is_quota_or_auth_error(str(raw_msg))):
-        return make("error", {
-            "reason": "quota_or_auth",
-            "message": f"[quota_or_auth] provider=kimi http_status={http_status} raw={str(raw)[:200]}",
-        })
+    quota_event = _kimi_quota_or_auth_event(raw, event_type, make)
+    if quota_event is not None:
+        return quota_event
 
     # kimi-cli 1.44.0 content-block message: {"role": ..., "content": [...]}.
     # Detected by a list-valued ``content`` field with a string ``role`` and no
@@ -360,6 +350,29 @@ def normalize_kimi_event(raw: dict, terminal_id: str, dispatch_id: str) -> Canon
         "raw_type": event_type,
         "raw": str(raw)[:300],
     })
+
+
+def _kimi_quota_or_auth_event(
+    raw: dict, event_type: str, make: Callable[[str, dict], CanonicalEvent],
+) -> Optional[CanonicalEvent]:
+    """The quota/auth error event of ``normalize_kimi_event``, or None when the raw event is none.
+
+    Detects HTTP-error-like JSON responses (e.g. {"status": 403, "message": "quota exceeded"})
+    that kimi CLI may emit before or instead of stream-json events.
+    """
+    http_status = raw.get("status") or raw.get("code") or raw.get("error_code") or 0
+    try:
+        http_status = int(http_status)
+    except (TypeError, ValueError):
+        http_status = 0
+    raw_msg = raw.get("message") or raw.get("msg") or raw.get("error") or ""
+    if http_status in (401, 403, 429) or (not event_type and _is_quota_or_auth_error(str(raw_msg))):
+        return make("error", {
+            "reason": "quota_or_auth",
+            "message": f"[quota_or_auth] provider=kimi http_status={http_status} raw={str(raw)[:200]}",
+        })
+    return None
+
 
 
 class _KimiNormalizerHost(StreamingDrainerMixin):
@@ -1024,7 +1037,7 @@ def _heartbeat_monitor_loop(
     """Poll the per-dispatch tee file for silence; kill + report if stuck.
 
     Same module (``worker_heartbeat.FileProgressHeartbeat``), same threshold
-    (``VNX_WORKER_HEARTBEAT_SILENCE_SECONDS``, default 1800s since OI-1130),
+    (``worker_heartbeat._DEFAULT_SILENCE_THRESHOLD_SECONDS``, 1800s since OI-1130),
     same failure-report
     shape (``build_heartbeat_failure_report``) as the tmux-spawn and subprocess
     lanes, so the audit trail is uniform regardless of which lane ran the
@@ -1437,7 +1450,7 @@ def spawn_kimi(
     Returns KimiSpawnResult(returncode=127) when the kimi binary is absent.
     Caller is responsible for lease/manifest/receipt/event-archive/retry.
 
-    The per-chunk stall default is 1200s (overridable via VNX_KIMI_STALL_THRESHOLD):
+    The per-chunk stall default is 1200s (scaled with the total deadline, OI-903):
     Kimi is a reasoning model whose 1.46.0 content-block output is end-loaded, so
     the first token can arrive only after a long reasoning gap (a 300s default
     spuriously killed adversarial-review dispatches mid-think). A FAILURE is
@@ -1471,19 +1484,9 @@ def spawn_kimi(
     if event_store is not None and event_writer is not None:
         raise ValueError("Pass either event_store OR event_writer, not both")
 
-    try:
-        chunk_timeout = float(os.environ.get("VNX_KIMI_STALL_THRESHOLD", chunk_timeout))
-    except (TypeError, ValueError):
-        pass
-    try:
-        total_deadline = float(os.environ.get("VNX_KIMI_TIMEOUT", total_deadline))
-    except (TypeError, ValueError):
-        pass
     # OI-903: scale the stall timeout with the total deadline so a long spec
-    # deadline is the binding constraint, not a fixed 1200s silence. Skipped when
-    # VNX_KIMI_STALL_THRESHOLD is set explicitly — env overrides retain precedence.
-    if "VNX_KIMI_STALL_THRESHOLD" not in os.environ:
-        chunk_timeout = coerce_chunk_stall(chunk_timeout, total_deadline)
+    # deadline is the binding constraint, not a fixed 1200s silence.
+    chunk_timeout, total_deadline = _resolve_kimi_timeouts(chunk_timeout, total_deadline)
 
     # OI-1619: the kimi CLI is a real worker subprocess (untrusted-model-driven,
     # same threat model as the claude/litellm lanes) — the parent env must be
@@ -1504,34 +1507,7 @@ def spawn_kimi(
     # so it lands in the archived event stream the receipt points to via
     # events_path — the "always logged, never hidden" posture for YOLO mode.
     # The --config-file path may be logged; the config values never are.
-    _redacted_argv = [f"<prompt:{len(prompt)}chars>" if tok == prompt else tok for tok in cmd]
-    logger.info(
-        "kimi_spawn: launching kimi -p <%d chars> -m %s effective_argv=%s",
-        len(prompt),
-        cmd[cmd.index("-m") + 1] if "-m" in cmd else "default",
-        _redacted_argv,
-    )
-    _flags_sink = event_writer or (event_store.append if event_store is not None else None)
-    if _flags_sink is not None:
-        try:
-            _flags_event = CanonicalEvent(
-                dispatch_id=dispatch_id,
-                terminal_id=terminal_id,
-                provider="kimi",
-                event_type="info",
-                data={
-                    "kind": "effective_argv",
-                    "argv": _redacted_argv,
-                    "yolo": "--yolo" in cmd,
-                    "work_dir": cwd_str,
-                },
-                observability_tier=1,
-            )
-            _flags_sink(terminal_id, _flags_event.to_dict(), dispatch_id=dispatch_id)
-        except Exception as _flags_exc:
-            logger.debug(
-                "kimi_spawn: effective-argv event emission failed (non-fatal): %s", _flags_exc,
-            )
+    _emit_kimi_effective_argv(prompt, cmd, cwd_str, event_writer, event_store, dispatch_id, terminal_id)
 
     proc, err_result = _start_kimi_subprocess(cmd, env, cwd_str, config_path)
     if err_result is not None:
@@ -1622,3 +1598,44 @@ def spawn_kimi(
             # must never break an otherwise-clean dispatch.
             _reap_kimi_session(session_id, env)
     return result
+
+
+def _resolve_kimi_timeouts(chunk_timeout: float, total_deadline: float) -> tuple:
+    """``(chunk_timeout, total_deadline)`` of ``spawn_kimi`` after OI-903."""
+    return coerce_chunk_stall(chunk_timeout, total_deadline), total_deadline
+
+
+def _emit_kimi_effective_argv(
+    prompt: str, cmd: list, cwd_str: Optional[str], event_writer: Optional[Callable[..., None]],
+    event_store: Optional[Any], dispatch_id: str, terminal_id: str,
+) -> None:
+    """Log the effective kimi argv (prompt redacted) and record it as an "info" event."""
+    _redacted_argv = [f"<prompt:{len(prompt)}chars>" if tok == prompt else tok for tok in cmd]
+    logger.info(
+        "kimi_spawn: launching kimi -p <%d chars> -m %s effective_argv=%s",
+        len(prompt),
+        cmd[cmd.index("-m") + 1] if "-m" in cmd else "default",
+        _redacted_argv,
+    )
+    _flags_sink = event_writer or (event_store.append if event_store is not None else None)
+    if _flags_sink is not None:
+        try:
+            _flags_event = CanonicalEvent(
+                dispatch_id=dispatch_id,
+                terminal_id=terminal_id,
+                provider="kimi",
+                event_type="info",
+                data={
+                    "kind": "effective_argv",
+                    "argv": _redacted_argv,
+                    "yolo": "--yolo" in cmd,
+                    "work_dir": cwd_str,
+                },
+                observability_tier=1,
+            )
+            _flags_sink(terminal_id, _flags_event.to_dict(), dispatch_id=dispatch_id)
+        except Exception as _flags_exc:
+            logger.debug(
+                "kimi_spawn: effective-argv event emission failed (non-fatal): %s", _flags_exc,
+            )
+

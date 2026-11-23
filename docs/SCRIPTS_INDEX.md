@@ -49,7 +49,6 @@ Core dispatch/runtime orchestration:
 - `scripts/providers_cli.py` — `vnx providers`: `list` shows the state of each model provider family; `on`, `off`, `reset`, `check`, `repair` and `usage` operate the switch that every launch function honors (`docs/core/PROVIDER_SWITCH.md`)
 - `scripts/runtime_core_cli.py` — runtime-core operator tooling
 - `scripts/runtime_cutover_check.py` — runtime-core certification/validation checks
-- `scripts/rollback_runtime_core.py` — runtime-core rollback helper
 
 Key implementation modules:
 

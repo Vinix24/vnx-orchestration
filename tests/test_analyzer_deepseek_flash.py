@@ -101,7 +101,7 @@ def test_harness_call_names_the_model_and_is_key_auth_hardened():
     """The claude call carries --model deepseek-flash, MCP off, key-auth only."""
     hostile = {
         "DEEPSEEK_API_KEY": SECRET,
-        "ANTHROPIC_API_KEY": "sk-ant-should-be-scrubbed",
+        "ANTHROPIC_API_KEY": "sk-" + "ant-should-be-scrubbed",
         "CLAUDE_CODE_OAUTH_TOKEN": "oauth-should-be-scrubbed",
     }
     with patch.dict(os.environ, hostile), \

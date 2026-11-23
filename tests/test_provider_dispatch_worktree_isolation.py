@@ -5,7 +5,7 @@ Verifies:
    - calls create_dispatch_worktree with the dispatch_id
    - passes the worktree path as cwd to the spawn function
    - calls remove_dispatch_worktree after (success and failure paths)
-2. Worktree is created even without VNX_ISOLATED_WORKTREE set (default-on).
+2. Worktree is created with no isolation switch (always on).
 3. create_dispatch_worktree failure: dispatch ABORTS (returns 1),
    spawn NOT called — no silent shared-checkout fallback.
 """
@@ -15,7 +15,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
-from contextlib import ExitStack
+from contextlib import ExitStack, nullcontext
 from pathlib import Path
 from unittest.mock import MagicMock, patch, call
 
@@ -98,7 +98,7 @@ class TestCodexIsolation:
                     return exit_code, captured.get("cwd"), mock_create, mock_remove
 
     def test_isolated_worktree_creates_and_removes(self):
-        with patch.dict("os.environ", {"VNX_ISOLATED_WORKTREE": "1"}, clear=False):
+        with nullcontext():
             result = _make_spawn_result()
             captured = {}
 
@@ -127,8 +127,7 @@ class TestCodexIsolation:
         assert captured["cwd"] == _FAKE_WT_PATH
 
     def test_isolation_without_env_var(self):
-        """Isolation is default-on: worktree created even without VNX_ISOLATED_WORKTREE."""
-        env = {k: v for k, v in __import__("os").environ.items() if k != "VNX_ISOLATED_WORKTREE"}
+        """Isolation is always on: the worktree is created with no switch."""
         result = _make_spawn_result()
         captured = {}
 
@@ -140,7 +139,7 @@ class TestCodexIsolation:
         mock_event_store.append = MagicMock()
         mock_event_store.clear = MagicMock()
 
-        with patch.dict("os.environ", {"VNX_ISOLATED_WORKTREE": ""}, clear=False), \
+        with nullcontext(), \
              patch("provider_dispatch._emit_governance", side_effect=_noop_governance), \
              patch("provider_dispatch._enrich_instruction", return_value="noop"), \
              patch("provider_dispatch._resolve_codex_model", return_value="gpt-test"), \
@@ -159,7 +158,7 @@ class TestCodexIsolation:
 
     def test_worktree_removed_on_spawn_failure(self):
         """remove_dispatch_worktree must be called even when spawn raises."""
-        with patch.dict("os.environ", {"VNX_ISOLATED_WORKTREE": "1"}, clear=False):
+        with nullcontext():
             mock_event_store = MagicMock()
             mock_event_store.append = MagicMock()
             mock_event_store.clear = MagicMock()
@@ -196,7 +195,7 @@ class TestGeminiIsolation:
         mock_event_store.append = MagicMock()
         mock_event_store.clear = MagicMock()
 
-        with patch.dict("os.environ", {"VNX_ISOLATED_WORKTREE": "1"}, clear=False), \
+        with nullcontext(), \
              patch("provider_dispatch._emit_governance", side_effect=_noop_governance), \
              patch("provider_dispatch._enrich_instruction", return_value="noop"), \
              patch("event_store.EventStore", return_value=mock_event_store), \
@@ -213,7 +212,7 @@ class TestGeminiIsolation:
         assert captured["cwd"] == _FAKE_WT_PATH
 
     def test_isolation_without_env_var(self):
-        """Isolation is default-on: worktree created even without VNX_ISOLATED_WORKTREE."""
+        """Isolation is always on: the worktree is created with no switch."""
         captured = {}
         result = _make_spawn_result()
 
@@ -225,7 +224,7 @@ class TestGeminiIsolation:
         mock_event_store.append = MagicMock()
         mock_event_store.clear = MagicMock()
 
-        with patch.dict("os.environ", {"VNX_ISOLATED_WORKTREE": ""}, clear=False), \
+        with nullcontext(), \
              patch("provider_dispatch._emit_governance", side_effect=_noop_governance), \
              patch("provider_dispatch._enrich_instruction", return_value="noop"), \
              patch("event_store.EventStore", return_value=mock_event_store), \
@@ -259,7 +258,7 @@ class TestKimiIsolation:
         mock_event_store.append = MagicMock()
         mock_event_store.clear = MagicMock()
 
-        with patch.dict("os.environ", {"VNX_ISOLATED_WORKTREE": "1"}, clear=False), \
+        with nullcontext(), \
              patch("provider_dispatch._emit_governance", side_effect=_noop_governance), \
              patch("provider_dispatch._enrich_instruction", return_value="noop"), \
              patch("provider_dispatch._resolve_kimi_model_label", return_value="kimi-default"), \
@@ -277,7 +276,7 @@ class TestKimiIsolation:
         assert captured["cwd"] == _FAKE_WT_PATH
 
     def test_isolation_without_env_var(self):
-        """Isolation is default-on: worktree created even without VNX_ISOLATED_WORKTREE."""
+        """Isolation is always on: the worktree is created with no switch."""
         captured = {}
         result = _make_spawn_result()
 
@@ -289,7 +288,7 @@ class TestKimiIsolation:
         mock_event_store.append = MagicMock()
         mock_event_store.clear = MagicMock()
 
-        with patch.dict("os.environ", {"VNX_ISOLATED_WORKTREE": ""}, clear=False), \
+        with nullcontext(), \
              patch("provider_dispatch._emit_governance", side_effect=_noop_governance), \
              patch("provider_dispatch._enrich_instruction", return_value="noop"), \
              patch("provider_dispatch._resolve_kimi_model_label", return_value="kimi-default"), \
@@ -325,7 +324,6 @@ class TestLiteLLMIsolation:
         mock_event_store.clear = MagicMock()
 
         with patch.dict("os.environ", {
-            "VNX_ISOLATED_WORKTREE": "1",
             "VNX_LITELLM_MODEL": "deepseek/deepseek-v4-pro",
             "DEEPSEEK_API_KEY": "sk-test",
         }, clear=False), \
@@ -347,7 +345,7 @@ class TestLiteLLMIsolation:
         assert captured["cwd"] == _FAKE_WT_PATH
 
     def test_isolation_without_env_var(self):
-        """Isolation is default-on: worktree created even without VNX_ISOLATED_WORKTREE."""
+        """Isolation is always on: the worktree is created with no switch."""
         captured = {}
         result = _make_spawn_result()
 
@@ -360,7 +358,6 @@ class TestLiteLLMIsolation:
         mock_event_store.clear = MagicMock()
 
         with patch.dict("os.environ", {
-            "VNX_ISOLATED_WORKTREE": "",
             "VNX_LITELLM_MODEL": "deepseek/deepseek-v4-pro",
             "DEEPSEEK_API_KEY": "sk-test",
         }, clear=False), \
@@ -462,7 +459,7 @@ class TestCodexIsolationFailLoud:
         mock_event_store.append = MagicMock()
         mock_event_store.clear = MagicMock()
 
-        with patch.dict("os.environ", {"VNX_ISOLATED_WORKTREE": "1"}, clear=False), \
+        with nullcontext(), \
              patch("provider_dispatch._emit_governance", side_effect=_noop_governance), \
              patch("provider_dispatch._enrich_instruction", return_value="noop"), \
              patch("provider_dispatch._resolve_codex_model", return_value="gpt-test"), \
@@ -491,7 +488,7 @@ class TestGeminiIsolationFailLoud:
         mock_event_store.append = MagicMock()
         mock_event_store.clear = MagicMock()
 
-        with patch.dict("os.environ", {"VNX_ISOLATED_WORKTREE": "1"}, clear=False), \
+        with nullcontext(), \
              patch("provider_dispatch._emit_governance", side_effect=_noop_governance), \
              patch("provider_dispatch._enrich_instruction", return_value="noop"), \
              patch("event_store.EventStore", return_value=mock_event_store), \
@@ -519,7 +516,7 @@ class TestKimiIsolationFailLoud:
         mock_event_store.append = MagicMock()
         mock_event_store.clear = MagicMock()
 
-        with patch.dict("os.environ", {"VNX_ISOLATED_WORKTREE": "1"}, clear=False), \
+        with nullcontext(), \
              patch("provider_dispatch._emit_governance", side_effect=_noop_governance), \
              patch("provider_dispatch._enrich_instruction", return_value="noop"), \
              patch("provider_dispatch._resolve_kimi_model_label", return_value="kimi-default"), \
@@ -549,7 +546,6 @@ class TestLiteLLMIsolationFailLoud:
         mock_event_store.clear = MagicMock()
 
         with patch.dict("os.environ", {
-            "VNX_ISOLATED_WORKTREE": "1",
             "VNX_LITELLM_MODEL": "deepseek/deepseek-v4-pro",
             "DEEPSEEK_API_KEY": "sk-test",
         }, clear=False), \
@@ -622,6 +618,19 @@ def _init_git_repo_with_origin(tmp_path: Path) -> Path:
     return local
 
 
+def _publish_head_elsewhere(wt_path: Path) -> None:
+    """Make HEAD reachable from a remote branch other than dispatch/<id>.
+
+    OI-2811 keeps a worktree whose HEAD is on no remote, so a fixture that means
+    "committed, local branch kept" must publish the commit. A side branch keeps
+    the teardown classification at 'committed' (dispatch/<id> stays unpushed).
+    """
+    subprocess.run(
+        ["git", "-C", str(wt_path), "push", "origin", "HEAD:refs/heads/published-elsewhere"],
+        check=True, capture_output=True,
+    )
+
+
 class TestProviderLaneReapClassification:
     """L3: remove_dispatch_worktree must classify before removing, using the
     single canonical classify() from tmux_worktree — no duplicate logic.
@@ -669,6 +678,7 @@ class TestProviderLaneReapClassification:
         ).strip()
         assert branch_name in branches_before
 
+        _publish_head_elsewhere(wt_path)
         remove_dispatch_worktree(dispatch_id, project_root=local, terminal_id="T1")
 
         # Worktree directory is gone.
@@ -861,6 +871,7 @@ class TestProviderLaneReapClassification:
             check=True, capture_output=True,
         )
 
+        _publish_head_elsewhere(wt_path)
         with patch("event_store.EventStore", return_value=mock_store):
             remove_dispatch_worktree(dispatch_id, project_root=local, terminal_id="T1")
 
@@ -967,6 +978,7 @@ class TestProviderLaneReapClassification:
             check=True, capture_output=True,
         )
 
+        _publish_head_elsewhere(wt_path)
         # With base_sha derived from origin/main (success), classify should work.
         remove_dispatch_worktree(dispatch_id, project_root=local, terminal_id="T1")
 
@@ -1105,6 +1117,7 @@ class TestReviewGateTeardownResetsReproduction:
             check=True, capture_output=True,
         )
 
+        _publish_head_elsewhere(wt_path)
         remove_dispatch_worktree(
             dispatch_id,
             project_root=local,

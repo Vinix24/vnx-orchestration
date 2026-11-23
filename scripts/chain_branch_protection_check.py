@@ -30,6 +30,15 @@ from chain_origin_anchor import (  # type: ignore[import]  # noqa: E402
 )
 
 
+def protection_status(project_root: Path, branch: str, *, check_name: str = ANCHOR_IMMUTABILITY_CHECK_NAME,
+                      owner_repo: str | None = None):
+    """The check this CLI runs; ``main`` exits 0 exactly when ``.confirmed`` is True.
+    ``audit_chain.py seal`` calls this for the repo and branch it seals against."""
+    return check_branch_protection(
+        Path(project_root).resolve(), branch, required_check_name=check_name, owner_repo=owner_repo
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--project-root", default=".", type=Path, help="repo root (default: cwd)")
@@ -47,12 +56,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--json", action="store_true", help="emit JSON instead of a human-readable line")
     args = ap.parse_args(argv)
 
-    status = check_branch_protection(
-        args.project_root.resolve(),
-        args.branch,
-        required_check_name=args.check_name,
-        owner_repo=args.owner_repo,
-    )
+    status = protection_status(args.project_root, args.branch, check_name=args.check_name, owner_repo=args.owner_repo)
 
     if args.json:
         print(json.dumps(status.__dict__, indent=2))
@@ -67,7 +71,7 @@ def main(argv: list[str] | None = None) -> int:
         if status.reason:
             print(f"  reason: {status.reason}")
 
-    return 0 if status.confirmed else 1
+    return 0 if status.confirmed is True else 1
 
 
 if __name__ == "__main__":

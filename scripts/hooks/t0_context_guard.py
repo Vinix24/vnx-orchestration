@@ -5,7 +5,7 @@ Operator decision 2026-09-25: at 500K context a T0 MUST rotate to a fresh sessio
 flight may be finished; nothing new is started. A running /goal carries over to the successor.
 
 Registered on UserPromptSubmit, PreToolUse and Stop. T0 only. A session is guarded when all
-three rules hold (``is_guarded_session``, plan t0-guard-gebruikersniveau), and is a silent
+three rules hold (``guarded_root``, plan t0-guard-gebruikersniveau), and is a silent
 no-op otherwise:
 
   1. a VNX project with a T0: the root of the session (``hook_coverage.session_project_root``:
@@ -14,7 +14,7 @@ no-op otherwise:
      starting git, with a ``.vnx-project-id`` whose first line is non-empty and
      ``.claude/terminals/T0/CLAUDE.md``, outside ``.vnx-data/worktrees/``;
   2. the T0 by convention: the identity check the T0 rotation safety net uses
-     (``session_stop_rotation._is_t0_session``). A side session opts out with
+     (``_is_t0_session`` below). A side session opts out with
      ``VNX_TERMINAL=<name>``;
   3. attended: not ``CLAUDE_CODE_ENTRYPOINT=sdk-*`` and not ``VNX_WORKER_SCOPED=1``. Measured
      in a hook's own environment on 2026-10-16: a ``claude -p`` started by the T0 carries
@@ -75,16 +75,45 @@ for _p in (str(_LIB_DIR), str(_HOOKS_DIR)):
 import hook_coverage
 import t0_context_budget as budget
 import t0_rotation_state as rotation_state
-from session_stop_rotation import _is_t0_session
 
 _DISPATCH_WORKTREE_CWD_RE = re.compile(r"(?:^|/)\.vnx-data/worktrees/")
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
+
+# Matches .claude/terminals/T1, T2, or T3 anywhere in a cwd. T0 has no such
+# segment (it runs at the project root), so its absence is the T0 signal.
+_WORKER_TERMINAL_CWD_RE = re.compile(r"(?:^|/)\.claude/terminals/(T[1-3])(?:/|$)")
 
 ROTATE_HOW = (
     "Rotatie = de rotate-skill: /build-log wrap (schrijft daily-log/handoff.md met genummerde "
     "next steps en, als er een /goal loopt, een sectie '## Actief /goal'), daarna "
     "scripts/t0_rotate_spawn.sh, dat een verse T0 start die de handoff via /kickoff oppakt."
 )
+
+
+def _is_t0_session(cwd: str, env: dict) -> bool:
+    """Best-effort, in-script T0 identity check (portable — does not rely on
+    harness-level hook-matcher scoping). An explicit VNX_TERMINAL /
+    VNX_TERMINAL_ID env var wins when set; otherwise falls back to the cwd
+    heuristic. No T1/T2/T3 signal at all -> assume T0 (matches the existing
+    default: T0 runs at the project root, not under terminals/T{n}).
+
+    A tmux-spawn dispatch worker is NOT T0 — it typically has no
+    VNX_TERMINAL set AND runs in an isolated dispatch worktree
+    (.vnx-data/worktrees/dispatch-*), which does not match the
+    .claude/terminals/T{1,2,3} cwd pattern either. Without a check, such a
+    worker fell through to the "assume T0" default and was taken for T0. VNX_DISPATCH_ID / VNX_TMUX_SIGNAL_DIR are the
+    repo-wide markers a dispatched worker always carries (set together by
+    tmux_interactive_dispatch.py before `claude` launches — see
+    hooks/git/pre-push for the same convention) — their presence means
+    NON-T0 regardless of cwd, unless
+    VNX_TERMINAL was explicitly set to T0 above.
+    """
+    terminal_env = env.get("VNX_TERMINAL") or env.get("VNX_TERMINAL_ID")
+    if terminal_env:
+        return terminal_env.strip().upper() == "T0"
+    if env.get("VNX_DISPATCH_ID") or env.get("VNX_TMUX_SIGNAL_DIR"):
+        return False
+    return _WORKER_TERMINAL_CWD_RE.search((cwd or "").replace("\\", "/")) is None
 
 
 def is_attended(env: Dict[str, str]) -> bool:
@@ -104,11 +133,6 @@ def guarded_root(cwd: str, env: Dict[str, str]) -> Optional[Path]:
     if _DISPATCH_WORKTREE_CWD_RE.search((cwd or "").replace("\\", "/")):
         return None
     return hook_coverage.session_project_root(cwd, env)
-
-
-def is_guarded_session(cwd: str, env: Dict[str, str]) -> bool:
-    """Rules 1-3 (module docstring)."""
-    return guarded_root(cwd, env) is not None
 
 
 def project_covers(event: str, payload: dict, env: Dict[str, str]) -> bool:

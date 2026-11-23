@@ -362,17 +362,10 @@ def register_provenance_link(
         # Merge: only overwrite fields that are currently NULL. ``existing`` is a plain tuple (the
         # caller's connection has no Row factory), so build the dict from the cursor's column names —
         # dict(tuple) would raise "dictionary update sequence element ... length N".
-        merged = dict(zip([d[0] for d in _cur.description], existing))
-        if receipt_id and not merged.get("receipt_id"):
-            merged["receipt_id"] = receipt_id
-        if commit_sha and not merged.get("commit_sha"):
-            merged["commit_sha"] = commit_sha
-        if pr_number is not None and merged.get("pr_number") is None:
-            merged["pr_number"] = pr_number
-        if feature_plan_pr and not merged.get("feature_plan_pr"):
-            merged["feature_plan_pr"] = feature_plan_pr
-        if trace_token and not merged.get("trace_token"):
-            merged["trace_token"] = trace_token
+        merged = _merge_null_provenance_fields(
+            dict(zip([d[0] for d in _cur.description], existing)),
+            receipt_id, commit_sha, pr_number, feature_plan_pr, trace_token,
+        )
 
         # Recalculate chain status from merged fields
         new_status = _calculate_chain_status(merged, gaps)
@@ -458,6 +451,28 @@ def register_provenance_link(
         chain_status=chain_status,
         gaps=gaps or [],
     )
+
+
+def _merge_null_provenance_fields(
+    merged: Dict[str, Any],
+    receipt_id: Optional[str],
+    commit_sha: Optional[str],
+    pr_number: Optional[int],
+    feature_plan_pr: Optional[str],
+    trace_token: Optional[str],
+) -> Dict[str, Any]:
+    """Fill each field of the existing row ``merged`` that is currently empty; returns ``merged``."""
+    if receipt_id and not merged.get("receipt_id"):
+        merged["receipt_id"] = receipt_id
+    if commit_sha and not merged.get("commit_sha"):
+        merged["commit_sha"] = commit_sha
+    if pr_number is not None and merged.get("pr_number") is None:
+        merged["pr_number"] = pr_number
+    if feature_plan_pr and not merged.get("feature_plan_pr"):
+        merged["feature_plan_pr"] = feature_plan_pr
+    if trace_token and not merged.get("trace_token"):
+        merged["trace_token"] = trace_token
+    return merged
 
 
 _SQUASH_SUFFIX_RE = re.compile(r"\(#(\d+)\)\s*$")
@@ -762,51 +777,16 @@ def reconcile_commit_provenance(
     # every caller, including the manual CLI. A central-store miss (dev
     # checkout, no project_id, or the DB just doesn't exist there) falls back
     # to the old repo-local resolution unchanged.
-    state_dir: Optional[Path] = None
-    try:
-        from vnx_paths import resolve_central_data_dir, resolve_state_dir  # noqa: PLC0415
-        if project_id:
-            try:
-                central_state_dir = (resolve_central_data_dir(project_id) / "state").resolve()
-                if (central_state_dir / "runtime_coordination.db").exists():
-                    state_dir = central_state_dir
-            except (ValueError, OSError) as exc:
-                logger.debug("central state dir resolution failed for pr linking: %s", exc)
-        if state_dir is None:
-            state_dir = resolve_state_dir(repo_root)
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("could not resolve state dir for pr linking: %s", exc)
-        state_dir = None
+    state_dir = _resolve_pr_link_state_dir(repo_root, project_id)
 
     # Open the project state DB once for the optional track.pr_ref upsert. If the
     # supplied ``conn`` already targets that DB, reuse it to avoid a second connection
     # (and the resulting lock contention in single-threaded callers). Failures here
     # are non-fatal: provenance reconciliation must keep working exactly as before.
-    state_conn: Optional[sqlite3.Connection] = None
-    state_conn_borrowed = False
     # receipt-quality PR-B2: quality_intelligence.db lives beside
     # runtime_coordination.db under the same state dir — always a fresh
     # connection (dispatch_metadata is never the registry's own DB).
-    qi_conn: Optional[sqlite3.Connection] = None
-    if state_dir is not None:
-        try:
-            state_db = (state_dir / "runtime_coordination.db").resolve()
-            if _connection_targets_db(conn, state_db):
-                state_conn = conn
-                state_conn_borrowed = True
-            else:
-                state_conn = sqlite3.connect(str(state_db), timeout=10.0)
-        except Exception as exc:  # noqa: BLE001
-            logger.debug("could not open project state db for pr_ref linking: %s", exc)
-            state_conn = None
-
-        try:
-            qi_db = (state_dir / "quality_intelligence.db").resolve()
-            if qi_db.exists():
-                qi_conn = sqlite3.connect(str(qi_db), timeout=10.0)
-        except Exception as exc:  # noqa: BLE001
-            logger.debug("could not open quality_intelligence.db for pr_id linking: %s", exc)
-            qi_conn = None
+    state_conn, state_conn_borrowed, qi_conn = _open_pr_link_connections(conn, state_dir)
 
     scanned = linked = pr_ref_linked = pr_id_linked = 0
     try:
@@ -932,6 +912,55 @@ def reconcile_commit_provenance(
         "pr_ref_linked": pr_ref_linked,
         "pr_id_linked": pr_id_linked,
     }
+
+
+def _resolve_pr_link_state_dir(repo_root: "str | Path", project_id: Optional[str]) -> Optional[Path]:
+    """State dir for ``reconcile_commit_provenance``'s pr_ref/pr_id linking; None on failure."""
+    state_dir: Optional[Path] = None
+    try:
+        from vnx_paths import resolve_central_data_dir, resolve_state_dir  # noqa: PLC0415
+        if project_id:
+            try:
+                central_state_dir = (resolve_central_data_dir(project_id) / "state").resolve()
+                if (central_state_dir / "runtime_coordination.db").exists():
+                    state_dir = central_state_dir
+            except (ValueError, OSError) as exc:
+                logger.debug("central state dir resolution failed for pr linking: %s", exc)
+        if state_dir is None:
+            state_dir = resolve_state_dir(repo_root)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("could not resolve state dir for pr linking: %s", exc)
+        state_dir = None
+    return state_dir
+
+
+def _open_pr_link_connections(
+    conn: sqlite3.Connection, state_dir: Optional[Path]
+) -> "tuple[Optional[sqlite3.Connection], bool, Optional[sqlite3.Connection]]":
+    """Return ``(state_conn, state_conn_borrowed, qi_conn)``; each failure is non-fatal."""
+    state_conn: Optional[sqlite3.Connection] = None
+    state_conn_borrowed = False
+    qi_conn: Optional[sqlite3.Connection] = None
+    if state_dir is not None:
+        try:
+            state_db = (state_dir / "runtime_coordination.db").resolve()
+            if _connection_targets_db(conn, state_db):
+                state_conn = conn
+                state_conn_borrowed = True
+            else:
+                state_conn = sqlite3.connect(str(state_db), timeout=10.0)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("could not open project state db for pr_ref linking: %s", exc)
+            state_conn = None
+
+        try:
+            qi_db = (state_dir / "quality_intelligence.db").resolve()
+            if qi_db.exists():
+                qi_conn = sqlite3.connect(str(qi_db), timeout=10.0)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("could not open quality_intelligence.db for pr_id linking: %s", exc)
+            qi_conn = None
+    return state_conn, state_conn_borrowed, qi_conn
 
 
 def get_provenance_link(

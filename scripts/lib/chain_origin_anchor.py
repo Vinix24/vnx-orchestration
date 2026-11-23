@@ -1117,6 +1117,30 @@ def verify_chain(
     # epochs the tail happens to observe right now.
     anchors_for_identity, id_provenance = read_git_anchors_for_identity(project_root, identity, ref=anchor_ref)  # type: ignore[arg-type]
     last_provenance = id_provenance
+    anchor_failed = _reverse_anchor_scan(
+        id_provenance, anchors_for_identity, observed_epoch_numbers, max_observed_epoch, violations
+    )
+
+    epochs_failed, last_provenance = _verify_epoch_anchors(
+        path, project_root, identity, epochs, anchor_ref, violations, last_provenance  # type: ignore[arg-type]
+    )
+    anchor_failed = anchor_failed or epochs_failed
+
+    final_ok = base_ok and not anchor_failed
+    final_status = base_status if final_ok else "broken"
+    return final_ok, violations, final_status, last_provenance
+
+
+def _reverse_anchor_scan(
+    id_provenance: AnchorProvenance,
+    anchors_for_identity: list[AnchorRecord],
+    observed_epoch_numbers: set[int],
+    max_observed_epoch: int | None,
+    violations: list[dict],
+) -> bool:
+    """verify_chain's reverse scan over every anchor the identity has ever had
+    (see the caller's comment). Appends its violations in place; True when any fired."""
+    anchor_failed = False
     max_anchored_open_epoch: int | None = None
     if not id_provenance.resolved:
         violations.append({"note": "identity anchor scan failed (fail-closed)", "error": id_provenance.error})
@@ -1172,7 +1196,22 @@ def verify_chain(
                 }
             )
             anchor_failed = True
+    return anchor_failed
 
+
+def _verify_epoch_anchors(
+    path: Path,
+    project_root: Path,
+    identity: str,
+    epochs: list[tuple[int, int]],
+    anchor_ref: str,
+    violations: list[dict],
+    last_provenance: AnchorProvenance | None,
+) -> tuple[bool, AnchorProvenance | None]:
+    """verify_chain's per-epoch forward check: each observed epoch's open anchor,
+    then (for a closed epoch) its closure record. Appends violations in place;
+    returns (any failed, the last provenance read, or the one passed in)."""
+    anchor_failed = False
     for idx, (epoch, _marker_line) in enumerate(epochs):
         record, provenance = read_git_anchor(project_root, identity, epoch, kind="open", ref=anchor_ref)  # type: ignore[arg-type]
         last_provenance = provenance
@@ -1218,39 +1257,49 @@ def verify_chain(
             # > max_observed_epoch / missing anchored epoch), so there is
             # nothing further to compute here either way.
             continue
-
         next_marker_line = epochs[idx + 1][1]
-        closure_record, cprovenance = read_git_anchor(project_root, identity, epoch, kind="close", ref=anchor_ref)  # type: ignore[arg-type]
-        last_provenance = cprovenance
-        if not cprovenance.resolved:
-            violations.append({"epoch": epoch, "note": "closure anchor resolution failed (fail-closed)", "error": cprovenance.error})
-            anchor_failed = True
-            continue
-        if closure_record is None:
-            violations.append({"epoch": epoch, "note": "no closure record for a CLOSED epoch"})
-            anchor_failed = True
-            continue
-        if closure_record == "corrupt":
-            violations.append({"epoch": epoch, "note": "duplicate closure records for this epoch (corrupt)"})
-            anchor_failed = True
-            continue
+        closure_failed, last_provenance = _verify_epoch_closure(
+            path, project_root, identity, epoch, next_marker_line, anchor_ref, violations
+        )
+        anchor_failed = anchor_failed or closure_failed
+    return anchor_failed, last_provenance
 
-        observed_closure = compute_epoch_closure(path, epoch, next_epoch_marker_line=next_marker_line)
-        if (
-            closure_record.closure_hash != observed_closure.closure_hash
-            or closure_record.closure_line_number != observed_closure.closure_line_number
-            or closure_record.entries_in_epoch != observed_closure.entries_in_epoch
-        ):
-            violations.append(
-                {
-                    "epoch": epoch,
-                    "note": "epoch closure fingerprint mismatch (tamper)",
-                    "anchor_closure_hash": closure_record.closure_hash,
-                    "observed_closure_hash": observed_closure.closure_hash,
-                }
-            )
-            anchor_failed = True
 
-    final_ok = base_ok and not anchor_failed
-    final_status = base_status if final_ok else "broken"
-    return final_ok, violations, final_status, last_provenance
+def _verify_epoch_closure(
+    path: Path,
+    project_root: Path,
+    identity: str,
+    epoch: int,
+    next_marker_line: int,
+    anchor_ref: str,
+    violations: list[dict],
+) -> tuple[bool, AnchorProvenance]:
+    """One CLOSED epoch's closure record against the walk (ADR-034 §2). Appends its
+    violations in place; returns (failed, the closure provenance)."""
+    closure_record, cprovenance = read_git_anchor(project_root, identity, epoch, kind="close", ref=anchor_ref)  # type: ignore[arg-type]
+    if not cprovenance.resolved:
+        violations.append({"epoch": epoch, "note": "closure anchor resolution failed (fail-closed)", "error": cprovenance.error})
+        return True, cprovenance
+    if closure_record is None:
+        violations.append({"epoch": epoch, "note": "no closure record for a CLOSED epoch"})
+        return True, cprovenance
+    if closure_record == "corrupt":
+        violations.append({"epoch": epoch, "note": "duplicate closure records for this epoch (corrupt)"})
+        return True, cprovenance
+
+    observed_closure = compute_epoch_closure(path, epoch, next_epoch_marker_line=next_marker_line)
+    if (
+        closure_record.closure_hash != observed_closure.closure_hash
+        or closure_record.closure_line_number != observed_closure.closure_line_number
+        or closure_record.entries_in_epoch != observed_closure.entries_in_epoch
+    ):
+        violations.append(
+            {
+                "epoch": epoch,
+                "note": "epoch closure fingerprint mismatch (tamper)",
+                "anchor_closure_hash": closure_record.closure_hash,
+                "observed_closure_hash": observed_closure.closure_hash,
+            }
+        )
+        return True, cprovenance
+    return False, cprovenance

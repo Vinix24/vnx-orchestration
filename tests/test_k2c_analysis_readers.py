@@ -688,7 +688,6 @@ def _run_engine(tmp_path: Path, monkeypatch, records: list[dict], dispatches: li
     monkeypatch.setattr(gtr, "STAGING_SEEN_FILE", state_dir / "staging_seen.json")
     monkeypatch.setattr(gtr, "PR_QUEUE_STATE_FILE", state_dir / "pr_queue_state.yaml")
     monkeypatch.setattr(gtr, "OPEN_ITEMS_DIGEST_FILE", state_dir / "open_items_digest.json")
-    monkeypatch.setattr(gtr, "_rollback_mode_enabled", lambda: False)
 
     engine = gtr.RecommendationEngine()
     engine.run()

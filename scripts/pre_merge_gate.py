@@ -26,7 +26,6 @@ import argparse
 import datetime as dt
 import json
 import logging
-import os
 import subprocess
 import sys
 import uuid
@@ -57,10 +56,11 @@ from governance_receipts import dispatch_identity_fields, emit_governance_receip
 # CQS threshold: dispatches below this score get a HOLD
 CQS_THRESHOLD = 50.0
 
-# Maximum diff size (lines added+removed) before triggering a size warning.
-# 450 per the 2026-11-09 operator decision (300-450 target, hard cap 450).
-PR_SIZE_WARN = 450
-PR_SIZE_HOLD = 600
+# The PR-size thresholds (lines added+removed) are the registry keys VNX_PR_SIZE_WARN and
+# VNX_PR_SIZE_HOLD, resolved per project in _pr_size_thresholds; the registry carries the
+# only copy of the defaults.
+PR_SIZE_WARN_KEY = "VNX_PR_SIZE_WARN"
+PR_SIZE_HOLD_KEY = "VNX_PR_SIZE_HOLD"
 
 # Maximum files completely deleted before triggering net-deletion warning/hold
 DELETION_FILE_WARN = 5
@@ -74,11 +74,10 @@ NET_LINE_DELETION_HOLD = 500
 PYTEST_TIMEOUT = 120
 
 # CI workflow name queried via `gh run list --workflow`. Overridable per-repo
-# via `ci_workflow` in the project's branch_protection.yaml on main, the
-# VNX_CI_WORKFLOW_NAME env var or the --ci-workflow-name CLI flag,
-# see _resolve_ci_workflow_name() for why this isn't auto-detected instead.
+# via `ci_workflow` in the project's branch_protection.yaml on main or the
+# --ci-workflow-name CLI flag, see _resolve_ci_workflow_name() for why this
+# isn't auto-detected instead.
 DEFAULT_CI_WORKFLOW_NAME = "VNX CI"
-CI_WORKFLOW_NAME_ENV_VAR = "VNX_CI_WORKFLOW_NAME"
 
 # Status for a check that could not establish an answer at all — distinct
 # from GO (verified passing) and HOLD (verified failing/missing). A gate
@@ -564,11 +563,88 @@ def _diff_numstat_totals(project_root: Path, base_ref: str, head_ref: str) -> Op
     return total_added, total_removed
 
 
+def _positive_int(raw: Any) -> Optional[int]:
+    try:
+        value = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
+
+
+def _pr_size_thresholds(
+    project_id: Optional[str], state_dir: Optional[Path]
+) -> Dict[str, Any]:
+    """``{"warn", "hold", "warn_source", "hold_source", "invalid"}`` for one project.
+
+    A configured WARN above HOLD is invalid; a HOLD set below the default WARN alone simply
+    lowers WARN to HOLD. Each key goes through the registry's precedence chain (override, project_config row of
+    ``state_dir``, environment, default). Fail-closed: a value that is not a positive
+    integer, or a WARN above HOLD, puts BOTH thresholds back on the registry defaults and
+    names the key in ``invalid``. The check is never disabled.
+    """
+    import config_registry as cr
+    import config_store_db
+
+    resolver = None
+    if project_id and state_dir is not None:
+        # raise_on_error: a non-raising resolver turns an unreadable store into "no row",
+        # which strict_resolver below could then never see.
+        resolver = config_store_db.make_db_resolver(lambda _pid: state_dir, raise_on_error=True)
+    resolved = {}
+    for key in (PR_SIZE_WARN_KEY, PR_SIZE_HOLD_KEY):
+        raw, source = cr.resolve_with_source(
+            key, project_id, resolver, use_default_resolver=False, strict_resolver=True)
+        resolved[key] = (raw, source)
+    defaults = {k: int(cr.CONFIG_REGISTRY[k].default) for k in resolved}
+    values, invalid = {}, []
+    for key, (raw, source) in resolved.items():
+        values[key] = _positive_int(raw)
+        if source in cr.ERROR_SOURCES:
+            invalid.append(
+                f"{source} {key}: the {source[:-len('_config_error')]} config could not be read, "
+                f"default {defaults[key]}")
+        elif values[key] is None:
+            invalid.append(f"invalid {key}: {raw!r}, default {defaults[key]}")
+    warn_set = resolved[PR_SIZE_WARN_KEY][1] != "default"
+    if not invalid and not warn_set and values[PR_SIZE_WARN_KEY] > values[PR_SIZE_HOLD_KEY]:
+        # Only HOLD is configured below the default WARN: HOLD is the limit, no warn band.
+        values[PR_SIZE_WARN_KEY] = values[PR_SIZE_HOLD_KEY]
+    if not invalid and values[PR_SIZE_WARN_KEY] > values[PR_SIZE_HOLD_KEY]:
+        invalid.append(
+            f"invalid {PR_SIZE_WARN_KEY}: {values[PR_SIZE_WARN_KEY]} above "
+            f"{PR_SIZE_HOLD_KEY} {values[PR_SIZE_HOLD_KEY]}, defaults "
+            f"{defaults[PR_SIZE_WARN_KEY]}/{defaults[PR_SIZE_HOLD_KEY]}")
+    if invalid:
+        return {"warn": defaults[PR_SIZE_WARN_KEY], "hold": defaults[PR_SIZE_HOLD_KEY],
+                "warn_source": "default", "hold_source": "default", "invalid": invalid}
+    return {"warn": values[PR_SIZE_WARN_KEY], "hold": values[PR_SIZE_HOLD_KEY],
+            "warn_source": resolved[PR_SIZE_WARN_KEY][1],
+            "hold_source": resolved[PR_SIZE_HOLD_KEY][1], "invalid": []}
+
+
+def _pr_size_verdict(total: int, base: str, th: Dict[str, Any]) -> "tuple[str, str]":
+    if total > th["hold"]:
+        status = "HOLD"
+        detail = f"{total} lines changed vs {base} (>{th['hold']} hold threshold, {th['hold_source']})"
+    elif total > th["warn"]:
+        status = "GO"
+        detail = (f"{total} lines changed vs {base} (>{th['warn']} warn threshold, "
+                  f"{th['warn_source']} — large but not blocking)")
+    else:
+        status = "GO"
+        detail = f"{total} lines changed vs {base}"
+    if th["invalid"]:
+        detail += "; " + "; ".join(th["invalid"])
+    return status, detail
+
+
 def check_pr_size(
     project_root: Path,
     *,
     base_ref: Optional[str] = None,
     head_ref: str = "HEAD",
+    project_id: Optional[str] = None,
+    state_dir: Optional[Path] = None,
 ) -> Dict[str, Any]:
     """Check PR diff size (lines added + removed) against the merge-base with the base branch.
 
@@ -624,15 +700,8 @@ def check_pr_size(
     total_added, total_removed = totals
     total = total_added + total_removed
 
-    if total > PR_SIZE_HOLD:
-        status = "HOLD"
-        detail = f"{total} lines changed vs {resolved_base_ref} (>{PR_SIZE_HOLD} hold threshold)"
-    elif total > PR_SIZE_WARN:
-        status = "GO"
-        detail = f"{total} lines changed vs {resolved_base_ref} (>{PR_SIZE_WARN} — large but not blocking)"
-    else:
-        status = "GO"
-        detail = f"{total} lines changed vs {resolved_base_ref}"
+    status, detail = _pr_size_verdict(
+        total, resolved_base_ref, _pr_size_thresholds(project_id, state_dir))
 
     return {
         "check": "pr_size",
@@ -644,6 +713,15 @@ def check_pr_size(
         "head_ref": head_ref,
         "merge_base": merge_base,
     }
+
+
+def _check_pr_size_for_project(project_root: Path, head_ref: str, state_dir: Path) -> Dict[str, Any]:
+    """check_pr_size with the thresholds of the project this gate runs for."""
+    from vnx_paths import _resolve_state_project_id
+
+    return check_pr_size(
+        project_root, head_ref=head_ref,
+        project_id=_resolve_state_project_id(project_root), state_dir=state_dir)
 
 
 def check_artifacts(
@@ -859,9 +937,8 @@ def _resolve_ci_workflow_name(workflow_name: Optional[str], project_workflow: Op
 
     Resolution order: explicit ``workflow_name`` argument (CLI
     ``--ci-workflow-name`` or a programmatic caller) > ``ci_workflow`` from the
-    project's ``branch_protection.yaml`` on main (OI-1849) > ``VNX_CI_WORKFLOW_NAME``
-    env var (per-repo operator override) > this fabric's own default,
-    "VNX CI".
+    project's ``branch_protection.yaml`` on main (OI-1849) > this fabric's own
+    default, "VNX CI".
 
     Mirrors ``merge_preflight_ci_check._resolve_workflow_name``. Keep the two
     in sync (tests/test_ci_workflow_resolution_parity.py holds them to it).
@@ -879,9 +956,6 @@ def _resolve_ci_workflow_name(workflow_name: Optional[str], project_workflow: Op
         return workflow_name
     if project_workflow:
         return project_workflow
-    env_name = os.environ.get(CI_WORKFLOW_NAME_ENV_VAR)
-    if env_name:
-        return env_name
     return DEFAULT_CI_WORKFLOW_NAME
 
 
@@ -940,57 +1014,80 @@ def check_ci_workflow(
             }
     resolved_workflow_name = _resolve_ci_workflow_name(workflow_name, project_workflow)
 
-    # ── Resolve head SHA ──────────────────────────────────────────────────
     if head_sha is None:
-        try:
-            result = subprocess.run(
-                ["git", "rev-parse", "HEAD"],
-                cwd=str(project_root),
-                capture_output=True, text=True, timeout=10,
-            )
-            if result.returncode != 0:
-                return {
-                    "check": "ci_workflow",
-                    "status": SKIPPED_UNVERIFIED,
-                    "detail": "could not resolve HEAD SHA — CI workflow could not be verified",
-                    "ci_conclusion": None,
-                    "ci_ran_on_sha": False,
-                }
-            head_sha = result.stdout.strip()
-        except (subprocess.TimeoutExpired, FileNotFoundError):
-            return {
+        head_sha, unresolved = _resolve_ci_head_sha(project_root)
+        if unresolved is not None:
+            return unresolved
+
+    if branch is None:
+        branch, unresolved = _resolve_ci_branch(project_root)
+        if unresolved is not None:
+            return unresolved
+
+    runs, unverified = _query_ci_runs(project_root, branch, resolved_workflow_name)
+    if unverified is not None:
+        return unverified
+    return _ci_verdict_from_runs(runs, head_sha, branch, resolved_workflow_name)
+
+
+def _resolve_ci_head_sha(project_root: Path) -> "tuple[Optional[str], Optional[Dict[str, Any]]]":
+    """Resolve HEAD's SHA via git; ``(sha, None)`` or ``(None, skipped-result)``."""
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=str(project_root),
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode != 0:
+            return None, {
                 "check": "ci_workflow",
                 "status": SKIPPED_UNVERIFIED,
                 "detail": "could not resolve HEAD SHA — CI workflow could not be verified",
                 "ci_conclusion": None,
                 "ci_ran_on_sha": False,
             }
+        return result.stdout.strip(), None
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return None, {
+            "check": "ci_workflow",
+            "status": SKIPPED_UNVERIFIED,
+            "detail": "could not resolve HEAD SHA — CI workflow could not be verified",
+            "ci_conclusion": None,
+            "ci_ran_on_sha": False,
+        }
 
-    if branch is None:
-        try:
-            result = subprocess.run(
-                ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-                cwd=str(project_root),
-                capture_output=True, text=True, timeout=10,
-            )
-            if result.returncode != 0:
-                return {
-                    "check": "ci_workflow",
-                    "status": SKIPPED_UNVERIFIED,
-                    "detail": "could not resolve branch name — CI workflow could not be verified",
-                    "ci_conclusion": None,
-                    "ci_ran_on_sha": False,
-                }
-            branch = result.stdout.strip()
-        except (subprocess.TimeoutExpired, FileNotFoundError):
-            return {
+
+def _resolve_ci_branch(project_root: Path) -> "tuple[Optional[str], Optional[Dict[str, Any]]]":
+    """Resolve the branch name via git; ``(branch, None)`` or ``(None, skipped-result)``."""
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            cwd=str(project_root),
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode != 0:
+            return None, {
                 "check": "ci_workflow",
                 "status": SKIPPED_UNVERIFIED,
                 "detail": "could not resolve branch name — CI workflow could not be verified",
                 "ci_conclusion": None,
                 "ci_ran_on_sha": False,
             }
+        return result.stdout.strip(), None
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return None, {
+            "check": "ci_workflow",
+            "status": SKIPPED_UNVERIFIED,
+            "detail": "could not resolve branch name — CI workflow could not be verified",
+            "ci_conclusion": None,
+            "ci_ran_on_sha": False,
+        }
 
+
+def _query_ci_runs(
+    project_root: Path, branch: str, resolved_workflow_name: str,
+) -> "tuple[Optional[Any], Optional[Dict[str, Any]]]":
+    """List the workflow's runs on *branch*; ``(runs, None)`` or ``(None, skipped-result)``."""
     # ── Query gh for workflow runs ─────────────────────────────────────────
     try:
         result = subprocess.run(
@@ -1005,7 +1102,7 @@ def check_ci_workflow(
             capture_output=True, text=True, timeout=15,
         )
     except (subprocess.TimeoutExpired, FileNotFoundError):
-        return {
+        return None, {
             "check": "ci_workflow",
             "status": SKIPPED_UNVERIFIED,
             "detail": "gh CLI not available — CI workflow could not be verified",
@@ -1015,7 +1112,7 @@ def check_ci_workflow(
 
     if result.returncode != 0:
         stderr = (result.stderr or "").strip()
-        return {
+        return None, {
             "check": "ci_workflow",
             "status": SKIPPED_UNVERIFIED,
             "detail": (
@@ -1029,14 +1126,20 @@ def check_ci_workflow(
     try:
         runs = json.loads(result.stdout)
     except json.JSONDecodeError:
-        return {
+        return None, {
             "check": "ci_workflow",
             "status": SKIPPED_UNVERIFIED,
             "detail": "gh output unparseable — CI workflow could not be verified",
             "ci_conclusion": None,
             "ci_ran_on_sha": False,
         }
+    return runs, None
 
+
+def _ci_verdict_from_runs(
+    runs: Any, head_sha: str, branch: str, resolved_workflow_name: str,
+) -> Dict[str, Any]:
+    """GO/HOLD verdict from the listed runs against *head_sha*."""
     # ── Match run to HEAD SHA ──────────────────────────────────────────────
     for run in runs:
         if run.get("headSha") == head_sha:
@@ -1616,7 +1719,7 @@ def run_gate_checks(
     checks.append(check_git_cleanliness(project_root))
     checks.append(check_contract_verification(pr_id, dispatch_dir, project_root, state_dir))
     checks.append(check_quality_advisory(project_root))
-    checks.append(check_pr_size(project_root, head_ref=head_ref))
+    checks.append(_check_pr_size_for_project(project_root, head_ref, state_dir))
     checks.extend([check_artifacts(pr_id, dispatch_dir, project_root), check_permission_policy(pr_id, project_root, dispatch_dir, pr_head, state_dir=state_dir)])
     checks.append(check_shell_syntax(project_root))
     checks.append(check_net_deletion(project_root, head_ref=head_ref))
@@ -1804,7 +1907,7 @@ def main() -> int:
         default=None,
         help=(
             "Name of the CI workflow to query via `gh run list --workflow`. "
-            f"Default: {CI_WORKFLOW_NAME_ENV_VAR} env var, else "
+            "Default: ci_workflow in the project's branch_protection.yaml on main, else "
             f"'{DEFAULT_CI_WORKFLOW_NAME}'. Set this for consumer repos whose "
             "CI workflow has a different name."
         ),

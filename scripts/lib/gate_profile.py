@@ -24,7 +24,8 @@ P1 wires the review stack only (``review_seats``); P5 gives ``light`` a one-seat
 refuses it below the safety floor. ``round_cap``, ``takeover_chain`` and
 ``plan_gate_seats`` are provided here with their tests; P3 and P4 read them.
 
-BILLING SAFETY: no Anthropic SDK, no network, no subprocess.
+BILLING SAFETY: no Anthropic SDK, no network. The one subprocess is ``git rev-parse`` (through
+``project_root``) when ``ci_requirement`` must find the project root itself.
 """
 from __future__ import annotations
 
@@ -62,24 +63,24 @@ Value = Union[str, int]
 # test pins it to those defaults. ``light.review_stack`` is ``codex_gate`` alone (P5): the
 # one value that weakens a review. It lands in the same change that refuses ``light`` on a
 # signal path (B2, ``review_seat_evaluation.light_floor_refusal``, ADR-008 amendment), so the
-# stack and its floor cannot be separated.
+# stack and its floor cannot be separated. Since 2026-11-11 (Kimi cancelled) no profile names kimi_gate.
 PROFILE_TABLE: Mapping[str, Mapping[str, Value]] = MappingProxyType({
     "light": MappingProxyType({
         "review_stack": "codex_gate",
         "round_cap": 2,
-        "takeover_chain": "codex_gate,kimi_gate,claude_gate",
+        "takeover_chain": "codex_gate,deepseek_gate,claude_gate",
         "plan_gate_seats": 1,
     }),
     "standard": MappingProxyType({
-        "review_stack": "codex_gate,kimi_gate",
+        "review_stack": "codex_gate,deepseek_gate",
         "round_cap": 3,
-        "takeover_chain": "codex_gate,kimi_gate,claude_gate,deepseek_gate",
+        "takeover_chain": "codex_gate,deepseek_gate,claude_gate",
         "plan_gate_seats": 1,
     }),
     "heavy": MappingProxyType({
-        "review_stack": "codex_gate,kimi_gate,claude_gate",
+        "review_stack": "codex_gate,deepseek_gate,claude_gate",
         "round_cap": 5,
-        "takeover_chain": "codex_gate,kimi_gate,claude_gate,deepseek_gate",
+        "takeover_chain": "codex_gate,deepseek_gate,claude_gate",
         "plan_gate_seats": 2,
     }),
 })
@@ -353,3 +354,107 @@ def required_stack(
             "Refusing to verify nothing."
         )
     return names, provenance
+
+
+# --- ci_requirement: the one CI rule (ADR-092 decision 4, OF-2c) ---------------------------
+
+_FALSY = frozenset({"0", "false", "no", "off"})
+
+
+class BranchProtectionUnreadable(ReviewGateConfigError):
+    """``branch_protection.yaml`` exists but cannot be read or is invalid. Never read as absent."""
+
+    def __init__(self, path: str, reason: str) -> None:
+        self.path, self.reason = path, reason
+        super().__init__(f"branch_protection_unreadable: {path}: {reason}")
+
+
+def _flag_source(project_id: Optional[str], resolver) -> Optional[str]:
+    """Source 1: the resolution source when ``VNX_CI_GATE_REQUIRED`` is true, the registry
+    default included. A value that is neither true nor false, or an unreadable store, raises."""
+    if resolver is None and (strict := config_runtime.strict_resolver()) is not None:  # autowire's: no row
+        resolver, project_id = strict[0], project_id if project_id is not None else strict[1]
+    raw, source = config_registry.resolve_with_source(
+        CI_GATE_KEY, project_id, resolver, use_default_resolver=resolver is None, strict_resolver=True,
+    )
+    if source == "project_config_error":
+        raise ReviewGateConfigError(f"{CI_GATE_KEY}: the project config store cannot be read.")
+    value = raw.strip().lower() if isinstance(raw, str) else None
+    if value in _TRUTHY:
+        return source
+    if value in _FALSY:
+        return None
+    raise ReviewGateConfigError(f"{CI_GATE_KEY}={raw!r} (source: {source}) is neither true nor false.")
+
+
+def _protection_ci_contexts(project_root: Optional[Path], protection_yaml) -> Tuple[str, List[str]]:
+    """``(path, ci_contexts)`` from ``branch_protection.yaml``; ``("", [])`` when no search path
+    holds a file. A CI context is every required check outside ``vnx-gate/*``: those are the only
+    contexts no workflow produces (the vnx-gate App and the door publish them)."""
+    import forge_protection_drift as fpd
+
+    if protection_yaml is not None:
+        path, fetched = protection_yaml
+        text = fetched.text
+        if fetched.error:
+            raise BranchProtectionUnreadable(path or "branch_protection.yaml", fetched.error)
+        if fetched.not_found:
+            return "", []
+    else:
+        root = Path(project_root) if project_root is not None else _default_project_root()
+        found = fpd.find_local_protection_yaml(root)
+        if found is None:
+            return "", []
+        path = str(found)
+        try:
+            text = found.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            raise BranchProtectionUnreadable(path, str(exc)) from exc
+    try:
+        config = fpd.parse_protection_config(text if isinstance(text, str) else "")
+    except fpd.ProtectionConfigError as exc:
+        raise BranchProtectionUnreadable(path, str(exc)) from exc
+    return path, [c.context for c in config.checks if not c.context.startswith(fpd.VNX_GATE_PREFIX)]
+
+
+def _default_project_root() -> Path:
+    import project_root
+
+    env_root = os.environ.get("PROJECT_ROOT", "").strip()
+    return Path(env_root) if env_root else project_root.resolve_project_root()
+
+
+def ci_requirement(
+    project_id: Optional[str] = None, *, resolution: Optional[ProfileResolution] = None, resolver=None,
+    config_path: Optional[Path] = None, protection_yaml=None, project_root: Optional[Path] = None,
+) -> Tuple[bool, List[str]]:
+    """``(required, sources)``: is CI required (ADR-092 decision 4). Required when one source
+    asks; ``sources`` names each, in order: (1) ``VNX_CI_GATE_REQUIRED`` true, the registry
+    default included, as its resolution source; (2) ``dial:ci_green_required`` at level >= 2;
+    (3) ``branch_protection:<path>`` for a CI context in its required checks, read with the
+    search order and parser of ``forge_protection_drift``: ``protection_yaml`` is an
+    already-fetched ``(path, YamlFetchResult)`` as ``fetch_project_yaml_from_ref`` returns it,
+    else the file is read under ``project_root`` (else ``$PROJECT_ROOT``, else the git root);
+    (4) ``review_stack:<source>`` when the project's own review chain names ``ci_gate``.
+
+    No caller reads this yet: OF-4 switches the request, the verification and the availability
+    over together. Raises :class:`BranchProtectionUnreadable` for a protection file that exists
+    but is unreadable or invalid, ``ReviewGateConfigError`` for a flag neither true nor false,
+    an unreadable config store or an unreadable dial.
+    """
+    config_runtime.autowire()
+    sources: List[str] = []
+    flag = _flag_source(project_id, resolver)
+    if flag is not None:
+        sources.append(flag)
+    dials = read_enforcement_dials(config_path if config_path is not None else enforcement_config_path())
+    if dials.get(CI_DIAL, 0) >= 2:
+        sources.append("dial:" + CI_DIAL)
+    path, contexts = _protection_ci_contexts(project_root, protection_yaml)
+    if contexts:
+        sources.append("branch_protection:" + path)
+    resolution = resolution if resolution is not None else resolve(project_id, resolver=resolver)
+    names, stack_source = review_stack(project_id, resolution, resolver)
+    if CI_GATE in names:
+        sources.append("review_stack:" + stack_source)
+    return bool(sources), sources

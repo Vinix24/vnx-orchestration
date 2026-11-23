@@ -6,6 +6,1071 @@ Format: [keep-a-changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [s
 
 ## [Unreleased]
 
+## [1.9.1] - 2026-11-16
+
+This release exists because two review fixes that the fleet waits on are on main but not in v1.9.0: #2865 (the codex review prompt names a test command per artifact type, so a TypeScript PR no longer gets a pytest requirement) and #2967 (the codex seat runs a PR's tests with the project's own interpreter and `PYTHONPATH`, through the keys `VNX_REVIEW_PYTHON` and `VNX_REVIEW_PYTHONPATH`). Without them codex blocks a project outside this repository with a verdict and no finding. It carries six themes, each named from the entries below. Reviews without an outcome (track `reviews-zonder-uitkomst`): ADR-080 (#2966) records that a `blocked` or `fail` verdict with zero findings is `unavailable` with reason `verdict_without_findings`, E6 takes the cause of an advisory-only rejection from its advisory files (#2965), and the review interpreter and `PYTHONPATH` rule above (#2969, #2967). Delta review in shadow (ADR-064, deltareview DR-2 to DR-8): the change classifier, the delta prompt, the carry and prune shadows, the merge receipt tree fields and `vnx review delta-compare`; `VNX_REVIEW_SCOPE` reads fail-closed to `full`. CI cost and merge admission: the main window and the `main` preflight of the merge door (ADR-073), and impact selection kept in shadow (ADR-074, `vnx impact report`). Operator queue, decisions and memory: `vnx inbox`, the `operator_inbox` block of the T0 index, the decisions register (ADR-077), the memory ledger (ADR-078) and operator steering (ADR-072). Permission events and hard stops: the permission-event and CLI-invocation ledgers (ADR-075), the scan of refused tool calls and every permission event carrying a closed `hard_stop` field classified on the raw form (ADR-082, #2972). Documentation and housekeeping: ADR-079 (documentation follows the code, #2968), the T0-state SessionStart hook skipping the build in a worker session (#2970), 36 test files back in Profile A and a long run of extract-method refactors under the 100-line rule.
+
+What 1.9.1 does not claim yet. Four tracks are partly merged or not merged at all, and none of them is written here as working or measured; the state is `vnx objective show <track> --project-id vnx-dev` of 2026-11-16. `reviews-zonder-uitkomst` has D0, D1, D3a and the D1 precursor merged (#2966, #2967, #2965, #2969); D2, D3b, D4 and D5 are not, so a verdict without a finding is not yet reclassified to `unavailable` by the gate. Its open criterion 2 reads: codex output `blocked` or `fail` with empty findings "wordt unavailable met reden verdict_without_findings en krijgt één herkansing", and criterion 5 needs a measurement 7 days after D5 with `verdict_without_findings` in under 5% of the codex runs on vnx-dev and MC; the gate run on MC #1389 that criterion 1 asks for is not in this release's evidence. `permissieblokkades-leren` has its ledgers, the scan and L5a merged; L5b and L5c are not, so no proposals are written yet. Its open criterion 3 reads: a form above the threshold "wordt een voorstel in de bestaande voorstellenwachtrij (steering_proposal_store)", and criterion 6 asks that the drop of a form after an accepted rule is measured, not assumed. `eventarchief-compressie` has no linked PR and ADR-081 is not on main: its criterion 6 (`plain_archive_files_older_than_window = 0` in the footprint probe and `events/archive` of vnx-dev at least 4,5 GiB smaller) is open, and no archive is compressed by this release. `receipt-hashketen-aan` has no linked PR: it is done only when every new receipt on vnx-dev carries a `prev_hash` and `python3 scripts/audit_chain.py verify` returns `verified` with exit 0 on the production ledger, and switching it on in a running process is an operator request; neither is established.
+
+Migrations and rollback. One store migrates, and it is the quality database. I measured `git diff v1.9.0..origin/main` over `schemas/migrations`, `scripts/lib/migrations` and `scripts/quality_db_init.py`, and over every non-test `*.py` and `*.sql` for `CREATE TABLE`, `ALTER TABLE`, `user_version` and renames. `runtime_coordination.db`: no migration file changed (the highest stays 0038), so 1.9.1 does not touch its `user_version`, which stays 38. `quality_intelligence.db` (`scripts/quality_db_init.py`, phase 0 of the nightly jobs): `HIGHEST_QI_VERSION` moves from 36 to 37. V37 adds the nullable column `difficulty_json TEXT` to `dispatch_metadata` when it is missing (herwerk-per-model-en-reviewer, ADR-071; written fill-once by `dispatch_metadata_db` from the difficulty recorded at staging), stamps `user_version` 37 inside the `apply_if_below` savepoint, creates no table and changes no existing row. The two other hits were not new: the `ALTER TABLE session_analytics ADD COLUMN` statements are the 1.9.0 ones moved by extract-method into `_v29_ensure_columns` (the v22 and v29 edits only split the functions), and `ALTER TABLE scan_quota RENAME TO scan_quota_old` is a fixture string in `tests/test_golf_schoon_r01c_characterisation.py`; it touches no store. No other `CREATE TABLE`, `user_version` or rename was added outside `tests/`. The new ledgers and state of this release (permission events, CLI invocations, `steering_cases.ndjson`, `memory_ledger.ndjson`, the operator queue, `besluiten.ndjson`, the `review_gates/shadow/*.ndjson` files, the main window and slot state) are NDJSON or JSON files, not SQL. The quality database has no down script.
+
+Re-pinning a project from 1.9.1 back to 1.9.0 is not established as safe, and I did not run it. What the 1.9.0 code shows: `bootstrap_qi_db` in v1.9.0 applies each version through `schema_migration.apply_if_below`, which returns without running when `user_version` is at or above the target, so at 37 every 1.9.0 migration (up to 36) is skipped, and I found no check in v1.9.0 that refuses a `user_version` above its own `HIGHEST_QI_VERSION`. The column `difficulty_json` stays behind, unread by 1.9.0 (`dispatch_metadata_db` in 1.9.0 does not know it), and the values 1.9.1 wrote there are not removed. The one writer I read in 1.9.0, `intelligence_backfill.py`, names its columns in its INSERT, so it is expected to be unaffected; two `SELECT * FROM dispatch_metadata` readers exist in 1.9.0 (`governance_aggregator.py`, `update_dispatch_cqs.py`) and whether they tolerate the extra column is not established. This is a reading of the code, not a run. No down path exists for V37; the zero point is a backup of the quality database right before the up. Receipts written by 1.9.1 carry fields 1.9.0 does not know (`token_usage_normalized`, `start_context_tokens`, and on `pr_merged` the tree fields); that a 1.9.0 reader ignores them is not established. The state files above stay behind on a re-pin.
+
+After the tag the operator runs `vnx release publish --tag v1.9.1 --set-current`, `vnx release verify v1.9.1`, creates the GitHub Release page and uploads to PyPI, raises the pins, runs `vnx regen-settings --merge` per project and `reload_plist.sh` per launchd family, and ends on `vnx preflight` with exit 0 (`docs/operations/install-central-runbook.md`, "Before a rollout").
+
+- Operator steering (ADR-072, OB-3): `scripts/lib/operator_steering_match.py` groups repeated operator prompts across sessions (decision 15), finds the prompts behind `OPERATOR` and `EIGEN MISSER` memory notes (decision 6), applies the case threshold (decision 7) and records at most five tool calls plus named dispatch-ids and PR numbers per prompt (decision 13). Pure functions over given records, ids and counts only (dlv-d8e782277aef).
+
+- Documentation (track `documentatie-volgt-de-code`, OI-2759): the README states `VERSION` 1.9.0 (released 2026-11-12) in its three version passages and installs from the `v1.9.0` tag because PyPI still carries 1.1.0; the install-central runbook gains the `gh release create` step and a pointer to the 1.9.0 migrations; the pages that stated `codex_gate,kimi_gate` as the current default now state `codex_gate,deepseek_gate` and the chain `codex_gate,deepseek_gate,claude_gate` (operator decision 2026-11-11). ADR bodies and dated records are unchanged.
+
+- Operator steering (ADR-072, OB-3): seven tests for `scripts/lib/operator_steering_match.py` that left #2719 for the size cap are back in `tests/test_operator_steering_match.py` (dlv-d8e782277aef-b).
+
+- Herwerk H4 (OI-2761): `scripts/lib/rework_blame_edges.py` reads the task class from the `task_class` column when the `dispatches` table has it and from `$.task_class` in `metadata_json` otherwise, so the nightly rework-attribution job no longer ends `degraded` on `no such column: task_class`. A `dispatches` table with neither source, or none at all, stops the run with a named `BlameRunError` and leaves the watermark in place (dlv-1cb445cf4f21-b).
+
+- Operator steering (ADR-072, OB-4a): `scripts/lib/operator_steering_report.py` builds the `steering_report/1` document from the bound transcripts and memory notes (session, transcript time and the assistant turn before each prompt), with every class present at zero, `low_coverage` above 30 percent unclassified and an atomic `steering_report.json` writer. Ids, classes, counts and note names only: no prompt text, note description or tool command (dlv-fb25b2b09b67).
+
+- Rekenslot RS-7: `scripts/lib/slot/slot_shadow.py` simulates `enforce` admission on the shadow state in observe mode (`shadow_admit`, `shadow_release`) and returns a `would_wait` record with reasons and an `estimated_wait_s` that is `estimate: true` and `null` without a known hold time; the real holders and queue are never touched (dlv-27a6de759fc1).
+
+- Review rounds (deltareview DR-3): `RoundLine` and the gate request record take the optional parent-chain fields `scope`, `parent_head_sha`, `parent_round_ref`, `delta_base`, `finding_ids`, `changekind`, `patch_id` and `full_review_reason`, written only when set; a line without them is unchanged and a reader that ignores them behaves as today (dlv-2cf7e0cd07bb).
+
+- Operator steering (ADR-072, OB-4b): `vnx learning steering report --json|--md|--show` and `show --case <case_id>` (also `scripts/operator_steering.py`); every `steering_report/1` case now carries a `case_id` (dlv-519d811d2382).
+
+- Deltareview DR-2: `scripts/lib/review_changekind.py` classifies a follow-up head against its parent head on git trees as `NO_CODE_CHANGE` (same merge-base, `head^{tree}` equals the parent's tree), `TRIVIAL_REBASE` (the parent's own diff replayed with `git merge-tree` merges cleanly into exactly `head^{tree}`, outside the seat input set at import depth 1 and outside `smart_router.security_path_kind`) or `REWORK`; the interdiff is the blob diff between those trees, so a relocated edit always shows, and `git patch-id --stable` stays on the record without deciding anything; anything it cannot prove is `REWORK` with `full_review_reason: cannot_prove`, and `anchors_present` marks a finding whose path or function vanished `unverifiable` (dlv-44d04a9dc3ac).
+
+- Daily metrics (track `doorloop-en-effectiviteit-dagelijks`, PR-14 split a): `scripts/daily_metrics.py report --check` exits 0 only when the last seven settled days are each this project's `final`, not backfilled, in-window collection, no collection gap exceeds 48 hours, every window day carries the ten ids with a valid record (no keyed record without entries, no `None` without a reason, no value next to an `unknown_reason`) and every `approved` event carries `evidence.tty == true`; otherwise exit 1 with each condition by name in `unmet`, and `status: "stale"` for a loaded `launchctl` job whose newest settled day is not fresh. `report --metric ID[:KEY] --last N --json` pools the final days of the window into `window`, `pooled_value` and `sample_size`, with `pooled_value: null` and a reason, never 0, when no day carries a measured value.
+
+- Deltareview DR-8b: `scripts/lib/review_prune_shadow.py` books the change-pruning decision (`unchanged` plus the finding-set hash) in `review_gates/shadow/prune.ndjson` and answers with `would_skip` which single next request pruning would skip; shadow only, nothing in the gate path calls it and `rounds.ndjson` is never touched (dlv-d8b41b275148).
+
+- PR-size thresholds per project: `VNX_PR_SIZE_WARN` and `VNX_PR_SIZE_HOLD` in the config registry (defaults 450 and 600, a `project_config` row per project). `pre_merge_gate` reads them for the PR's project and names the threshold and its source in the detail line; an invalid value or a WARN above HOLD falls back to the defaults and is named by key (dlv-6eed0a2cbc05).
+
+- Daily metrics (track `doorloop-en-effectiviteit-dagelijks`, PR-14 split b): `scripts/daily_metrics.py report --scan-zero-for-unknown` reads every day file and revision of the store and exits 1 on a value next to an `unknown_reason` (0 included), on an unreadable file and on an empty store; `report --check` runs the same scan and adds `zero_for_unknown` and `unreadable_files` to `unmet`. New runbook `docs/operations/DAILY_METRICS.md`: install per project, every `--check` condition, how to read `stale` and `unknown`, the window read and the rollback.
+
+- OB-5b: `vnx learning steering proposals [--status S] [--json]` lists the steering proposals of the project with `doelpad` and `bewijs` (ids only), and `vnx learning decide-steering <proposal_id> approve|reject|apply --approval-id <id> --reason <text> [--applied-ref <pr-or-sha>]` records the operator decision in the proposal store; `apply` needs the ref, `approved` changes nothing by itself (dlv-3da1828aff4f).
+
+- Rekenslot RS-6: `scripts/lib/slot/slot_supervisor.py` runs a workload in its own session, books it on the lease, keeps the heartbeat and the 30-second memory samples, and releases only when the session and every child lease are positively gone; a start on a booked lease, under a parent without room or after a stale token is refused before the spawn (dlv-e9918dddd494).
+
+- `vnx daily-metrics` owns `scripts/daily_metrics.py`: `install` manages one opt-in per-project launchd job at 04:10 local, every other verb is passed through unchanged, and `vnx init` installs no such job (doorloop-en-effectiviteit-dagelijks PR-13).
+
+- Deltareview DR-2 follow-up: `classify_change` now computes the security set over the own changes and the base move, so a rebase that brings in a security path is `REWORK` with `security_path` (OI-2768), and `seat_input_set` and the `ls-tree`/`diff --name-only` readers in `gate_reanchor.py` read paths with `-z` so a path with a space or a quoted character stays in the import graph (OI-2767) (dlv-44d04a9dc3ac-b).
+
+- Operator steering OB-6a (ADR-072 decisions 8, 12, 16): `scripts/operator_steering_rca.py stage --case <id>` folds the report into the append-only case ledger `state/steering_cases.ndjson` (stable case ids, `case_opened`/`case_members`/`rca_staged`) and stages one research-analyst RCA bundle without prompt text; an open RCA is not staged again, five `rca_staged` per project per ISO week (UTC) is the cap, and a corrupt ledger line fails loud with its line number (dlv-45b308ccb700).
+
+- Deltareview DR-4a: `scripts/lib/review_delta.py` builds the delta prompt (parent chain, interdiff, open finding ids, one question per id, the callers rule, the `delta_verdict/1` answer contract) and parses the seat's answer; it refuses a record that forces a full review, counts an unanswered id as `open`, and turns a PASS into FAIL while a sent blocker id is `open`, `regressed` or `unverifiable` or a new finding blocks (ADR-064 besluit 1 and 3, C2) (dlv-57a9f506acac).
+
+- Deltareview DR-8a: `scripts/lib/review_carry_shadow.py` books a carried PASS in shadow (`review_gates/shadow/carry.ndjson`) with seven provenance fields, validated, never a round, replaced by any fresh verdict on the same head, and never for a security path (dlv-7d7f3af891f0).
+
+- Operator steering (OB-6b, ADR-072): `operator_steering_rca.py ingest --dispatch <id>` reads the `steering_rca/1` answer of a staged RCA, checks it against the sha-bound case snapshot, refuses a 40-character prompt quote in the prose or in any decoded string of its JSON blocks (NFC, whitespace runs as one space) and every foreign id with its own reason code booked as `rca_refused`, and turns a valid proposal into a revision in the proposal store before booking `rca_ingested`.
+
+- The codex seat answers a shadow delta prompt on a follow-up head of a medium PR, booked next to the full round in `review_gates/shadow/delta.ndjson`; the full round still decides and no ledger, result or obligation changes (deltareview DR-4b).
+
+- The nightly `vnx dream run` now writes `steering_report.json` and stages at most five RCA bundles per week, and `vnx doctor` warns when that report is stale, absent or in error (OB-7).
+
+- `review_delta_compare.compare` measures the shadow delta against the full codex round per pair: missed blockers, the 95% interval and a planted set, with the pass/fail/insufficient outcome (deltareview DR-5, library).
+
+- `vnx review delta-compare` measures the shadow delta against the full codex round per pair: missed blockers, the 95% interval and a planted set, with the pass/fail/insufficient outcome (deltareview DR-5).
+
+- Merge receipt (DR-7, requirement 9, split 2): `merge_pr` now computes the merge-tree record after a confirmed merge and the binding `pr_merged` receipt carries `merge_sha`, `merged_tree`, `tested_head`, `tested_tree`, `tree_equal` and, when something could not be read, `merge_tree_unavailable`. The unit-test run no longer starts a real `git fetch` per merge test: `tests/conftest.py` refuses `_git_in_target`.
+
+- The profile key `VNX_REVIEW_SCOPE` (full, delta_shadow, delta) reads fail-closed to `full`; the DR-4b shadow delta runs only under `delta_shadow` or `delta`, and writing `delta` is refused without a passed DR-5 measurement, a merged DR-7 and a green main CI (deltareview DR-6 part 1).
+
+- Deltareview DR-6 part 2, split c: the full codex prompt and the shadow delta prompt are built by one reviewer assembly (`gate_runner._assemble_reviewer_prompt`: untrusted-data sandwich, reviewer role policy and ADR rules, tests block). The shadow now carries that policy instead of the bare delta brief, `run_shadow` and `build_delta_prompt` take the assembly as a required argument, and the full codex prompt stays byte for byte the same (dlv-ddffcb39a8e0-c).
+
+- Under `VNX_REVIEW_SCOPE=delta` the codex seat decides an eligible medium follow-up head with the delta round, and every other head stays a full round that names why in `full_review_reason` (deltareview DR-6, part 2).
+
+- ADR-074 records the impact-selection-in-shadow contract (sets U/X/S/E/F, `scope: full|impact`, the evidence contract, activation threshold of 0 misses over at least 15 red runs) and registers the hook `VNX_CI_IMPACT_CMD` in config_registry; no code reads it yet (impactselectie-in-schaduw PR 1).
+
+- A window on main replaces the wait per merge: ADR-073 fixes the admission contract, the `main` gate in the merge door behind `VNX_MAIN_UNVERIFIED_MAX`, and why a native merge queue is not available here, and `docs/operations/CI_COST_METING.md` holds the CI-cost measurement (ci-cost-and-merge-cadence PR 1).
+
+- Window on main, part 1 (ci-cost-and-merge-cadence PR 2, split a): `scripts/lib/main_window.py` holds the pure core `compute_window`, the merges since the last green VNX CI run with the oldest red entry named as the probable cause; the gh adapter follows in a next PR (dlv-f5988975198e-a).
+
+- `scripts/ci/impact_select.py` builds a static test-to-module graph from imports and path literals and selects the tests a changed path reaches, expanding to the full suite with a named reason whenever it is unsure; it decides nothing in CI yet (impactselectie-in-schaduw PR 2).
+
+- `check_main_ci_red` reads a window on main (the merges since the last green VNX CI run, `scripts/lib/main_window.py`) instead of only the latest run, so a red run in the middle of the window is TRIGGERED with its probable merge, PR and dispatch (ci-cost-and-merge-cadence PR 2).
+
+- The main window base is a green run with the heavy profile, every run status has one outcome with the age limit, a profile adapter reads the files per commit, and E1 reads the named NO-GO outcomes (ADR-073, ci-cost-and-merge-cadence PR 3a, part a).
+
+- CI impact shadow (impactselectie-in-schaduw PR 3a): `scripts/ci/impact_shadow.py` builds the `impact_shadow/1` record from the selector JSON and the Profile A evidence (sets by name, misses for the graph-only and the conftest variant, known failures with `niet onderzocht`, `attempt_valid`, `reconstructible`); `impact_select.py` gains `conftest_closure_version` and `conftest_reached` (ADR-074 besluit 14, OI-2788) (dlv-8838e8cb0775-a).
+
+- CI impact shadow (impactselectie-in-schaduw PR 3b, part 1): the Profile A step `Impact shadow record (never fails the job)` runs `impact_shadow_inputs.sh` and `impact_shadow_step.sh` against the Profile A evidence, `continue-on-error` and exit 0 on every path; the shadow job that runs only S follows in dlv-8838e8cb0775-c (dlv-8838e8cb0775-b).
+
+- `admit` decides GO or NO-GO for a merge from the main window under `VNX_MAIN_UNVERIFIED_MAX` (unset means mode off), the age limit comes from `VNX_MAIN_RUN_MAX_AGE_MIN`, and `vnx main-window status` is the read-only probe, registered in the starter/operator tier; an unreadable config store makes the admission NO-GO `config_unreadable` (`make_db_resolver(raise_on_error=True)`)
+
+- CI impact shadow (impactselectie-in-schaduw PR 3b, part 2): the job `Impact shadow (runs only S, never required)` runs `impact_shadow_job.sh`, which runs only the files of S - X with the Profile A options and records the wall clock; `impact_shadow.py` gains `plan`, `shape` and `job` (`impact_shadow_job/1`, completeness against S); job-level `continue-on-error`, exit 0 on every path, no `needs` either way, ADR-074 besluit 15 (dlv-8838e8cb0775-c).
+
+- Headless claude builders now start with `--setting-sources project,local`, carrying only `effortLevel` and `cleanupPeriodDays` from the user settings, which saves about 39,000 start tokens per build; `VNX_BUILDER_SETTING_SOURCES=user,project,local` restores the old argv.
+
+- Rework (ADR-071, herwerk-per-model-en-reviewer): every round carries a cause (review, ci, grens, operator), declared at staging with `--round-cause` and read from the title only for history; first-pass yield counts review and unknown rounds only, and the report adds a "Rondes per oorzaak" table (dlv-f121e49516df).
+
+- Every dispatch receipt carries `token_usage_normalized` (uncached input, cache read, cache write 5m and 1h, output) and, for a claude harness builder, `start_context_tokens`, beside the raw `token_usage` that keeps its shape; the claude adapter now also reports `cache_write` (herwerk-per-model-en-reviewer).
+
+- CI cost (impactselectie-in-schaduw PR 4a-1): the impact collector keeps the shadow artifacts of every VNX CI run attempt in `state/impact_shadow.ndjson` before GitHub deletes them after 90 days.
+
+- The rework report shows a 95% Wilson interval beside every rate and proposes a builder floor or a seat flag only when the two intervals do not overlap, replacing the 5-point rule (herwerk-per-model-en-reviewer).
+
+- The impact shadow job runs only on pull requests, so the conclusion of VNX CI on main no longer waits for it; the shadow step in Profile A is unchanged (impactselectie-in-schaduw PR 3, part d).
+
+- CI cost (impactselectie-in-schaduw PR 4a-2): `vnx impact report` shows the misses of reduced selections, the reduced share, the red runs and the wall clock of the shadow job beside Profile A, over the ledger that `vnx impact collect` keeps.
+
+- The subagent guard of this repo (`.claude/settings.json`, `pretooluse_block_subagent.sh`, `pretooluse_subagent_guard.py`) now denies the `Agent` tool as well as `Task`, so the block that went dead with the rename in Claude Code 2.1.63 holds again (OI-2798).
+
+- `vnx deliverable close` books a `dead_letter` base on its own completed `<id>-rK` round when the T0's newest decision on that base is `reject`, so a deliverable whose rescued work landed through a round no longer stays `failed`; without that reject, a decision log or a completed round it refuses by name (OI-2803, ADR-049 amendment).
+
+- rework_report: `--json` carries a cost axis per accepted delivery (build tokens and API-equivalent, review runs and cost per seat, lead time) per builder x task_class x risk, every gap named; the Markdown section follows (herwerk-per-model-en-reviewer).
+
+- rework_report --md: a `## Cost per delivery` section per builder x task_class x risk with the gap counts under it, or the line "Geen kostenas" when the cost ledger is missing (herwerk-per-model-en-reviewer).
+
+- The door re-reads a fresh permit run (by id, then the list, 3 attempts) before "not on the head" becomes a refusal, so it no longer revokes its own permit on GitHub's read-after-write lag, and the receipt names `readback_attempts` (OI-2787, ci-cost-and-merge-cadence PR 3b part a).
+
+- Headless claude builders run at the model's own effort again (no `--effort` carried from the user file) and exclude the user-level `CLAUDE.md` and rules that the walk-up still loads, through `claudeMdExcludes` in the `--settings` JSON (lean builder context, part c).
+
+- Impact report (impactselectie-in-schaduw PR 4b, split c): `vnx impact report` counts live and backtest ledger lines apart (`by_source`) and together, an attempt in both counts once as live, and an unreconstructible record names its unreadable input; `impact_ledger` exposes `discover`, `fetch_jobs`, `timing` and `entry_key` for the backtest (dlv-cde4f9c66c0b-c).
+
+- Failure classes: a Cloudflare edge block ("Attention Required! | Cloudflare") is `api_blocked` (retry the same tier, notify the operator) instead of `auth_rejected`, and a paid-lane budget refusal is `paid_lane_budget_exceeded` (no climb, next step named) instead of `unknown` (OI-2796, OI-2783, dlv-oi2796-api-blocked).
+
+- Config: the PR-size thresholds of the merge gate and the injection-WHY flag read the project store with a raising resolver, so an unreadable store is named (`project_config_error`) instead of silently read as unset; the answers stay the defaults and off (OI-2795, dlv-oi2795-strict-resolver).
+
+- The merge door gets a `main` preflight before `door`: off without VNX_MAIN_UNVERIFIED_MAX, NO-GO on a red, unmeasurable or full window when it is set, its own `--override-main`, and the admission as `main_admission` on `pr_merged` and `pr_merge_refused` (ci-cost-and-merge-cadence PR 3b, part b).
+
+- CI installs ripgrep from one script, `scripts/ci/install_ripgrep.sh`: the pinned release is retried patiently (8 tries, 10 s apart) after the 08-11 HTTP 504 window, then a bounded apt fallback; the sha256 check stays mandatory and all four workflow steps call it.
+
+- A docs dispatch now gets the writing rules from the file named in `VNX_DOC_STYLE_FILE` appended to its instruction at staging (off when empty), with its path and sha256 recorded on the spec; a set path that cannot be read refuses staging.
+
+- `vnx impact backtest` rebuilds S for old pull_request runs from their `profile-a-evidence` with today's selector into `state/impact_backtest.ndjson`, and `vnx impact report` counts live and backtest apart and together (impactselectie-in-schaduw PR 4b). The backtest takes its base from main as it stood when the run was created.
+
+- Main window (ci-cost 3b part d): a merge known only from its `pr_merged` receipt, newer than the base and not yet in GitHub's commit list, now counts as running (or as the NO-GO `receipt_only_stale` past the age limit), so the read-after-write gap cannot let a second merge past N; an unreadable receipt time counts, an unreadable base time with such a merge is unmeasurable (dlv-f981dfd5fbee-d).
+
+- Staging records the difficulty of a dispatch (line budget, file count, plan complexity, route reason) on the spec; migration v37 adds `dispatch_metadata.difficulty_json` and the lane-start writer takes it fill-once (herwerk-per-model-en-reviewer, part b, PR 1 of 2).
+
+- Merge door (ci-cost 3b part c): with `VNX_MAIN_UNVERIFIED_MAX` set, admission and merge run under one flock per project, the window is read again under that lock right before `gh pr merge`, a bounded wait refuses as `main_lock_timeout`, and the lock is released after the receipt, so parallel merge loops cannot take the window past N; without the key nothing changes (dlv-f981dfd5fbee-c-r2).
+
+- The nightly token backfill rewrites the receipt ledger only when it enriches a line, under the append lock, and keeps every other line byte for byte (OI-1940).
+
+- The headless lane start now stamps the staged dispatch difficulty into dispatch_metadata.difficulty_json (herwerk-per-model-en-reviewer, decision rule part b).
+
+- The unavailable-reason classifier reads `VNX_CI_GATE_REQUIRED` through `config_runtime`, the resolver the availability check uses, so a `ci_gate` parked off in the project DB books `provider_disabled` and the obligation stays pending instead of `provider_not_configured` (OI-1456).
+
+- DISPATCH_RULES section 2.2.1 and the T0 role describe the door's `main` gate, `--override-main`, the per-project lock and the chain wait through `vnx main-window status`; DOCS_INDEX lists ADR-073 and ADR-074 (ci-cost-and-merge-cadence PR 4a).
+
+- test: seven more CI-excluded test files (gemini prompt, receipt instruction hash, T0 skill consistency, terminal state reconciler, worker heartbeat, codex event normalizer, pool lease e2e) match the current code and leave the CI exclusion list (OI-2589, batch e).
+
+- Five more CI-excluded dashboard test files (kanban and open-items-gate certification, serve_dashboard API, conversation resume, dashboard feature) follow the handlers into api_operator and leave the Profile A exclusion list (OI-2589).
+
+- fix(governance): a configured enforcer check without a `_check_<name>` implementation now fails closed at level 1 and up, named, and follows the normal override rule instead of passing silently (OI-2758)
+
+- A pre-push hook that needs minutes no longer loses the door's salvage commit: the push timeout is the setting `VNX_SALVAGE_PUSH_TIMEOUT_S` (default 900 s, was 120 s), and a worktree whose salvage commit is on no remote branch is kept, with `worktree_kept` on the receipt (OI-2744).
+
+- fix(dispatch): the door retries a locked runtime DB at the claim with backoff, and a refused start no longer blocks a plain refire (OI-2754)
+
+- fix(dispatch): a provider run whose only output is an API credit or auth refusal now books failure and the door exits non-zero, instead of a clean success (OI-1803)
+
+- The quality digest parses an ISO timestamp without sub-seconds instead of silently dropping it, so it reads the whole ledger window again, and logs one WARNING with the count of lines it still cannot parse (OI-1687).
+
+- The toolkit export refuses a committed build artefact (`__pycache__`, `.pytest_cache`, `.pyc`, `.pyo`) in the plugin source and its leak scan now reads every file it publishes (OI-2154).
+
+- fix(constraints): the bare provider string `glm` resolves to the `zai` registry key, so the deprecated-glm-models allowlist cannot be sidestepped (OI-1798)
+
+- The worker-scope hook now scope-checks NotebookEdit (target `notebook_path`) like Write/Edit/MultiEdit, also blocks it on a refused policy, and names its allow decision for Task and mcp__ tools (OI-2649).
+
+- fix(learning): reattr verify matches a moved row on its stable identity (without the columns a writer updates in place) and lists a row whose mutable columns changed since the move under `mutated_since_move`, instead of reporting it missing; two planned moves with one stable identity are `ambiguous_stable_identity` and a destination row matched twice is `destination_row_reused` (OI-2786)
+
+- The seven dispatcher test files that were CI-excluded for OI-1227 now check the current dispatcher code; their lines leave `scripts/ci/test_exclusions.txt` in a closing PR (OI-2704).
+
+- Seven more test files pass on main again: the tests now match the current shutdown, skill, task-count, strict-diff, scoped auto-commit and head-sha behavior, and two review-linkage tests pin their project id so a mocked `subprocess.run` never serves `git remote`. Their CI exclusion lines leave `scripts/ci/test_exclusions.txt` in one closing PR (OI-2589, batch b).
+
+- Eight more CI-excluded test files (identity, pattern stability, codex PR311 findings, registry integration, tmux adapter, session ids, strategy roadmap x2) are fixed to match the current code, or deleted when obsolete; the exclusion line of the deleted `tests/test_strategy_roadmap_real_file.py` leaves `scripts/ci/test_exclusions.txt` in this PR, the other seven leave in a closing PR (OI-2589).
+
+- Eight more CI-excluded test files (gemini streaming, auto-report, behavior contracts, bench headless routing, build_t0_state, project-status hook, receipt classifier, wiring completeness) check current behavior again; their exclusion lines leave `scripts/ci/test_exclusions.txt` in one closing PR (OI-2589, batch d).
+
+- Seven more CI-excluded test files (subprocess cheap-lane, health, w3e robustness, headless daemon wave5, tmux adapter, pattern matching, safe-autonomy cutover) are updated to current behavior; their scripts/ci/test_exclusions.txt lines leave in one closing PR (OI-2589, batch g).
+
+- `vnx dream status` names a pending-review file it cannot read instead of silently dropping it, so an empty pending list no longer hides a waiting cycle (OI-2727, ADR-066).
+
+- A revision of a day without its base file is now refused by the daily-metrics day store itself (OI-2694).
+
+- Role discovery reads an unreadable role directory as "cannot verify" on Python 3.14 and later, the same as on 3.12 and 3.13, by deciding it with an explicit stat instead of is_dir/is_file (OI-2685).
+
+- A detached HEAD no longer stands in for the dispatch branch: it classifies from origin and pushes with HEAD:refs/heads/<branch> (OI-2716).
+
+- Review seats: a caller that deliberately asks for a risk class above the derived one now fires the `caller_escalation` signal, so the second review seat stays under the signal rule (OI-2697).
+
+- `bin/vnx horizon plan-gate` and `bin/vnx horizon deliverable` now reach their own parsers, and the help names `impact backtest` (OI-2699, OI-2806).
+
+- fix(intelligence): every writer of intelligence_usage.ndjson closes a torn tail through one shared append helper before it appends (OI-2714)
+
+- fix(governance): the side-door audit now sees a claude spawn through a variable binary (`"$CLAUDE_BIN" -p`) and lists `probe_claude_cli.sh` as an audited probe (OI-2660)
+
+- pyproject.toml declares its license as the SPDX expression `MIT` with `license-files`, drops the deprecated license classifier, and requires setuptools 77 or newer (OI-2776).
+
+- The dream liveness probe refuses a test-run write into the real central store, and its docstring names the beacon path it writes (OI-2732).
+
+- `vnx learning status` dates a contract_invalid receipt in the corpus block by its effective timestamp (`ingested_at` before `timestamp`), so a receipt that carries only `ingested_at` is counted in the window instead of as unreadable (OI-2736).
+
+- `run_blame_edges` loses its test-only `rc_conn is None` branch and the attribution job test now runs against a real runtime store (OI-2763).
+
+- Seven more CI-excluded test files (gate dispatch-id, evidence accuracy, execution certification, status schema, governance blockers, digest certification, digest runner) pass again on main; their exclusion lines leave in the closing PR (OI-2589, batch h).
+
+- test: seven more CI-excluded test files (pool manager/state/provider mix, provider string canon, provider dispatch contract/entry, wave7 deepseek smoke) pass on main again (OI-2589, batch i)
+
+- test: seven CI-excluded test files (adr007 repair and conformance, dispatch-agent default instruction, headless inspect, litellm agentic runner, observability linkage, per-PR closure) pass on main again (OI-2589, batch j)
+- fix(migrate): run() in migrate_future_system.py is back under the 70-line gate by extracting the backup step, so the batch-j skip on test_all_functions_within_70_lines_gate_counter goes (OI-2816)
+
+- test: seven more CI-excluded test files (review adapters, schema view ordering, track CLI, track v23 CLI, w-init project-id threading, week-1 skills, wheel install) pass on main again after their stale checks were updated (OI-2589, batch k)
+
+- The worker-scope hook is registered for NotebookEdit too, so the matcher in settings, the probe settings and the docs matches the hook's write-like tools (OI-2813).
+
+- CI: 36 test files whose fixes are on main leave `scripts/ci/test_exclusions.txt` and Profile A runs them again; their two host-conditional gemini skips join `xdist_expected_skips.txt` (OI-2589).
+- CI: the pinned skip-set count in `tests/test_ci_xdist_d4_switch.py` follows the two gemini keys (52 to 54) and the skip-set header names OI-2589.
+
+- A dispatch worktree whose HEAD no remote branch contains is kept whoever made the commit, and `vnx status` shows the held-worktree count (OI-2811).
+- Four worktree-isolation tests publish their fixture commit to a remote branch so they follow the keep-any-unpublished-head rule (OI-2811).
+
+- A staged dispatch bundle older than 30 minutes (VNX_STALE_STAGED_MINUTES) with no receipt and no worktree is listed in `t0_state.json` and counted in `t0_index.json` as `stale_staged`, so a stalled T0 shows it (OI-1553).
+
+- fix(closure): closure invariant 1 "a request record exists" is now a per-gate check `gate_<gate>_request_record`: a result carrying an `execution_id` with no matching request record in `review_gates/requests/` fails closure; legacy results without the id pass as legacy (OI-1438).
+
+- Stop-conditions: failed attempts from the panel lane (deliberation panel, plan-gate seats, tiebreak) no longer count toward `provider_exhausted` for a build or gate dispatch, and the door names how many it left out (OI-1800).
+
+- test: the `deliver_with_recovery` back-off test counts only the sleeps of `_backoff_or_fail`, so a retry loop elsewhere in the same worker no longer fails it (OI-2589)
+
+- One dispatch is one PR: registering a second, different PR on a dispatch's review-gate obligation is refused loudly (the door blocks the fire), and the obligation runner finds the PR through the dispatch registration before the `dispatch/<id>` branch name (OI-1563, OI-1751).
+
+- Events now resolve their data dir with the same rule as receipts (`vnx_paths.resolve_paths`): a bare `VNX_DATA_DIR` without `VNX_DATA_DIR_EXPLICIT=1` is ignored with one stderr line instead of splitting events from receipts; worktree and bench overrides now set the flag (OI-1276).
+- An explicit `VNX_DATA_DIR` (with `VNX_DATA_DIR_EXPLICIT=1`) now resolves for events without a git call, so `EventStore()` spawns no process (OI-1276, round 2).
+
+- test: tests/test_week_1_skills.py resolves this repo's root and asserts on the current skill and dispatcher layout instead of returning True/False (OI-2818)
+- test: merged main into this branch (the OI-2589 batch k edit to the old tests/test_week_1_skills.py is already contained in the rewrite) (OI-2818)
+
+- ci: 28 exclusion lines of batches h to k leave scripts/ci/test_exclusions.txt now that their fixes are on main, so Profile A runs those files again (OI-2589, closing PR 2).
+- test: the one unconditional skip in tests/test_w_init_project_id_threading.py now names OI-2080 and is a key of the Profile A skip set (OI-2589, closing PR 2, round 2).
+- ci: two exclusion lines go back (tests/test_pool_provider_mix_integration.py: post-spawn registration writes to /events; tests/test_wheel_install.py: build --no-isolation reports wheel not installed), both red on the Linux runner in run 43580191462 (OI-2589, closing PR 2, round 3).
+
+- The over-long benchmark `lane_adapter.dispatch` is cut under 100 lines by extract-method, behaviour unchanged (golf schoon R01).
+
+- `build_projection` is under 100 executable lines by extract-method, with no change in behaviour (golf-schoon R02, first of three functions).
+
+- Two functions of the golf-schoon R03 list (build_governance_health, QualityDatabaseManager.store_quality_metrics) are split by extract-method under 100 lines; behaviour pinned by characterisation tests.
+
+- `run_dream_cycle` is split by extract-method into helpers, each under 100 lines, with no behaviour change (golf schoon R04).
+
+- Refactor: `T0IntelligenceGatherer.extract_tags_from_description` in scripts/gather_intelligence.py is split into private helpers by extract-method, behaviour unchanged (golf schoon R05).
+
+- `LearningLoop.daily_learning_cycle` is split into private step helpers; its behaviour is unchanged (golf schoon R06).
+
+- `main` in `scripts/llm_benchmark.py` is under 100 executable lines by extract-method, with no behaviour change (golf schoon R07).
+
+- `render_markdown` and `_scan_collisions_in_db` in the migrate dry-run are split into smaller private helpers with the same output (golf schoon R08).
+
+- `scripts/orphan_sweep.py` `main` is split into private helpers by extract-method, no behaviour change (golf schoon R10).
+
+- `wiring_gate.py --tree --ref <ref>` lists the unused public definitions in scripts/ at a git ref, with the files it could not parse (golf schoon W0a).
+
+- refactor: `materialize_views` is cut into private helpers by extract-method, under 100 executable lines, behaviour unchanged (golf schoon R01b).
+
+- Two benchmark `verify` functions (tasks 04 and 05) split into private helpers, each under 100 executable lines, behaviour unchanged (golf schoon R02b).
+
+- refactor: `verify` of the rls_policy field-test task split into private helpers, now under 100 executable lines, behaviour unchanged (golf schoon R01c)
+
+- `backfill_dispatch_experiments` is under 100 lines by extract-method, with no behaviour change (golf schoon R16).
+- Round 2: the experiment status sets are function-local again, so the status vocabulary drift guard passes (no behaviour change).
+
+- ADR-075 sets the binding rules for the permission-events and CLI-invocation ledgers: what is never stored, one shared secret-pattern list, normalisation, 90 days live plus a one-year archive, lifecycle, `unknown` coverage and hard stops that never become an allow rule (permissieblokkades-leren L0).
+
+- `vnx staging-list` lists the staged spec bundles (`pending/<id>/dispatch-spec.json`, oldest first, `--json`, `--help`) instead of raising a KeyError, and `vnx queue-status` reads the horizon queue instead of printing "Unknown command" (OI-2828).
+
+- The wheel-install smoke preflight now checks the installed distributions (build, setuptools, wheel) that `python -m build --no-isolation` checks, not importable modules, so a vendored `wheel` no longer passes it (OI-2830).
+
+- `cost_tracker.build_metrics` is split into private helpers by extract-method and ends under 100 executable lines; the report it returns is unchanged (golf schoon R03b).
+- The R03b characterisation test loads `scripts/cost_tracker.py` by path under a unique module name, so it no longer picks up `scripts/lib/cost_tracker.py` when another test imported that first (golf schoon R03b, round 2).
+
+- fix(hooks): the worker-scope hook runs on a pinned interpreter with PyYAML (VNX_PYTHON, repo .venv, homebrew 3.12) instead of the bare python3 (OI-2819)
+- fix(hooks): the pinned interpreter path of the worker-scope hook can be set with VNX_HOOK_PINNED_PYTHON, so its test no longer skips on a machine without homebrew 3.12 (OI-2819)
+
+- `_run_apply` in `migrate_to_central_vnx.py` and `main` in `open_items_manager.py` drop under 100 executable lines by extract-method, with characterisation tests pinning their exit codes, stdout lines and side-effect order (golf schoon R09).
+
+- `ReportParser.extract_metadata` split into eight private step helpers by extract-method, behaviour unchanged (golf schoon R15).
+
+- `producer_freshness_monitor.main`, `_migrate_v22` and `_migrate_v29` fall under 100 executable lines by extract-method, with characterisation tests pinning their SQL order, log lines, output and exit codes (golf schoon R14).
+
+- Three CI-excluded test files (plan-gate panel, planning CLI, receipt v2 PR4 wiring) pass on main again; stale fixtures fixed and their exclusion lines removed (OI-2589, batch l). Billing safety and installer template leak stay excluded: both are red on the Linux runner (OI-951, OI-1227).
+
+- refactor: `main` in `scripts/gather_intelligence.py` under 100 lines by extract-method (golf schoon R05b)
+
+- Split `generate_markdown_report` in `scripts/llm_benchmark.py` into private section helpers (golf schoon R07b); behaviour unchanged.
+
+- ADR-076 proposes the operator queue: one append-only ledger per project, six line kinds, a closed `ref` grammar, and a point that closes only on the state of its source, never on a tick (operator-vragen-tot-antwoord Q0).
+
+- Refactor `cmd_objective_link_pr` and `_build_parser` under 100 executable lines by extract-method; no behaviour change (golf schoon R13).
+
+- Split `simulate_feedback_loop` into extract-method helpers so it is under 100 executable lines, no behaviour change (golf schoon R16b).
+
+- `validate_installation` in `scripts/vnx_install.py` is split into six private helpers and stays under 100 lines, with identical results and order (golf schoon R16c).
+
+- `_close_with_attest` in `scripts/planning_cli.py` is under 100 executable lines (185 -> 95) by extract-method, with a characterisation net pinning its exit codes, output and write order (golf schoon R11).
+
+- Refactor `patch_dispatch` under 100 executable lines by extract-method; no behaviour change (golf schoon R13b).
+
+- refactor: `cmd_objective_close` in `scripts/planning_cli.py` under 100 executable lines by extract-method, behaviour unchanged (golf schoon R12; `_run_tiebreaker_for_track` follows in its own PR for the 450-line cap).
+
+- `scripts/lib/slot/slot_store.py` and `vnx slot doctor` (operator tier of the mode table): the state reader, the control-lock transaction with atomic write and the initial state join the host-wide slot store (rekenslot RS-2 split 2, ADR-062); a policy memory threshold of `1e999` or an integer too large for a float (`10**400`) is now refused as `policy_invalid`.
+
+- `vnx main-window status` reads the central state store the merge door reads, so its mode and limit match the door (OI-2814).
+
+- The door-integrity check now covers `scripts/lib/forge_gate_publisher.py` and `scripts/lib/forge_check_run.py` (OI-2667); after merging a PR that touches either file, a dev checkout must be fast-forwarded (`ff_main_safe`) before the next merge, as for `pr_merge.py`.
+
+- ADR-077 fixes the decision register per context: `besluiten.ndjson` next to the daily-log, schema `besluit/1` with a stable `besluit_id`, a transition table, the torn-tail rule, confidentiality per export audience and a checked copy of the secret patterns (besluitenregister B0).
+- ADR-077 round 2: the newline is the commit marker, a writer moves an unterminated tail to `besluiten.ndjson.afgescheurd` and truncates before it appends (crash-safe on offset plus sha256), and the one closing `vervangen` record is the explicit exception after a terminal decision.
+
+- The codex review prompt names a test command per changed test type: pytest only for `.py` tests, a read-the-tests line for any other type, and it says a missing command is never a blocking requirement, so a TypeScript PR no longer gets a pytest demand (golf schoon F1, OI-2785).
+- Round 2: a test path from the diff that holds a shell metacharacter, whitespace or a leading `-` is left out of the review pytest command and named as text instead, and every remaining path is `shlex.quote`d, so a PR-controlled name such as `tests/test_$(id).py` can no longer run in the reviewer shell (OI-2785).
+
+- `vnx deliverable list --json` now adds `promote_grant` (`track_opt_in`, `grant`, `t0_can_promote`) to every proposed row, so a reader can tell "waits on the operator" from "the T0 can promote this"; read only, the promote rule is unchanged (OI-2851).
+
+- The litellm agentic runner's `main` (`scripts/lib/adapters/_litellm_agentic_runner.py`) is now under 100 lines by extract-method (golf schoon R17b, split from #2866); `litellm.completion` stays in `main` so the provider-switch census holds. Behaviour is unchanged, pinned by `tests/test_golf_schoon_r17b_characterisation.py`.
+
+- Golf schoon R17: `_run_producer` and `build_terminal_snapshot` cut under 100 executable lines by extract-method, no behaviour change. The litellm runner's `main` follows in its own PR.
+
+- test: `test_billing_safety` now filters skipped directories relative to the scanned base, so the key scan reads files in a `.vnx-data/worktrees` checkout too; four fixtures no longer match the key pattern and the file leaves `scripts/ci/test_exclusions.txt` (OI-2832).
+
+- Four public symbols with no caller are removed: `InboxRetryExhaustedError`, `backend_name`, `load_recent_decisions` and `StarterDispatchResult` (golf schoon W1).
+
+- The tree mode of `wiring_gate` counts by rule version 4: own-file use, Python in `bin/vnx` and `*.sh`, two proven registration decorators and a tracked skip file with reasons count as wired, and `scripts/benchmark/field-tests/` is excluded by default (`--exclude-prefix` adds more). The PR mode is unchanged (golf-schoon-naar-2-0 W0c).
+
+- A builder that dies on a transient API error (the CLI's `API Error: 403 Attention Required! | Cloudflare` or 500/502/503/529 line) without a report keeps its status but now names the line as `transient_api_error: <line>` in its error, instead of `(no error captured)` (OI-2796).
+
+- `secret_patterns` masks quoted shell values with one grammar (escaped double quotes, single quotes, `$'…'`, unclosed quotes), so no tail of a secret reaches the ledger (permissieblokkades-leren L1a, OI-2835).
+- `secret_patterns` masks a whole assignment value before any token fragment runs and reads a command substitution (`$(...)` with nesting, backticks, unbalanced to end of line) as one segment, so no suffix of a secret survives (round 2, OI-2835).
+- `secret_patterns` reads a double-quoted value with a reader (a `$(...)` or backtick inside is its own context) and runs every whole-value mask, including any `=` value that holds a token, before the token fragments, so no fragment can cut a value short; a bare word or flag argument that holds a token goes as one word (round 3, OI-2835).
+
+- refactor: `FPCCertificationChecksMixin._certify_task_class_routing` and `emit_dispatch_receipt` under 100 executable lines by extract-method, behaviour unchanged (golf schoon R19).
+
+- The delta review no longer treats a non-Python file as proof of no change: a path without a symbol provider in the own diff, the interdiff or the base move forces a full round with `full_review_reason: no_symbol_provider`, the record names the path and its suffix, and the delta prompt says `symbols not computed for this file type (<suffix>)` (OI-2784). A changelog fragment (`changelog.d/<name>.md` directly under the repo root) is the one inert type: it has no callers, so it alone never forces a full round, never counts as touching the input set in a base move, and the prompt says `changelog fragment (no callers)`.
+
+- Four class-C characterisation tests for `scripts/orphan_sweep.py:main` pin path expansion, logging config, exception propagation and the JSON error exit (golf schoon R10 follow-up, OI-2860).
+
+- refactor: `verify_chain` and `run_deliberation` cut under 100 executable lines by extract-method, behaviour unchanged (golf schoon R18)
+
+- ADR-078 legt het geheugengrootboek `memory_ledger/1`, de binding `memory_sources/1`, de geldigheidsvelden zonder wissen en de grenzen van de memory-doctor vast (geheugen-in-de-store M1).
+
+- `scripts/lib/operator_queue.py`: the append-only operator queue (schema, `point_id`, locked writer, state derived from the ledger with beantwoord/vervallen, refusal on secrets) (operator-vragen-tot-antwoord Q1).
+
+- Golf schoon R21: `_import_table` (migrate_import) and `run_reconcile` (objective_reconcile) brought under 100 executable lines by extract-method, behaviour unchanged.
+
+- `governance_audit_view`, `provenance_audit_view` and `pre_merge_advisory` are each under 100 lines now, split into private helpers with the same output (golf schoon R23).
+
+- refactor: `orphan_sweep.sweep` under 100 executable lines by extract-method into private helpers, behaviour unchanged (golf schoon R22).
+
+- Golf schoon R24: `verify_dispatch_provenance` and `_rebuild_table_phase1` cut under 100 executable lines by extract-method, behaviour unchanged and pinned by characterisation tests.
+
+- The wheel-install smoke (`tests/test_wheel_install.py`) now runs on the Linux runner: the `profile-a-prelude` action installs `build`, `setuptools>=77` and `wheel`, and the file leaves `scripts/ci/test_exclusions.txt` (golf schoon F5, OI-2834).
+- The smoke's in-project footprint check (`scripts/test_wheel_install.sh`) is now an allowlist of the 13 tracked config files `vnx init` writes plus a 16 KB ceiling (measured 13.8 KB), replacing the out-of-date flat 10 KB limit; the darwin skip (OI-2589) is gone because the smoke passes on macOS (golf schoon F5 r3, OI-2834, OI-2589).
+- The launchd install guard (`scripts/lib/launchd_install_guard.py`) now refuses an engine root under a temporary directory (the resolved `tempfile.gettempdir()`, `/tmp`, `/private/tmp`, `/private/var/folders`) before it considers any allow rule, so a packaged engine in a scratch venv never installs a launchd job; the wheel smoke also puts a `launchctl` shim first on `PATH` on macOS, asserts the init output names the launchd install as skipped, and checks that the real `~/Library/LaunchAgents` listing of `com.vnx.*` is unchanged (golf schoon F5 r4, OI-2834, OI-1942).
+
+- Behavioral-summary aggregation of the intelligence dashboard split into private helpers (golf schoon R20, `get_behavioral_summary`); no behaviour change.
+
+- The operator memory indexer no longer injects a note that is out of force: `invalid_at <= now`, `valid_from > now`, or a `superseded_by` chain (at most 10 links) that reaches a valid note. Fields are read from `metadata.<field>` first, then the top level. A cycle, a missing successor, an unreadable date or a chain of 11 keeps the note in, with a warning (ADR-078 M3).
+
+- Golf schoon R27: `verify_pr_closure` and `verify_closure` in `scripts/closure_verifier.py` are under 100 executable lines by extract-method, with characterisation tests; behaviour unchanged.
+
+- golf schoon R40: `reconcile_commit_provenance` and `register_provenance_link` in `scripts/lib/receipt_provenance.py` cut under 100 executable lines by extract-method, behaviour unchanged.
+
+- New package `packages/besluitenregister/`: the core of the decisions register (ADR-077): schema `besluit/1` with validation, the identity model (`besluit_id`, `event_id`, `herkomst`), a reader that counts torn and invalid lines without writing, an append-only writer under `flock` with tail quarantine, deduplication and secret refusal, and a checked copy of the secret patterns; `vervang` refuses a replacement that deduplicates to the decision itself, so no `vervangen` event points at its own `betreft`. The writer also refuses, under the lock and before any byte is written, every event the ADR-077 § 3 table refuses: any event after `ingetrokken` or a closed `vervangen`, a `vervangen` without an earlier `vastgelegd` with `vervangt`, a `vervangen` with another `door`, and a `betreft` or `vervangt` that names no existing decision.
+
+- `backfill_dispatch_track_linkage.apply_to_live` is split into private helpers by extract-method and now has 55 executable lines; output, exit codes and the order of writes are unchanged (golf schoon R26).
+
+- refactor: `provider_dispatch._emit_governance` (186 → 50) and `main` (172 → 39) under 100 executable lines by extract-method; behaviour unchanged, pinned by `tests/test_golf_schoon_r37_characterisation.py` (golf schoon R37).
+
+- refactor: `_convert_one_detailed` in `scripts/lib/report_to_receipt_converter.py` under 100 executable lines by extract-method, behaviour unchanged (golf schoon R41; `_build_receipt_from_report_core` follows in R41b).
+
+- `worker_scope_enforcement_measure.main` is split into private helpers by extract-method and now has 41 executable lines; stdout, exit code and git call order are unchanged (golf schoon R26b).
+
+- `scripts/lib/dispatch_cli.py:build_runtime_snapshot` drops from 194 to 96 executable lines by extract-method into five private helpers, with no change in behaviour (golf schoon R29; `run_dispatch` follows in R29b).
+
+- Golf schoon R34: `remove_dispatch_worktree` and `ProviderAdapter.run` are under 100 executable lines by extract-method; behaviour unchanged, pinned by characterisation tests.
+
+- refactor: `spawn_kimi`, `normalize_kimi_event` and `spawn_litellm_agentic` are under 100 executable lines by extract-method, no behaviour change (golf schoon R39).
+
+- golf schoon R44: `log_dispatch_metadata.main` and `pre_merge_gate.check_ci_workflow` cut under 100 executable lines by extract-method, no behaviour change.
+
+- The wheel-build tests (`test_wheel_builds`, `test_wheel_install_smoke`) take one shared file lock around the build, so two xdist workers no longer race on `build/bdist.*/wheel` (OI-2875).
+
+- Memory ledger binding (ADR-078, geheugen-in-de-store M2, part 1 of 2): `vnx memory bind --dir` binds a memory folder under `~/.claude/projects/` to the project (operator only, five refusals). The content-boundary refusal checks the encoded project folder (first component under the projects root) at any depth, on a real path boundary. The state_mutation receipt is persisted before the binding is written; a receipt that is not appended refuses the bind and leaves the binding unchanged (ADR-005). Uniqueness is checked across every central store, the caller's own store and the central registry `~/.vnx-data/memory_bindings.json`, under one lock. The scan follows in M2b.
+
+- `_govern_impl` in `scripts/lib/dispatch_govern.py` is cut from 169 to 85 executable lines by moving the worker-report read and the emit-then-receipt step into two private helpers; behaviour, log lines and the order of writes are unchanged (golf schoon R32).
+
+- Golf schoon R33: `DispatchParameterTracker.analyze`, `compile_plan` and `validate` split under 100 executable lines by extract-method, behaviour pinned by a characterisation test.
+
+- `verify_pr` drops from 149 to 77 executable lines by extract-method (`_override_verdict`, `_enforce_override_trail`, `_override_in_trail`); verdicts, messages and exit codes are unchanged, pinned by new characterisation tests that also cover `deliver_via_subprocess` (golf schoon R43).
+
+- Golf schoon R34b: `ProviderAdapter.run` under 100 executable lines by extracting the gemini, litellm and local-gemma branches into private helpers (no behaviour change).
+
+- `convert_dispatch_ids`, `scan_and_convert` and `SubprocessAdapter.deliver` are each under 100 executable lines through extract-method; behaviour, log lines and the order of side effects are unchanged (golf schoon R42).
+
+- `run_dispatch` (scripts/lib/dispatch_cli.py) under 100 executable lines by extract-method: `_merge_plan_warnings`, `_run_scout_prepass`, `_export_worker_env`, `_run_lane` (golf schoon R29b).
+
+- `fulfill_obligation` and `_stale_terminal_evidence` (gate obligation runner) and `gate_reanchor_cli.main` are each under 100 executable lines by extract-method, behaviour unchanged (golf schoon R28).
+
+- An unknown event type on a litellm agentic runner line now becomes an `info` event that keeps the runner type as `runner_event_type`, instead of a ValueError that ended the spawn (OI-2873).
+
+- `log_dispatch_metadata.py` uses a timezone-aware UTC clock instead of the deprecated `datetime.utcnow()`, with an unchanged timestamp format (OI-2874).
+
+- Two test groups (`test_dispatch_cli.py`, `test_subprocess_adapter_policy_record.py`) no longer read `VNX_OVERRIDE_WORKER_CLAUDE*` and `VNX_PERMISSION_POLICY_DIGEST` from the worker environment.
+
+- Besluitenregister B2: the CLI `python3 -m besluitenregister` with add, list, show, vervang, trek-in, herzien, bevestig, check, render and export (ADR-077; `export --uit` refuses the register's own files and directories), plus a README for use outside VNX.
+
+- Four more Python modules (`t0_intelligence_aggregator`, `query_quality_intelligence`, `confidence_reconcile`, `skill_refinement`) no longer call the deprecated `datetime.utcnow()`: they read a timezone-aware UTC clock and keep their timestamps byte-identical; `deliberation_panel._utcnow` was already aware (follow-up of OI-2874).
+
+- refactor: `upsert_dispatch_provider_row` cut from 170 to under 100 executable lines by extract-method into module-level helpers, behaviour unchanged (golf schoon R32b).
+
+- refactor: `WorkflowSupervisor.handle_incident` cut from 125 to under 100 executable lines by extract-method into three private helpers, behaviour unchanged (golf schoon R25).
+
+- Operator queue readers for dream reviews (source 3) and analyzer proposals (source 4), with revisions and close-on-source-state (operator-vragen-tot-antwoord Q2a).
+- An analyzer proposal closes only on a recognised decision status (accepted, rejected, applied, approved, dismissed); any other status is `unknown` with the status named.
+- An edit that left `pending_edits.json` closes on its `edit_history.json` entry only when that entry's status is a decision status; a missing, `unknown`, `pending`, empty or non-text status keeps the point `unknown` with the status named.
+
+- The operator-queue readers for steering and permission proposals (operator-vragen-tot-antwoord Q2b): a pending proposal becomes an open point that closes on an `approved`, `rejected` or `applied` record bound to its revision; an unbound steering store is `niet_gebonden`, never zero points read.
+
+- `vnx inbox ask` and `vnx inbox answer` put a question for the operator in the queue (ref grammar of ADR-076 decision 4, a refused secret exits 2) and record the operator's own words for a chat question; `read_asked` closes sources 1, 2 and 8 on the state their `dlv:`, `oi:` and `antwoord:` ref names (operator-vragen-tot-antwoord Q3).
+
+- `vnx memory scan` observes every bound memory folder into `state/memory_ledger.ndjson` (`memory_ledger/1`: hashes and frontmatter labels, never note text; torn tail set apart, unreadable note or folder as an `unreadable` line), and `bind` now writes the central registry before the binding so a crash leaves at most an unbound claim; a ledger append writes every byte or rolls back to its size before the call, the torn tail is only cut after its archive line landed, and an impossible frontmatter date (`valid_from: 2026-13-01`) is `unparseable` instead of aborting the scan (geheugen-in-de-store M2b, OI-2877).
+
+- `scripts/lib/memory_doctor.py` proposes structural memory fixes (dead `[[links]]`, index lines without a file, notes no index names, `MEMORY.md` over budget, binding divergence) into `state/memory_doctor.json` and never writes into a memory folder (geheugen-in-de-store M5a, ADR-078).
+
+- `deliver_via_subprocess` is cut under 100 executable lines by extract-method (spawn env, completion classification, event archive and report trigger into private helpers); behaviour is unchanged (golf schoon R43b).
+
+- refactor: `_build_receipt_from_report_core` in `scripts/lib/report_to_receipt_converter.py` under 100 executable lines by extract-method, behaviour unchanged (golf schoon R41b).
+
+- Refactor: `check_ci_run_for_head` in `merge_preflight_ci_check.py` split by extract-method to under 100 executable lines (golf schoon R46), behaviour unchanged.
+
+- refactor: `parse_protection_config` in `scripts/lib/forge_protection_drift.py` under 100 executable lines by extract-method (golf schoon R45), no behaviour change.
+
+- refactor: `run_envelope_headless_plan` under 100 executable lines (184 to 89) by extract-method into `_isolated_worktree` and `_work_then_govern`, behaviour unchanged (golf schoon R31).
+
+- The operator queue reads cap-verdict points (source 7, `mergen-met-OI`) and reads the steering store without writing its projection or lock (operator-vragen-tot-antwoord Q2b part b, OI-2885).
+- A torn or non-object line in the receipt ledger or the review rounds ledger makes the cap-verdict reader report `pr_staat_onleesbaar` or `kop_onleesbaar` and keep the point open, instead of reading a shorter history as `open` or matching an older branch (round 2).
+
+- vnx inbox shows the open operator points per project and fleet-wide (`--all`, with one coverage line per project), in a fixed order of five, and `push-due` reserves a push in the queue ledger under its lock (operator-vragen-tot-antwoord Q4).
+
+- `_dispatch_litellm` under 100 executable lines (147 -> 82) by extract-method, behaviour unchanged (golf schoon R38).
+
+- `spawn_claude` (`scripts/lib/provider_spawns/claude_spawn.py`) drops from 158 to 90 executable lines by extract-method into six private helpers, behaviour unchanged (golf schoon R38b).
+
+- `_check_reachability` in `scripts/lib/dispatch_cli.py` under 100 executable lines by extract-method (golf schoon R30); no behaviour change.
+
+- build_t0_state now runs the memory scan within 2 s and shows a memory_ledger block (status, reason, counts) in t0_state.json (geheugen-in-de-store M4)
+
+- `vnx memory doctor` now proposes `invalid_at` for notes that cite only closed OIs (looked up in the bound project's own store) or merged PRs, plus the validity and frontmatter warnings, into `state/memory_doctor.json` (geheugen-in-de-store M5b, ADR-078).
+
+- `besluitenregister add --from-daily-log <log.md>` imports every point under `## Beslissingen` of one daily-log as a decision, deduplicated on `herkomst`, which for this source keys on the point's position (`<log>#<heading>/<n>`) rather than its text (a second import writes nothing, a point edited in place is refused with exit 3), skipping bullets inside fenced blocks, and the README names the skill activation; the core scans for secrets before any other refusal (also in field names), and no refusal names caller text that holds a secret: a collision names the point's position and the existing id, never its text; only `add` relaxes its required flags for `--from-daily-log` (on its own parent parsers, so `vervang`, `trek-in`, `herzien` and `bevestig` still exit 2 on a missing flag) (besluitenregister B3).
+
+- `read_asked` now closes `track:<id>:<fase>`, `config:<sleutel>` and `verdict:<id>` points on the state they name (the verdict through the source-7 match), returns the promote refusal reason per open source-1 point under `weigerreden`, and `operator_queue.answers` reads the `answer` lines (operator-vragen-tot-antwoord Q3 part b).
+
+- Refactor: `run_envelope_plan` (the provider lane) drops from 196 to under 100 executable lines by reusing `_isolated_worktree` and `_work_then_govern` and a new shared `_verified_instruction` hash check, with no behaviour change (golf schoon R31b).
+
+- Nine dead public symbols are removed (golf schoon W3): `create_lock`, `get_pending_locks` and `has_pending_locks` in `scripts/f39/gate_locks.py`, `is_guarded_session` in the T0 context guard, `first_rejected_epoch` and `last_rejected_epoch` in the receipt-conversion rejection beacon, `is_regulated_strict_enabled` in the regulated-strict approval module, `load_supervisor` in the runtime supervisor and `SupervisionSummary` in the workflow supervisor. Nothing called them; which sessions are guarded and which approvals are strict is unchanged.
+
+- Ten dead public symbols are gone from the dispatch and headless modules (`BrokerDisabledError`, `peek_dispatch_outcome`, `collect_descendant_pgids`, `NoEligibleTargetError`, `RoutingInvariantViolation`, `strip_known_wrappers` with its only input `DEFAULT_WRAPPER_MARKERS`, `headless_config_from_env`, `HeadlessTimeoutError`, `HeadlessBinaryNotFoundError`, `inject_skill_prefix_into_instruction`); nothing called them, so behaviour is unchanged (golf schoon W2).
+
+- `vnx inbox --all` lists every project found under `~/.vnx-data/` and in `~/.vnx/projects.json` with one coverage line each (`gelezen`, `niet_gebonden`, or `unknown` with its reason, never counted as zero open points); `--json` prints the same (operator-vragen-tot-antwoord Q4 part b). A failed read (store listing, one entry, the registry, one project's state or reader) is `unknown` with the error as reason and a `store:` coverage line, never an empty or smaller fleet. A project whose queue reads but one of whose sources (reader) is `unknown` is `unknown` too, with `bron <name>: <reden>` as reason and `open ?` (never `gelezen` with a count); its known points stay listed. Both `vnx inbox` and `vnx inbox --all` print one `bron <name>: unknown (<reden>)` line per unknown source, the same set `--json` carries.
+- `vnx inbox --all` needs no current project: it runs before any project is resolved, and `--all` with `--project-id`, `--state-dir` or `--data-root` is refused (exit 2, nothing written). The reason in each `bron` text line is cut at the same 200 characters `project_coverage()` uses; `--json` keeps the full reason.
+
+- Added `scripts/lib/permission_events.py`, the permission-event ledger (ADR-075): schema, `event_id`, normalisation on the shared shell grammar (`secret_patterns.shell_value_end`) and an append-only writer that loops on short writes, restores the file on error, starts a new line after a torn tail and counts unparseable lines in the coverage record; an unreadable or malformed coverage file is logged and raised, never read as empty; a project_id that is not a fleet id (`vnx_ids.PROJECT_ID_RE`) or whose central dir resolves outside `~/.vnx-data` is refused before any file is touched (permissieblokkades-leren L1b, OI-2836, OI-2837).
+
+- `vnx objective reconcile` now skips a track with an open deliverable (proposed, ready, failed, failed_delivery, timed_out) or an in-flight dispatch with the verdict `open_deliverable`, instead of confirming it (OI-2904).
+
+- The T0 index carries an `operator_inbox` block (schema `t0_index/1.4`) that the SessionStart hook shows without writing a `presented` line, and the T0 role gains two inbox rules (operator-vragen-tot-antwoord Q5).
+- The `operator_inbox` block takes its status and count from `project_coverage()`: one unknown source makes it `unknown` with `open_total` null, and the hook prints one `bron <name>: unknown (<reden>)` line per unknown source (ADR-076 decision 11).
+- The state build runs the inbox refresh in a detached child process with the 0.5 s budget, so a timeout never stops a reader between its ledger append and the projection rebuild.
+
+- golf schoon R35: `envelope_govern._govern` drops from 183 to 86 executable lines by extract-method (receipt emit, role resolution, failure classification, post-emit check); behaviour unchanged.
+
+- `vnx memory bind`, `scan` and `doctor` now use the central per-project store that `build_t0_state` reads, not the repo-local `.vnx-data/state`; `bind` prints the state dir it wrote (OI-2907).
+
+- `vnx inbox audit --since <N>d [--project-id <id> | --all] [--json]` lists per project the points first presented more than 48 hours after they were asked and the open points older than 48 hours never presented, with `ledger_since`; a window before the first ledger line is `niet gemeten` and an unreadable project is `unknown`, never `schoon` (ADR-076 decision 13).
+
+- The receipt processor logs an already processed report once per process instead of every 5 seconds, logs "Report accepted" only for reports it will process, and the supervisor log rotates to `.1` above 50 MB (OI-2903).
+
+- golf schoon R24b: `reconcile_terminal_state` under 100 executable lines by extracting `_reconcile_terminal_record` and `_repair_payload`, no behaviour change.
+
+- The besluitenregister now keeps the ADR-077 section 3 transition table and the derived state (geldig, vervangen, ingetrokken, te_herzien, with an explicit `nu`) in one module, `besluitenregister/stand.py`, used by the writer, `list`/`show` and `check`; no behaviour change (besluitenregister B1b).
+
+- Refactor: `update_confidence_from_outcome` split by extract-method to under 100 lines, behaviour unchanged (golf schoon R20b).
+
+- `materialize_artifacts` in `scripts/lib/gate_artifacts.py` cut under 100 executable lines by extract-method (golf schoon R35b, OI-2906), behaviour unchanged.
+
+- plan-gate: `emit_plan_gate_pass` takes `extra_fields`, `verify_with` and `expect_latest_hash`; the latest-pass recheck and the append share one ledger lock (OI-2849, preceding part).
+- plan-gate: `extra_fields` can no longer change the `track_id` or `project_id` of a pass; a differing value refuses the append (OI-2849, round 2).
+
+- Documentation: five retired pages moved to `docs/_archive/` (stubs left at the two old paths that frozen files link), `docs/README.md` is now a pointer to `DOCS_INDEX.md`, nine stale `vnx` commands corrected, broken links fixed and the `claudedocs/` citations replaced by ADRs or dropped.
+
+- Permission-event normalisation now masks a home, scratchpad, tmp or vnx-data path as one whole shell word, so a quoted or backslash-escaped path with a space no longer leaks the part after the space into the ledger (OI-2870).
+- Permission-event normalisation no longer emits a replacement twice when a bare `~` precedes a quoted path in the same quote, so a following command (`&& ls /etc`) survives the ledger's second normalise pass (OI-2870, round 2).
+- Permission-event normalisation now replaces a bare `~` inside a quote as the whole quoted word, so `echo '~' && ls` normalises once and a second pass changes nothing (OI-2870, round 3).
+
+- `vnx inbox compact` drops the points closed more than 180 days ago under the writer's lock (`--dry-run` shows the count first); open points stay however old.
+
+- Refactor `shadow_grounding_compare` under 100 executable lines by extracting `_shadow_pattern_details` (golf schoon R20c, no behaviour change).
+
+- docs(adr): the status line of fourteen ADRs (063-078 minus 066, 070) now says Aangenomen with the merge that accepted them (OI-2912).
+
+- `vnx horizon plan-gate sign <track> --key <k> --identity <id>`: the operator signs the latest plan-gate pass of a track, so a T0 may promote on an opted-in track (ADR-056); a T0 is refused (exit 2), no pass is exit 3, a signature that does not verify against `VNX_ALLOWED_SIGNERS` writes nothing (exit 4), and a newer plan-gate run drops the grant back to unsigned (OI-2849).
+- Round 3: the `plan_gate_evidence` library part (`expect_latest_hash`, `LatestPassChanged`, identity fields) now comes from main (#2949), and the `scripts/planning_cli.py plan-gate sign` parser takes only `--project-id`, `--key` and `--identity`, dropping the unused `--state-dir` and `--json` (OI-2849).
+
+- `enforce_pr_exists` and `_handle_dirty_substantive` in `pr_enforcement.py` are now under 100 executable lines through extract-method, with characterisation tests pinning every return path (golf schoon R36).
+
+- `DispatchDaemon._handle` in `headless_dispatch_daemon.py` is now under 100 executable lines through extract-method, with characterisation tests pinning the claim, refusal and failure paths (golf schoon R36b).
+
+- The T0 index (`t0_index/1.5`) gains a `besluiten` block and `vnx inbox answer` writes a decision into `besluiten.ndjson` for every operator-queue answer, a sync that also catches answers whose register write failed earlier (besluitenregister B4).
+- Decisions of the besluitenregister index are now a compact block (counts and at most 3/5 ids; titles moved to the state block), the register folder is created on the first answer and tests no longer read the real `daily-log/` (besluitenregister B4, round 3).
+
+- The T0 role Open items policy now files an OI outside the diff only with a concrete failure scenario (D2) and defers `warn`/`info` OIs without recurrence (D3).
+
+- L2: `scripts/permission_events_scan.py` reads refused tool calls (B1), answered permission prompts (B2) and copy blocks (B4a) from bound transcripts into `permission_events.ndjson` with origin, account slot (never uuid or e-mail), coverage per source and skipped-line counts (permissieblokkades-leren L2, ADR-075).
+
+- `<bash-input>` transcript lines count as the manual action `handmatige_actie` and as B3 (`executed`) in the permission-events scan (permissieblokkades-leren L3).
+
+- The backend-developer, security-engineer and quality-engineer role files now carry a `## What review finds most` section: the six patterns codex review returns most, each with the proof the report must show.
+- The same section now also sits in the `scripts/lib/prompts/roles/` prompts for backend-developer and security-engineer, the files the headless lane loads; a test reads the role text through `PromptAssembler._load_role`.
+
+- Every `vnx` call (`bin/vnx` and the pip `vnx`, except the `dispatch` door) now writes one `cli_invocation/1` line, into the store the call itself resolves (an explicit `VNX_DATA_DIR` too), with its subcommand form, flag names, `actor_class`, exit code and duration, never an argument value, and B4b coverage stays `unknown` without a readable ledger (ADR-075, permissieblokkades-leren L4).
+
+- `bin/vnx` usage() now lists the ten commands it hid (deliverable, install-git-hooks, uninstall-git-hooks, migrate, dream, learning, staging-list, queue-status, slot, inbox), and a test keeps usage() and the case block in step.
+
+- ADR-080 records that a `blocked` or `fail` review verdict with zero findings is booked as `unavailable` (`verdict_without_findings`), with the report-veto exception, the retry and takeover contract and the E6 rules the later deliverables build against (track reviews-zonder-uitkomst, D0).
+
+- E6 now takes the cause of a rejection whose only blocking entry is the synthetic verdict entry from the files of its advisory findings, so three unrelated advisory-only rejections no longer trip it (reviews-zonder-uitkomst D3a).
+
+- ADR-079 (documentation follows the code) is added, with one line in the worker base prompt that tells builders to update the `docs/` page in the same PR as a behaviour change.
+
+- The codex review tests block can now put `VNX_REVIEW_PYTHONPATH` entries first in `PYTHONPATH` behind an import check and name the interpreter rule; the keys `VNX_REVIEW_PYTHON` and `VNX_REVIEW_PYTHONPATH` are registered, and the gate wires both in D1 (#2967).
+
+- The codex review seat now runs a PR's tests with the project's own interpreter and `PYTHONPATH`: `VNX_REVIEW_PYTHON` from `project_config`, else `<projectroot>/.venv/bin/python`, else the OI-2591 chain; `VNX_REVIEW_PYTHONPATH` entries go first in `PYTHONPATH` behind an import check that shows where the package loads from. The gate request names the interpreter and the rule (reviews-zonder-uitkomst D1).
+- The review interpreter is resolved once per run, before the prompt is built, from the repository the gate runs for; the pytest probe no longer goes through `subprocess.Popen`, so no second probe runs at spawn and the prompt and the recorded `review_interpreter` always agree.
+- `review_interpreter` is cleared at the start of each gate run, and rule 1 applies only when `VNX_REVIEW_PYTHON` comes from the project's `project_config` row or `VNX_OVERRIDE_REVIEW_PYTHON` (by source, also when the env names the same interpreter).
+
+- The T0-state SessionStart hook (`build_t0_state_hook.sh`) now skips the build in a worker session (actor class `worker`, via `actor_class.derive()`), so parallel headless builders no longer each run `build_t0_state.py`; every other class builds as before and a failed classification builds too (OI-2951).
+
+- Every permission event now carries a closed `hard_stop` field, classified on the raw command before masking: words anywhere in the de-quoted text (no command position), shell indirection as `indirection`, no raw evidence as `evidence_unavailable`, and a hard stop keeps its own `event_id` (ADR-082, permissieblokkades-leren L5a).
+
+## [1.9.0] - 2026-11-12
+
+This release carries seven themes, each named from the entries below. The merge door is enforced by a required permit status: ADR-061 makes `vnx-gate/door` the sixth and last preflight of `scripts/pr_merge.py`, published on the exact head from the evidence of the five gates before it, read back, bound to its own check-run and revoked with a PATCH to `failure`; it is a required check on `main`, with a daily report-only door audit and an open-permit reconciliation. The ledger became falsifiable: a receipt processor heartbeat with five liveness states, named conversion errors, pytest noise rows kept out of the ledger health and a typed `ledger_verdict/1`. The intelligence corpus quarantine (ADR-070) copies the corpus into a sealed artefact, proves a nine-point permit with `verify` and `rehearse` on a copy, purges only after that proof and restores from the artefact. Learning capture and signal re-attribution (ADR-068) vote ownership over three receipt signals and move pattern rows between project stores with a journal and an `undo`. The self-learning loop runs behind that ledger gate: it ingests only a rule the operator approved in the decision record, writes it with its activation (`pattern_activation`) and has an off switch. Review seats follow the project gate profile (`light`, `heavy`, the signal seat rule, the delta review of ADR-064), gate lanes derive from one `GATE_LANE_ROWS` registry, and after the Kimi cancellation of 2026-11-11 the default stack is `codex_gate,deepseek_gate` with `VNX_DREAM_PROVIDER` defaulting to `deepseek`. Rework attribution per builder model and review seat (ADR-071) adds the `rework_edges` table, a fill-once writer, a backfill, a nightly attribution job and a report that proposes and never writes. The daily lead-time metrics (`doorloop-en-effectiviteit-dagelijks`) and the dream liveness watch (ADR-066) ship alongside.
+
+What 1.9 does not claim yet. Six tracks are merged but still wait on a measuring window after this release, and none of them is written here as working or measured. `dream-liveness-watch` is a recurring check that closes only on an explicit operator decision; its own criterion says not to close it on a green check or a merged PR, so no night of output is claimed. `intelligence-effect-measurable` still has open that `VNX_INJECTION_WHY_ENABLED` and `VNX_INTEL_AB_TEST` run a bounded window so that `pattern_injection_outcome` fills, and that a treatment against control comparison on outcome exists; no injection effect has been measured. `learning-signal-reattribution` states its goal as a misrouted dispatch feeding the right consumer loop instead of vnx-dev, and a measurement that a misrouted dispatch now feeds the right loop is not established. `self-learning-loop-reactivate` states its goal as the loop running periodically and surfacing `report_contract_invalid` violations as operator-gated proposals; that periodic run is not established. `zelfstandigheid-meten` is done only when, over a cohort of 50 deliveries with a final state, at least 90% needed zero operator actions and at most 5% are unknown; that cohort has not been measured. `herwerk-per-model-en-reviewer` is done only when the report per builder and per review seat has been measured on vnx-dev over at least 4 weeks after go-live, with `n` in every cell and no percentage under n=20; until then it waits on that window.
+
+Migrations and rollback. Two stores migrate. `runtime_coordination.db` gets migration 0038 (`scripts/lib/migrations/apply_0038.py`, documented by `schemas/migrations/0038_intelligence_injections_ab_arm.sql`, with `0038_intelligence_injections_ab_arm_down.sql`; `schemas/migrations/2026_05_intelligence_ab_arm.sql` is marked superseded and does not execute). It adds the nullable columns `ab_arm` and `ab_window` to `intelligence_injections` (a column that is already there is left alone) and the index `idx_injection_window_arm` on `(project_id, ab_window, ab_arm)`, inside one `BEGIN IMMEDIATE`, and stamps `user_version` 38. No row changes on the way up. The down path is `apply_0038.revert_migration(db_path)`. On a SQLite below 3.35 it raises `Migration0038Error` before the store is opened. At `user_version` 37 it returns `False` and changes nothing. At 38 it drops the new index, the older `idx_injection_ab_arm`, `ab_window` and `ab_arm` (when `intelligence_injections` exists) and stamps 37. At any other version it raises `Migration0038Error`. The arm history is lost on a down; the zero point is a fresh backup right before the up. `quality_intelligence.db` has its own path in `scripts/quality_db_init.py` (phase 0 of the nightly jobs), and `HIGHEST_QI_VERSION` moves from 34 to 36. V35 creates `pattern_activation` keyed `(project_id, activation_id)` plus the index `idx_pattern_activation_rule_active` and stamps `user_version` 35 (#2663). V36 creates `rework_edges` keyed `(project_id, rework_dispatch_id, origin_dispatch_id, kind)` plus `idx_rework_edges_origin` and stamps 36 (#2695). Both are purely additive, change no existing table, column or row, and raise without adopting a table of that name that has another shape. On vnx-dev the T0 applied both on 2026-11-12 at 09:30Z, after a rehearsal on a copy, with a backup in `~/.vnx-data/_backups/qi-voor-v36-20261112/`. The quality database has no down script.
+
+Re-pinning a project from 1.9.0 back to 1.8.0 is not established as safe, and I did not run it. What the 1.8.0 code shows: for `quality_intelligence.db` at 36, `schema_migration.apply_if_below` skips every migration up to 34 and nothing in the 1.8.0 scripts reads `pattern_activation`, so the two tables stay behind unused; the rows that 1.9.0 wrote into them (activations, rework edges) are not read by 1.8.0 and nothing there removes them. For `runtime_coordination.db` at 38, `reconcile_user_version` in 1.8.0 validates the claim against the highest manifest version at or below it (37), is lenient on extra columns and indexes, and so is expected to leave `user_version` at 38 with `ab_arm` and `ab_window` ignored. That is a reading of the code, not a run. The safe order is to run `apply_0038.revert_migration` with the 1.9.0 tree first (stamps 37), take a backup before it, and only then move the pin. Whether a 1.8.0 writer to `intelligence_injections` is unaffected by the two extra nullable columns is not established. The state files that 1.9.0 adds (`learning_ledger_verdict.json` and its `.ndjson`, `dream_liveness.ndjson`) are not removed by a re-pin. The corpus quarantine restore command, from `docs/operations/INTELLIGENCE_CORPUS_QUARANTINE.md`, takes the `quarantine.json` file and not the directory (a directory gives `[Errno 21] Is a directory` and restores nothing): `python3 scripts/vnx_intelligence_corpus_quarantine.py restore --db "$DB" --quarantine "$Q/artifact/quarantine.json" --state-dir ~/.vnx-data/vnx-dev/state`.
+
+After the tag the operator runs `vnx release publish --tag v1.9.0 --set-current`, `vnx release verify v1.9.0`, raises the pins, runs `vnx regen-settings --merge` per project and `reload_plist.sh` per launchd family, and ends on `vnx preflight` with exit 0 (`docs/operations/install-central-runbook.md`, "Before a rollout").
+
+- Preflight (OI-2613): a project without a pin reports `hooks` as unmeasured and no longer runs a render from the running tree, so the fabric source repo no longer blocks `vnx preflight`.
+
+- Documentation (track `documentatie-volgt-de-code`): `docs/operations/FORGE_GATE.md` carries the live branch protection measured on 2026-11-07, the seat rule by risk class (R3b), the default takeover chain with `claude_gate`, `VNX_REVIEW_SEAT_RULE`, `refresh_review_summary` (RG-2), and points to `docs/core/ENFORCEMENT_CHAIN.md` for the other 14 required checks.
+
+- docs(enforcement): one page, `docs/core/ENFORCEMENT_CHAIN.md`, for the chain from the dispatch door to branch protection (15 required checks, risk-class seats, `Red on base`); `DOCS_INDEX.md` and `GOVERNANCE_ARCHITECTURE.md` section 10 corrected (tag, takeover chain with `claude_gate`, R3b).
+
+- Documentation (track `documentatie-volgt-de-code`, PR 4): the architecture document, getting started, CI Profile A, the install-central runbook and three cross-references describe the code of 1.8.0 (tracks DB as the only plan source, risk-class seats, two-phase Profile A with 93 exclusions, `Red on base` as its own workflow, migrations 0036 and 0037 with their way back).
+
+- ADR-046 amendment 1: the gate dispatch table, the lane row as the only registration (billing and `Gate` enum derived) and closure admission by kind (docs only).
+
+- Documentation (track `ledger-is-falsifiable`, PR 0): `docs/governance/decisions/ADR-055-processor-liveness-heartbeat.md` fixes the receipt processor heartbeat contract, its five states, the `fail` > `unknown` > `ok` aggregation, the 90 s window as an assumption and the writer-before-reader rollout order.
+
+- Hooks (track `agents-als-map-fase-1`): `.claude/settings.json` registers the worker scope hook for Write, Edit, MultiEdit and Bash (timeout 5 s); it stays a no-op while `VNX_ENFORCE_WORKER_PERMISSIONS` is off.
+
+- Tests (track `provider-agnostic-review-lane`, P7): `tests/test_provider_agnostic_review_lane_e2e.py` pins end to end that a `kimi_gate` obligation declared by the door is fulfilled by the obligation runner with `contract_hash`, `report_path` on disk and `commit_sha` equal to the PR head.
+
+- Agent layout (track `agents-als-map-fase-1`, PR-1): `VNX_AGENT_LAYOUT` (default `off`) with `off` and `shadow`; `on` and unknown values read as `off` with one WARNING, via the new `scripts/lib/agent_layout.py`.
+
+- Context manifest (track `agents-als-map-fase-1`, PR-4a1): `token_harvest.locate_session_transcript` is the one transcript locator and `context_manifest.capture` reports instruction files, skills and auto-memory of a session as paths, types, lengths and hashes, never content.
+
+- Regen settings (OI-2614): `vnx regen-settings --merge` no longer creates a `.vnx/worker_permissions.yaml` override in a project without one, and the worker_permissions dry-run names every create/update.
+
+- Doctor: `scripts/probe_claude_cli.sh` measures whether `claude -p` without `--bare` still authenticates (cell B) and records a row with the probe sha256 in `docs/operations/CLAUDE_CLI_MEASUREMENTS.md`; the new `claude-cli` check WARNs when the installed version or the row (outcome, hash) is not a measurement (track `agents-als-map-fase-1`, PR-5).
+
+- Agent layout (track `agents-als-map-fase-1`, PR-0): ADR-050 records the `VNX_AGENT_LAYOUT` flag (`off` default, `shadow`; `on` reads as `off` until phase 2), the shadow skill copy contract and the context-manifest receipt contract.
+
+- Converter (track `ledger-is-falsifiable`, OI-2611): every conversion error names its file and reason in `details.errors` (capped at 100, rest in `errors_omitted`), the full list goes to `health/report_to_receipt_converter.errors.ndjson`, rewritten atomically per scan.
+
+- Ledger (track `ledger-is-falsifiable`, PR 3): `ledger_health` and the quality digest drop pytest noise rows through `receipt_outcome.noise_reason`, so a registry id covered only by a pytest row now shows in `gaps`.
+
+- Review lane (track `provider-agnostic-review-lane`, P1): `GateRunner` picks its dispatcher from `scripts/lib/gate_dispatch_table.py` and `gate_runner.py` holds no provider name; a harness-lane row with no dispatcher books `not_executable` / `gate_runner_missing` instead of falling back on the governed lane.
+
+- Receipts: the receipt processor writes `receipt_processor_heartbeat.json` twice per poll cycle with `last_cycle_seconds`, so a stalled processor becomes detectable (track `ledger-is-falsifiable`, PR 2).
+
+- pr-ready: a second seat the door requested (request record with origin: door) is no longer marked off the door; a loose request record still is.
+
+- Closure (track `provider-agnostic-review-lane`, P6): a registered `harness_lane` gate without its own handler gets the generic evidence handler for its kind, the four per-gate wrappers are gone, and the enum drift test now pins "every registered gate has a kind".
+
+- Gates (OI-2623): kimi's weekly-limit 429 counts as an exhausted lane at the third wrap width too, so the takeover walk passes the seat to the next gate in the chain. The OI-1748 spawn-failure test now pins `lane_exhausted` for the weekly-limit text and keeps `harness_lane_no_model_response` for a spawn failure without quota wording.
+
+- The dead `script_runner` gate-provider kind is removed from `gate_recorder`, `gate_runner` and `gate_result_parser`; the registry keeps its three kinds (review-lane P5).
+
+- Review lane P2: `scripts/lib/gate_lane_rows.py` (stdlib only) holds `GATE_LANE_ROWS`, and `MODEL_DEFAULTS`, `SINGLE_SHOT_GATES`, `TIMEOUT_CONFIG` and `DIFF_CHAR_CONFIG` in `gate_lane_contract` derive from it, byte-equal; a bad row is refused at load.
+
+- Agents (track `agents-als-map-fase-1`, PR-2a): `backend-developer`, `quality-engineer` and `research-analyst` declare their `skills:` in `config.yaml`, and `scripts/lib/agent_skill_materialize.py` copies them to `<worktree>/.vnx-agent-skills/<role>/` under `VNX_AGENT_LAYOUT=shadow` (git-ignored, fail-open, manifest with sha256 per file); nothing calls it yet. It refuses every symlinked destination, also on the error path.
+
+- Gates (track `provider-agnostic-review-lane`, P2b): `GATE_BILLING` and the `Gate` enum read the harness-lane rows, so a new `GATE_LANE_ROWS` row is billed and a member with no second hand-written line.
+
+- Gates (track `provider-agnostic-review-lane`, P3a): the gate request handler takes the `provider` label of a harness-lane request from the gate's row (`request_provider`) through one lookup, and the labels `kimi`, `glm`, `deepseek`, `claude` stay byte-equal.
+
+- Context manifest (track `agents-als-map-fase-1`, PR-4a2): `context_manifest.capture` now also reports the hooks that ran, the account (auth kind and an org hash, never an address) and the config home; `provider` other than `claude` gives `unsupported` without reading any file.
+- Context manifest hooks: `command_path` is only ever one bare path; an inline `-c` script, an argument token and `KEY=/path` or `--flag=/path` forms are never recorded.
+- Context manifest hooks (round 3): `command_path` is read from the executable or script position only. An argument after a non-path executable (`curl --token /x`), a relative script or an interpreter `-c`/`-m` is never promoted to the path.
+
+- docs(gates): ADR-008 amendement 4 (08-11-2026) — het poortprofiel (`light`/`standard`/`heavy`), de veiligheidsondergrens onder elk profiel, de `gate-merge`-uitzondering (operatorbesluit 30-10) en de fail-closed regel voor een onbekende of malformed `VNX_GOVERNANCE_PROFILE` (gate-profiel-per-project P0).
+
+- Router (track `gate-profiel-per-project`, P2): `configs/` and `.vnx/` fall under `gate-merge` in `smart_router`, so the files that set the review weight (plan-gate panel, governance profiles and enforcement) are reviewed as gate code; the plan-scope rule version changes to `0e24a4e6629bc962`, so a stored `review_risk` under the old version is recomputed.
+
+- T0 rotation (OI-2647): `scripts/t0_rotate_spawn.sh` types each `/goal` piece after `send-keys -l --`, so a piece that starts with a dash is text and not a tmux flag; a failed `send-keys` stops the typing, sends no Enter and books outcome `type_failed` instead of dying silently.
+
+- Docs (permissions P1): ADR-057 ratifies one permission policy as the source of truth, and the fleet rule `worker-permission-enforcement-on` and the LOCKS_AND_RELEASES hook row now state the measured posture (default OFF, hook registered and inert).
+
+- Agents (track `agents-als-map-fase-1`, PR-2b): `ClaudeSubprocessAdapter.run` calls the skill materializer before `spawn_claude` under `VNX_AGENT_LAYOUT=shadow` (role config via the resolver, fail-open with one WARNING); under `off` neither resolver nor materializer runs.
+
+- Permissions (track `provider-agnostic-permissions`, P2): `scripts/lib/permission_policy.py` builds one `PermissionPolicy` from the role profile and the optional `isolation` block, and `resolve_worker_profile` now returns it with a `policy_digest`; an unreadable or broken source, an unknown key or a role in no register refuses with a named reason, `is_fallback` and `isolation: {}` still resolve. Nothing reads the digest yet and enforcement stays default OFF.
+- Round 2 (r2): the worker-scope hook now treats every `PermissionPolicyRefused` like `UnknownRoleError` (code-worker fallback, reason slug on stderr) instead of failing open; the dispatch path refuses with the named reason; `role_grants_write` and `classify_permission_posture` fall back fail-closed on any refusal.
+- Round 3 (r3): a refused policy of a known role now BLOCKS the worker-scope hook's Bash and write-like tool calls (reason slug in the message) instead of granting the code-worker fallback, which can write and would widen a read-only role; only `UnknownRoleError` keeps that fallback. An `agents/<role>/config.yaml` that is empty, a scalar or a list refuses with `source-malformed`; a mapping without `isolation` stays absent.
+- Round 4 (r4): a policy source with a non-string key (int, bool, null, float) now refuses with `source-malformed` instead of raising `TypeError` inside `sorted()`; any other exception while the worker-scope hook resolves the role policy blocks Bash and write-like calls with reason `policy-resolution-error` (only the exception type name is reported), and the dispatch path refuses with the same slug instead of falling back to the generic scope. `UnknownRoleError` keeps its behaviour in both places.
+
+- Review gates (track `provider-agnostic-review-lane`, P3b): `_request_kimi` and `_request_glm` go through `_request_harness_seat` like deepseek and claude, so the four seat requests share one payload shape. `report_path` is set when the seat is requested and empty when it is `not_executable` (kimi used to set it always), and an unavailable glm, deepseek or claude seat now carries `failure_reason` as kimi did; the four `provider` labels are unchanged.
+
+- Docs (track `orchestrator-skills-port-codex-kimi`, SP-0): ADR-058 fixes the T0 playbook source contract (five-step resolution with `source_id` and `degraded`, sha256 freshness, the all-sources-missing behaviour, the `loaded` evidence file with two named readers and the budget scope); no code changes.
+
+- Gates (track `gate-profiel-per-project`, P1): `scripts/lib/gate_profile.py` reads `VNX_GOVERNANCE_PROFILE` (`light`, `standard`, `heavy`) as one fail-closed function (an unknown value raises `GateProfileConfigError` with the raw value and its source, never a fallback to `standard`), `config_registry.resolve_with_source` names where a value came from, and `review_seats` takes its stack from the profile and records `profile`, `profile_source` and `profile_error`; `standard` and an unset key change nothing.
+- Gates (track `gate-profiel-per-project`, P1 round 2): an invalid `VNX_GOVERNANCE_PROFILE` is a structured refusal at every review-seat boundary. `review_seat_evaluation.fresh_config_seats()` catches `ReviewGateConfigError` (the shared base) instead of only `ReviewSeatError`, so merge-seat evaluation returns its refusal with and without recorded seats, and `gate_enforcement_verify` reports `GATE_ENFORCEMENT_FAILED` with the error text instead of a traceback.
+- Gates (track `gate-profiel-per-project`, P1 round 3): `ReviewSeats.to_record()` no longer carries `profile`, `profile_source` and `profile_error`, so the GE-4c-2 golden request line stays byte-equal. The plan assigns the profile in the trail to P6; P1 keeps the fields on the `ReviewSeats` attributes.
+
+- An interpreter or shell with an option before the script no longer records an argument as `command_path` (context manifest, agents-als-map PR-4a3, OI-2632).
+
+- `vnx init` (track `gate-profiel-per-project`, P8) writes no `.vnx/governance_profiles.yaml` any more: the template it wrote carried keys no loader reads. It prints how to select the profile with `VNX_GOVERNANCE_PROFILE` (`light`/`standard`/`heavy`) and leaves any profile file an operator already keeps untouched.
+
+- Receipts: under `VNX_AGENT_LAYOUT=shadow` the dispatch receipt carries a `context_manifest` reference (status and sha256) and the manifest lands first in the idempotent sidecar `context_manifests.ndjson`; `off` is byte-equal to before (agents-als-map PR-4b).
+- Receipts: the context-manifest ledger drops an unterminated tail under the lock before the duplicate scan, rolls a failed write back to its size, and fsyncs a duplicate before reporting success (agents-als-map PR-4b round 2).
+- Receipts: the context-manifest ledger reads its whole captured size (looping over short reads) before tail recovery truncates, and an incomplete read fails the append without touching the ledger (agents-als-map PR-4b round 3).
+- Docs: the ADR-005 `context_manifests.ndjson` amendment now sits below the 2026-09-26 scope amendment, which stays first by design (agents-als-map PR-4b r4).
+
+- test(gates): a synthetic harness-lane gate walks through billing, lane config, request, availability, closure and readiness from one registry row, and the count of files with a literal gate-name table is pinned at 16 (review-lane P8)
+
+- `vnx role sync` now writes a `T0-PLAYBOOK` pointer block (path, source_id, sha256) next to the ROLE block in the T0 `AGENTS.md` and `GEMINI.md`, and the playbook source resolver is one module, `scripts/lib/t0_playbook.py` (skills-port SP-3, ADR-058).
+
+- Skills (track `orchestrator-skills-port-codex-kimi`, SP-1): `validate_skill.py --inventory` prints one JSON object (`t0_layer`, `worker_layer`, `provider_unsafe`, `parity`) and the portability rule lives in `scripts/lib/skill_portability.py`, so `vnx skills sync` can lint with the same detector; `--list` is unchanged.
+
+- ADR-056 fixes autonomy as a measurable concept (track `zelfstandigheid-meten`, PR-1): the norm per actor class, the tenant-safe delivery key, the bounded period and denominator, the period 2026-10-30 up to 2026-11-09, the thresholds `N >= 50`, `zero_rate` >= 0.80 and `unknown_rate` <= 0.20 (a high `zero_rate` is autonomous), who may promote, and the write-once outcome marker. Status: accepted by the T0 on 08-11-2026.
+
+- The round cap and the takeover chain now come from the gate profile (`light` cap 2 and a three-gate chain, `heavy` cap 5; `standard` and unset change nothing), under an operator override or `project_config` row, and `vnx providers list` shows both with their source (gate-profiel P3). The profile is read from the store the round cap is asked for, and `vnx providers list` reports the chain of the project it was asked about (round 2).
+
+- docs(adr): ADR-059 records the native materialisation of an agent's skill set (phase 2) and DISPATCH_RULES §4 and §15 get its operating half (skilldisc R1)
+
+- Fleet role-drift meter (track `orchestrator-skills-port-codex-kimi`, SP-4): a new `playbook` axis reads the T0-PLAYBOOK pointer block per provider file (ok, stale_sha, stale_source, missing, absent), keeps present apart from loaded, and reads `state/playbook_loading.ndjson` fail-closed through `scripts/lib/playbook_loading_evidence.py`; exit codes are unchanged.
+
+- feat(planning): promote and close derive the actor class from the TTY and agent-marker signals and write it as metadata.actor_class on the coordination event (ADR-056, zelfst PR-2)
+
+- The lifecycle count now gives every `dlv-` deliverable in the cohort one membership status: `completed` is delivered, `withdrawn`, `expired` and `dead_letter` are not_delivered with that reason, a `completed` row with a `pr_ref` but no `pr_merged` receipt is unknown (`receipt_missing`), and a row created before the period start is out of the cohort (track `zelfstandigheid-meten`, PR-6a).
+
+- `vnx context-manifest [--json] [--by provider] [--state-dir <dir>]` (new, read-only, `scripts/context_manifest_report.py`) reads the context-manifest sidecar: per provider the lines, the `in_config_home`, user-skill and hook shares and the lines per status, plus `foreign_project_lines`, the unreadable lines by number and the receipt hashes without a sidecar line (agents-als-map PR-4c).
+
+- The plan-gate seat count comes from the gate profile (`heavy` seats two from the start, the path floor stays); `gov_trace` names `profile=<name> (<source>)` and a malformed profile refuses the run (gate-profiel P4).
+
+- Permissions (track `provider-agnostic-permissions`, P3): the subprocess seam writes a policy material record per delivery and exports `VNX_PERMISSION_POLICY_DIGEST`, and `permission_harness_map` states per lane what the harness can enforce; a `config.yaml` that is a directory or dead symlink now refuses instead of reading as no isolation (OI-2650).
+
+- Dispatch spec and plan (permissions P4): `DispatchSpec` gains an optional `permission_policy_digest` (sha256 hex, refused at validate() with `bad-permission-policy-digest` when malformed) and `ExecutionPlan.canonical_dict()` includes it when set, so the `ExecutionPermit` binds the policy; a spec without the field keeps its plan digest byte-for-byte.
+
+- fleet_role_drift reports the AGENTS.md chain per file and as an aggregate against the 32,768-byte Kimi cap in a new `budget` section (`status` is `ok`, `exceeded` or `unmeasured`, `claim: reference_metric_only`), and the exit code does not change (skills-port SP-7).
+
+- `t0_role_audit.sh --static` reads the T0-PLAYBOOK pointer of AGENTS.md and GEMINI.md through `t0_playbook` and the loading evidence through `playbook_loading_evidence` (skills-port SP-5). A current pointer reports `POINTER-ONLY`, a stale one `POINTER-STALE` with its state, and a project with none of the five playbook sources reports `PLAYBOOK-SOURCE-MISSING`, each next to `PLAYBOOK-MECHANISM-GAP`. A pointer never closes the gap: only a valid loading-evidence record closes it, and only for the provider that reads that surface (AGENTS.md is codex; GEMINI.md has no evidence provider and stays open).
+
+- feat(lifecycle): measure_coverage reads per project, from the stores, whether each counted source (promote, close, decide, merge, override, prompt) carries (project_id, delivery_id) and answers covered, uncovered or no_data (ADR-056, zelfst PR-6b)
+
+- `vnx skills sync --for codex|gemini` mirrors the shipped skills to `.agents/skills/` or `.gemini/skills/` without the provider CLI installed (an explicit `--for` is the operator's intent; the `command -v` probe stays only on the auto-detect path). Before mirroring, the sync reports each skill that `skill_portability.provider_unsafe_skills` flags by name, as a warning that does not stop the mirror. Dry run stays the default (skills-port SP-6).
+
+- Launchd (OI-2653, OI-2616): `vnx_pinned_launcher.sh` runs the job as `$ENGINE_ROOT/<script>` with cwd and `PROJECT_ROOT`/`VNX_PROJECT_ROOT` set to the project checkout (`VNX_HOME` stays the engine), so a project-bound daemon no longer resolves its root from the read-only release tree; `pinned_engine.py --with-checkout` prints that checkout from the same resolution.
+
+- Docs (track `orchestrator-skills-port-codex-kimi`, SP-8): the canonical T0 role names the playbook source in the ADR-058 order (fabric `skills/` tree first, the `.claude/skills` copy only as degraded fallback) and says present is not loaded; the shipped playbook no longer ties the T0 to `CLAUDE.md`, and the role stays at 33,659 bytes or below.
+
+- The promotion grant verifier `verify_promotion_grant` in `plan_gate_enforcement.py` separates `VERIFIED`, `PRESENT_UNSIGNED`, `SIGNATURE_INVALID` and `ABSENT` and requires the exact `project_id` (a record with project `None` is `ABSENT`); nothing calls it yet (zelfst PR-5a).
+
+- The Claude skill destination `.claude/skills/<slug>/SKILL.md` is now ignored by git (skilldisc R2): the authored source of a new skill is `skills/<slug>/SKILL.md`, and the generated copy can no longer land in a commit. The 27 already tracked `SKILL.md` files there stay tracked.
+
+- The `pr_merged` receipt now carries `project_id` (from the store, `unknown` when unresolved) and `delivery_id` (the base `dlv-...` id, `unknown` without a dispatch id), the delivery identity of ADR-056 (track `zelfstandigheid-meten`, PR-3).
+
+- The provider family of a review gate now comes from the `family` column of its `GATE_LANE_ROWS` row, so `gate_is_available` follows a newly registered row (review-lane P9a, OI-2654).
+
+- The governance override record now carries project_id and delivery_id (unknown when missing) in metadata_json, and the B3-cap override books one such record per capped PR next to its round-ledger line (zelfst PR-4).
+
+- Governance (track `deur-afgedwongen`, D1): ADR-061 legt vast dat de garantie van de merge-deur een permit is — één identiteit (de bestaande `vnx-gate`-App, app_id 4869217, met de eerlijke vermelding dat dit geen credential-scheiding is), `vnx-gate/door` als zesde en laatste preflight die publiceert, terugleest en aan zijn eigen `check_run_id` bindt, intrekking door de eigen check-run met een `PATCH` naar `conclusion: failure` te zetten (één run per kop; GitHub kent geen `DELETE` op een check-run) en drie expliciete triggers, drie lezerstoestanden met een herstelpad, de merge-queue als gelezen drift, een dagelijkse report-only audit over 7 dagen met bewezen pagineringsdekking en drie uitkomsten, een vlootrunner met enumeratie/isolatie/selectie/aggregatie/dedup, de activering A0-A3 met de integriteitsregel voor dev-worktrees, en de vier contracten (GO-evidence, publicatie-autoriteit, het `door_check`-receiptblok met de fail-closed leesregel `unwitnessed`, en de herkomst van een backfill). `docs/operations/FORGE_GATE.md` noemt de permit-semantiek en verwijst naar het ADR.
+
+- `backfill_pr_merged_receipts.py --report-only` is the daily door audit: it compares merged PRs (window proven by paginating `pulls` on `updated_at`, default 7 days) with both `pr_merged` ledgers, tells door evidence from backfill, files one open item per missing PR plus a `door_audit` beacon, and exits 0 (complete, no gaps), 1 (gaps) or 2 (unmeasurable).
+
+- The live protection state reads the merge queue of `main` through GraphQL (`merge_queue`: `null` or `{"enabled": true}`); an enabled queue is drift in `compare()` and a failed read fails the fetch (track `deur-afgedwongen`, D2).
+
+- The dispatcher and the provider kind of a harness-lane gate come from its row in `GATE_LANE_ROWS`: `LANE_DISPATCHER_KEYS` and `GATE_PROVIDERS` are derived, the dispatcher column now holds `provider_dispatch` / `claude_gate_lane`, and a row with an unknown `family` is refused when built (review-lane P9b, OI-2655, OI-2656).
+
+- hooks: the SessionStart hook injects the T0 playbook from the ADR-058 source (`t0_playbook.resolve()`), names its path and source (and DEGRADED), and prints one MISSING line with every probed step instead of reading the stale `.claude/skills` copy (skills-port SP-2)
+
+- The decide, merge and override writers record the actor_class derived by `actor_class.derive()`, the outcome decision carries its `delivery_id`, and the T0 rotation spawner exports `CLAUDE_ROLE=orchestrator` into the successor (zelfst PR-7c, ADR-056).
+
+- `scripts/probe_agent_layout.sh` measures cells A, C, D, H1, H2, L and B of track `agents-als-map-fase-1` (points 3, 4 and 5): the parent `CLAUDE.md`, the `projects` memory, the write-scope hook and the `--bare` lanes, one JSON line per cell with `ja`, `nee` or `niet gemeten` with a reason, plus `docs/investigations/2026-11-08-agent-layout-metingen.md` with one row per cell.
+- `scripts/probe_agent_layout.sh` cells H1 and H2 now report `ja` only on a recorded `Write` attempt at the denied path plus the hook refusal in the stream-json run, and cell B runs with the credential variables unset and reports `ja` only when the init event names no API key; anything else is `niet gemeten` with its reason.
+- `scripts/lib/dispatch_sidedoor_audit.py` lists `scripts/probe_agent_layout.sh` in `KNOWN_RAW_CLAUDE_CALLERS` as an audited read-only measurement probe, so the side-door audit no longer reports it as an unaudited receipt-bypass spawner; a test pins the registration.
+
+- The `light` gate profile gives one review seat and is refused on a security, schema, irreversible, outside-repo or store-resolution head; a recorded one-seat stack that the profile supplied (`stack_source=profile`) and that sits below the current configuration on such a head also needs a new review request; an operator-set recorded stack keeps winning. `VNX_GOVERNANCE_PROFILE` is registered as read (gate-profiel P5, OI-2652).
+- The stack path's request record carries `stack_source` (`override` for a stack the caller named, as ADR-008 names it), so the `ge4c2` golden request line for that path gains the same field (gate-profiel P5, round 5).
+
+- The door fills `permission_policy_digest` on every staged spec from the composed role policy and refuses to stage (non-zero, no spec) when the policy evidence cannot be proven; at fire time a changed digest is a plan warning, and a refusal only under enforcement (permissions P5).
+
+- `backfill_pr_merged_receipts.py --all-projects` runs the door audit per project in its own process (own cwd and VNX_* paths) over the union of the project registry and the ledger-health labels, with `--project`, a max-severity exit and one machine-wide daily `com.vnx.door-audit` job (deur D7b).
+
+- Gates (track `deur-afgedwongen`, D6): the required-contexts reader knows three door states for exactly `vnx-gate/door` bound to the door App (4869217). No run on the head is `published_at_merge` and does not block; one door-App run concluded `failure` is `permit_revoked`, blocking, with recovery `python3 scripts/pr_merge.py --pr N`; two or more door-App runs are `door_runs_ambiguous`, blocking, with recovery "push een nieuwe commit". `required_contexts_gate` carries `published_at_merge` and `recovery` as their own payload fields and `pr_readiness` lists the recovery among its costs; a foreign-App run, any other name and an unbound requirement keep today's reading.
+
+- Governance (track `deur-afgedwongen`, D3): `forge_gate_publisher.py` houdt één `vnx-gate/door`-run per kop: `publish_door_permit` maakt hem (`POST`) of zet hem terug op `success` (`PATCH`) uit GO-evidence van de vijf poorten vóór de deur, `read_back_door` leest hem terug op eigen App en id, `revoke_door` zet hem met drie pogingen op `failure` (er is geen `DELETE`); de slug `door` is gereserveerd zoals `review`, en de CLI `door` is een herstel- en testpad dat hetzelfde evidence eist. De runs op de kop worden gesplitst met de regel van de lezer zelf (`ci_contexts._split_by_app`): een kop met alleen een run van een andere App, of een run zonder `app`-object, wordt geweigerd zonder `POST` of `PATCH` (ADR-061 §3 geval 4), en elke receipt van de publicatie noemt de vreemde deurruns in `foreign_door_runs`.
+
+- The agent skill materializer gains the native claude destination `.claude/skills/<slug>/` (ignore gate, existence gate, path gate, closed status and reason sets) and one record per attempt under `agent_skill_materializations/`, and `ClaudeSubprocessAdapter.run` calls it by layout mode; `on` still reads as `off` until R6 (skilldisc R3).
+- The skill materializer refuses a native destination that holds a symlink, a wrong-typed entry or a path leaving the worktree (`symlink_in_destination`, `path_outside_worktree`) before any write, and writes through directory descriptors with `O_NOFOLLOW` so a link planted afterwards fails the write instead of being followed (skilldisc R3 round 2).
+- The envelope census fixture counts the two direct calls of `tests/test_claude_skill_materialize.py` (`EnvelopeSpec`, `ClaudeSubprocessAdapter`), regenerated with `tests/dispatch_envelope_census_scanner.py` (skilldisc R3 round 3).
+- The skill materializer proves every destination file of a pending skill new, untracked and ignored before the first byte is written (one `git check-ignore --stdin -z` and one `git ls-files -z` for all slugs; `not_owned:<slug>` or `not_ignored` refuses that slug), creates each file with `O_CREAT|O_EXCL|O_NOFOLLOW` so nothing is ever replaced, writes `SKILL.md` last, copies from a source snapshot taken before any check, and reads native skills before the first copy, with `O_NONBLOCK` plus an `fstat` check so a FIFO or directory at `SKILL.md` refuses instead of blocking (skilldisc R3 round 5).
+- The skill materializer writes each skill file to a private `.<name>.vnx-partial-<hex>` name in the same directory, syncs and length-checks it, and publishes it with a no-replace `os.link`, so a file appears at its final name only when complete and a failed write leaves neither name; a filesystem without hard links refuses the slug as `copy_failed:LinkUnsupported` instead of writing the final name, and `.gitignore` ignores a private name a killed run leaves behind (skilldisc R3 round 6).
+
+- `probe_agent_layout.sh` reads a successful Write (no `is_error` on claude 2.1.319) and an ancestor `CLAUDE.md` under a `$TMPDIR` that ends in `/` correctly, never gives `ja` after a failed call, names the real reason a Write gave no proof, and records the failure class of cell C; the measurement document carries the T0 run of 08-11-2026.
+
+- Gate profile P6 round 2: `stamp_request_identity` copies `profile`, `profile_source` and `profile_error` from the request (top level, else its `review_seats` record) onto the result, so the `review_gate_result` receipt names the profile on the production path; a request from before P6 leaves the keys absent.
+
+- Gate profile P6 (gateprof): the effective gate profile and its source (`profile`, `profile_source`, `profile_error`, `required_error`, `stack_source`) travel in the seat record, the request record, the `review_gate_result` receipt and the `plan_gate_pass` evidence; a refused value never reads as `standard`.
+
+- The merge gate checks the spec's permission policy digest against a fresh composition at the merge base, found by Dispatch-ID, and records the outcome (`match`, `mismatch`, `policy_absent`, `spec_missing`, `evidence_refused`); it blocks only under worker-permission enforcement (permissions P7).
+
+- feat(planning): promotion by an agent needs the track opt-in autonomous_promotion_eligible and a VERIFIED plan-gate grant; `vnx objective set-autonomous-promotion` sets the opt-in and the T0 role says so (zelfst PR-5b)
+
+- The direct creation paths (deliverable add, proposed track dispatch) write the delivery identity (project_id, delivery_id) through one helper, and a proposed track dispatch is never booked silently as vnx-dev (zelfst PR-8a).
+
+- `vnx gate` and `vnx gate-profile` now read one required stack from `gate_profile.required_stack()` (the profile's review stack plus the `checks.*_required` enforcement dials, with `ci_gate` on `ci_green_required` >= 2); `gate.sh` loses its inline YAML parser and its literal `codex_gate,kimi_gate` fallback and stops with the reason when the stack cannot be read (gate-profile P7).
+
+- The write-scope hook compares the write target and the cwd on their real paths, so a Write through a symlinked parent (macOS `/var` to `/private/var`) is no longer refused falsely. A directory symlink inside the worktree that points outside stays refused. The agent-layout probe builds its tree on the physical `$TMPDIR` path (OI-2666).
+
+- Gate profile (track `gate-profiel-per-project`, P9): ADR-060 records the durable contract of `VNX_GOVERNANCE_PROFILE` (the 3 x 4 table, the precedence `override > project_config row > enforcement > profile > env > default`, the fail-closed rule with the raw value and its source and no fallback to `standard`, the safety floor and the `gate-merge` exception by reference to the ADR-008 amendment, the two views `review_stack`/`required_stack`, the receipt fields `profile`/`profile_source`/`profile_error`, and the change contract B14 per clause: what holds today and what is a limit), and `docs/core/DISPATCH_RULES.md` gains section 2.4 with the operator half: how to set the row, what each profile does, how to read it with `vnx gate-profile show`, the refusal of `light` on a signal path, and the rollback.
+
+- Merge door (deur D4, ADR-061): `door` is the sixth and last preflight of `scripts/pr_merge.py`. When main's `branch_protection.yaml` lists `vnx-gate/door` in `checks[]` (the read the branch-protection preflight already made), the door publishes that check on the exact head through the D3 publisher from GO-evidence of the five gates before it, reads it back and binds `permit_id` to its own run. A merge that does not happen, an unknown merge outcome and an exception before a confirmed merge each revoke the permit with a PATCH to `failure`; a revocation that does not land is a blocker open item and a non-zero exit. `pr_merged` and `pr_merge_refused` both carry the `door_check` block of contract (c); a project without the entry records `not_required` and publishes nothing. The merge is confirmed the moment GitHub reports it, before its receipt and register event: an exception in that bookkeeping propagates, never revokes the permit and never writes `pr_merge_refused`, so the ledger never carries both for one merge.
+
+- `receipt_query.py operator-actions` and `operator-cohort` count operator actions per delivery over the six sources and report N, zero_rate and unknown_rate over the ADR-056 period, read-only and per project (zelfst PR-7a).
+
+- The skill materializer claims the slug folder with one atomic `mkdir` before it publishes the ownership marker and never adopts an existing folder, so a folder created by another process after the check is no longer marked and reclaimed (skilldisc R4 round 2).
+
+- Every removal in the skill materializer is bound to one directory fd: a folder is opened once, its ownership is read and its contents are removed through that fd, and only the empty entry is removed by name while its `st_dev`/`st_ino` still match. A folder swapped in after the ownership check, after the role-folder check or between a claim and its open is never removed or entered (skilldisc R4 round 3).
+
+- Codex gets the role's skill set in `<worktree>/.agents/skills/<slug>/` with an ownership marker (`.vnx-managed.json`: only a folder carrying this run's `dispatch_id` is ever removed, an unmarked one stays and the run ends `partial` with `not_owned:<slug>`), and `spawn_codex` takes `role`, `state_dir` and `project_id` from all four codex routes (skilldisc R4, ADR-059).
+
+- DISPATCH_RULES no longer names a `vnx config` subcommand, so the T0 role audit (`tests/test_t0_role_audit_static.py`) is clean again after #2547 (OI-2678).
+
+- The door reconciliation (`backfill_pr_merged_receipts.py --reconcile-open-permits`, also run by the `--all-projects` child) reads every open PR and revokes a stale or orphaned `vnx-gate/door` permit with a PATCH to failure through the publisher (deur D7c).
+
+- `vnx gate-profile show` and `--value` take `--project-id <pid>` and read that project's profile; `show` names the project it read (`project_id`). With `--json` every config error, not only an invalid profile, prints a JSON error record on stdout and exits 2. `--csv` is documented as the default format that only `gate.sh` passes (OI-2676, OI-2674).
+
+- ADR-056 PR-7b: `receipt_query.py operator-outcome` gives the autonomy verdict (`onvoldoende_meting`, `selfstandig`, `niet_selfstandig`) and `--write-marker` freezes it once as `autonomy_markers/<name>.json` with the five projects, the period, the thresholds and the end source; a marker is never rewritten.
+
+- A repo-side UserPromptSubmit hook (`scripts/hooks/log_prompt_time.py`) and the attribution module `scripts/lib/prompt_attribution.py` ship in this change, but the hook is inert until PR-8c registers it in the settings; once registered it records each prompt with its derived class and, only when unambiguous, its delivery key, never the prompt text (ADR-056, zelfst PR-8b).
+
+- The receipt's `context_manifest` reads the dispatch's skill materialisation record when the session capture is not `ok` or `partial` (ADR-059 decisions 10 and 15, skilldisc R5). A valid record lands in `context_manifests.ndjson` with `source: materialized` before the receipt names its hash; every refusal (`no_record`, `record_malformed`, `identity_mismatch`, `project_mismatch`, `session_mismatch`, `unknown_status`) stays non-`ok`, the highest attempt that passes the identity test is chosen, and a dispatch without a record stamps exactly what it stamps today.
+
+- kimi and codex now write their own layer-0 policy record (layer0 floor, layer1 flag set, capability levels from the matrix, `policy_absent` when the spec has no digest) next to the P3 records without changing a single flag (track `provider-agnostic-permissions`, P6); a failed record write is a WARNING and the spawn runs on.
+
+- `vnx-gate/door` is now a required check on `main` in `scripts/forge/branch_protection.yaml` (apply is the operator step after the merge), and `ci_contexts.py` and `forge_check_run.py` fall under the merge gate risk class, so the path-rule version moves and stored risk classes are recomputed (deur D5, ADR-061).
+
+- `VNX_AGENT_LAYOUT=on` is now a working value: `layout_mode()` returns `on` (no warning) and `is_on()` exists. With `on` the role's skills are materialized at the native claude (`.claude/skills`) or codex (`.agents/skills`) destination, a record is written per attempt, and the receipt's `context_manifest` reads it (`source: materialized`). The default stays `off`, `shadow` is unchanged, an unknown value still reads as `off` with one WARNING (skilldisc R6, ADR-050, ADR-059).
+
+- `scripts/permission_posture_report.py` is a read-only posture report per lane and flip gate for worker-permission enforcement: five conditions (qualification, fallback roles, unsupported restrictions, consecutive digest matches, operator decision), exit 0 flip-allowed, 1 blocked, 2 unreadable input; it never sets the flag (permissions P8).
+
+- A PR is now 300-450 changed lines with a hard cap of 450 and 300 or less on security, permission and auth paths (operator decision 2026-11-09). The planner and backend-developer skills, the T0 references, the AGENTS snippet, CONTRIBUTING, the dispatch guide and DISPATCH_RULES §3 carry the rule, and `PR_SIZE_WARN` in `scripts/pre_merge_gate.py` moves from 300 to 450 (OI-2688).
+
+- Health (track `ledger-is-falsifiable`): `scripts/lib/processor_liveness.py` reads the receipt-processor heartbeat in five states (absent, unknown, dead, stalled, fresh) and `t0_state` `system_health` carries it as `processor_liveness`, so a stalled processor no longer reads running. The window is 942 s, three times the measured p99 cycle of 314 s (ADR-055 section 5), and a heartbeat that is not valid UTF-8 reads `unknown` instead of raising.
+
+- The fleet door audit (`backfill_pr_merged_receipts.py --all-projects`) now reads per project whether main requires `vnx-gate/door`, as the door does. A project without that requirement is reported `not_enrolled` and no child starts, so it gets no open items; an unreadable or invalid declaration is `unmeasurable` (OI-2691).
+
+- Probe `scripts/probe_agent_skill_discovery.sh` (track `agent-skill-discovery-binding`, R7): four discovery cells (C1 claude `on`, C2 the same under `--bare`, C3a codex placement, C3b codex discovery), one JSON line each with three outcomes and the sha256 of the full raw output that was judged; only the T0 runs it (`VNX_PROBE_OPERATOR=1`), and `--self-check` validates the table without a CLI call.
+
+- The skill-discovery probe keeps the CLI stderr out of the evidence stream, so C3b is measurable, names the last stderr line when a call fails, and `--evidence-dir DIR` keeps each cell stream and stderr after the run (OI-2693).
+
+- Planning (OI-2272): `vnx objective set-horizon <track> now|next|later` (pip CLI: `vnx horizon set-horizon`) moves an existing track to another horizon in one `BEGIN IMMEDIATE` transaction, with one `track_horizon_set` event carrying the old and the new horizon. The value a track already has is exit 0 "unchanged" with no event, an unknown value or unknown track changes nothing, another project's same `track_id` is untouched (ADR-007), and a store predating migration 0027 refuses instead of dropping the move.
+
+- ADR-063 fixes the contract of the daily lead-time measurement (track `doorloop-en-effectiviteit-dagelijks`, PR-0) before any code lands: the ten metric ids with unit, source module and shape (one of them keyed per seat), unknown as `None` plus a reason and never 0, no partial sum as the total, the settled UTC day (`SETTLE_HOURS = 2`, catch-up over 14 days, immutable `final` files, freshness within 30 hours), coverage proven by `len < limit`, the proposal and verdict rules with retry-safe limits, the structural approval gate with its residual risk named, the scope reduction of "klaarstaand werk" to the `work_ready_coverage` proxy, opt-in per project, and no schema change.
+
+- Agent-skill-discovery measurements (track `agent-skill-discovery-binding`, R8): the T0 run after R7 is committed in `docs/investigations/2026-11-09-agent-skill-discovery.md`, one row per cell (C1, C2, C3a, C3b) with outcome, command, CLI version and sha256 copied from the measurement.
+
+- Recommendation dispatch metrics treat an empty window as unknown: every metric is `None` instead of `0.0`, and a before/after window comparison with a missing side is `insufficient_data` rather than a delta against 0 (doorloop PR-10, dlv-1df6c9ea4824).
+
+- The daily-metrics metric contract (`ScalarMetric`, `KeyedMetric`, the ten ids, transient/permanent reasons, `day_status`) lands under `scripts/lib/daily_metrics/`, with missing evidence kept as `None` plus a reason (dlv-a87b0c27302f).
+
+- Daily metrics (doorloop PR-2): the day calendar decides which UTC days the job may write — a day settles two hours after its end, catch-up covers the last 14 settled days oldest first, and a collection later than 30 hours after the day's end is marked backfilled.
+
+- The daily-metrics day store (`DayStore`) lands under `scripts/lib/daily_metrics/store.py`: per-day `flock` guards every write, and final files and numbered revisions are published by `os.link` so nothing is ever overwritten; an `incomplete` day is replaced atomically until it becomes final (dlv-a87b0c27302f-b).
+
+- `daily_metrics.baseline` computes the 7-day baseline over pooled raw samples for the five quantile metrics and the mean of day values for the five counts: only `final` days count, fewer than four usable days is `insufficient_baseline_days`, never 0, and keyed seats get their own baseline (doorloop PR-9).
+
+- `scripts/lib/daily_metrics/collect.py` is the daily-metrics collector module: it discovers the `daily_metrics` sources, builds one day document per settled day, takes an exclusive non-blocking run lock on the store root, and emits the event-driven `daily_metrics` health beacon (doorloop-en-effectiviteit-dagelijks PR-3a).
+
+- The daily metrics collect three more ids from their own sources, each `unknown` with a precise permanent reason: `cost_per_merged_pr_usd` with the day's numeric coverage in `details`, `operator_wait_hours` (no request timestamp in the approval ledger) and `merges_without_receipt_count` (`ledger_reader_not_wired`, the receipt reader is not wired yet).
+
+- `daily_metrics.py` is the daily-metrics CLI (`collect`, `daily`, `--recollect`) that builds one day document per settled day from the `daily_metrics` sources, writes it through `DayStore` under an exclusive non-blocking `.lock`, and emits the event-driven `daily_metrics` health beacon (doorloop-en-effectiviteit-dagelijks PR-3b).
+
+- Daily metrics (doorloop PR-4a): the merged-PR reader proves its coverage — a page that fills `--limit` is halved by time down to six levels and a leaf that stays full makes the population `truncated`, never a short count — and `pr_queue_state` reads it: `_get_merged_today` drops `--limit 30` and carries `merged_truncated` beside `merged_today` (dlv-6157a85d1191-r2).
+
+- Daily metrics (doorloop PR-4b): `sources/github_merges.py` publishes the day's `merges` count, the open-to-merge median and p75 from one proven `MergedPopulation`; a truncated population, a failed read or an unparseable `createdAt` leaves all three `None` with `truncated_fetch`, `gh_failed` or `population_mismatch`, and a day without merges is a measured 0 while the lead-time metrics stay `unknown` with `no_merges_on_day` (dlv-6157a85d1191-b).
+
+- `scripts/daily_metrics.py` discovers its commands: every module in `scripts/lib/daily_metrics/commands/` with a callable `register(subparsers)` and `run(args)` becomes a subcommand, `daily` runs each module with an integer `DAILY_STEP` in `(DAILY_STEP, module name)` order, and a command that fails to import is reported on stderr as `{"command_import_failed": ...}` and makes `daily` exit 1 instead of being skipped. Both command and source loaders register the module in `sys.modules` before running it, so a module with `from __future__ import annotations` and a `dataclass` imports cleanly instead of failing with `AttributeError`, and a failed import leaves no half-imported entry behind (doorloop-en-effectiviteit-dagelijks PR-3c).
+
+- Daily metrics (track `doorloop-en-effectiviteit-dagelijks`, PR-11a): `scripts/lib/daily_metrics/proposal_rules.py` holds decision 26's immutable rule table, its `RULE_VERSION` (sha256 of the serialised table) and a pure `evaluate(day, days)` that returns ranked candidates only when every condition holds on a `final` day, with the skip reason (`day_not_final`, `no_rule`, `value_unknown`, `baseline_unknown`, `sample_too_small`, `below_trigger`) of every other key; the ledger and `propose` follow as PR-11b.
+
+- Daily metrics (doorloop PR-5a): `gate_duration_seconds_by_seat` is a keyed metric with one full record per seat — median, p75, sample size and samples — from `state/review_gates/results/pr-<n>-<seat>.json`. Files that name no seat, results without a numeric `duration_seconds` and results without a timestamp are counted in `details` instead of dropped; a seat seen in the previous 14 days keeps an `unknown` entry so its baseline keeps running.
+
+- The daily-metrics silence source (`sources/silence.py`, doorloop PR-8) counts gaps of more than 30 minutes between consecutive merges on the UTC day they close, over a 14-day lookback, with the open PRs that ran through each gap (`open_pr_through`), the still-open window after the day's last merge in `details.open_window_at_day_end`, and `work_ready_coverage` kept as an explicit `0 of n` (`no_historical_readiness_snapshot`).
+
+- The daily `rounds_per_pr` now comes from the round ledger over exactly the day's merged PRs (track `doorloop-en-effectiviteit-dagelijks`, PR-5b): one codex-seat verdict per distinct head is a round, and a merged PR the ledger does not cover makes the metric `None` with `rounds_missing_for_<n>_prs` instead of 0.
+
+- Tests (OI-2696): `tests/test_daily_metrics/conftest.py` puts `scripts/lib` ahead of the same-named CLI script and pins the package, so a single test file no longer resolves `scripts/daily_metrics.py`; `test_import_isolation.py` runs every sibling test file in its own interpreter and requires exit 0.
+
+- Daily metrics (track `doorloop-en-effectiviteit-dagelijks`, PR-11b): `scripts/lib/daily_metrics/proposal_ledger.py` keeps `proposals.ndjson` append-only under `slot_lock`, with ids from `sha256(project_id|key|metric_day|rule_version)[:12]`; one run writes at most `3 - existing` proposals for a project and metric day, skips ids that already exist, keys with an open proposal and keys silenced by an `undetermined` verdict in the previous 14 days, and a damaged line raises `LedgerUnreadable` instead of being read around (decision 26, open question 9).
+
+- The daily-metrics CI source (decision 22) publishes `ci_duration_seconds_median` as the median over the day's merged PRs of `max(updatedAt) - min(startedAt)` across the runs on each PR's head, fail-closed on a sha that is not 40 hex characters, a failed or unparseable `gh run list --commit` read, a run that is not `completed`, or a run without a parseable timestamp; an empty run list is a measured `no_run_prs` entry, and a day where every head has no runs is permanent `no_ci_runs_on_any_head`.
+
+- The daily-metrics `propose` command (track `doorloop-en-effectiviteit-dagelijks`, PR-11c): a discovered command and a `DAILY_STEP` of `daily` that evaluates the decision-26 rule table on the newest settled day only — so a catch-up over five days proposes for one day, never fifteen — and writes through the retry-safe `proposals.ndjson` ledger; a day that is not `final` prints `reason: "day_not_final"` and writes nothing, an unreadable ledger exits 1 with the day files untouched, and a missing project id exits 2.
+
+- Daily metrics (doorloop PR-12a): `daily_metrics.py approve PROPOSAL_ID --action TEXT` is a TTY-only gate (refuses with `VNX_AGENT_ID` set, a non-terminal stdin or stdout, an unknown, judged or approved proposal, or a mistyped id) that appends one `approved` event to `proposals.ndjson` with the baseline frozen over the seven days before the approval day; `append_approval` re-checks the proposal under the ledger lock.
+
+- Add read-only intelligence corpus baselines with per-table counts and storage, a shared typed content digest, and an atomic validated manifest contract.
+
+- Intelligence corpus quarantine (Q7): daily hygiene logs 0 patterns at INFO for an empty corpus, preserving populated quality summaries; regression tests verify empty-corpus monitor, dashboard, documentation selection, and gather CLI behavior against the production schema.
+
+- docs(adr): ADR-062 legt het hostbrede capaciteitscontract vast: veilige slottoelating, werklasteigendom, operatorbeleid en observe vóór enforce (rekenslot RS-0).
+
+- RS-1 adds `scripts/lib/process_tree_load.py`, the pure parsers and summaries behind the process-tree load sampler: `ps` tree walking with xdist-worker CPU apart from other subprocesses, plus RSS, swap and compressor, and a `cores_p95` candidate slot number per run. The sampler and its CLI land in RS-1b (track `rekenslot-per-machine`).
+
+- `VNX_REVIEW_SEAT_RULE` is registered in `config_registry.CONFIG_REGISTRY` (`gate`, approval required, default empty, `ACTIVATE`), so a project can carry the seat rule in `project_config` written through `config_store_db.set_config` with an approval id. vnx-dev decides by `first_seat_or_every_seat_on_signal` since 2026-11-09; every other project has no row and keeps `first_seat_or_every_seat_by_risk`, and `VNX_OVERRIDE_REVIEW_SEAT_RULE` is the emergency brake (track tweede-stoel-op-signaal, PR 5).
+
+- Daily metrics (track `doorloop-en-effectiviteit-dagelijks`, PR-12b, split 1 of 2): `scripts/lib/daily_metrics/verdict.py` judges an approved proposal over `a+1` to `a+7` against the baseline frozen at approval and returns `helped`, `not_helped` or `undetermined` with a reason -- never `not_helped` -- while the frozen baseline, the post value, five final days, the sample minimum or the metric schema is missing (decision 26). `proposal_ledger.append_verdict` appends the one `verdict` event under the ledger's lock and refuses `not_approved` or `already_judged` without writing. The `verdict` command and its CLI tests follow in split 2.
+
+- The daily job now judges approved proposals on their seven settled post days: `daily_metrics.py verdict` (DAILY_STEP 20) refuses while `a+7` is not settled (exit 2), judges one proposal by id or every due one, writes one `verdict` event per approval with the frozen baseline and prints `{"judged": [...], "waiting": [...]}`; a day whose `schema` nobody recorded is written as `undetermined` with `schema_missing` (doorloop PR-12b, split 2).
+
+- RS-1b adds `scripts/measure_process_tree_load.py` on top of the split-1 library: NDJSON samples of a process tree's xdist-worker CPU apart from other subprocesses (the root's own CPU included), plus RSS, swap and compressor, with an exclusively created `--out`, a `failed_snapshots` count and a `cores_p95` candidate slot number per run (track `rekenslot-per-machine`).
+
+- ADR-065 fixes what learning may and may not do before any code lands (track `self-learning-loop-reactivate`, D0): the nine-class failure vocabulary in one ordered table, the count contract with `len(failure_patterns) == dispatches + without_dispatch_id` and `failure_receipts == len(failure_patterns) + merged_duplicates`, the four pattern states where a proposal never activates itself, the decision record as sole producer of `approval_id` and `bundle_ref`, the `pattern_activation` table with PK `(project_id, activation_id)` (ADR-007) and the `ledger_verdict/1` contract on which learning stops with a declared reason. Status: proposed by the T0 on 10-11-2026; no code and no receipt-format change.
+
+- Dream writer: `_emit_dream_event` stamps every `events/dream/*.ndjson` event with a UTC `timestamp` through one helper (`_utc_timestamp`), and the pending-review JSON records `created_at`, so the liveness reader can judge age from content (3 of 134 measured events carried none). The skip-event and review-JSON builders moved out of `run_dream_cycle`, which drops from 197 to 147 executable lines; behaviour is otherwise unchanged.
+
+- ADR-066 fixes the `dream_liveness/1` contract, the night and seven-night progress rules, and the review-age chain (track `dream-liveness-watch`, PR-1): the 30-day review-age threshold is new policy introduced here, and the ADR corrects ADR-019, which sets no maximum age for a waiting proposal.
+
+- The legacy dispatcher lane (`scripts/dispatcher_minimal.sh`, the `VNX_DISPATCH_LEGACY=1` rollback route) passes `"$dispatch_id"` as the fifth argument to `gather_intelligence.py gather`, so an injection row written through that lane can be tied back to its dispatch. `tests/test_legacy_intel_lane_ratchet.py` pins the five-argument call shape and pins that the single-entry door (`VNX_SINGLE_ENTRY_DISPATCH=1`) never routes through the legacy dispatcher.
+
+- Governance (ADR-069, track `intelligence-effect-measurable`): the protocol of the intelligence-ab effect measurement is binding before the window opens — a SHA-256 arm inside one frozen `VNX_INTEL_AB_WINDOW` configuration and its exact cohort, a 50/50 control fraction, the five fail-closed outcome classes with a 72-hour horizon, the stratified Mantel-Haenszel estimator, the hard floor `MIN_PER_ARM = 200` that no flag can lower, four verdict classes under the measured 97.7 % ceiling, the falsifications with their coverage contract, the v38 migration recovery contract, and the window dates with the closing rule.
+
+- ADR-064 (the delta review: a fresh verdict on the exact head, the parent chain in the ledger, shadow first, `VNX_REVIEW_SCOPE` as the one switch back) and the matching ADR-060 amendment for the new profile key (deltareview DR-0).
+
+- Learning loop (d3filter D1): a failure-prevention proposal now has one id over pattern, terminal scope and agent scope (`_rule_id`), so two agents on the same failure no longer collapse into one pending rule. A missing or sentinel terminal reads `any`, a sentinel `provider` no longer hides a real `model` (`_agent_identity`), the record and the shadow record carry `agent_constraint`, and the "Queued" count states what was added. Proposals stay proposals: nothing here applies or activates a rule.
+
+- Add ADR-067 and `docs/core/LEARNING_CAPTURE_ROUTING.md`: which bucket a lesson belongs in, the reference grammar, the audit window convention, the three pair dispositions, the project binding and the rollback (capture PR-0, no code).
+
+- Slot memory (RS-5, ADR-062 §4/§11): `scripts/lib/slot/slot_memory.py` keeps one host-wide memory sample per 30-second bucket (retention on time, 600 s), decides heavy requests by the 5-minute growth rule or the level rule, requires two clean samples from two different buckets to recover from a block, and refuses with exit 75 after `max_wait_s` when only `memory_guard`/`memory_metric_unavailable` remains. A missing or unreadable measurement is `unavailable` with null values, never 0.
+
+- OI-2701: a takeover of seat 1 by a reviewer the project approves in the new key `VNX_REVIEW_TAKEOVER_FULL_FILL` (`gate:model` pairs, `gate`, approval required, empty by default) counts as seat 1 under the signal seat rule when it gives a PASS with 0 blocking findings and both warning counts known on the exact head. Its counts come from its own report, only when the report header names its own gate and PR; the round line now carries `reviewer_model`, and the seat decision, the checkrun text and the `pr_merged` record name the approving pair (`takeover_full_fill`). With the key empty every project keeps today's behaviour: a takeover keeps every seat.
+
+- `vnx learning review` shows the `Terminal:` and `Agent:` scope of each pending rule, and `ingest_approved_rules` marks every processed rule `ingest_result` (`inserted` or `duplicate_of_existing_row`) with `ingest_row_id` and logs the number of collapsed rules; the dedupe key is unchanged (d3filter D2).
+
+- Deltareview (DR-1): `scripts/lib/review_findings.py` gives every review finding a stable 16-hex id — `sha256(seat, path, symbolic context, normalised text)`, no line number in it. The symbolic context is the innermost `def`/`async def`/`class` qualified name and is found through compound statements too (`if`/`try`/`with`/`for`/`match`), so two functions with identical finding text never share an id. No IO, no caller changes. The fail-closed status model (`next_status`, `blocks`) follows in the second half of this split (`dlv-f896cabfc2b0-b`).
+
+- Merge-tree record (DR-7, requirement 9, split 1 of 2): `pr_merge.py` gains the helpers that read `merge_sha`, `merged_tree`, `tested_head`, `tested_tree` and `tree_equal` under one short 20s budget — a failed read never refuses the merge it cannot undo, it books what it could read and names the reason in `merge_tree_unavailable`. Nothing calls the record yet: wiring those fields onto the existing `pr_merged` receipt and into `merge_pr` follows in split 2.
+
+- Docs (reattr L1): ADR-068 fixes how a learning pattern's project is decided (a vote over body, store and report path with six fail-closed categories), how a row moves between project stores (whole rows with `content_key`, a journal, `resume` and `undo`, never a rebuild or a file swap) and that persisting needs an approval record bound to the exact change (`changes_sha256`, single use, created from a tty).
+
+- Delta review (DR-1, split 2): `scripts/lib/review_findings.py` adds the five finding statuses (`open`, `fixed`, `waived`, `regressed`, `unverifiable`), `next_status` and `blocks`. A finding never closes silently: an unanswered id stays `open`, a vanished anchor is `unverifiable`, `waived` is carried only from `previous` (a reviewer cannot waive), and `open`/`regressed`/`unverifiable` plus unknown values block.
+
+- Complete corpus baselines: opt-in corpus and all-column session digests in the baseline manifest.
+
+- `scripts/lib/slot/slot_store.py`: the host-wide capacity store and policy opened with rights/ACL checks (exit 78 on any violation) (rekenslot RS-2 split 1, read-only; the transaction follows in split 2, ADR-062).
+
+- The converter-to-proposal chain is pinned end to end (`d3filter` D3): a report the real report-to-receipt converter books as `report_contract_invalid` with `provider="unknown"` and `terminal="unknown"` becomes one proposal in `pending_rules.json` with `terminal_constraint == "any"`, `agent_constraint is None`, `occurrence_count == 2`, `status == "pending"` and an id equal to `_rule_id` over its three identity values. The threshold of two, the double-sentinel noise boundary, a real `provider`/`terminal` and an agent split are pinned as boundaries (D3).
+
+- Memory (learning-capture PR-1, split 1 of 2): new `scripts/lib/lesson_refs.py` holds the `OI-<n>` reference grammar, a read-only resolver over the open-items store of the process itself (a missing, unreadable or foreign store, an unknown status or an unknown ref resolves to `resolved: False` with a reason, never `open`) and `BIN_ROUTING`. The memory indexer integration follows in split 2.
+
+- Slots (RS-3, split 1 of 2): `scripts/lib/slot/slot_admission.py` holds the admission building blocks: free slots, the safe sequence, fencing, growth and nested plans and the cleanup verdict (ADR-062 decisions 1, 2, 8), pure and without IO; `decide_round` follows in split 2.
+
+- The intelligence A/B window is now registered configuration: `VNX_INTEL_AB_TEST`, `VNX_INTEL_PLACEBO_ARM` and `VNX_INTEL_AB_WINDOW` exist in the config registry, all off or empty, and `_injection_why_enabled()` follows the registry precedence chain (override, `project_config` row, environment, default) instead of reading only the environment; a failing DB resolver gives `False` (window closed) whatever the environment says, and is logged, via an opt-in `strict_resolver` on `resolve_with_source` that leaves every other caller unchanged (intelligence-effect-measurable PR-1).
+
+- `scripts/lib/learning_ledger_gate.py` gives the learning loop a typed verdict `ledger_verdict/1` (`ok`, `pending` or `refused`) on the ledger, a thin projection of `compute_lifecycle_count` and `attempt_verdict` with the seven ADR-065 rules; it evaluates against one unchanged ledger (retry once, then `refused`) (self-learning-loop D6, split 1 of 2).
+
+- Dream liveness (ADR-066, PR-2 split 1): `scripts/lib/dream_liveness.py` reads the dream event stream and the installed plist into the `dream_liveness/1` document. `state` is `deviation` on a finding with severity `error`, `unmeasured` when a source is missing, else `ok`; an unexplained skip reason, an unknown event type and 26 hours without an attempt are errors, never a pass.
+
+- Memory (learning-capture PR-1, split 2 of 2): the operator-memory indexer now shows the live status of every `OI-<n>` an operator note names (`- OI-<n>: done (gesloten <datum>, #<pr>)`), resolved read-only through `lesson_refs` against the open-items store of the process itself; a missing, unreadable or foreign store, an unknown status or an unknown ref reads `onbekend (<reden>)`, never `open`.
+
+- Snapshot of the corpus: a read-only `VACUUM INTO` copy of the intelligence store, cross-checked against the measured digest, with verified reuse (`--snapshot`, `--reuse-snapshot`).
+
+- Capture audit (capture PR-2, split 1): per-project source binding `state/capture_sources.json` with `load_binding` (project id and memory-dir checks), plus the memory-note and open-item readers. Each source reports ok, absent, unbound or error; an unbound or broken source never reads as an empty ok list.
+
+- `scripts/lib/slot/slot_liveness.py` reports alive, gone or unknown for a slot lease from one process snapshot: its session, owner pid plus start time, descendants found through the ppid chain and child leases (rekenslot RS-4, ADR-062). An unreadable table or a missing identity is never gone.
+
+- The ledger verdict file `state/learning_ledger_verdict.json` is written atomically by `write_verdict` and read fail-closed by `read_verdict`: a missing, corrupt, malformed or future-dated verdict is `refused` with `verdict_unreadable`, one older than 36h is `verdict_stale` (loop D6, split 2 of 2).
+
+- Intelligence corpus quarantine (track `intelligence-corpus-quarantine`, Q3 split 1 of 2): `vnx_intelligence_corpus_quarantine.py quarantine --db <store> --out <dir>` copies `code_snippets` and `snippet_metadata` from a read-only source in one read transaction into `artifact/quality_intelligence-corpus-<YYYYMMDD>.db` (untyped columns, no index, every rowid), proves it before the seal (`integrity_check`, the shared content digest and a per-row storage-class comparison against the source, and a MATCH probe on a throwaway FTS5 with the real DDL), writes `quarantine.json` validated by `validate_quarantine`, then seals the files 0444 and `artifact/` 0555. An existing `artifact/` or any failed proof exits 3 and removes only what the run created.
+
+- New `scripts/lib/qi_learning_approval.py` (ADR-068 besluit 18, reattr L4 split 1a of 4), the read side: `preview` hashes the rows the operator approves, and `load_approval` reads and validates the learning-persist approval record that `VNX_LEARNING_LOOP_APPROVED` selects. The ledger wins: a `learning_persist` line for the proposal in `intelligence_usage.ndjson` refuses as already used, also when the record still says `consumed_at: null`. A missing log holds no claim, only a torn last line without a newline is skipped, and any other unreadable line refuses. Every refusal raises `LearningApprovalRefused` and writes nothing. The claim (`claim_approval`, ledger first) lands in split 1b, `write_record` with the approve CLI in split 3. Unused on main until the `learning_loop.py` hook lands.
+
+- Capture audit (capture PR-2, split 2): the build-log bucket reader (only the bound slug is returned, the others are counted; an unreadable `bucket_dir` is `error`, never an empty `ok`) and `scripts/capture_audit.py sources` (per bin ok, absent, unbound or error, `--json`).
+
+- `pattern_reattribution` decides ownership by a vote over three receipt signals (store, body `project_id`, report-path root) into the six fail-closed ADR-068 categories, strips only a known-project prefix from `source_dispatch_ids`, and `--apply` refuses (exit 3, file untouched) any `moves` row whose destination is another project's DB file, naming `qi_transfer_apply.py` as the route.
+
+- Intelligence A/B (effect PR-2): the arm is now `arm_for_dispatch(dispatch_id, project_id, window)`, a sha256 over `window_id:salt:project_id:dispatch_id` inside the strictly parsed frozen window `VNX_INTEL_AB_WINDOW` (`load_window_config`). The same dispatch gets the same arm in every process, and a disabled flag, a missing or invalid window or an empty id gives no arm (`(None, None)`) instead of a silent `treatment`. `random.random()`, `_ab_arm()` and `AB_CONTROL_FRACTION` are gone.
+
+- `scripts/lib/qi_learning_approval.py` gets its claim side (ADR-068 besluit 18, reattr L4 split 1b of 4): `claim_approval` binds the approval record to the exact rows about to be written and uses it up before the first DB write, ledger first (ADR-005). Under the record's `slot_lock` it re-reads the record, appends one `learning_persist` line with the proposal id, the record sha256 and the claim time to `intelligence_usage.ndjson`, and only then sets `consumed_at` through `atomic_write_json`. When the append fails the record stays byte-identical and the approval stays usable; when the record write fails after the line, the approval counts as used. `_append_event` closes a torn last line with a newline before it appends. Unused on main until the `learning_loop.py` hook lands.
+
+- The intelligence injection table has two new columns, `ab_arm` and `ab_window`, added by migration 0038 with a way back (`apply_0038.revert_migration`) and a schema-manifest entry for version 38 that the migration probe checks. The existing injection recorder writes `ab_arm` once the column exists; `ab_window` has no writer yet (effect track PR-3).
+
+- Slot admission decides top-ups, nested leases and fencing in decide_round (rekenslot RS-3 split 2, ADR-062).
+
+- Capture audit engine (capture PR-3, split 1): `scripts/lib/capture_audit.py` with the window (`explicit`, `chain`, `first24h`; naive open-item times read as host-local time), the Jaccard pairs `oi_mem`, `oi_nug` and `mem_nug`, the disposition (`linked` only from the non-home side) and the anchor rule in `audit_model`, where a bin that is not `ok` or a window without a new record makes `open_pairs` null, never 0.
+
+- Learning (reattr L3a): `scripts/lib/qi_transfer_plan.py` plans, and never runs, the move of a mis-filed pattern row to the right project database. Only L2 `moves` rows become moves, each with its full pre-image (row plus junction rows), a `content_key`, both `user_version` values and a content-derived `plan-id`; a non-NULL value that would land in a column the destination lacks is `schema_gap`, and every database is opened `mode=ro`.
+
+- Intelligence corpus quarantine (track `intelligence-corpus-quarantine`, Q3 split 2 of 2): `vnx_intelligence_corpus_quarantine.py restore --db <store> --quarantine <dir>/artifact/quarantine.json [--allow-existing] [--state-dir <dir>]` validates `quarantine.json` and the artefact sha256 before opening the store for writing, then in one `BEGIN IMMEDIATE` transaction refuses a non-empty target (or, with `--allow-existing`, names every colliding rowid), inserts every row with its own rowid, and proves the shared content digest over the restored rowids plus a MATCH probe on the target FTS5 index before `COMMIT`; any doubt is `ROLLBACK` and exit 3. `quarantine` now writes `LEESMIJ.md` (0444) with the exact restore command in the permit dir and a `quarantined` audit line. Both use the new single audit writer (`audit.append`: O_APPEND + fsync to `<state_dir>/intelligence_corpus_quarantine_audit.ndjson`, eight known stages, `permit_sha256` over manifest.json + quarantine.json, never inside the permit dir); a failed audit or LEESMIJ write after the commit or seal is exit 4.
+
+- Tests (effect PR-4): a guard builds a store from the real `schemas/migrations/` directory and requires every column the injection recorder writes on `intelligence_injections` to exist in it. The column list is derived from the recorder's own `INSERT`, and a fixture migration directory that names `ab_arm` only in a SQL comment must fail it. The fake `get_connection` in the A/B tests now takes `timeout` the way the real one does.
+
+- `scripts/lib/qi_learning_approval.py` gets its write side (ADR-068 besluit 18, reattr L4 split 3 of 4): `python3 scripts/lib/qi_learning_approval.py approve --proposal-id <id> --reason <text> [--approved-by operator|T0]` creates the approval record, only when stdin and stdout are both a tty, in `ensure_env()["VNX_STATE_DIR"]`. `write_record` refuses an unknown approver, an empty reason, a malformed id, an existing record or symlink, and a proposal the ledger already shows used; under the record's `slot_lock` it appends the `learning_approval` event with the record sha256 first and only then writes the record, so a persist receipt whose record hash no approval event carries points at a forged record. `claim_approval` now refuses rows that are no list of JSON objects before hashing them (OI-2717: a non-dict row raised `AttributeError`). Unused on main until the `learning_loop.py` hook lands.
+
+- `scripts/learning_loop.py` gets the approval hook (ADR-068 besluit 18, reattr L4 split 2 of 4): `LearningLoop(persist=True)` calls `load_approval` before it opens a writable connection, and `persist_to_intelligence_db` plans its rows first, then claims the record through `claim_approval` before the first upsert. Without an unused approval record whose `changes_sha256` equals the hash of exactly those rows, persist raises `LearningApprovalRefused` and writes nothing. The shadow preview now carries the rows, their hash and the `proposal_id` to approve, and the antipattern terminal list is sorted so the shadow run and the persist run hash the same rows. The approve CLI (`write_record`) lands in split 3.
+
+- Capture audit read model (capture PR-3, split 2): `build_audit` reads the three bins through `capture_sources` (each reader result normalized, any other shape is `error` and the measurement null), reads the dismissal ledger and writes `state/capture_audit.json` atomically with hashes, ids and counts only plus `schema` and `window.chain_until`; only a successful `chain` or `first24h` run moves `chain_until`, an explicit or failed run carries it on and refuses when it cannot be read. `python3 scripts/capture_audit.py audit [--since --until] [--json] --state-dir <dir>` runs it, and the CLI loads the lib by file path because both share the module name `capture_audit`.
+
+- Learning (reattr L3a, split 2 of 2): `scripts/lib/qi_transfer_plan.py --out <path>` publishes the transfer plan atomically (temp file in the same directory, fsync, `os.replace`) and keeps stdout empty; an existing plan survives a failed write untouched, and a path in the directory of a source database is refused with exit 2 and nothing written.
+
+- `intel_injection_join.py cohort --qi --rc --project-id [--as-of] [--json]` counts the frozen intelligence A/B window per arm (resolved, unresolved, excluded, unknown) on the first injection row per dispatch, and exits 3 with a reason on `window_invalid`, `malformed_timestamp`, `unstamped_after_open`, `config_diverged`, `arm_invalid`, `unknown_states` or `below_floor` (a floor of 200 resolved per arm that no flag lowers); it never prints a verdict (effect PR-6).
+
+- Dream liveness (ADR-066, PR-2 split 2): the night window and progress over the last seven closed nights (5 of 7 with output, failures and timeouts inside a window are blocked).
+
+- `vnx_intelligence_corpus_quarantine.py verify --db <db> --manifest <m> --quarantine <artifact dir>` proves the nine-point permit (manifest, sealed artefact, snapshot and live store describe the same rows) without changing anything: exit 0 with a JSON verdict (`--human` for text), exit 3 naming the failed requirement, one `verified` audit line either way; `check_permit` is the one function the purge will call inside its transaction (corpus Q4).
+
+- The learning misfile report and verification CLI: `scripts/learning_misfile_report.py report` counts the misfiled rows per database (read-only) and `verify --plan` exits 0 only when every planned row stands once in its destination, zero times in its source and passes the consumer's selector predicate (reattr L6).
+
+- The learning loop has a pure failure classifier (`scripts/lib/learning_failure_class.py`): one class per dispatch from one ordered table, and a merge of all receipts of one dispatch; the loop does not call it yet, so counting per dispatch follows in split 2 (ADR-065 §1 and §2, loop D1).
+
+- Learning (loop D2, split 1 of 2): `scripts/lib/prevention_rule_store.py` is the one store of the prevention-rule proposal queue (`pending_rules.json`): writes run under an exclusive lock and replace the file atomically, an unreadable queue raises `QueueUnreadable` instead of being read as empty, and a decided rule never returns to `pending`. The rule id now covers pattern, terminal, agent and failure class (ADR-065 correction). Wiring `update_terminal_constraints` to it follows in split 2.
+
+- The repo doctor's dream check now delegates to `dream_liveness.assess()` (ADR-066): PASS only when the state is `ok` and no finding is measured, so a completed cycle with no output, or seven closed nights ending in `dream_cycle_failed` or `dream_cycle_timeout`, is a WARN carrying the finding ids (dream PR-2, split 3 of 3).
+
+- Learning loop (ADR-068 besluit 10 and 18, reattr L5): a regression guard AST-scans `scripts/learning_loop.py` for SQL writes and fails any write outside a reviewed per-function allowlist; it reads every statement of a literal, calls a statement a read only when its complete text is known (a dynamic part gives `unreadable_sql`, a write keyword in the known head stays a write), treats `executescript` and `executemany` as writes, accepts a PRAGMA only in a proven read-only form, and a statement it cannot read fails closed with `unreadable_sql` unless its function is allowlisted.
+
+- `intel_injection_join.py cohort` re-derives every stored arm and stamp with the new pure `intelligence_selector.derive_arm` and `window_stamp` on the frozen window, so a window closed with `VNX_INTEL_AB_TEST=0` stays countable (refusal `assignment_not_reproducible` on one differing row); `n` counts only dispatches mature at `injected_at + 72 h <= as_of` with `immature` reported per arm, an unresolved-plus-unknown share that differs more than 5 pp between the arms refuses as `differential_attrition`, and a coverage line counts door dispatches without an injection row, injections without a `dispatches` row, rows of another window and dispatches whose first injection falls before the open or off the window (effect PR-6, split 2 of 2).
+
+- Intelligence (effect PR-5): `fetch_intelligence_section` decides the A/B arm with `arm_for_dispatch` before `select()`: a control dispatch gets no section and one injection row stamped `ab_arm='control'` plus `ab_window`, zero offer rows; with no active window the injection is unchanged and the row stays unstamped. `InjectionResult.ab_arm` no longer defaults to `treatment` (it is `None`, not assigned) and carries `ab_window`; `record_injection_audit` writes both and, on a store without the columns, writes the row without the arm and emits `ab_stamp_failed` instead of raising. With an arm the decision goes to the NDJSON ledger (`intelligence_arm_assigned`) first, then the coordination event; when either fails no injection row, offer row or source-dispatch stamp is written and the dispatch proceeds with the same section.
+
+- `vnx doctor`'s dream check proves a night with the `dream run:` log line and its event (same cycle id), reads the installed plist through `plutil`, asks `launchctl print` whether the job is loaded and reports `template_drift` against the plist template (dream PR-4, ADR-066).
+
+- `intel_injection_join.py effect --qi --rc --project-id` compares the A/B arms on dispatch success: per arm `n` and `success_rate`, the stratified risk difference (task_class by ISO week, Mantel-Haenszel weights, Agresti-Coull variance) with its 95% interval, the raw difference as a control number, a verdict class (`treatment_better`, `control_better`, `equivalent_within_5pp`, `inconclusive`, margin 5 pp) and the `terminal_id`/`track` balance per arm. Any cohort refusal, or more than 10% of the resolved dispatches in strata with an empty arm (`strata_coverage`), is exit 3 without an estimate or a verdict; there is no `--min-per-arm` (intelligence-effect-measurable PR-7).
+
+- `vnx_intelligence_corpus_quarantine.py verify` now checks all nine permit requirements: the source DDL, the session invariant against the baseline snapshot, the corpus counts, the snapshot and `db.bytes`, so the verdict carries `ddl_equal`, `session_equal` and `snapshot_ok` and lists `requirements_checked` 1-9; an audit dir anywhere in the permit dir is refused, and a malformed value in either document or a store that does not open or cannot be measured is a refusal with its audit line, never another exception (corpus Q4, split 2 of 2).
+
+- Learning capture (capture PR-2, split 3 of 3): `capture_audit bind` appends a `state_mutation` receipt (`capture_bind`, `created` or `replaced`) to `t0_receipts.ndjson` before it writes `capture_sources.json`. A failed append prints `bind refused: ledger append failed`, exits 1 and leaves an existing binding as it was.
+
+- fix(dream): the proposal queue ages a review from its content (`created_at`, then the completion event, then mtime) and counts an unreadable review file instead of skipping it, so "0 pending" only holds when the queue was readable; 30 days pending raises `review_overdue` (dream PR-5, ADR-066).
+
+- A test that removes or replaces a `sys.modules` entry no longer leaks it: an autouse fixture in `tests/conftest.py` puts every removed or replaced entry back, `test_append_receipt_identity.py` removes `dispatch_register` through `monkeypatch.delitem`, and `test_intel_ab_injection_path.py` patches the live module. This cured the 8 E1 failures on main (run 42881222755).
+
+- Learning reattribution (ADR-068 besluit 13-17, reattr L3b split 1 of 3): `scripts/lib/qi_transfer_apply.py apply --plan <plan.json> --reason <text>` copies each planned pattern row with its junction rows into the database of the project it belongs to and verifies the copy, with a drift and evidence check and an fsync'd journal per move; the source database is opened read-only and keeps the row. Removing it from the source and `resume` follow in split 2, `undo` in split 3.
+
+- Intelligence corpus quarantine (Q5): `purge` empties code_snippets and snippet_metadata (rows only) in one `BEGIN IMMEDIATE` transaction that re-proves the nine-point permit and the session_analytics digest before it commits, then checkpoints, vacuums and measures; a 0/0 store resumes only on a matching `deleted` audit line.
+
+- The learning loop counts one failure per dispatch with the evidence of all its receipts merged and groups prevention rules on the failure class (`scripts/lib/learning_failure_class.py`); a class outside the eligible set is counted and never becomes a rule, and nothing writes to `prevention_rules` (ADR-065 §1 and §2, loop D1, split 2 of 2).
+
+- Loop D5: `quality_intelligence.db` v35 adds the table `pattern_activation`, keyed `(project_id, activation_id)` (ADR-007), and `scripts/lib/pattern_activation.py` writes and reads it. An activation is written only from an approved decision record of `prevention_rule_store` whose `approval_id` the store minted, with a `bundle_ref`, a baseline, an effect criterion, a stop condition, the store's recovery path and `rollout_scope` `project`; anything else is a `ValueError` and writes no row. The `activation_id` is deterministic, so a repeat hits the same key and a deactivated activation stays off. A table of that name with another shape is never adopted: v35 rolls back and `user_version` stays 34. Nothing writes activations yet (D9) and no reader filters on them yet (D8).
+
+- Learning capture (PR-4): `capture_audit report` and `dismiss`, and the nightly beacon carries `duplicate_capture_open` and `capture_audit_bins` (`capture_audit_error` when the audit itself fails).
+
+- `vnx doctor` carries the three dream checks `dream:liveness`, `dream:job` and `dream:reviews`, projections of one `assess()` call per run (ADR-066): PASS only on measured, clean evidence; an unimportable `dream_liveness` module reports all three as `unmeasured` (dream PR-6).
+
+- `select_intelligence` and `build_intelligence_context` stamp `ab_window` on the row and record the arm decision (ledger line, event, then row) through the same helper as the live path; a failed record writes no row and never fails the dispatch. A deduplicated ledger line is compared on arm, window and project before it counts as recorded (OI-2721).
+
+- Learning (loop D2, split 2 of 2): queue mode (`VNX_LEARNING_LOOP_QUEUE=1`) writes the proposals of the learning loop to `pending_rules.json` through the prevention-rule store, in shadow and persist mode and also when the probe gate is degraded; it writes no database row and activates nothing. Only an eligible failure class seen in at least two dispatches is queued, and an unreadable queue degrades the run with a reason instead of being overwritten.
+
+- Loop D8: every reader of `prevention_rules` that returns content (failure prevention, cached intelligence, `gather_intelligence`, the T0 quality digest and both `tag_intelligence` queries) now goes through `pattern_activation.injectable_clause`. A `source='learning_loop'` rule is returned only with an `active = 1` activation in its own project and a fresh `ok` or `pending` ledger verdict for that project; a missing, stale, unreadable, refused or unknown verdict, a missing `pattern_activation` table or `project_id` column keeps loop rules out. Legacy rules are unchanged. A census test fails on any new `FROM prevention_rules` without the guard or an allowlist reason; `CachedIntelligence.query_prevention_rules` is no longer cached, so a deactivation shows on the next read.
+
+- `tests/test_k7b_manifest_readers.py` checks right after hand-over that a `dispatches` table in the tmp store carries `project_id`; a failure names the database path, `PRAGMA table_info`, the module origins, the cwd and `VNX_HOME`, so the order-dependent E1 failure explains itself (OI-2590, OI-2712).
+
+- Intelligence corpus quarantine: `rehearse --db --manifest --quarantine [--work] [--discard-copy]` runs baseline, quarantine, verify, purge and restore on a `VACUUM INTO` copy of the store with the same functions and returns a verdict (rows, rowids, digests, MATCH probe, orphans, session; exit 0 all true, exit 4 otherwise); the live store and the given artefact are only read.
+
+- Learning reattribution (ADR-068 besluit 13-17, reattr L3b split 2 of 3): `scripts/lib/qi_transfer_apply.py apply` now finishes each move: only from `verified`, and only while the copy still verifies and the source row and its junction rows still equal the journaled pre-image, one `BEGIN IMMEDIATE` on the source deletes them (`source_removed`, then `done`); a difference is `drift` and deletes nothing. `resume --plan-id <id>` finishes every move from its last journal state, the `planned` line is checked field by field before step 3 reads it, and a journal with a torn line refuses the whole command. `undo` follows in split 3.
+
+- Learning (loop D3): `vnx learning` is reachable through `bin/vnx`, and `vnx learning decide-rule --rule-id ID [--rule-id ID] --decision approved|rejected --reason R --by WHO` records the operator decision as one bundle in `state/prevention_rule_decisions.ndjson` with an `approval_id` minted by `prevention_rule_store` (an approval also carries a `bundle_ref` and requires `--effect-criterion` and `--stop-condition`). An identical repeat writes nothing, a conflicting decision or an unknown rule is exit 1, and `reconcile()` repairs a queue status that lags the record after a crash.
+
+- `vnx dream install-scheduler` also installs `com.vnx.dream-watch`, which runs `scripts/dream_liveness_probe.py --append` at 04:00 local: one NDJSON line in `state/dream_liveness.ndjson` and a `dream_liveness` beacon (25h interval), so a dead probe shows up as a stale beacon (dream PR-7, ADR-066).
+
+- Intelligence (effect PR-8): `intel_injection_join.py secondary` reports the falsifications F1 (adoption rises without a favourable verdict), F2 (adoption rises while the characters per injected item fall 10 % or more) and F3 (`control_better`), each as `fired`, `clear` or `not_evaluable` with the weekly coverage; unreadable or thin evidence is never a pass, and the command never changes the verdict or the exit code of `effect`.
+
+- Learning (loop D7): in queue mode and persist mode the learning loop reads `ledger_source_check` on the ledger it learns from before it extracts anything, and stores the verdict in `learning_ledger_verdict.json` on every run. A refused, malformed or unstorable verdict stops the cycle with `{"status": "refused", "reason": "ledger_source_check: <reason_code>"}` and a degraded heartbeat, and leaves the proposal queue untouched; a `pending` verdict runs on without the dispatches still in flight; the next run on a green ledger resumes by itself. Shadow mode without queue mode is unchanged. A long-lived loop no longer carries a previous cycle's queue error into the next cycle.
+
+- Learning loop: the nightly beacon now records a refused cycle as `status=refused` with its `reason` (a degraded one carries its reason too), so `vnx doctor` warns instead of passing a night in which the ledger verdict was refused.
+
+- `write_verdict` appends every learning-ledger verdict to `state/learning_ledger_verdict.ndjson` before it writes the JSON snapshot; a failing append leaves the snapshot untouched (ADR-005, follow-up of D7 #2673).
+
+- `scripts/deactivate_pattern_activation.py --activation-id <id> --reason <text>` switches one learning-loop pattern activation off: the store records a `deactivated` decision with its own `approval_id` and the queue rule becomes `deactivated`, then `pattern_activation` gets `active = 0`. `pattern_activation.deactivate` switches off only from that record, never from a caller's dict; a repeat is a no-op. Exit 1 for an unknown id, another project or a legacy rule, 2 for an empty reason (self-learning-loop-reactivate D9, split 1 of 2).
+
+- ADR-072 (`docs/governance/decisions/ADR-072-operator-bijsturing-leert.md`) records decisions 1 to 18 of track `operator-bijsturing-leert`: a bound steering source, a closed class table, a proposal queue with its own identity, a root-cause analysis that keeps no prompt text, and the rule that learning stays proposing (OB-0).
+
+- `vnx learning status` now prints, after the six existing counters, the failure-class corpus of the receipt window with its noise and its `unclassified` coverage, the three operator queues (proposals, archiving, suggest-edits) with the age of the oldest pending entry, where each queue leaves the building (`decisions:`), and the recorded decisions with queue mode. A missing or malformed source is shown as such and never as a clean zero or full coverage (loop D4).
+
+- `scripts/intelligence_ab_report.py` computes nothing itself any more: `weekly_ab_lift(qi_db, rc_db, project_id)` delegates to the cohort and the estimator, so a row without an arm never counts as treatment and a refused cohort gives no pairs (effect PR-9). The flags are now `--qi`, `--rc`, `--project-id` and `--as-of`.
+
+- Intelligence (effect PR-8, split 2): `intel_injection_join.py secondary` also reports the mean CQS and the mean open items created and resolved per dispatch for each arm, from `dispatch_metadata`, with the coverage per arm; below 80 % coverage in either arm, with no `dispatch_metadata` rows, or with a missing table or column the measure is `not_evaluable` and names why. The verdict and exit code of `effect` never depend on them.
+
+- The intelligence-effect protocol now sits next to the code and the cockpit names its probe (track `intelligence-effect-measurable`, PR-12): `claudedocs/specs/intelligence-effect-measurable/protocol.md` carries the exact `cohort` / `effect` / `secondary` commands from `## Done measurement`, their exit codes and the fail-closed table; the `injection-effectiveness-eval-loop` row in `docs/core/SUBSYSTEMS.md` moves from "probe not built yet" to `intel_injection_join.py cohort` and `effect` with no live reading yet (the A/B window is not open); and the injection chain in `docs/core/DISPATCH_AND_INTELLIGENCE_ARCHITECTURE.md` gains the `arm_for_dispatch` step before `selector.select()`.
+
+- Test: `test_k7b_manifest_readers.py` no longer races the detached `build_t0_state.py` rebuild that every lifecycle line fires on the tmp store, the cause of the k7b flake (OI-2590, OI-2712, OI-2729).
+
+- Purge: before `VACUUM` it runs FTS5 `optimize` on the corpus tables that are FTS5 virtual tables (found by their DDL), so the delete markers in the index segments are merged away and the file actually shrinks (live run 11-11: 444 MB to 152 MB, with 116 MB left in `code_snippets_data`; 36 MB after optimize on a copy). The after-measurement fails with exit 4 when a `<t>_data` shadow table still holds more than 4 pages, and the resume path gives the same shrink.
+
+- Learning reattribution (ADR-068 besluit 13-17, reattr L3b split 3 of 3): `scripts/lib/qi_transfer_apply.py undo --plan-id <id> --reason <text>` reverses every move with a `copied` line: first the source gets the journaled pre-image back (old id when free, else a new one; `restored` journaled before the COMMIT), then, with the source lock held until the destination COMMIT, only the rows that move created and that still hold what it wrote are deleted; a copy changed since stays (`undone_kept_changed_copy`), and so does a created row that a junction row this move did not create still names (any project's, e.g. a later `dispatch_pattern_offered` row), a row that left the source meanwhile keeps the copy (`source_missing`). Undo deletes nothing in the destination unless, under the source lock in that same step, the source holds the complete journaled pre-image, the row and every junction row by content (step 1 puts back whatever of it the source lacks before its COMMIT); otherwise the copy stays and undo exits 1 (`source_not_restored`). The `planned`, `copied` and `restored` lines are validated before any field is read, a second undo writes nothing, and apply or resume never moves an undone move again (`undo_started`).
+
+- The learning loop ingests only a rule the operator approved in the decision record, stamps `project_id` and `source='learning_loop'`, writes it with its activation in one transaction, refuses without a fresh `ok` or `pending` verdict of the project, and switches an activation off with reason `rule_row_missing` when its rule row is gone (self-learning-loop-reactivate D9, split 2 of 2).
+
+- ADR-071 records the rework per builder model and review seat: the `rework_edges` table with four edge kinds, rework against churn, three measures with the 14-day window and the n-rule, and proposals only (track herwerk-per-model-en-reviewer, H0).
+
+- Learning (operator-bijsturing-leert OB-2): `scripts/lib/operator_steering_class.py` holds the class table of ADR-072 decision 4 (`handmatige_actie`, `onderbreking`, `correctie`, `nieuw_besluit`, `vrijgave`, `statusvraag`, `vraag`, `ongeclassificeerd`) with Dutch and English markers. `classify()` maps one prompt to zero, one or more classes and names the marker that matched; a prompt that matches nothing gets an empty result, and `primary_class()` is the only place that turns that into `ongeclassificeerd` for counting. Deterministic, no model, no I/O.
+
+- New `scripts/lib/steering_proposal_store.py` (ADR-072, operator-bijsturing-leert OB-5a-a): the store of steering proposals. A proposal id is `sha256(project_id | oorzaak | artefact_soort | doelpad)[:16]` and the text is a revision under it. Revisions and operator decisions are append-only records in `steering_proposal_decisions.ndjson`, fsynced, and every append starts on a line boundary, also after a last record that lost its newline. A decision binds to a revision and `applied` only to the approved one. An unreadable or inconsistent record file is refused, never read as empty, and nothing is written to it. Nothing here applies a proposal; the derived projection, reopening and `reconcile()` follow in OB-5a-b.
+
+- A project reads operator transcripts only through a binding (`scripts/lib/operator_steering_source.py`, ADR-072, OB-1a): every file is contained under the canonical directory, validated once and checked before opening and on the open file descriptor. Client and business slugs are refused. The `bind` CLI follows in OB-1b.
+
+- Tests: `VNX_STATE_REBUILD_TRIGGER=0` (set once in `tests/conftest.py`) stops every lifecycle line from starting a detached state rebuild that raced the test stores (OI-2590, OI-2712, OI-2729).
+
+- `qi_transfer_apply.py undo` journals one fsynced `undo_started` line for a move before it changes either database, and from that line on `apply` and `resume` never advance the move again, so a crash between undo's destination COMMIT and its outcome line no longer lets `resume` copy the move back and remove the restored source row (reattr L3b-d).
+
+- Operator-bijsturing: `scripts/operator_steering.py bind` met bindingsledger, het filter van besluit 3 (met telling per uitsluitreden) en `show --prompt`.
+
+- feat(learning): the steering proposal store reconciles a batch, reopens a rejected proposal on new evidence and derives its projection (operator-bijsturing-leert OB-5a-b)
+
+- The README, the architecture overview and the intelligence system doc now describe the learning loop, the effect measurement, the corpus quarantine and auto-dream as they stand on main, and say that no injection effect has been measured.
+
+- Intelligence corpus quarantine (ADR-070, Q8): the policy behind `scripts/vnx_intelligence_corpus_quarantine.py` is written down. The ADR fixes the manifest, the quarantine document, the nine permit requirements, the in-transaction session invariant, the exit codes, the audit line, the seal and the fail-closed rule, plus the 22 decisions. The new operator runbook in `docs/operations/INTELLIGENCE_CORPUS_QUARANTINE.md` carries the live order, the exit codes, the restore command and the done measurement; `docs/EXIT_CODES.md` gains the tool's five codes. Move, never delete: the artifact is never removed by code.
+
+- `qi_transfer_plan.py` plans a row the destination already holds on a UNIQUE index as a `collision` (new `collision_rows`, `collision`), never as a move, and counts a table without a `project_id` column under `no_project_column` instead of crashing. `learning_misfile_report.py report` shows `collision`, `no_project_column` and `no_project_column_tables`, and a collision no longer counts under `moves`. `qi_transfer_apply.py` hashes the two new plan keys into the `plan_id` check (reattr L3a-c, ADR-068).
+
+- Herwerk H3: `quality_intelligence.db` v36 adds the table `rework_edges`, keyed `(project_id, rework_dispatch_id, origin_dispatch_id, kind)` (ADR-007), and `rework_attribution.record_edge` writes it fill-once (an unknown kind, class or source is a `ValueError` before any write); `load_edges` reads one project's edges. No existing table changes. Nothing reads the edges yet (H4/H5); the one-time fill of declared edges follows in a separate PR.
+
+- docs: the manifesto pages (`ARCHITECTURE.md`, the diagram, `ARCHITECTURAL_DECISIONS.md` with an index of all 70 ADRs, `LIMITATIONS.md`, `ROADMAP.md`, `README.md`) now match `origin/main`.
+
+- Public docs, track `documentatie-volgt-de-code`: `docs/core/00_VNX_ARCHITECTURE.md`, `docs/core/PROVIDER_LANES.md`, `docs/core/PROVIDER_SWITCH.md`, `docs/README.md` and `docs/DOCS_INDEX.md` now describe `origin/main`. The default takeover chain is `codex_gate,kimi_gate,claude_gate,deepseek_gate`, the worker terminals T1-T3 always take the subprocess lane, and the architecture page has short sections on the learning loop, dreaming and harness portability. Retired components and the demo generator are gone.
+
+- Docs: new `docs/intelligence/DREAMING.md` (what a dream cycle does and does not do, scheduling, liveness watch, human review) and `SCOUT_PREPASS.md`, `TAG_TAXONOMY.md` corrected to main (no line-number citations, legacy tag engine described as it is). Docs only.
+
+- Herwerk H3-b: `scripts/backfill_rework_edges.py` fills the declared `round`, `oi_fix` and `pr_fix` edges from the spec bundles and receipts of one project into `rework_edges` through `record_edge`; `--dry-run` is the default, `--apply` writes, a second run adds nothing. No other table is touched.
+
+- Docs: the merge door is described with its six preflights, context rotation and the seat rule as released in v1.8.0, ADR-066 is accepted, ADR-019 notes that its auto-apply is not implemented, and the dream review and scout comments say what the code does (`dlv-docs-li-staart`).
+
+- README: "What changed recently", the feature tiers, the governed-memory section, the multi-provider section and the status paragraph describe `main` as of `f0c113253` (learning loop, dreaming, effect measurement, corpus quarantine, operator steering, agents as folders, gate profile, door permit), with the proposal-only boundary and what is not proven stated in the same place. Documentation only (track `documentatie-volgt-de-code`).
+
+- Intelligence and learning docs describe the learning loop as it is on main: shadow, queue and persist modes with their defaults, the `decide-rule` approval bundle, the persist approval record, the A/B effect window with its `MIN_PER_ARM = 200` floor, signal reattribution, the corpus quarantine and operator steering; stale benchmark, coverage and count claims are removed.
+
+- Docs: `docs/intelligence/COST_TRACKING_GUIDE.md` rewritten around the cost ledger (ADR-043, `vnx costs`) with the receipt-based `cost-report` as the narrower reader; invented sample outputs and the unbuilt session manager removed. Docs only.
+
+- Eight dream-provider tests return to `tests/test_dream_consolidation_provider.py`: the shared JSON parser, the client-project exception, no-JSON failure, deepseek and kimi timeout reasons, the provider on every event, the registry default and the blocked unknown-provider skip (dlv-kimi-afbouw-dream-b).
+
+- `tests/test_rework_metrics.py` regains the H6 cases that left #2709 for the size cap: 14-day boundary, model conflict cell, n rule at 19 and 20, exclusions per reason, malformed GitHub facts, rounds folding into a delivery, seat deduplication and an unreadable rounds ledger (dlv-306a8f7db80d-b).
+
+- The docs follow the Kimi cancellation of 2026-11-11 (track `tweede-stoel-op-signaal`): the default review stack is `codex_gate,deepseek_gate`, the takeover chain `codex_gate,deepseek_gate,claude_gate`, "subscription first" holds for seat 1 only, and the dream consolidation runs on `VNX_DREAM_PROVIDER` (default `deepseek`). Changed: `DISPATCH_RULES.md`, the T0 role and template, the `fabric-reference` skill, ADR-008 (amendment 2026-11-11), `README.md`, `PROVIDER_LANES.md`, `PROVIDER_SWITCH.md`, `DREAMING.md`. Docs only.
+
 ## [1.8.0] - 2026-11-07
 
 This release carries six themes. The dispatch ledger lifecycle of the `audit-spoor-kern` track (ADR-045): start and end lines, a sweep that recovers end intents, readers that decide a `v3` dispatch on its ledger attempt, and `VNX_LEDGER_LIFECYCLE` on by default. The gate engine consolidation (ADR-046): one `GateOutcome`, one `GovernedLane` adapter under `glm_gate` and `kimi_gate`, and obligation outcomes booked through one writer. The per-model cost ledger (`vnx costs report` and `backfill`, the daily paid-lane ceiling). The planning layer with the tracks DB as the only plan source (ADR-047) and `vnx deliverable retarget` and `withdraw`. The fleet rollout tooling: `vnx preflight`, the fleet pin audit, `vnx release verify`, the pinned launchd launcher, `vnx regen-settings --merge` and the T0 context guard at user level. Worker isolation and CI hardening: `git stash` denied as a command on the claude and kimi worker lanes, while the door refuses a build dispatch on the gemini lane (which has no per-command denial) and leaves codex, which has none either, un-refused, the function-size ratchet with its whole-tree measurement, and the Profile A xdist cutover with the `test-suite-kosten` fixes.

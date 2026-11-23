@@ -185,7 +185,7 @@ scripts/benchmark/
   export_routing_matrix.py  writes routing_recommendations.yaml
 ```
 
-The framework is fixed; the corpus is not. `--tasks-dir` and `--models-file` (or `VNX_BENCH_TASKS_DIR` / `VNX_BENCH_MODELS_FILE`) point the same harness at your own prompts and your own model list. The bundled seven are seeds to be replaced, not a benchmark to be trusted as-is.
+The framework is fixed; the corpus is not. `--tasks-dir` and `--models-file` point the same harness at your own prompts and your own model list. The bundled seven are seeds to be replaced, not a benchmark to be trusted as-is.
 
 Each result carries the measurements the ranking needs: a quality score, wall-clock duration, launch success, and cost per call. `composite_score` is derived from those, per task class, and `n` travels with it — a score without its sample size is not a score.
 

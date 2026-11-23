@@ -1,0 +1,1 @@
+- `tests/test_event_archive_compress.py` builds its import-time `gzip.compress` parametrize values with `mtime=0`, so xdist workers that import across a second boundary collect the same test ids (fix-forward for the red `Different tests were collected between gw2 and gw0` on main).

@@ -1,1 +1,0 @@
-- Tests (OI-2696): `tests/test_daily_metrics/conftest.py` puts `scripts/lib` ahead of the same-named CLI script and pins the package, so a single test file no longer resolves `scripts/daily_metrics.py`; `test_import_isolation.py` runs every sibling test file in its own interpreter and requires exit 0.

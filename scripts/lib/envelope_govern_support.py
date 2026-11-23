@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -34,6 +35,61 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # GOVERN
 # ---------------------------------------------------------------------------
+
+
+# OI-2796: the CLI's own form for an edge or server failure. Only the code
+# form counts (never free text that merely mentions a code): the Cloudflare
+# edge 403 and the 5xx lines 500/502/503/529.
+_TRANSIENT_API_ERROR_RE = re.compile(
+    r"API Error: (?:403 Attention Required! \| Cloudflare|5(?:00|02|03|29)(?![0-9]))"
+)
+# A bearer, an Anthropic/OpenAI-style key or any long opaque run is redacted.
+_SECRET_RE = re.compile(r"(?i)bearer\s+\S+|sk-[A-Za-z0-9_-]{8,}|[A-Za-z0-9_-]{32,}")
+_TRANSIENT_LINE_MAX = 200
+
+
+def transient_api_error_line(text: Optional[str]) -> Optional[str]:
+    """The last transient API-error line in ``text``, or None (OI-2796).
+
+    Pure. The line runs from the sentence that holds the match (a builder's
+    response glues sentences together without newlines) to the end of the
+    line, keys redacted, cut at 200 characters.
+    """
+    if not text:
+        return None
+    last = None
+    for line in text.splitlines():
+        for match in _TRANSIENT_API_ERROR_RE.finditer(line):
+            last = (line, match.start())
+    if last is None:
+        return None
+    line, start = last
+    sentences = [p.strip() for p in re.split(r"(?<=[.!?])", line[:start]) if p.strip()]
+    snippet = " ".join(sentences[-1:] + [line[start:].strip()])
+    return _SECRET_RE.sub("[redacted]", snippet)[:_TRANSIENT_LINE_MAX]
+
+
+def _name_transient_api_error(
+    adapter_result: Any, report_path: Optional[Path], contract_warnings: Any,
+) -> None:
+    """Fill an empty ``adapter_result.error`` with ``transient_api_error: <line>``.
+
+    Only when no valid report stands (none emitted, or the body contract was
+    violated) and the completion holds a recognised line. The status is never
+    touched (ADR-039: no report, no evidence) and a filled error is never
+    overwritten. The lane does not retry: that rule lives with the T0.
+    """
+    if adapter_result.error:
+        return
+    violated = any(
+        isinstance(w, dict) and w.get("code") == "report_contract_violated"
+        for w in (contract_warnings or [])
+    )
+    if report_path is not None and not violated:
+        return
+    line = transient_api_error_line(adapter_result.completion_text)
+    if line is not None:
+        adapter_result.error = f"transient_api_error: {line}"
 
 
 def _is_lane_completion_receipt(entry: Any, dispatch_id: str) -> bool:

@@ -1,0 +1,1 @@
+- `vnx slot acquire`, `run` and `release` (ADR-062 RS-8, part 1): `run` holds a lease for its own workload session, `observe` admits at once and logs `would_wait` from the shadow queue, the slotlog is written per month without tokens, and macOS session ids now come from `getsid` (its `ps` prints 0).

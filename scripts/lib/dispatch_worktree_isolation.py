@@ -995,6 +995,23 @@ def create_dispatch_worktree(
     return wt_path.resolve()
 
 
+def _keep_unpublished_head(wt_path: Path, classification: str) -> str:
+    """OI-2811: a "committed" worktree whose HEAD no remote branch contains,
+    whoever made the commit, holds the only copy of that work, so it is kept
+    (reap "dirty" locks it) instead of removed."""
+    if classification != "committed":
+        return classification
+    from pr_enforcement import head_commit_subject, unpublished_head_commit  # noqa: PLC0415
+    sha = unpublished_head_commit(wt_path)
+    if not sha:
+        return classification
+    log.warning(
+        "remove_dispatch_worktree: keeping %s — HEAD commit %s (%r) is not on origin (OI-2811)",
+        wt_path, sha[:12], head_commit_subject(wt_path),
+    )
+    return "dirty"
+
+
 def remove_dispatch_worktree(
     dispatch_id: str,
     *,
@@ -1071,29 +1088,7 @@ def remove_dispatch_worktree(
     # (never raises), and namedrops the dispatch_id so the warning is traceable.
     _claim_main_head = (claim or {}).get("main_head_sha", "")
     if _claim_main_head:
-        try:
-            _current_head_result = subprocess.run(
-                ["git", "-C", str(root), "rev-parse", "HEAD"],
-                check=True, capture_output=True, text=True,
-            )
-            _current_head = _current_head_result.stdout.strip()
-            if _current_head and _current_head != _claim_main_head:
-                log.warning(
-                    "OI-975 HEAD-JUMP DETECTED: main checkout HEAD changed "
-                    "during dispatch %s (was %s, now %s) — the checkout no longer "
-                    "matches what this dispatch was launched against, so any "
-                    "post-dispatch verification on this checkout may measure "
-                    "different code than the dispatch actually built",
-                    dispatch_id,
-                    _claim_main_head[:12],
-                    _current_head[:12],
-                )
-        except subprocess.CalledProcessError:
-            log.debug(
-                "remove_dispatch_worktree: cannot resolve current HEAD for %s; "
-                "HEAD-jump check skipped",
-                dispatch_id,
-            )
+        _warn_main_head_jump(root, dispatch_id, _claim_main_head)
 
     # ── OI-1149/OI-1061: detect fabric-version drift during the dispatch ───
     # The worktree's fabric version was frozen at creation time (the
@@ -1126,19 +1121,7 @@ def remove_dispatch_worktree(
     # advanced since the worktree was created, but a stale base_sha is still
     # safer than skipping classification entirely.
     if not _claim_base_sha:
-        try:
-            sha_result = subprocess.run(
-                ["git", "-C", str(root), "rev-parse", _claim_base_ref],
-                check=True, capture_output=True, text=True,
-            )
-            _claim_base_sha = sha_result.stdout.strip()
-        except subprocess.CalledProcessError:
-            log.warning(
-                "remove_dispatch_worktree: cannot resolve base_ref %r for %s; "
-                "treating as dirty (fail-closed)",
-                _claim_base_ref, dispatch_id,
-            )
-            _claim_base_sha = ""
+        _claim_base_sha = _resolve_teardown_base_sha(root, dispatch_id, _claim_base_ref)
 
     # ── OI-1629b: review-gate teardown resets the disposable PR reproduction ─
     # A review-gate worker may have materialized the PR diff into the worktree
@@ -1151,43 +1134,7 @@ def remove_dispatch_worktree(
     # degrades to normal classification (which preserves it).  Best-effort:
     # any git failure also degrades to normal classification.
     if review_only and _claim_base_sha:
-        try:
-            _head_result = subprocess.run(
-                ["git", "-C", str(wt_path), "rev-parse", "HEAD"],
-                check=True, capture_output=True, text=True,
-            )
-            _wt_head = _head_result.stdout.strip()
-        except subprocess.CalledProcessError:
-            _wt_head = ""
-
-        if _wt_head and _wt_head == _claim_base_sha:
-            try:
-                subprocess.run(
-                    ["git", "-C", str(wt_path), "reset", "--hard", _claim_base_sha],
-                    check=True, capture_output=True, text=True,
-                )
-                subprocess.run(
-                    ["git", "-C", str(wt_path), "clean", "-fd"],
-                    check=True, capture_output=True, text=True,
-                )
-                log.info(
-                    "remove_dispatch_worktree: review_only reset %s to base %s "
-                    "(no local commits — disposable PR reproduction discarded)",
-                    dispatch_id, _claim_base_sha[:8],
-                )
-            except subprocess.CalledProcessError as _reset_exc:
-                log.warning(
-                    "remove_dispatch_worktree: review_only reset failed for %s: %s — "
-                    "degrading to normal classification (worktree may be preserved)",
-                    dispatch_id, _reset_exc,
-                )
-        else:
-            log.info(
-                "remove_dispatch_worktree: review_only skip reset for %s "
-                "(HEAD=%s base=%s) — local commits present, degrading to normal "
-                "classification so real work is never discarded",
-                dispatch_id, (_wt_head or "?")[:8], _claim_base_sha[:8],
-            )
+        _review_only_reset(wt_path, dispatch_id, _claim_base_sha)
 
     from tmux_worktree import WorktreeHandle, classify, reap  # noqa: PLC0415
 
@@ -1199,7 +1146,7 @@ def remove_dispatch_worktree(
         dispatch_id=safe_id,
     )
 
-    classification = classify(handle)
+    classification = _keep_unpublished_head(wt_path, classify(handle))
     log.info(
         "remove_dispatch_worktree: classified %s as %s (branch=%s base_sha=%s)",
         dispatch_id, classification, _claim_branch,
@@ -1251,6 +1198,91 @@ def remove_dispatch_worktree(
             data_dir=data_dir,
         )
     return classification
+
+
+def _warn_main_head_jump(root: Path, dispatch_id: str, _claim_main_head: str) -> None:
+    """OI-975 HEAD-jump warning, extracted from remove_dispatch_worktree (golf schoon R34)."""
+    try:
+        _current_head_result = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "HEAD"],
+            check=True, capture_output=True, text=True,
+        )
+        _current_head = _current_head_result.stdout.strip()
+        if _current_head and _current_head != _claim_main_head:
+            log.warning(
+                "OI-975 HEAD-JUMP DETECTED: main checkout HEAD changed "
+                "during dispatch %s (was %s, now %s) — the checkout no longer "
+                "matches what this dispatch was launched against, so any "
+                "post-dispatch verification on this checkout may measure "
+                "different code than the dispatch actually built",
+                dispatch_id,
+                _claim_main_head[:12],
+                _current_head[:12],
+            )
+    except subprocess.CalledProcessError:
+        log.debug(
+            "remove_dispatch_worktree: cannot resolve current HEAD for %s; "
+            "HEAD-jump check skipped",
+            dispatch_id,
+        )
+
+
+def _resolve_teardown_base_sha(root: Path, dispatch_id: str, _claim_base_ref: str) -> str:
+    """Pre-L3 claim fallback: base_sha from the base ref at teardown (golf schoon R34)."""
+    try:
+        sha_result = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", _claim_base_ref],
+            check=True, capture_output=True, text=True,
+        )
+    except subprocess.CalledProcessError:
+        log.warning(
+            "remove_dispatch_worktree: cannot resolve base_ref %r for %s; "
+            "treating as dirty (fail-closed)",
+            _claim_base_ref, dispatch_id,
+        )
+        return ""
+    return sha_result.stdout.strip()
+
+
+def _review_only_reset(wt_path: Path, dispatch_id: str, _claim_base_sha: str) -> None:
+    """OI-1629b review-gate reset, extracted from remove_dispatch_worktree (golf schoon R34)."""
+    try:
+        _head_result = subprocess.run(
+            ["git", "-C", str(wt_path), "rev-parse", "HEAD"],
+            check=True, capture_output=True, text=True,
+        )
+        _wt_head = _head_result.stdout.strip()
+    except subprocess.CalledProcessError:
+        _wt_head = ""
+
+    if _wt_head and _wt_head == _claim_base_sha:
+        try:
+            subprocess.run(
+                ["git", "-C", str(wt_path), "reset", "--hard", _claim_base_sha],
+                check=True, capture_output=True, text=True,
+            )
+            subprocess.run(
+                ["git", "-C", str(wt_path), "clean", "-fd"],
+                check=True, capture_output=True, text=True,
+            )
+            log.info(
+                "remove_dispatch_worktree: review_only reset %s to base %s "
+                "(no local commits — disposable PR reproduction discarded)",
+                dispatch_id, _claim_base_sha[:8],
+            )
+        except subprocess.CalledProcessError as _reset_exc:
+            log.warning(
+                "remove_dispatch_worktree: review_only reset failed for %s: %s — "
+                "degrading to normal classification (worktree may be preserved)",
+                dispatch_id, _reset_exc,
+            )
+    else:
+        log.info(
+            "remove_dispatch_worktree: review_only skip reset for %s "
+            "(HEAD=%s base=%s) — local commits present, degrading to normal "
+            "classification so real work is never discarded",
+            dispatch_id, (_wt_head or "?")[:8], _claim_base_sha[:8],
+        )
 
 
 def _emit_provider_teardown_events(

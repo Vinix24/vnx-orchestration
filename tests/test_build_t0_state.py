@@ -19,6 +19,7 @@ import os
 import sqlite3
 import sys
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from unittest.mock import MagicMock, patch
@@ -426,3 +427,40 @@ class TestBuildDreamReviews:
         assert "dream_reviews" in result
         assert result["dream_reviews"]["available"] is True
         assert result["dream_reviews"]["pending_count"] == 0
+
+
+class TestDreamReviewsUnreadable:
+    def test_unreadable_review_is_counted_and_source_is_named(self, tmp_path: Path) -> None:
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        _write_dream_review(tmp_path, cycle_id="good-a", age_hours=5)
+        _write_dream_review(tmp_path, cycle_id="good-b", age_hours=7)
+        broken = tmp_path / "state" / "dream" / "broken-pending-review.json"
+        broken.write_text('{"secret": "do-not-leak"', encoding="utf-8")
+
+        block = bts._build_dream_reviews(state_dir, SAMPLE_PROJECT_ID)
+
+        assert block.get("unreadable_count") == 1
+        assert block["pending_count"] == 2
+        assert block["unreadable_paths"] == ["broken-pending-review.json"]
+        assert "do-not-leak" not in json.dumps(block)
+        assert block["pending_reviews"][0]["created_at_source"] == "mtime"
+
+    def test_created_at_in_the_review_wins_over_mtime(self, tmp_path: Path) -> None:
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        path = _write_dream_review(tmp_path, cycle_id="dated", age_hours=1)
+        created = datetime.now(timezone.utc) - timedelta(days=3)
+        body = json.loads(path.read_text(encoding="utf-8"))
+        path.write_text(json.dumps({**body, "created_at": created.isoformat()}), encoding="utf-8")
+
+        block = bts._build_dream_reviews(state_dir, SAMPLE_PROJECT_ID)
+
+        assert block["pending_reviews"][0]["created_at_source"] == "content"
+        assert block["oldest_age_seconds"] == pytest.approx(3 * 86400, abs=60)
+
+    def test_empty_queue_keeps_unreadable_count_zero(self, tmp_path: Path) -> None:
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+
+        assert bts._build_dream_reviews(state_dir, SAMPLE_PROJECT_ID)["unreadable_count"] == 0

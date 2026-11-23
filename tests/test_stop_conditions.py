@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -26,6 +27,7 @@ import pytest
 SCRIPT_DIR = Path(__file__).resolve().parent.parent / "scripts"
 sys.path.insert(0, str(SCRIPT_DIR / "lib"))
 
+import gate_artifacts  # noqa: E402
 import stop_conditions as sc  # noqa: E402
 from stop_conditions import (  # noqa: E402
     CheckStatus,
@@ -47,9 +49,26 @@ def _proc(returncode=0, stdout="", stderr=""):
     return MagicMock(returncode=returncode, stdout=stdout, stderr=stderr)
 
 
-def _run_list_output(conclusion, status="completed", head_sha="a" * 40, created_at="2026-09-04T08:00:00Z"):
-    runs = [{"conclusion": conclusion, "status": status, "headSha": head_sha, "createdAt": created_at, "databaseId": 1}]
-    return _proc(0, json.dumps(runs), "")
+def _gh_replies(runs, commits=("c" * 40, "b" * 40, "a" * 40)):
+    """A fake subprocess.run for main_window: commits call, then runs call."""
+
+    def fake(argv, **_kwargs):
+        if argv[1] == "api" and "/commits/" in argv[2]:
+            return _proc(0, "scripts/lib/x.py\n", "")
+        if argv[1] == "api":
+            return _proc(0, "".join(f"{sha}\t{_MAIN_RUN_TIME}\n" for sha in commits), "")
+        return _proc(0, json.dumps(runs), "")
+
+    return fake
+
+
+_MAIN_RUN_TIME = "2026-09-04T08:00:00Z"
+_MAIN_NOW = datetime(2026, 9, 4, 8, 5, tzinfo=timezone.utc)  # inside the 40 minute age limit
+
+
+def _ci_run(sha, run_id, conclusion="success", status="completed"):
+    return {"databaseId": run_id, "headSha": sha, "status": status, "conclusion": conclusion,
+            "createdAt": _MAIN_RUN_TIME, "attempt": 1}
 
 
 def _write_receipt_lines(path: Path, records: list[dict]) -> None:
@@ -107,55 +126,94 @@ def _gate_result(pr_number, gate, *, status, reason=None, blocking_findings=None
 
 
 class TestMainCiRed:
+    A, B, C = "a" * 40, "b" * 40, "c" * 40
+
+    def _check(self, tmp_path, runs, **kwargs):
+        kwargs.setdefault("now", _MAIN_NOW)
+        with patch("stop_conditions.shutil.which", return_value="/usr/bin/gh"), \
+             patch("main_window.subprocess.run", side_effect=_gh_replies(runs)):
+            return check_main_ci_red(tmp_path, **kwargs)
+
     def test_gh_missing_is_unmeasurable(self, tmp_path):
         with patch("stop_conditions.shutil.which", return_value=None):
             result = check_main_ci_red(tmp_path)
         assert result.status == CheckStatus.UNMEASURABLE
 
-    def test_success_conclusion_is_clear(self, tmp_path):
+    def test_gh_vanishing_during_the_read_is_unmeasurable(self, tmp_path):
         with patch("stop_conditions.shutil.which", return_value="/usr/bin/gh"), \
-             patch("stop_conditions.subprocess.run", return_value=_run_list_output("success")):
+             patch("main_window.subprocess.run", side_effect=FileNotFoundError("gh")):
             result = check_main_ci_red(tmp_path)
+        assert result.status == CheckStatus.UNMEASURABLE
+        assert "commits_gh_missing" in result.message
+
+    def test_green_window_is_clear(self, tmp_path):
+        result = self._check(tmp_path, [_ci_run(self.A, 1), _ci_run(self.B, 2), _ci_run(self.C, 3)])
+        assert result.status == CheckStatus.CLEAR
+        assert result.evidence["window"]["verdict"] == "green"
+
+    def test_red_in_the_middle_of_the_window_is_triggered_with_its_cause(self, tmp_path):
+        state = tmp_path / "state"
+        state.mkdir()
+        _write_receipt_lines(state / "t0_receipts.ndjson", [
+            {"event_type": "pr_merged", "merge_sha": self.B, "pr_number": 7, "dispatch_id": "d-mid"},
+            {"event_type": "pr_merged", "merge_sha": self.C, "pr_number": 8, "dispatch_id": "d-top"},
+        ])
+        runs = [_ci_run(self.A, 1), _ci_run(self.B, 2, "failure"), _ci_run(self.C, 3, None, "in_progress")]
+        result = self._check(tmp_path, runs, state_dir=state)
+        assert result.status == CheckStatus.TRIGGERED
+        for needle in (self.B, "run 2", "PR #7", "d-mid", "2 merge", "niet bewezen"):
+            assert needle in result.message
+        assert result.evidence["window"]["first_red"]["sha"] == self.B
+
+    def test_red_without_receipt_names_no_receipt(self, tmp_path):
+        result = self._check(tmp_path, [_ci_run(self.A, 1), _ci_run(self.B, 2, "failure"), _ci_run(self.C, 3, None, "queued")])
+        assert result.status == CheckStatus.TRIGGERED
+        assert "no_receipt" in result.message
+
+    def test_red_run_followed_by_a_newer_green_is_clear(self, tmp_path):
+        result = self._check(tmp_path, [_ci_run(self.A, 1, "failure"), _ci_run(self.B, 2, "failure"), _ci_run(self.C, 3)])
         assert result.status == CheckStatus.CLEAR
 
-    def test_failure_conclusion_is_triggered(self, tmp_path):
-        with patch("stop_conditions.shutil.which", return_value="/usr/bin/gh"), \
-             patch("stop_conditions.subprocess.run", return_value=_run_list_output("failure")):
-            result = check_main_ci_red(tmp_path)
-        assert result.status == CheckStatus.TRIGGERED
-        assert "failure" in result.message
+    def test_running_window_is_unmeasurable_not_clear(self, tmp_path):
+        result = self._check(tmp_path, [_ci_run(self.A, 1), _ci_run(self.B, 2), _ci_run(self.C, 3, None, "in_progress")])
+        assert result.status == CheckStatus.UNMEASURABLE
+        assert result.evidence["window"]["verdict"] == "running"
 
-    def test_empty_run_list_is_unmeasurable(self, tmp_path):
+    def test_empty_run_list_is_unmeasurable_history_incomplete(self, tmp_path):
+        result = self._check(tmp_path, [])
+        assert result.status == CheckStatus.UNMEASURABLE
+        assert "history_incomplete" in result.message
+
+    def test_gh_nonzero_exit_is_unmeasurable(self, tmp_path):
         with patch("stop_conditions.shutil.which", return_value="/usr/bin/gh"), \
-             patch("stop_conditions.subprocess.run", return_value=_proc(0, "[]", "")):
+             patch("main_window.subprocess.run", return_value=_proc(1, "", "boom")):
             result = check_main_ci_red(tmp_path)
         assert result.status == CheckStatus.UNMEASURABLE
 
-    def test_in_progress_run_is_unmeasurable_not_clear(self, tmp_path):
-        with patch("stop_conditions.shutil.which", return_value="/usr/bin/gh"), \
-             patch("stop_conditions.subprocess.run", return_value=_run_list_output(None, status="in_progress")):
-            result = check_main_ci_red(tmp_path)
-        assert result.status == CheckStatus.UNMEASURABLE
+    def test_malformed_runs_json_is_unmeasurable(self, tmp_path):
+        def fake(argv, **_kwargs):
+            return _proc(0, "c" * 40 if argv[1] == "api" else "not json", "")
 
-    def test_gh_run_list_nonzero_exit_is_unmeasurable(self, tmp_path):
         with patch("stop_conditions.shutil.which", return_value="/usr/bin/gh"), \
-             patch("stop_conditions.subprocess.run", return_value=_proc(1, "", "boom")):
+             patch("main_window.subprocess.run", side_effect=fake):
             result = check_main_ci_red(tmp_path)
         assert result.status == CheckStatus.UNMEASURABLE
-
-    def test_malformed_json_is_unmeasurable(self, tmp_path):
-        with patch("stop_conditions.shutil.which", return_value="/usr/bin/gh"), \
-             patch("stop_conditions.subprocess.run", return_value=_proc(0, "not json", "")):
-            result = check_main_ci_red(tmp_path)
-        assert result.status == CheckStatus.UNMEASURABLE
+        assert "runs_bad_json" in result.message
 
     def test_timeout_is_unmeasurable(self, tmp_path):
         import subprocess as _sp
 
         with patch("stop_conditions.shutil.which", return_value="/usr/bin/gh"), \
-             patch("stop_conditions.subprocess.run", side_effect=_sp.TimeoutExpired(cmd="gh", timeout=15)):
+             patch("main_window.subprocess.run", side_effect=_sp.TimeoutExpired(cmd="gh", timeout=15)):
             result = check_main_ci_red(tmp_path)
         assert result.status == CheckStatus.UNMEASURABLE
+
+    def test_run_all_checks_hands_its_state_dir_to_the_window(self, tmp_path):
+        clear = StopConditionResult(check_id="x", status=CheckStatus.CLEAR, message="ok")
+        with patch("stop_conditions.check_main_ci_red", return_value=clear) as mocked, \
+             patch("stop_conditions.check_gh_auth_dead", return_value=clear):
+            run_all_checks(state_dir=tmp_path, project_root=tmp_path, write_halt=False)
+        assert mocked.call_args.kwargs["state_dir"] == tmp_path
 
 
 # ── check_gh_auth_dead (E4) ──────────────────────────────────────────────
@@ -533,6 +591,52 @@ class TestRepeatedGateFailureCause:
         result = check_repeated_gate_failure_cause(results_dir, n=3)
         assert result.status != CheckStatus.TRIGGERED
 
+    def test_verdict_without_findings_streak_does_not_trigger_and_is_loud(self, tmp_path):
+        # ADR-080 besluit 4: a rejection without findings is no verdict and no
+        # recurring cause: no E6, exactly one loud notice for the gate.
+        results_dir = tmp_path / "results"
+        results_dir.mkdir()
+        for i, pr in enumerate([3001, 3002, 3003]):
+            d = _gate_result(pr, "codex_gate", status="unavailable", reason="verdict_without_findings", recorded_at=f"2026-09-0{i+1}T00:00:00Z")
+            (results_dir / f"pr-{pr}-codex_gate.json").write_text(json.dumps(d))
+        result = check_repeated_gate_failure_cause(results_dir, n=3)
+        assert result.status != CheckStatus.TRIGGERED
+        per_gate = result.evidence["per_gate"]
+        notices = [k for k in per_gate if "verdict_without_findings" in k]
+        assert notices == ["repeated_gate_failure_cause:verdict_without_findings:codex_gate"]
+        notice = per_gate[notices[0]]
+        assert notice["status"] == CheckStatus.UNMEASURABLE.value
+        assert notice["evidence"]["count"] == 3
+        assert notice["evidence"]["newest_pr"] == 3003
+        assert notice["evidence"]["gate"] == "codex_gate"
+
+    def test_verdict_without_findings_record_neither_counts_nor_breaks_streak(self, tmp_path):
+        # Absence of a verdict says nothing about the cause: two real failures
+        # plus the reclassified record do not trigger (it does not count), and
+        # a third real failure with the same cause triggers although the
+        # reclassified record sits inside the window (it does not break it).
+        results_dir = tmp_path / "results"
+        results_dir.mkdir()
+        recs = [
+            (4001, "provider_not_installed", "2026-09-01T00:00:00Z"),
+            (4002, "verdict_without_findings", "2026-09-02T00:00:00Z"),
+            (4003, "provider_not_installed", "2026-09-03T00:00:00Z"),
+        ]
+        for pr, reason, ts in recs:
+            d = _gate_result(pr, "codex_gate", status="unavailable", reason=reason, recorded_at=ts)
+            (results_dir / f"pr-{pr}-codex_gate.json").write_text(json.dumps(d))
+        assert check_repeated_gate_failure_cause(results_dir, n=3).status != CheckStatus.TRIGGERED
+        d = _gate_result(4004, "codex_gate", status="unavailable", reason="provider_not_installed", recorded_at="2026-09-04T00:00:00Z")
+        (results_dir / "pr-4004-codex_gate.json").write_text(json.dumps(d))
+        assert check_repeated_gate_failure_cause(results_dir, n=3).status == CheckStatus.TRIGGERED
+
+    def test_verdict_without_findings_classified_in_own_bucket(self):
+        record = {"status": "unavailable", "reason": "verdict_without_findings"}
+        assert sc._classify_gate_record(record)[0] == "no_verdict"
+        # Unknown / missing reason stays counted (fail-closed on evidence).
+        assert sc._classify_gate_record({"status": "unavailable", "reason": "other"})[0] == "counted"
+        assert sc._classify_gate_record({"status": "unavailable"})[0] == "counted"
+
     def test_different_gates_scored_independently(self, tmp_path):
         # codex_gate stays clean; kimi_gate has the 3x repeat — overall must
         # still trigger (any-sub-triggered wins), and the untriggered gate
@@ -547,6 +651,76 @@ class TestRepeatedGateFailureCause:
             (results_dir / f"pr-{pr}-kimi_gate.json").write_text(json.dumps(d))
         result = check_repeated_gate_failure_cause(results_dir, n=3)
         assert result.status == CheckStatus.TRIGGERED
+
+
+# ── E6: advisory-only rejections take their cause from the advisory files ──
+
+
+def _synthetic():
+    return {"severity": "error", "file_path": "", "line": 0,
+            "message": f"{gate_artifacts.VERDICT_ENTRY_PREFIX}: verdict 'fail' read as fail; 1 finding(s), none at a blocking severity"}
+
+
+def _advisory(path):
+    return {"severity": "warning", "message": "real defect", "file_path": path, "line": 3}
+
+
+def _write_gate(results_dir, pr, blocking, advisory, day):
+    d = _gate_result(pr, "codex_gate", status="completed", blocking_findings=blocking,
+                     recorded_at=f"2026-09-0{day}T00:00:00Z")
+    d["advisory_findings"] = advisory
+    (results_dir / f"pr-{pr}-codex_gate.json").write_text(json.dumps(d))
+
+
+class TestAdvisoryOnlyRejectionCause:
+    def _dir(self, tmp_path):
+        results_dir = tmp_path / "results"
+        results_dir.mkdir()
+        return results_dir
+
+    def test_three_advisory_rejections_on_different_files_do_not_trigger(self, tmp_path):
+        rd = self._dir(tmp_path)
+        for i, pr in enumerate([501, 502, 503]):
+            _write_gate(rd, pr, [_synthetic()], [_advisory(f"a{i}.py")], i + 1)
+        assert check_repeated_gate_failure_cause(rd, n=3).status == CheckStatus.CLEAR
+
+    def test_three_advisory_rejections_on_one_file_trigger_naming_it(self, tmp_path):
+        rd = self._dir(tmp_path)
+        for i, pr in enumerate([511, 512, 513]):
+            _write_gate(rd, pr, [_synthetic()], [_advisory("same.py"), _advisory(f"x{i}.py")], i + 1)
+        result = check_repeated_gate_failure_cause(rd, n=3)
+        assert result.status == CheckStatus.TRIGGERED
+        assert "file:same.py" in result.message
+        assert "file:x0.py" not in result.message
+
+    def test_synthetic_only_without_advisory_path_keeps_legacy_cause(self):
+        for advisory in ([], None, [{"message": "m", "file_path": ""}], [{"message": "m"}], "junk", [None]):
+            record = {"status": "completed", "blocking_findings": [_synthetic()]}
+            if advisory is not None:
+                record["advisory_findings"] = advisory
+            assert sc._gate_result_cause(record) == frozenset({"blocking_findings"})
+
+    def test_real_blocking_finding_with_synthetic_entry_keeps_todays_cause(self):
+        record = {
+            "status": "completed",
+            "blocking_findings": [{"severity": "blocking", "message": "x", "file_path": "real.py"}, _synthetic()],
+            "advisory_findings": [_advisory("adv.py")],
+        }
+        assert sc._gate_result_cause(record) == frozenset({"file:real.py", "blocking_findings"})
+
+    def test_non_string_message_is_not_synthetic(self):
+        record = {"status": "completed", "blocking_findings": [{"message": None, "file_path": ""}],
+                  "advisory_findings": [_advisory("adv.py")]}
+        assert sc._gate_result_cause(record) == frozenset({"blocking_findings"})
+
+    def test_classify_buckets_unchanged(self):
+        unbuilt = {"status": "failed", "reason": next(iter(sc._UNBUILT_GATE_REASONS))}
+        exhausted = {"status": "failed", "reason": sc.QUOTA_REFUSAL_REASON}
+        assert sc._classify_gate_record(unbuilt)[0] == "unbuilt"
+        assert sc._classify_gate_record(exhausted)[0] == "exhausted"
+        advisory_only = {"status": "completed", "blocking_findings": [_synthetic()],
+                         "advisory_findings": [_advisory("a.py")]}
+        assert sc._classify_gate_record(advisory_only) == ("counted", frozenset({"file:a.py"}))
 
 
 # ── tri-state discipline (cross-cutting) ────────────────────────────────
@@ -605,7 +779,7 @@ class TestRunAllChecksAndHalt:
         payload = json.loads(halt_path.read_text())
         assert len(payload["triggered"]) == 1
         assert payload["triggered"][0]["check_id"] == "gh_auth_dead"
-        assert len(payload["all_checks"]) == 4
+        assert len(payload["all_checks"]) == 5
 
     def test_no_halt_written_when_nothing_triggered(self, tmp_path):
         state_dir = tmp_path / "state"
@@ -628,6 +802,26 @@ class TestRunAllChecksAndHalt:
         assert not list(state_dir.glob("*.tmp"))
         payload = json.loads(halt_path.read_text())
         assert payload["triggered"][0]["check_id"] == "x"
+
+    def test_write_halt_file_separates_scoped_out_from_triggered(self, tmp_path):
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        blocking = StopConditionResult("provider_exhausted", CheckStatus.TRIGGERED, "bad")
+        other = StopConditionResult("repeated_gate_failure_cause", CheckStatus.TRIGGERED, "other gate")
+        halt_path = write_halt_file(
+            state_dir, [blocking, other], scoped_out=[other], scope={"providers": ["kimi"], "gates": ["glm_gate"]},
+        )
+        payload = json.loads(halt_path.read_text())
+        assert [t["check_id"] for t in payload["triggered"]] == ["provider_exhausted"]
+        assert payload["scoped_out"][0]["check_id"] == "repeated_gate_failure_cause"
+        assert payload["scoped_out"][0]["scope"] == {"providers": ["kimi"], "gates": ["glm_gate"]}
+        assert [c.get("scope") for c in payload["all_checks"]] == [None, "scoped_out"]
+
+    def test_write_halt_file_default_has_empty_scoped_out(self, tmp_path):
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        halt_path = write_halt_file(state_dir, [StopConditionResult("x", CheckStatus.TRIGGERED, "bad")])
+        assert json.loads(halt_path.read_text())["scoped_out"] == []
 
 
 # ── central-mode path gate (OI: un-grandfathered violation, PR #1754 review) ─
@@ -831,3 +1025,31 @@ class TestLedgerScopingEnumDrift:
         for gate_name in ("ci_gate", "wiring_gate", "claude_github_optional"):
             assert gate_name in sc.GATE_LEDGER_PROVIDERS
             assert sc.GATE_LEDGER_PROVIDERS[gate_name] == frozenset()
+
+
+# ── Standalone-import contract + shared prefix (D3a round 2) ────────────────
+
+
+def test_stop_conditions_imports_without_the_receipt_stack():
+    import subprocess
+
+    lib = str(SCRIPT_DIR / "lib")
+    code = (
+        "import sys; sys.path.insert(0, %r); import stop_conditions; "
+        "bad = [m for m in ('gate_recorder', 'gate_artifacts') if m in sys.modules]; "
+        "print(','.join(bad)); sys.exit(1 if bad else 0)" % lib
+    )
+    proc = subprocess.run(
+        [sys.executable, "-I", "-c", code], capture_output=True, text=True, timeout=60
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
+def test_verdict_entry_prefix_is_one_shared_value():
+    import failure_classification
+    import stop_conditions
+
+    shared = failure_classification.VERDICT_ENTRY_PREFIX
+    assert shared == "verdict_without_blocking_finding"
+    assert gate_artifacts.VERDICT_ENTRY_PREFIX == shared
+    assert stop_conditions.VERDICT_ENTRY_PREFIX == shared

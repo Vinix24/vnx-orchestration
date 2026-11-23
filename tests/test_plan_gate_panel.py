@@ -24,6 +24,8 @@ for p in (str(_LIB), str(_SCRIPTS)):
     if p not in sys.path:
         sys.path.insert(0, p)
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from fixtures.dispatches_schema_fixture import ensure_dispatches_columns  # noqa: E402
 import schema_migration  # noqa: E402
 import tracks  # noqa: E402
 import track_reconciler  # noqa: E402
@@ -401,7 +403,7 @@ def test_rule_solo_no_verdict_is_infra_fail():
 def test_run_panel_all_lanes_down_returns_infra_fail(tmp_path, monkeypatch):
     # End-to-end through run_panel: every lane raises (e.g. PermissionError on a
     # read-only install tree) -> INFRA_FAIL, and the rationale names the lanes.
-    monkeypatch.setenv("VNX_PANEL_RETRY", "0")
+    monkeypatch.setattr(pgp, "PANEL_RETRY_COUNT", 0)
     doc = tmp_path / "plan.md"
     doc.write_text("## Problem\n## Approach\n", encoding="utf-8")
 
@@ -466,80 +468,42 @@ def test_run_panel_dispatch_exception_is_no_verdict(tmp_path):
 
 
 # --------------------------------------------------------------------------
-# panel-quorum-fix: bounded single retry of a flaked panelist (VNX_PANEL_RETRY)
+# panel-quorum-fix: bounded single retry of a flaked panelist (PANEL_RETRY_COUNT)
 # in front of the (already-shipped) abstain/quorum rule.
 # --------------------------------------------------------------------------
 
 def test_panel_retry_count_default_is_one(monkeypatch):
-    monkeypatch.delenv("VNX_PANEL_RETRY", raising=False)
     assert pgp._panel_retry_count() == 1
 
 
-def test_panel_retry_count_honors_env(monkeypatch):
-    monkeypatch.setenv("VNX_PANEL_RETRY", "3")
+def test_panel_retry_count_reads_the_constant(monkeypatch):
+    monkeypatch.setattr(pgp, "PANEL_RETRY_COUNT", 3)
     assert pgp._panel_retry_count() == 3
-    monkeypatch.setenv("VNX_PANEL_RETRY", "0")
-    assert pgp._panel_retry_count() == 0
-
-
-def test_panel_retry_count_malformed_falls_back_to_one(monkeypatch):
-    monkeypatch.setenv("VNX_PANEL_RETRY", "not-a-number")
-    assert pgp._panel_retry_count() == 1
-    monkeypatch.setenv("VNX_PANEL_RETRY", "-4")  # clamped to >= 0
+    monkeypatch.setattr(pgp, "PANEL_RETRY_COUNT", 0)
     assert pgp._panel_retry_count() == 0
 
 
 # --------------------------------------------------------------------------
-# OI-1068: VNX_PLAN_GATE_SEAT_TIMEOUT — the per-seat deadline knob, in the
-# same env-var style as VNX_PANEL_RETRY. Before this the deadline was a bare 900
+# OI-1068: the per-seat deadline. Before this the deadline was a bare 900
 # baked into run_panel's signature with no override, so a seat that could not
-# meet 900s booked a fabricated abstention with no way to widen it.
+# meet 900s booked a fabricated abstention with no way to widen it. It is now
+# the --seat-timeout flag or DEFAULT_SEAT_TIMEOUT_SECONDS.
 # --------------------------------------------------------------------------
 
 def test_seat_timeout_default_is_900(monkeypatch):
-    monkeypatch.delenv("VNX_PLAN_GATE_SEAT_TIMEOUT", raising=False)
-    assert pgp._seat_timeout() == 900
-
-
-def test_seat_timeout_honors_env(monkeypatch):
-    monkeypatch.setenv("VNX_PLAN_GATE_SEAT_TIMEOUT", "1800")
-    assert pgp._seat_timeout() == 1800
-    monkeypatch.setenv("VNX_PLAN_GATE_SEAT_TIMEOUT", "300")
-    assert pgp._seat_timeout() == 300
-
-
-def test_seat_timeout_explicit_wins_over_env(monkeypatch):
-    """An explicit caller value (the --seat-timeout CLI flag) wins outright over the env var."""
-    monkeypatch.setenv("VNX_PLAN_GATE_SEAT_TIMEOUT", "1800")
-    assert pgp._seat_timeout(600) == 600
-    assert pgp._seat_timeout(1) == 1
-
-
-def test_seat_timeout_malformed_falls_back_to_default(monkeypatch):
-    monkeypatch.setenv("VNX_PLAN_GATE_SEAT_TIMEOUT", "not-a-number")
-    assert pgp._seat_timeout() == 900
-
-
-def test_seat_timeout_nonpositive_falls_back_to_default(monkeypatch):
-    # 0 or negative would let the lane run forever / invert the deadline — fall back
-    # to the default rather than silently widening the window to infinity.
-    monkeypatch.setenv("VNX_PLAN_GATE_SEAT_TIMEOUT", "0")
-    assert pgp._seat_timeout() == 900
-    monkeypatch.setenv("VNX_PLAN_GATE_SEAT_TIMEOUT", "-30")
     assert pgp._seat_timeout() == 900
 
 
 def test_seat_timeout_explicit_clamped_to_at_least_one(monkeypatch):
     """A non-positive explicit value (a bad CLI flag) is clamped to 1, never 0."""
-    monkeypatch.delenv("VNX_PLAN_GATE_SEAT_TIMEOUT", raising=False)
     assert pgp._seat_timeout(0) == 1
     assert pgp._seat_timeout(-5) == 1
 
 
 def test_run_panel_passes_resolved_seat_timeout_to_default_dispatcher(tmp_path, monkeypatch):
-    """run_panel (no explicit timeout, no injected dispatcher) resolves the env var and
-    passes it to _make_default_dispatcher — the knob actually reaches the lane."""
-    monkeypatch.setenv("VNX_PLAN_GATE_SEAT_TIMEOUT", "1234")
+    """run_panel (no explicit timeout, no injected dispatcher) resolves the default and
+    passes it to _make_default_dispatcher — the deadline actually reaches the lane."""
+    monkeypatch.setattr(pgp, "DEFAULT_SEAT_TIMEOUT_SECONDS", 1234)
     seen_timeouts: list[int] = []
 
     def _capturing_make_dispatcher(data_dir, timeout_seconds, *, role="plan-reviewer"):
@@ -553,9 +517,9 @@ def test_run_panel_passes_resolved_seat_timeout_to_default_dispatcher(tmp_path, 
     assert seen_timeouts == [1234]
 
 
-def test_run_panel_explicit_timeout_overrides_env(tmp_path, monkeypatch):
-    """An explicit timeout_seconds kwarg wins over the env var."""
-    monkeypatch.setenv("VNX_PLAN_GATE_SEAT_TIMEOUT", "1234")
+def test_run_panel_explicit_timeout_overrides_default(tmp_path, monkeypatch):
+    """An explicit timeout_seconds kwarg wins over the default."""
+    monkeypatch.setattr(pgp, "DEFAULT_SEAT_TIMEOUT_SECONDS", 1234)
     seen_timeouts: list[int] = []
 
     def _capturing_make_dispatcher(data_dir, timeout_seconds, *, role="plan-reviewer"):
@@ -575,7 +539,7 @@ def test_run_panel_first_flake_then_success_recovers(tmp_path, monkeypatch):
     # Since OI-1434 that second call is the cheap extraction, not the full re-dispatch (the
     # retry-after-a-RAISED-dispatch path is covered by the next test); either way the seat
     # ends up scoring, which is what this test pins.
-    monkeypatch.setenv("VNX_PANEL_RETRY", "1")
+    monkeypatch.setattr(pgp, "PANEL_RETRY_COUNT", 1)
     doc = tmp_path / "plan.md"
     doc.write_text("## Problem\n", encoding="utf-8")
 
@@ -599,7 +563,7 @@ def test_run_panel_first_flake_then_success_recovers(tmp_path, monkeypatch):
 
 def test_run_panel_first_dispatch_error_then_success_recovers(tmp_path, monkeypatch):
     # A dispatch that raises on the first attempt (down proxy) then succeeds must also recover.
-    monkeypatch.setenv("VNX_PANEL_RETRY", "1")
+    monkeypatch.setattr(pgp, "PANEL_RETRY_COUNT", 1)
     doc = tmp_path / "plan.md"
     doc.write_text("## Problem\n", encoding="utf-8")
 
@@ -624,7 +588,7 @@ def test_run_panel_first_dispatch_error_then_success_recovers(tmp_path, monkeypa
 def test_run_panel_persistent_flake_still_abstains(tmp_path, monkeypatch):
     # A lane that flakes on every attempt exhausts the retry budget and abstains (non-scoring);
     # the two readable PASS voices still meet quorum -> PASS. The retry must not raise.
-    monkeypatch.setenv("VNX_PANEL_RETRY", "1")
+    monkeypatch.setattr(pgp, "PANEL_RETRY_COUNT", 1)
     doc = tmp_path / "plan.md"
     doc.write_text("## Problem\n", encoding="utf-8")
 
@@ -655,8 +619,8 @@ def test_run_panel_persistent_flake_still_abstains(tmp_path, monkeypatch):
 
 
 def test_run_panel_retry_count_is_honored_and_bounded(tmp_path, monkeypatch):
-    # VNX_PANEL_RETRY=2 -> at most 1 initial + 2 retries = 3 attempts, never more.
-    monkeypatch.setenv("VNX_PANEL_RETRY", "2")
+    # PANEL_RETRY_COUNT=2 -> at most 1 initial + 2 retries = 3 attempts, never more.
+    monkeypatch.setattr(pgp, "PANEL_RETRY_COUNT", 2)
     doc = tmp_path / "plan.md"
     doc.write_text("## Problem\n", encoding="utf-8")
 
@@ -676,8 +640,8 @@ def test_run_panel_retry_count_is_honored_and_bounded(tmp_path, monkeypatch):
 
 
 def test_run_panel_retry_zero_disables_retry(tmp_path, monkeypatch):
-    # VNX_PANEL_RETRY=0 -> exactly one attempt per panelist, no retry.
-    monkeypatch.setenv("VNX_PANEL_RETRY", "0")
+    # PANEL_RETRY_COUNT=0 -> exactly one attempt per panelist, no retry.
+    monkeypatch.setattr(pgp, "PANEL_RETRY_COUNT", 0)
     doc = tmp_path / "plan.md"
     doc.write_text("## Problem\n", encoding="utf-8")
 
@@ -698,7 +662,7 @@ def test_run_panel_retry_zero_disables_retry(tmp_path, monkeypatch):
 
 def test_run_panel_success_first_try_does_not_retry(tmp_path, monkeypatch):
     # A clean first-try verdict must NOT trigger a retry even with a generous budget.
-    monkeypatch.setenv("VNX_PANEL_RETRY", "3")
+    monkeypatch.setattr(pgp, "PANEL_RETRY_COUNT", 3)
     doc = tmp_path / "plan.md"
     doc.write_text("## Problem\n", encoding="utf-8")
 
@@ -748,6 +712,11 @@ def _bootstrap(tmp_path: Path) -> Path:
         (30, "0030_track_oi_resolved_at.sql"),
         (33, "0033_track_decision_ref.sql"),
     ]:
+        if version == 27:
+            # the 0027 deliverable view reads dispatches.output_ref, which the hand-made
+            # table lacks (same order as tests/test_planning_cli.py::_build_db)
+            ensure_dispatches_columns(conn)
+            conn.commit()
         sql = (_MIGRATIONS / filename).read_text(encoding="utf-8")
         schema_migration.apply_script_if_below(conn, version, sql)
         conn.commit()
@@ -779,14 +748,16 @@ def test_seed_then_resolve_unblocks(tmp_path):
     assert planning_cli._seed_plan_blocker(state_dir, "feat-r", "p1") is True
     assert _derived(state_dir, "feat-r", "p1") == "blocked"
     # plan gate passed -> resolve -> reconciler clears the block
-    assert planning_cli._resolve_plan_blocker(state_dir, "feat-r", "p1") is True
+    assert planning_cli._resolve_plan_blocker(
+        state_dir, "feat-r", "p1", reason="plan gate passed", resolver="test") is True
     assert _derived(state_dir, "feat-r", "p1") != "blocked"
 
 
 def test_resolve_when_no_blocker_returns_false(tmp_path):
     state_dir = _bootstrap(tmp_path)
     tracks.create_track(state_dir, "feat-n", "p1", "t", "shipped", phase="queued")
-    assert planning_cli._resolve_plan_blocker(state_dir, "feat-n", "p1") is False
+    assert planning_cli._resolve_plan_blocker(
+        state_dir, "feat-n", "p1", reason="plan gate passed", resolver="test") is False
 
 
 def test_seed_is_tenant_scoped(tmp_path):
@@ -850,7 +821,8 @@ def test_reseed_after_resolve_reblocks(tmp_path):
     tracks.create_track(state_dir, "feat-rs", "p1", "t", "shipped", phase="queued")
     assert planning_cli._seed_plan_blocker(state_dir, "feat-rs", "p1") is True
     assert _derived(state_dir, "feat-rs", "p1") == "blocked"
-    assert planning_cli._resolve_plan_blocker(state_dir, "feat-rs", "p1") is True
+    assert planning_cli._resolve_plan_blocker(
+        state_dir, "feat-rs", "p1", reason="plan gate passed", resolver="test") is True
     assert _derived(state_dir, "feat-rs", "p1") != "blocked"
     # mid-flight plan change: re-seeding must re-block the previously-passed track
     assert planning_cli._seed_plan_blocker(state_dir, "feat-rs", "p1") is True
@@ -919,30 +891,14 @@ def test_sanitize_doc_caps_huge_doc():
 # --------------------------------------------------------------------------
 # doc-truncation VISIBILITY (a gate that reads only part of its input must say
 # so in the verdict, not just in the panelist's own prompt) + the raised,
-# platform-measured ARG_MAX-derived cap, with an env override.
+# platform-measured ARG_MAX-derived cap.
 # --------------------------------------------------------------------------
 
 def test_max_doc_chars_default_is_400k(monkeypatch):
-    monkeypatch.delenv("VNX_PLAN_GATE_MAX_DOC_CHARS", raising=False)
     assert pgp._max_doc_chars() == 400_000 == pgp.DEFAULT_MAX_DOC_CHARS
 
 
-def test_max_doc_chars_honors_env_override(monkeypatch):
-    monkeypatch.setenv("VNX_PLAN_GATE_MAX_DOC_CHARS", "12345")
-    assert pgp._max_doc_chars() == 12345
-
-
-def test_max_doc_chars_malformed_or_non_positive_falls_back_to_default(monkeypatch):
-    monkeypatch.setenv("VNX_PLAN_GATE_MAX_DOC_CHARS", "not-a-number")
-    assert pgp._max_doc_chars() == pgp.DEFAULT_MAX_DOC_CHARS
-    monkeypatch.setenv("VNX_PLAN_GATE_MAX_DOC_CHARS", "0")
-    assert pgp._max_doc_chars() == pgp.DEFAULT_MAX_DOC_CHARS
-    monkeypatch.setenv("VNX_PLAN_GATE_MAX_DOC_CHARS", "-1")
-    assert pgp._max_doc_chars() == pgp.DEFAULT_MAX_DOC_CHARS
-
-
 def test_doc_truncation_info_reports_no_truncation_for_small_doc(monkeypatch):
-    monkeypatch.delenv("VNX_PLAN_GATE_MAX_DOC_CHARS", raising=False)
     small = "## Problem\n## Approach\n"
     info = pgp._doc_truncation_info(small)
     assert info == {
@@ -954,7 +910,7 @@ def test_doc_truncation_info_reports_no_truncation_for_small_doc(monkeypatch):
 
 
 def test_doc_truncation_info_reports_exact_counts_when_truncated(monkeypatch):
-    monkeypatch.setenv("VNX_PLAN_GATE_MAX_DOC_CHARS", "100")
+    monkeypatch.setattr(pgp, "DEFAULT_MAX_DOC_CHARS", 100)
     doc = "y" * 250
     info = pgp._doc_truncation_info(doc)
     assert info == {
@@ -970,7 +926,7 @@ def test_run_panel_surfaces_doc_truncation_in_result_and_rationale(tmp_path, mon
     reads (top-level ``doc_truncation`` key, for --json and any programmatic caller) AND
     in the human-readable summary rationale (so a truncation can never be missed just by
     reading the one-line verdict) — never silently only in the panelist's own prompt."""
-    monkeypatch.setenv("VNX_PLAN_GATE_MAX_DOC_CHARS", "200")
+    monkeypatch.setattr(pgp, "DEFAULT_MAX_DOC_CHARS", 200)
     doc = tmp_path / "plan.md"
     doc.write_text("z" * 500, encoding="utf-8")
 
@@ -995,7 +951,6 @@ def test_run_panel_surfaces_doc_truncation_in_result_and_rationale(tmp_path, mon
 
 
 def test_run_panel_no_truncation_note_when_doc_fits(tmp_path, monkeypatch):
-    monkeypatch.delenv("VNX_PLAN_GATE_MAX_DOC_CHARS", raising=False)
     doc = tmp_path / "plan.md"
     doc.write_text("## Problem\n## Approach\n", encoding="utf-8")
 
@@ -1245,7 +1200,7 @@ def test_synthesized_no_verdict_is_retryable(tmp_path, monkeypatch):
     """A no-verdict seat is retryable just like a parse_error: a lane that
     times out once may deliver on a fresh dispatch id. The retry must continue
     past a no-verdict result, not treat it as a final readable verdict."""
-    monkeypatch.setenv("VNX_PANEL_RETRY", "1")
+    monkeypatch.setattr(pgp, "PANEL_RETRY_COUNT", 1)
     doc = tmp_path / "plan.md"
     doc.write_text("## Problem\n", encoding="utf-8")
 
@@ -1486,7 +1441,7 @@ def test_headless_seat_that_writes_no_report_is_no_verdict_not_a_crash(
     lane never delivered") rather than the abstain category ("the lane answered
     but malformed its fence"), and the report + receipt still exist.
     """
-    monkeypatch.setenv("VNX_PANEL_RETRY", "0")
+    monkeypatch.setattr(pgp, "PANEL_RETRY_COUNT", 0)
     doc = tmp_path / "plan.md"
     doc.write_text("## Problem\n", encoding="utf-8")
 
@@ -1980,7 +1935,7 @@ def test_claude_seat_no_report_error_surfaces_the_lane_failure(tmp_path, monkeyp
     back in-process on the adapter result, so it must reach the seat's error
     instead of being swallowed.
     """
-    monkeypatch.setenv("VNX_PANEL_RETRY", "0")
+    monkeypatch.setattr(pgp, "PANEL_RETRY_COUNT", 0)
     doc = tmp_path / "plan.md"
     doc.write_text("## Problem\n", encoding="utf-8")
 
@@ -2584,7 +2539,6 @@ def test_cmd_plan_gate_run_passes_seat_timeout_flag_to_run_panel(tmp_path, monke
     import argparse
 
     monkeypatch.setattr(pgp, "_default_panel_config_path", lambda: tmp_path / "absent.yaml")
-    monkeypatch.delenv("VNX_PLAN_GATE_SEAT_TIMEOUT", raising=False)
     seen_timeouts: list = []
 
     def _capturing_run_panel(doc_path, *, track_id, project_id, panel, data_dir, **kw):
@@ -2608,13 +2562,12 @@ def test_cmd_plan_gate_run_passes_seat_timeout_flag_to_run_panel(tmp_path, monke
     assert seen_timeouts == [1800]
 
 
-def test_cmd_plan_gate_run_no_flag_falls_back_to_env_via_run_panel(tmp_path, monkeypatch):
+def test_cmd_plan_gate_run_no_flag_falls_back_to_default_via_run_panel(tmp_path, monkeypatch):
     """With no --seat-timeout flag (seat_timeout=None), cmd_plan_gate_run passes None
-    so run_panel resolves VNX_PLAN_GATE_SEAT_TIMEOUT itself (env var is the knob)."""
+    so run_panel resolves the default deadline itself."""
     import argparse
 
     monkeypatch.setattr(pgp, "_default_panel_config_path", lambda: tmp_path / "absent.yaml")
-    monkeypatch.setenv("VNX_PLAN_GATE_SEAT_TIMEOUT", "2700")
     seen_timeouts: list = []
 
     def _capturing_run_panel(doc_path, *, track_id, project_id, panel, data_dir, **kw):
@@ -3031,7 +2984,7 @@ def _one_prose_seat_panel():
 def _run_with_reextraction(tmp_path, monkeypatch, reextraction_answer):
     """One seat that answers in prose; ``reextraction_answer`` is what the second
     call does (a string to return, or a callable that raises)."""
-    monkeypatch.setenv("VNX_PANEL_RETRY", "0")
+    monkeypatch.setattr(pgp, "PANEL_RETRY_COUNT", 0)
     doc = tmp_path / "plan.md"
     doc.write_text("## Problem\n", encoding="utf-8")
 
@@ -3098,7 +3051,7 @@ def test_reextraction_runs_before_the_expensive_retry(tmp_path, monkeypatch):
     re-reads a report that already exists. Paying the expensive one first while
     the cheap one would have sufficed is the waste this order removes.
     """
-    monkeypatch.setenv("VNX_PANEL_RETRY", "1")
+    monkeypatch.setattr(pgp, "PANEL_RETRY_COUNT", 1)
     doc = tmp_path / "plan.md"
     doc.write_text("## Problem\n", encoding="utf-8")
 
@@ -3124,7 +3077,7 @@ def test_reextraction_runs_before_the_expensive_retry(tmp_path, monkeypatch):
 def test_reextraction_budget_is_one_per_seat_per_round(tmp_path, monkeypatch):
     """The retry does not refill the extraction budget. A lane that answers in
     prose twice gets exactly one extraction for the round, not one per attempt."""
-    monkeypatch.setenv("VNX_PANEL_RETRY", "2")
+    monkeypatch.setattr(pgp, "PANEL_RETRY_COUNT", 2)
     doc = tmp_path / "plan.md"
     doc.write_text("## Problem\n", encoding="utf-8")
 
@@ -3150,7 +3103,7 @@ def test_reextraction_budget_is_one_per_seat_per_round(tmp_path, monkeypatch):
 def test_no_reextraction_for_an_empty_report(tmp_path, monkeypatch):
     """There is nothing to extract FROM an empty report — that seat goes straight
     to the retry."""
-    monkeypatch.setenv("VNX_PANEL_RETRY", "1")
+    monkeypatch.setattr(pgp, "PANEL_RETRY_COUNT", 1)
     doc = tmp_path / "plan.md"
     doc.write_text("## Problem\n", encoding="utf-8")
 
@@ -3173,7 +3126,7 @@ def test_no_reextraction_for_an_unparseable_fence(tmp_path, monkeypatch):
     """The lane emitted a fence and botched the payload; the tolerant repair pass
     already ran on that text. Re-reading it buys nothing, so the seat falls
     through to the retry."""
-    monkeypatch.setenv("VNX_PANEL_RETRY", "1")
+    monkeypatch.setattr(pgp, "PANEL_RETRY_COUNT", 1)
     doc = tmp_path / "plan.md"
     doc.write_text("## Problem\n", encoding="utf-8")
 
@@ -3219,27 +3172,19 @@ def test_reextraction_instruction_neutralizes_a_fence_in_its_input():
 
 
 def test_reextraction_timeout_default_is_120(monkeypatch):
-    monkeypatch.delenv("VNX_PLAN_GATE_REEXTRACT_TIMEOUT", raising=False)
     assert pgp._reextraction_timeout() == 120
     assert pgp.DEFAULT_REEXTRACTION_TIMEOUT_SECONDS == 120
 
 
-def test_reextraction_timeout_honors_env_and_falls_back(monkeypatch):
-    monkeypatch.setenv("VNX_PLAN_GATE_REEXTRACT_TIMEOUT", "45")
-    assert pgp._reextraction_timeout() == 45
-    monkeypatch.setenv("VNX_PLAN_GATE_REEXTRACT_TIMEOUT", "not-a-number")
-    assert pgp._reextraction_timeout() == 120
-    monkeypatch.setenv("VNX_PLAN_GATE_REEXTRACT_TIMEOUT", "0")
-    assert pgp._reextraction_timeout() == 120
-    assert pgp._reextraction_timeout(30) == 30  # explicit wins outright
+def test_reextraction_timeout_explicit_wins_outright(monkeypatch):
+    assert pgp._reextraction_timeout(30) == 30
+    assert pgp._reextraction_timeout(0) == 1  # floored at 1, never 0
 
 
 def test_default_path_builds_a_short_deadline_extraction_lane(tmp_path, monkeypatch):
     """The extraction must not inherit the 900s seat deadline: it re-reads one
     report and emits one JSON block."""
-    monkeypatch.setenv("VNX_PLAN_GATE_SEAT_TIMEOUT", "900")
-    monkeypatch.delenv("VNX_PLAN_GATE_REEXTRACT_TIMEOUT", raising=False)
-    monkeypatch.setenv("VNX_PANEL_RETRY", "0")
+    monkeypatch.setattr(pgp, "PANEL_RETRY_COUNT", 0)
     seen_timeouts = []
 
     def _lane(p, m, instruction, dispatch_id):
@@ -3271,7 +3216,6 @@ def test_no_extraction_lane_is_built_when_no_seat_needs_one(tmp_path, monkeypatc
         return lambda p, m, i, d: _report('{"verdict": "pass"}')
 
     monkeypatch.setattr(pgp, "_make_default_dispatcher", _fake_factory)
-    monkeypatch.setenv("VNX_PLAN_GATE_SEAT_TIMEOUT", "900")
     doc = tmp_path / "plan.md"
     doc.write_text("## Problem\n", encoding="utf-8")
     pgp.run_panel(
@@ -3283,7 +3227,7 @@ def test_no_extraction_lane_is_built_when_no_seat_needs_one(tmp_path, monkeypatc
 def test_injected_dispatcher_serves_the_extraction_too(tmp_path, monkeypatch):
     """No separate lane object for a test double: an injected dispatcher handles
     both calls, so the test exercises the same path production takes."""
-    monkeypatch.setenv("VNX_PANEL_RETRY", "0")
+    monkeypatch.setattr(pgp, "PANEL_RETRY_COUNT", 0)
     doc = tmp_path / "plan.md"
     doc.write_text("## Problem\n", encoding="utf-8")
     seen = []
@@ -3337,7 +3281,7 @@ def test_rule_rationale_omits_the_suffix_for_an_unclassified_seat():
 
 
 def test_seat_ledger_records_seat_status_and_reextraction_provenance(tmp_path, monkeypatch):
-    monkeypatch.setenv("VNX_PANEL_RETRY", "0")
+    monkeypatch.setattr(pgp, "PANEL_RETRY_COUNT", 0)
     ledger = tmp_path / "plan-gate-seats.ndjson"
     doc = tmp_path / "plan.md"
     doc.write_text("## Problem\n", encoding="utf-8")

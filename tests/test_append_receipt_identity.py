@@ -204,7 +204,7 @@ def test_dispatch_register_stamps_identity(tmp_path, monkeypatch):
     monkeypatch.setenv(ENV_ORCHESTRATOR, "dev-t0")
 
     # Force re-import so the module picks up our env-resolved identity path.
-    sys.modules.pop("dispatch_register", None)
+    monkeypatch.delitem(sys.modules, "dispatch_register", raising=False)
     from dispatch_register import append_event
 
     ok = append_event(
@@ -230,7 +230,7 @@ def test_dispatch_register_explicit_identity_overrides_env(tmp_path, monkeypatch
     monkeypatch.setenv(ENV_OPERATOR, "vincent-vd")
     monkeypatch.setenv(ENV_PROJECT, "vnx-dev")
 
-    sys.modules.pop("dispatch_register", None)
+    monkeypatch.delitem(sys.modules, "dispatch_register", raising=False)
     from dispatch_register import append_event
 
     ok = append_event(
@@ -256,7 +256,7 @@ def test_dispatch_register_no_identity_when_unresolvable(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("HOME", str(tmp_path))
 
-    sys.modules.pop("dispatch_register", None)
+    monkeypatch.delitem(sys.modules, "dispatch_register", raising=False)
     from dispatch_register import append_event
 
     ok = append_event(

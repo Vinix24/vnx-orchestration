@@ -310,14 +310,59 @@ def _write_dream_events(vnx_env, events, filename="2026-08-08.ndjson"):
     return events_dir
 
 
+def _install_dream_plist(home, arm="1", hour=3, minute=0, data_dir=None):
+    """Write the installed dream plist under a tmp HOME (the doctor reads it from there).
+    With `data_dir` it carries the StandardOutPath the template would give."""
+    import plistlib
+    agents = Path(home) / "Library" / "LaunchAgents"
+    agents.mkdir(parents=True, exist_ok=True)
+    body = {
+        "Label": "com.vnx.auto-dream",
+        "ProgramArguments": ["vnx", "dream", "run", "--project-id", "vnx-dev"],
+        "EnvironmentVariables": {"VNX_DREAM_SCHEDULER_ENABLED": arm},
+        "StartCalendarInterval": {"Hour": hour, "Minute": minute},
+    }
+    if data_dir is not None:
+        body["StandardOutPath"] = str(Path(data_dir) / "events" / "dream" / "launchd.out.log")
+    (agents / "com.vnx.auto-dream.plist").write_bytes(plistlib.dumps(body))
+
+
+def _write_dream_log(vnx_env, cycle_ids):
+    """The launchd stdout log: one `dream run:` line per cycle id."""
+    log = Path(vnx_env["VNX_DATA_DIR"]) / "events" / "dream" / "launchd.out.log"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    log.write_text("".join(f"dream run: cycle={c} project=vnx-dev\n" for c in cycle_ids), encoding="utf-8")
+
+
+@pytest.fixture(autouse=True)
+def _tmp_home_for_dream(tmp_path, monkeypatch):
+    """The doctor reads the installed plist from $HOME: never the real one.
+    The subprocess seam answers a loaded job and no plutil: the real launchctl is never reached."""
+    import dream_liveness
+
+    def fake_run(argv, timeout=10):
+        if argv[0] == "plutil":
+            raise FileNotFoundError("plutil")
+        assert argv[:2] == ["launchctl", "print"], argv
+        return 0, "last exit code = 0\n"
+
+    monkeypatch.setattr(dream_liveness, "_run", fake_run)
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    return home
+
+
 class TestDreamCycleCheck:
     """OI-1088: a dream cycle that keeps skipping must surface in `vnx doctor`
     with its reason — the six-week silent no-op must not be repeatable."""
 
-    def test_no_events_dir_passes(self, vnx_env):
+    def test_no_events_dir_is_not_pass(self, vnx_env):
+        """ADR-066: no events folder and no plist is silence, not health."""
         results = check_dream_cycle(vnx_env)
         assert len(results) == 1
-        assert results[0].status == PASS
+        assert results[0].status == WARN
+        assert "events_missing" in results[0].message
 
     def test_latest_skip_warns_with_reason(self, vnx_env):
         """The exact production failure shape: preflight keeps skipping on
@@ -336,8 +381,9 @@ class TestDreamCycleCheck:
         assert "incomplete_data" in results[0].message
         assert "stale" in results[0].message
 
-    def test_scheduler_disabled_skip_passes(self, vnx_env):
-        """scheduler_disabled is the deliberate arm-switch state — not a WARN."""
+    def test_scheduler_disabled_is_not_pass(self, vnx_env, _tmp_home_for_dream):
+        """Red run (ADR-066): a switched-off scheduler is a finding, never a PASS."""
+        _install_dream_plist(_tmp_home_for_dream, arm="0")
         _write_dream_events(vnx_env, [{
             "event_type": "dream_cycle_skipped",
             "cycle_id": "dream-x",
@@ -345,19 +391,33 @@ class TestDreamCycleCheck:
             "detail": "VNX_DREAM_SCHEDULER_ENABLED=0",
             "timestamp": "2026-08-08T01:00:05+00:00",
         }])
-        results = check_dream_cycle(vnx_env)
-        assert results[0].status == PASS
-        assert "disabled" in results[0].message
+        check = check_dream_cycle(vnx_env)[0]
+        assert check.status != PASS
+        assert "scheduler_disabled" in check.message
 
-    def test_completed_cycle_passes(self, vnx_env):
+        # An installed plist with an empty events folder is not a PASS either.
+        empty = Path(vnx_env["VNX_DATA_DIR"]) / "events" / "dream"
+        for f in empty.glob("*.ndjson"):
+            f.unlink()
+        check = check_dream_cycle(vnx_env)[0]
+        assert check.status != PASS
+        assert "no_attempt_26h" in check.message
+
+        # A missing source is unmeasured, never ok.
+        from dream_liveness import assess
+        assert assess({"events": None})["state"] == "unmeasured"
+        assert assess({"events": None})["state"] != "ok"
+
+    def test_completed_cycle_without_output_is_not_pass(self, vnx_env):
         _write_dream_events(vnx_env, [{
             "event_type": "dream_cycle_completed",
             "cycle_id": "dream-ok",
             "timestamp": "2026-08-08T01:00:05+00:00",
         }])
         results = check_dream_cycle(vnx_env)
-        assert results[0].status == PASS
+        assert results[0].status == WARN
         assert "dream_cycle_completed" in results[0].message
+        assert "no_output" not in results[0].message  # no plist: the window is unmeasured
 
     def test_latest_event_wins_by_timestamp(self, vnx_env):
         """An older completed cycle followed by a newer skip must WARN — the
@@ -400,7 +460,46 @@ class TestDreamCycleCheck:
         with (events_dir / "2026-08-08.ndjson").open("a", encoding="utf-8") as fh:
             fh.write("not-json\n{broken\n")
         results = check_dream_cycle(vnx_env)
-        assert results[0].status == PASS
+        assert results[0].status == WARN
+        assert "unknown_event_type" in results[0].message
+
+
+class TestDreamCycleProgressPasses:
+    """The one road to PASS: a fresh attempt, an armed plist and output on 5 of 7 nights."""
+
+    def test_progressing_window_passes(self, vnx_env, _tmp_home_for_dream):
+        from datetime import datetime, timedelta
+        _install_dream_plist(_tmp_home_for_dream, data_dir=vnx_env["VNX_DATA_DIR"])
+        now = datetime.now().astimezone()
+        events = []
+        for back in range(9):
+            at = (now - timedelta(days=back)).replace(hour=3, minute=5, second=0, microsecond=0)
+            if at <= now:
+                events.append({"event_type": "dream_cycle_completed", "cycle_id": f"c{back}",
+                               "merged_count": 2, "timestamp": at.isoformat()})
+        _write_dream_events(vnx_env, events)
+        _write_dream_log(vnx_env, [e["cycle_id"] for e in events])
+        assert check_dream_cycle(vnx_env)[0].status == PASS
+
+    def test_loaded_job_without_attempt_is_not_pass(self, vnx_env, _tmp_home_for_dream):
+        """Red run (ADR-066): a loaded job whose log has no `dream run:` line is no attempt."""
+        _install_dream_plist(_tmp_home_for_dream, data_dir=vnx_env["VNX_DATA_DIR"])
+        _write_dream_events(vnx_env, [])
+        _write_dream_log(vnx_env, [])
+        check = check_dream_cycle(vnx_env)[0]
+        assert check.status == WARN
+        assert "no_attempt_26h" in check.message
+
+    def test_unloaded_job_is_not_pass(self, vnx_env, _tmp_home_for_dream, monkeypatch):
+        """A job launchctl does not know is a finding even when the events look fine."""
+        import dream_liveness
+        _install_dream_plist(_tmp_home_for_dream, data_dir=vnx_env["VNX_DATA_DIR"])
+        real_fake = dream_liveness._run
+        monkeypatch.setattr(dream_liveness, "_run",
+                            lambda argv, timeout=10: (113, "") if argv[0] == "launchctl" else real_fake(argv))
+        check = check_dream_cycle(vnx_env)[0]
+        assert check.status == WARN
+        assert "job_not_loaded" in check.message
 
 
 class TestDreamCycleDegradedIsNotPass:
@@ -435,10 +534,11 @@ class TestDreamCycleDegradedIsNotPass:
         assert results[0].status == WARN
         assert "mode=proposal_only" in results[0].message
 
-    def test_healthy_cycle_stays_pass(self, vnx_env):
+    def test_healthy_cycle_without_output_is_not_pass(self, vnx_env):
         self._completed(vnx_env, {"probe_health": "ok"}, cycle_id="dream-healthy")
         results = check_dream_cycle(vnx_env)
-        assert results[0].status == PASS
+        assert results[0].status == WARN
+        assert "DEGRADED" not in results[0].message
 
     def test_review_found_by_cycle_id_when_event_has_no_path(self, vnx_env):
         self._completed(
@@ -459,7 +559,7 @@ class TestDreamCycleDegradedIsNotPass:
         results = check_dream_cycle(vnx_env)
         assert results[0].status == WARN
 
-    def test_corrupt_review_without_event_signal_stays_pass(self, vnx_env):
+    def test_corrupt_review_without_event_signal_is_not_degraded(self, vnx_env):
         review_dir = Path(vnx_env["VNX_DATA_DIR"]) / "state" / "dream"
         review_dir.mkdir(parents=True, exist_ok=True)
         (review_dir / "dream-bad-pending-review.json").write_text("{broken", encoding="utf-8")
@@ -468,7 +568,9 @@ class TestDreamCycleDegradedIsNotPass:
             "cycle_id": "dream-bad",
             "timestamp": "2026-08-08T01:00:05+00:00",
         }])
-        assert check_dream_cycle(vnx_env)[0].status == PASS
+        check = check_dream_cycle(vnx_env)[0]
+        assert check.status == WARN
+        assert "DEGRADED" not in check.message
 
 
 # ---------------------------------------------------------------------------
@@ -558,3 +660,30 @@ class TestWorktreeChecks:
             results = check_worktree(vnx_env)
             warns = [r for r in results if r.status == WARN]
             assert any(".env_override" in r.message for r in warns)
+
+
+class TestDreamDoctorMapping:
+    """ADR-066 doctor mapping: PASS only on state ok with no measured finding."""
+
+    def _doc_check(self, vnx_env, monkeypatch, findings, state="ok"):
+        import dream_liveness
+        monkeypatch.setattr(dream_liveness, "assess", lambda *a, **k: {
+            "state": state, "findings": findings, "outcome": None,
+            "attempts": {"age_hours": None}})
+        return check_dream_cycle(vnx_env)[0]
+
+    def test_measured_warn_maps_to_warn(self, vnx_env, monkeypatch):
+        check = self._doc_check(vnx_env, monkeypatch, [{"id": "no_output", "severity": "warn", "measured": True}])
+        assert check.status == WARN and "no_output" in check.message
+
+    @pytest.mark.parametrize("measured", [None, "yes", 1])
+    def test_malformed_measured_flag_stays_warn(self, vnx_env, monkeypatch, measured):
+        finding = {"id": "undated_event", "severity": "warn", "measured": measured}
+        assert self._doc_check(vnx_env, monkeypatch, [finding]).status == WARN
+
+    def test_unmeasured_only_warn_with_ok_state_is_pass(self, vnx_env, monkeypatch):
+        finding = {"id": "plist_missing", "severity": "warn", "measured": False}
+        assert self._doc_check(vnx_env, monkeypatch, [finding]).status == PASS
+
+    def test_non_ok_state_is_warn(self, vnx_env, monkeypatch):
+        assert self._doc_check(vnx_env, monkeypatch, [], state="unmeasured").status == WARN

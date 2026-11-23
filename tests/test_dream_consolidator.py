@@ -3,7 +3,7 @@
 Coverage:
 - test_emit_dream_event_writes_ndjson: NDJSON-first emit (ADR-005)
 - test_fetch_patterns_respects_project_id: tenant isolation (ADR-007)
-- test_parse_kimi_response_strict_json: response JSON extraction
+- test_parse_json_response_strict_json: response JSON extraction
 - test_dry_run_no_db_write: dry-run skips dream_cycles INSERT
 - test_run_dream_cycle_happy_path: full cycle with mocked kimi
 - GAP-7 receipt-completeness preflight: stale/empty → skip with warning event
@@ -33,6 +33,7 @@ sys.path.insert(0, str(REPO_ROOT / "scripts" / "lib"))
 sys.path.insert(0, str(REPO_ROOT / "scripts" / "dream"))
 
 import consolidator
+from content_boundary_pin import pin_boundary
 
 # Captured before the autouse fixture below monkeypatches consolidator._injection_probe_health,
 # so the real-probe-integration tests in TestActivationGate can exercise the genuine function.
@@ -47,6 +48,7 @@ def _dream_activation_gate_open(monkeypatch):
     covered by TestActivationGate below (which overrides these as needed).
     """
     monkeypatch.setenv("VNX_DREAM_SCHEDULER_ENABLED", "1")
+    monkeypatch.setenv("VNX_DREAM_PROVIDER", "kimi")  # these tests patch the kimi dispatch
     monkeypatch.setattr(consolidator, "_injection_probe_health", lambda state_dir: "ok")
 
 
@@ -56,7 +58,7 @@ def _dream_boundary_configured(monkeypatch, tmp_path_factory):
     unconfigured one, and a test must never read the operator's real boundary file."""
     boundary_file = tmp_path_factory.mktemp("dream-boundary") / "content_boundary.json"
     boundary_file.write_text(json.dumps({"version": 1}), encoding="utf-8")
-    monkeypatch.setenv("VNX_CONTENT_BOUNDARY_FILE", str(boundary_file))
+    pin_boundary(monkeypatch, str(boundary_file))
 
 
 # ---------------------------------------------------------------------------
@@ -208,10 +210,10 @@ class TestFetchPatterns:
 
 
 class TestParseKimiResponse:
-    def test_parse_kimi_response_strict_json(self):
+    def test_parse_json_response_strict_json(self):
         """Extracts first complete JSON object from text with preamble/postamble."""
         text = 'Sure! Here you go:\n{"merged":[],"dropped":[],"archived":[],"flagged":[],"summary":"ok"}\nDone.'
-        result = consolidator._parse_kimi_response(text)
+        result = consolidator._parse_json_response(text)
         assert result == {
             "merged": [],
             "dropped": [],
@@ -220,15 +222,15 @@ class TestParseKimiResponse:
             "summary": "ok",
         }
 
-    def test_parse_kimi_response_no_json_raises(self):
+    def test_parse_json_response_no_json_raises(self):
         """Raises ValueError when no JSON object is found in the output."""
         with pytest.raises(ValueError, match="No JSON found"):
-            consolidator._parse_kimi_response("no braces here at all")
+            consolidator._parse_json_response("no braces here at all")
 
-    def test_parse_kimi_response_invalid_json_raises(self):
+    def test_parse_json_response_invalid_json_raises(self):
         """Raises ValueError on malformed JSON."""
         with pytest.raises(ValueError, match="Invalid JSON"):
-            consolidator._parse_kimi_response("{not: valid json}")
+            consolidator._parse_json_response("{not: valid json}")
 
 
 class TestExtractKimiText:
@@ -671,10 +673,10 @@ class TestKimiTimeout:
         timeout_events = [e for e in events if e.get("event_type") == "dream_cycle_timeout"]
         assert timeout_events, "dream_cycle_timeout event not emitted"
 
-    def test_timeout_env_override(self, tmp_path, monkeypatch):
-        """VNX_DREAM_KIMI_TIMEOUT env var is passed to _dispatch_kimi_consolidation."""
+    def test_timeout_default_is_passed(self, tmp_path, monkeypatch):
+        """``_DEFAULT_TIMEOUT`` is the timeout passed to _dispatch_kimi_consolidation."""
         db_path, data_root = _make_db_with_receipts(tmp_path, with_patterns=True)
-        monkeypatch.setenv("VNX_DREAM_KIMI_TIMEOUT", "42")
+        monkeypatch.setattr(consolidator, "_DEFAULT_TIMEOUT", 42)
         captured = {}
 
         def _capture_timeout(patterns, project_id, timeout=180.0, data_root=None):
@@ -687,6 +689,73 @@ class TestKimiTimeout:
             )
 
         assert captured["timeout"] == 42.0
+
+
+# ---------------------------------------------------------------------------
+# Content stamps: every event and the review JSON carry a UTC timestamp
+# ---------------------------------------------------------------------------
+
+
+class TestContentStamps:
+    """The liveness reader can only judge age from content, so the writer stamps it."""
+
+    def _events(self, data_root: Path) -> list[dict]:
+        event_files = list((data_root / "events" / "dream").glob("*.ndjson"))
+        assert event_files, "No NDJSON event file written"
+        return [
+            json.loads(line)
+            for line in event_files[0].read_text().strip().splitlines()
+        ]
+
+    def test_completed_event_carries_timestamp(self, tmp_path):
+        """A completed cycle stamps the event; 3 of 134 measured events lacked one."""
+        db_path, data_root = _make_db_with_receipts(tmp_path, with_patterns=True)
+
+        with patch(
+            "consolidator._dispatch_kimi_consolidation",
+            return_value=_FAKE_CONSOLIDATION,
+        ):
+            consolidator.run_dream_cycle("vnx-dev", db_path, data_root=data_root)
+
+        completed = [
+            e for e in self._events(data_root) if e["event_type"] == "dream_cycle_completed"
+        ]
+        assert len(completed) == 1
+        assert "timestamp" in completed[0]
+        assert datetime.fromisoformat(completed[0]["timestamp"]).tzinfo == timezone.utc
+
+    def test_failed_event_carries_timestamp(self, tmp_path):
+        """An exception mid-cycle still leaves the failed event datable."""
+        db_path, data_root = _make_db_with_receipts(tmp_path, with_patterns=True)
+
+        with patch(
+            "consolidator._dispatch_kimi_consolidation",
+            side_effect=RuntimeError("kimi exploded"),
+        ):
+            with pytest.raises(RuntimeError):
+                consolidator.run_dream_cycle("vnx-dev", db_path, data_root=data_root)
+
+        failed = [
+            e for e in self._events(data_root) if e["event_type"] == "dream_cycle_failed"
+        ]
+        assert len(failed) == 1
+        assert "timestamp" in failed[0]
+
+    def test_review_json_carries_created_at(self, tmp_path):
+        """The pending review records when it was written, from content not mtime."""
+        db_path, data_root = _make_db_with_receipts(tmp_path, with_patterns=True)
+
+        with patch(
+            "consolidator._dispatch_kimi_consolidation",
+            return_value=_FAKE_CONSOLIDATION,
+        ):
+            result = consolidator.run_dream_cycle(
+                "vnx-dev", db_path, dry_run=True, data_root=data_root
+            )
+
+        review = json.loads(Path(result["review_path"]).read_text())
+        assert review["created_at"]
+        assert datetime.fromisoformat(review["created_at"]).tzinfo == timezone.utc
 
 
 # ---------------------------------------------------------------------------
@@ -1375,7 +1444,7 @@ class TestDreamContentBoundaryAndSwitch:
         token_file.write_text(_CANARY, encoding="utf-8")
         boundary_file = tmp_path / "boundary" / "content_boundary.json"
         boundary_file.parent.mkdir()
-        monkeypatch.setenv("VNX_CONTENT_BOUNDARY_FILE", str(boundary_file))
+        pin_boundary(monkeypatch, str(boundary_file))
         monkeypatch.setenv("VNX_PROVIDER_SWITCH_FILE", str(tmp_path / "switch" / "providers.json"))
         for name in list(__import__("os").environ):
             if name.startswith("VNX_OVERRIDE_PROVIDER_"):

@@ -5,11 +5,10 @@ Tests for fine-grained task_class sub-classification and scope_tags activation.
 Covers:
   - infer_task_subclass path/instruction routing
   - resolve_task_class with dispatch_paths
-  - _scope_matches strict mode (VNX_INTEL_STRICT_SCOPE)
+  - _scope_matches (lenient: an item without scope tags matches)
   - _expand_scope_tags subclass keyword expansion
   - intelligence_backfill.py keyword-to-tag mapping
   - IntelligenceSelector scope filtering (sql scope excludes ui-tagged items)
-  - Backwards-compat: VNX_INTEL_STRICT_SCOPE=0 preserves old behaviour
 """
 from __future__ import annotations
 
@@ -171,35 +170,20 @@ class TestExpandScopeTags(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# _scope_matches strict mode
+# _scope_matches
 # ---------------------------------------------------------------------------
 
 class TestScopeMatchesStrictMode(unittest.TestCase):
-
-    def setUp(self):
-        os.environ.pop("VNX_INTEL_STRICT_SCOPE", None)
-
-    def tearDown(self):
-        os.environ.pop("VNX_INTEL_STRICT_SCOPE", None)
 
     def test_empty_query_always_matches(self):
         self.assertTrue(_scope_matches([], []))
         self.assertTrue(_scope_matches(["sql"], []))
 
     def test_default_empty_item_matches_nonempty_query(self):
-        # VNX_INTEL_STRICT_SCOPE not set → old behaviour, empty item = matches all
+        # empty item = matches all
         self.assertTrue(_scope_matches([], ["sql"]))
 
-    def test_strict_off_empty_item_matches_nonempty_query(self):
-        os.environ["VNX_INTEL_STRICT_SCOPE"] = "0"
-        self.assertTrue(_scope_matches([], ["sql"]))
-
-    def test_strict_on_empty_item_does_not_match_nonempty_query(self):
-        os.environ["VNX_INTEL_STRICT_SCOPE"] = "1"
-        self.assertFalse(_scope_matches([], ["sql"]))
-
-    def test_strict_on_empty_query_still_matches(self):
-        os.environ["VNX_INTEL_STRICT_SCOPE"] = "1"
+    def test_empty_query_with_empty_item_matches(self):
         self.assertTrue(_scope_matches([], []))
 
     def test_sql_item_matches_sql_query(self):

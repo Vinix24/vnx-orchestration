@@ -1,0 +1,1 @@
+- `vnx config set <KEY> <VALUE>` and `vnx config unset <KEY>` write the project row or, with `--global`, the global file; both require a non-blank `--reason`, pass `--approval-id` through, refuse outside operator mode, and print the new effective value and its source (config-een-oppervlak PR-10b).

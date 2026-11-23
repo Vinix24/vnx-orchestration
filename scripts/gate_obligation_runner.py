@@ -205,7 +205,8 @@ runner fulfils them:
       while this launch was on its way is used, never run over; (c) the retry
       cap: at most ``gate_run_guard.MAX_REVIEWER_RUNS_PER_HEAD`` runs on one
       head in which the reviewer ran without a bookable verdict
-      (:func:`_book_reviewer_run`), after which the obligation stays pending
+      (counted at the launch point, ``execute_gate``; read back here by
+      :func:`_report_cap_reached`), after which the obligation stays pending
       under ``degenerate_retry_cap`` and reports ``retry_capped`` until the
       head changes. A refusal that ran no reviewer (quota, capacity, a setup
       failure) does not count. A run on a head that already has a decided,
@@ -307,7 +308,6 @@ sys.path.insert(0, str(SCRIPT_DIR / "lib"))
 import gate_run_guard
 from gate_obligations import (  # noqa: E402
     NO_GATE_KEY,
-    REASON_DEGENERATE_RETRY_CAP,
     REASON_DISPATCH_STILL_RUNNING,
     REASON_FAILED_BY_GATE_VERDICT,
     REASON_FAILED_BY_TAKEOVER,
@@ -319,6 +319,7 @@ from gate_obligations import (  # noqa: E402
     REASON_NO_PR_BRANCH_GONE_UNMEASURED,
     REASON_PR_CLOSED,
     REASON_PR_MERGED,
+    REASON_VERDICT_WITHOUT_FINDINGS_RETRY_CAP,
     STATUS_FAILED,
     STATUS_FULFILLED,
     STATUS_NOT_EXECUTABLE,
@@ -1457,6 +1458,25 @@ def _resolve_github_owner_repo(state_dir: Path) -> Optional[str]:
     return None
 
 
+def _pr_from_registration(state_dir: Path, record: Dict[str, Any]) -> Optional[int]:
+    """The PR the dispatch registration names, or None (OI-1751).
+
+    In order: the stamped ``pr_number``, the door-registered spec ``pr_id``
+    (records that predate the stamp carry only that), then the receipt
+    pipeline's ``dispatch_metadata``. Only a positive int or a PR-shaped pr_id
+    counts; the ``dispatch/<id>`` branch is the caller's fallback, never the link.
+    """
+    pr_number = record.get("pr_number")
+    if isinstance(pr_number, int) and not isinstance(pr_number, bool) and pr_number > 0:
+        return pr_number
+    pr_id = record.get("pr_id")
+    from_pr_id = pr_number_from_pr_id(pr_id) if isinstance(pr_id, str) else None
+    if from_pr_id:
+        return from_pr_id
+    dispatch_id = str(record.get("dispatch_id") or "")
+    return _pr_from_dispatch_metadata(state_dir, dispatch_id) if dispatch_id else None
+
+
 def resolve_pr_number(
     state_dir: Path, record: Dict[str, Any], snapshot: Optional[_GithubSnapshot] = None,
 ) -> PrResolution:
@@ -1465,26 +1485,26 @@ def resolve_pr_number(
     Returns a :class:`PrResolution` carrying one of three statuses so the caller
     can record the distinction in the obligation's state:
 
-      - ``resolved``   — a PR number is known (record, dispatch metadata, GitHub).
+      - ``resolved``   — a PR number is known (dispatch registration first, then
+                         the ``dispatch/<id>`` head branch on GitHub).
       - ``awaiting``   — the repo resolves and ``gh`` works, but no PR exists yet
                          for the head branch: a genuine wait, stays ``pending``.
       - ``unresolvable`` — the environment is wrong (no GitHub owner/repo, no
                          checkout, gh missing): a fault, recorded distinctly.
     """
-    pr_number = record.get("pr_number")
-    if isinstance(pr_number, int) and pr_number > 0:
-        return PrResolution(RESOLUTION_RESOLVED, pr_number=pr_number)
+    from_registration = _pr_from_registration(state_dir, record)
+    if from_registration:
+        return PrResolution(RESOLUTION_RESOLVED, pr_number=from_registration)
     dispatch_id = str(record.get("dispatch_id") or "")
     if not dispatch_id:
         return PrResolution(
             RESOLUTION_UNRESOLVABLE,
             reason="obligation has no dispatch_id to resolve a PR for",
         )
-
-    from_metadata = _pr_from_dispatch_metadata(state_dir, dispatch_id)
-    if from_metadata:
-        return PrResolution(RESOLUTION_RESOLVED, pr_number=from_metadata)
-
+    _LOG.info(
+        "no dispatch registration names a PR for %s; falling back to head branch dispatch/%s",
+        dispatch_id, dispatch_id,
+    )
     owner_repo = _resolve_github_owner_repo(state_dir)
     if not owner_repo:
         return PrResolution(
@@ -2682,19 +2702,7 @@ def _stale_terminal_evidence(
         dispatch_id = str(record.get("dispatch_id") or path.stem)
         gate = str(record.get("gate") or "")
 
-        evidence_record: Optional[Dict[str, Any]] = None
-        read_error: Optional[str] = None
-        try:
-            evidence_record = json.loads(Path(evidence_path_str).read_text(encoding="utf-8"))
-        except OSError as exc:
-            read_error = f"evidence file unreadable: {exc}"
-        except json.JSONDecodeError as exc:
-            read_error = f"evidence file is not valid JSON: {exc}"
-        if not isinstance(evidence_record, dict):
-            if read_error is None:
-                read_error = "evidence file does not contain a JSON object"
-            evidence_record = {}
-        result_sha = str(evidence_record.get("commit_sha") or "")
+        result_sha, read_error = _read_evidence_commit_sha(evidence_path_str)
 
         # OI-2459 round 2: this read-only diagnostic keeps the snapshot on
         # purpose. It books nothing — it reports binding drift for a human —
@@ -2744,24 +2752,47 @@ def _stale_terminal_evidence(
             )
         findings.append(finding)
     if open_pr_lookup.get("suspect"):
-        findings.append({
-            "dispatch_id": None,
-            "gate": None,
-            "pr_number": None,
-            "obligation_status": None,
-            "obligation_path": None,
-            "evidence_result_path": None,
-            "head_sha": "",
-            "evidence_commit_sha": "",
-            "binding": "unknown",
-            "detail": (
-                f"the open-PR list hit the --limit {_OPEN_PR_LIST_LIMIT} cap "
-                f"({len(open_prs)} PRs returned) — additional open PRs may "
-                "exist beyond the cap and were not checked this run "
-                "(OI-1766): coverage is undetermined, not complete."
-            ),
-        })
+        findings.append(_open_pr_list_capped_finding(len(open_prs)))
     return findings
+
+
+def _read_evidence_commit_sha(evidence_path_str: str) -> Tuple[str, Optional[str]]:
+    """(commit_sha, read_error) of one evidence file; an unreadable or non-object file is ("", why)."""
+    evidence_record: Optional[Dict[str, Any]] = None
+    read_error: Optional[str] = None
+    try:
+        evidence_record = json.loads(Path(evidence_path_str).read_text(encoding="utf-8"))
+    except OSError as exc:
+        read_error = f"evidence file unreadable: {exc}"
+    except json.JSONDecodeError as exc:
+        read_error = f"evidence file is not valid JSON: {exc}"
+    if not isinstance(evidence_record, dict):
+        if read_error is None:
+            read_error = "evidence file does not contain a JSON object"
+        evidence_record = {}
+    result_sha = str(evidence_record.get("commit_sha") or "")
+    return result_sha, read_error
+
+
+def _open_pr_list_capped_finding(returned: int) -> Dict[str, Any]:
+    """The loud ``unknown`` finding when the open-PR list hit the ``--limit`` cap (OI-1766)."""
+    return {
+        "dispatch_id": None,
+        "gate": None,
+        "pr_number": None,
+        "obligation_status": None,
+        "obligation_path": None,
+        "evidence_result_path": None,
+        "head_sha": "",
+        "evidence_commit_sha": "",
+        "binding": "unknown",
+        "detail": (
+            f"the open-PR list hit the --limit {_OPEN_PR_LIST_LIMIT} cap "
+            f"({returned} PRs returned) — additional open PRs may "
+            "exist beyond the cap and were not checked this run "
+            "(OI-1766): coverage is undetermined, not complete."
+        ),
+    }
 
 
 def _evidence_decision(evidence: Tuple[Path, Dict[str, Any]]) -> Dict[str, Any]:
@@ -3717,7 +3748,7 @@ def _recheck_under_lock(
 
     In this order: an obligation another runner already booked is not run
     again; without a force-rerun, an obligation at the retry cap on this head
-    is parked (:func:`_park_at_cap`), and a decided, complete-evidence verdict
+    is parked (:func:`_park_at_cap`) unless :func:`_passed_over`, and a decided, complete-evidence verdict
     on this head that landed since the pre-execution decision is booked
     (:func:`_book_existing_evidence`) instead of run over.
     """
@@ -3729,7 +3760,7 @@ def _recheck_under_lock(
         }, None
     if force_rerun:
         return None, None
-    if gate_run_guard.cap_reached(fresh.get("head_runs"), head_sha):
+    if gate_run_guard.cap_reached(fresh.get("head_runs"), head_sha) and not _passed_over(fresh, head_sha):
         return _park_at_cap(path, fresh, gate=gate, pr_number=pr_number, dispatch_id=dispatch_id), None
     lookup = _fulfilling_result(
         _index_gate_results(state_dir), dispatch_id, gate, pr_number=pr_number, snapshot=snapshot,
@@ -3753,48 +3784,51 @@ def _recheck_under_lock(
     return None, None
 
 
+def _passed_over(record: Dict[str, Any], head_sha: str, result: Any = None, gate: str = "") -> bool:
+    """ADR-080 besluit 3: at the verdict-without-findings cap on this head (the hop's own proof) the declared gate does not run; with ``result``, it did not run in that call."""
+    runs, cap = record.get("head_runs"), REASON_VERDICT_WITHOUT_FINDINGS_RETRY_CAP
+    ran = [e for e in (result or {}).get("gates") or [] if e.get("gate") == gate and e.get("request_status") == "requested"]
+    return record.get("reason") == cap == gate_run_guard.cap_reason(runs) and gate_run_guard.cap_reached(runs, head_sha) and not ran
+
+
+def _temporary_refusal_or_hop(record, head_sha: str, result: Any, declared: Tuple[str, str, Any], gate: str, pr_number):
+    """:func:`_temporary_refusal` of the declared record, or, when the seat went on (:func:`_passed_over`), the cap reason: that record is old and is not judged."""
+    if _passed_over(record, head_sha, result, gate):
+        return REASON_VERDICT_WITHOUT_FINDINGS_RETRY_CAP, f"{gate} passed over on head {head_sha[:8]} (ADR-080 besluit 3); its successor has no verdict yet", None
+    return (*_temporary_refusal(gate, pr_number, declared[0], declared[1]), declared[2])
+
+
 def _park_at_cap(
     path: Path, fresh: Dict[str, Any], *, gate: str, pr_number: int, dispatch_id: str,
 ) -> Dict[str, Any]:
-    """R10: the obligation stays pending under ``degenerate_retry_cap``; the gate is not run on this head."""
-    detail = gate_run_guard.cap_detail(gate, pr_number, dispatch_id, fresh.get("head_runs") or {})
-    if fresh.get("reason") != REASON_DEGENERATE_RETRY_CAP:
-        update_obligation(path, reason=REASON_DEGENERATE_RETRY_CAP, reason_detail=detail)
-    return {"action": ACTION_RETRY_CAPPED, "detail": detail, "reason": REASON_DEGENERATE_RETRY_CAP}
+    """R10: the obligation stays pending under ``gate_run_guard.cap_reason``, which the request-time hop reads."""
+    head_runs = fresh.get("head_runs") or {}
+    reason = gate_run_guard.cap_reason(head_runs)
+    detail = gate_run_guard.cap_detail(gate, pr_number, dispatch_id, head_runs)
+    if fresh.get("reason") != reason:
+        update_obligation(path, reason=reason, reason_detail=detail)
+    return {"action": ACTION_RETRY_CAPPED, "detail": detail, "reason": reason}
 
 
-def _book_reviewer_run(
-    path: Path,
-    head_sha: str,
-    result_data: Optional[Dict[str, Any]],
-    outcome: Dict[str, Any],
-    *,
-    gate: str,
-    pr_number: int,
-    dispatch_id: str,
+def _report_cap_reached(
+    path: Path, head_sha: str, result_data: Optional[Dict[str, Any]], outcome: Dict[str, Any],
+    *, gate: str, pr_number: int, dispatch_id: str,
 ) -> None:
-    """R10: count a run in which the reviewer ran on ``head_sha`` without a bookable verdict.
+    """R10: report ``retry_capped`` when this run brought the obligation to the cap on ``head_sha``.
 
-    Only a pending obligation counts, only on a known head, and only a result
-    in which the reviewer ran (``gate_run_guard.reviewer_ran``: a degenerate
-    verdict, a timeout, a stall, a partial review). A quota or capacity refusal
-    and a failed setup step ran no reviewer and leave the count alone. The run
-    that reaches the cap parks the obligation under ``degenerate_retry_cap``
-    and reports ``retry_capped``.
+    ``execute_gate`` counted the run (``gate_run_guard.book_reviewer_run``);
+    this reads the count back, never counts again. Only a pending obligation,
+    only a known head, only a run in which the reviewer ran. The temporary
+    refusal booked just before wrote its own reason, so :func:`_park_at_cap`
+    writes the cap reason back.
     """
     if not head_sha or not gate_run_guard.reviewer_ran(result_data):
         return
     fresh = _read_obligation_record(path)
     if not fresh or fresh.get("status") != STATUS_PENDING:
         return
-    head_runs = gate_run_guard.next_head_runs(fresh.get("head_runs"), head_sha, result_data or {})
-    if not gate_run_guard.cap_reached(head_runs, head_sha):
-        update_obligation(path, head_runs=head_runs)
-        return
-    detail = gate_run_guard.cap_detail(gate, pr_number, dispatch_id, head_runs)
-    update_obligation(path, head_runs=head_runs, reason=REASON_DEGENERATE_RETRY_CAP, reason_detail=detail)
-    _LOG.warning("gate_obligation_runner: %s", detail)
-    outcome.update(action=ACTION_RETRY_CAPPED, detail=detail, reason=REASON_DEGENERATE_RETRY_CAP)
+    if gate_run_guard.cap_reached(fresh.get("head_runs"), head_sha):
+        outcome.update(_park_at_cap(path, fresh, gate=gate, pr_number=pr_number, dispatch_id=dispatch_id))
 
 
 def _apply_force_rerun(
@@ -4437,9 +4471,8 @@ def _fulfill_temporary_refusal(
         )
         outcome["action"] = "not_executable"
         outcome["detail"] = escalation_detail
-    # R10: a reviewer that ran without a bookable verdict counts toward
-    # the retry cap of this head; the run that reaches it parks the obligation.
-    _book_reviewer_run(
+    # R10: execute_gate counted the run; the run that reached the cap parks the obligation.
+    _report_cap_reached(
         path, head_sha_before_run, result_data, outcome, gate=gate, pr_number=pr_number,
         dispatch_id=dispatch_id,
     )
@@ -4760,6 +4793,18 @@ def fulfill_obligation(
     if decision["kind"] == "stay_pending":
         return _fulfill_stay_pending(path, outcome, attempts=attempts, now=now)
 
+    return _fulfill_attempt_gate(
+        state_dir, path, record, resolution, outcome, dispatch_id=dispatch_id, gate=gate,
+        attempts=attempts, now=now, force_rerun=force_rerun, snapshot=snapshot,
+    )
+
+
+def _fulfill_attempt_gate(
+    state_dir: Path, path: Path, record: Dict[str, Any], resolution, outcome: Dict[str, Any], *,
+    dispatch_id: str, gate: str, attempts: int, now: str, force_rerun: str,
+    snapshot: Optional[_GithubSnapshot],
+) -> Dict[str, Any]:
+    """:func:`fulfill_obligation`'s ``attempt_gate`` path: launch under the run lock."""
     # decision["kind"] == "attempt_gate": a PR is resolved — actually run it.
     pr_number = resolution.pr_number
     owner_repo = resolution.owner_repo or _resolve_github_owner_repo(state_dir)
@@ -4801,6 +4846,19 @@ def fulfill_obligation(
     if launch.lock is None:
         outcome.update(launch.refusal or {})
         return outcome
+    return _fulfill_run_gate(
+        state_dir, path, outcome, launch, dispatch_id=dispatch_id, gate=gate, pr_number=pr_number,
+        branch=branch, changed_files=changed_files, head_sha_before_run=head_sha_before_run,
+        attempts=attempts, now=now, force_rerun=force_rerun,
+    )
+
+
+def _fulfill_run_gate(
+    state_dir: Path, path: Path, outcome: Dict[str, Any], launch, *, dispatch_id: str, gate: str,
+    pr_number: Any, branch: Any, changed_files: List[str], head_sha_before_run: Any,
+    attempts: int, now: str, force_rerun: str,
+) -> Dict[str, Any]:
+    """Run the gate while ``launch.lock`` is held, judge its result, release the lock."""
     try:
         manager = _build_manager(state_dir)
         result = manager.request_and_execute(
@@ -4817,16 +4875,8 @@ def fulfill_obligation(
         # Mirror the recorded outcome: a gate the manager could not execute
         # leaves a loud not_executable/failed RESULT record — the obligation
         # must tell the same truth, not a cosmetic "fulfilled".
-        result_status = ""
-        result_reason = ""
-        result_data: Optional[Dict[str, Any]] = None
-        try:
-            if result_file.exists():
-                result_data = json.loads(result_file.read_text(encoding="utf-8"))
-                result_status = str(result_data.get("status") or "")
-                result_reason = str(result_data.get("reason") or "")
-        except (OSError, json.JSONDecodeError) as exc:
-            _LOG.debug("result status unreadable for pr-%s-%s: %s", pr_number, gate, exc)
+        result_status, result_reason, result_data = _read_declared_result(
+            result_file, gate=gate, pr_number=pr_number)
 
         # The head is resolved AGAIN here, after the gate ran, and every sha
         # check below is judged against THIS value — the head at booking time.
@@ -4848,10 +4898,7 @@ def fulfill_obligation(
         # The commit the result under decision actually records. An empty sha
         # (record has no commit_sha, or no record at all) keeps the existing
         # "binding unverifiable" handling: unknown is never a mismatch.
-        result_commit_sha = (
-            str(result_data.get("commit_sha") or "")
-            if isinstance(result_data, dict) else ""
-        )
+        result_commit_sha = _result_commit_sha(result_data)
         result_sha_binding = _classify_sha_binding(head_sha, result_commit_sha)
 
         # D2e: the declared gate's own record can be a permanent dead end
@@ -4871,13 +4918,8 @@ def fulfill_obligation(
         # takeover walk entirely — declared_kind/declared_detail are reused
         # below, after the walk, so a MISMATCH/UNKNOWN_SHA declared record
         # is never silently trusted by the unconditional fallback either.
-        declared_kind, declared_detail = (
-            _has_decided_evidence(result_data, head_sha) if result_data is not None
-            else (_EVIDENCE_NOT_DECIDED, "no result record on disk yet")
-        )
-        takeover_hit = None
-        if declared_kind != _EVIDENCE_USABLE:
-            takeover_hit = _find_takeover_successor_evidence(manager, gate, pr_number, head_sha)
+        declared_kind, declared_detail, takeover_hit = _declared_evidence_and_takeover(
+            manager, result_data, head_sha, gate=gate, pr_number=pr_number)
 
         if takeover_hit is not None:
             return _fulfill_by_takeover(
@@ -4888,7 +4930,8 @@ def fulfill_obligation(
         _drop_provider_not_installed_result(
             result_file, result_status, result_reason, gate=gate, pr_number=pr_number)
 
-        temp_reason, temp_detail = _temporary_refusal(gate, pr_number, result_status, result_reason)
+        temp_reason, temp_detail, result_data = _temporary_refusal_or_hop(
+            launch.record, head_sha_before_run, result, (result_status, result_reason, result_data), gate, pr_number)
         if temp_reason is not None:
             return _fulfill_temporary_refusal(
                 path, outcome, temp_reason, temp_detail, manager=manager, gate=gate,
@@ -4929,6 +4972,49 @@ def fulfill_obligation(
         )
     finally:
         launch.lock.release()
+
+
+def _read_declared_result(
+    result_file: Path, *, gate: str, pr_number: Any,
+) -> Tuple[str, str, Optional[Dict[str, Any]]]:
+    """(status, reason, record) of the declared gate's result file; an unreadable file is ("", "", None).
+
+    A record that parses but is not an object raises out of here (AttributeError)
+    on purpose: :func:`_fulfill_run_gate` books that as a runner error.
+    """
+    result_status = ""
+    result_reason = ""
+    result_data: Optional[Dict[str, Any]] = None
+    try:
+        if result_file.exists():
+            result_data = json.loads(result_file.read_text(encoding="utf-8"))
+            result_status = str(result_data.get("status") or "")
+            result_reason = str(result_data.get("reason") or "")
+    except (OSError, json.JSONDecodeError) as exc:
+        _LOG.debug("result status unreadable for pr-%s-%s: %s", pr_number, gate, exc)
+    return result_status, result_reason, result_data
+
+
+def _result_commit_sha(result_data: Optional[Dict[str, Any]]) -> str:
+    """The commit a result record says it reviewed; "" when there is no record object."""
+    return (
+        str(result_data.get("commit_sha") or "")
+        if isinstance(result_data, dict) else ""
+    )
+
+
+def _declared_evidence_and_takeover(
+    manager, result_data: Optional[Dict[str, Any]], head_sha: str, *, gate: str, pr_number: Any,
+) -> Tuple[str, str, Any]:
+    """(declared_kind, declared_detail, takeover_hit); the takeover chain is walked only when the declared record is not usable."""
+    declared_kind, declared_detail = (
+        _has_decided_evidence(result_data, head_sha) if result_data is not None
+        else (_EVIDENCE_NOT_DECIDED, "no result record on disk yet")
+    )
+    takeover_hit = None
+    if declared_kind != _EVIDENCE_USABLE:
+        takeover_hit = _find_takeover_successor_evidence(manager, gate, pr_number, head_sha)
+    return declared_kind, declared_detail, takeover_hit
 
 
 # ---------------------------------------------------------------------------

@@ -341,7 +341,7 @@ class DeliberationResult:
 # model-emitted sentinel were both considered and rejected — fragile, or dependent on
 # model cooperation. The backstop here exists only to cap a single seat's raw report
 # before the per-seat distill is applied; hitting it must never be silent (see _clip).
-_REPORT_BACKSTOP = int(os.environ.get("VNX_PANEL_REPORT_BACKSTOP", "40000"))
+_REPORT_BACKSTOP = 40000
 
 
 def _clip(text: str, tag: str, limit: int = _REPORT_BACKSTOP) -> str:
@@ -349,7 +349,7 @@ def _clip(text: str, tag: str, limit: int = _REPORT_BACKSTOP) -> str:
     logged loudly — silent degradation is the exact bug this replaces."""
     if len(text) > limit:
         logger.warning(
-            "panel digest: report for %s clipped at %d chars (was %d) — raise VNX_PANEL_REPORT_BACKSTOP",
+            "panel digest: report for %s clipped at %d chars (was %d)",
             tag, limit, len(text),
         )
         return text[:limit]
@@ -378,7 +378,7 @@ def _clip(text: str, tag: str, limit: int = _REPORT_BACKSTOP) -> str:
 # FIRST, so a fixed-length cut anywhere downstream can only ever trim the context tail, never
 # the task. The budget is therefore the second line of defence, not the only one — raising it
 # is bounded risk. Hitting it is always logged loudly (see _distill), never silent.
-_SEAT_DISTILLATE_BUDGET = int(os.environ.get("VNX_PANEL_SEAT_DISTILLATE_BUDGET", "12000"))
+_SEAT_DISTILLATE_BUDGET = 12000
 
 
 def _digest(fan_out: List[Dict[str, str]], limit: int = _REPORT_BACKSTOP) -> str:
@@ -399,9 +399,7 @@ def _digest(fan_out: List[Dict[str, str]], limit: int = _REPORT_BACKSTOP) -> str
         text = (fo.get("text") or "").strip()
         text = _clip(text, fo.get("provider", "?"), limit)
         seat = f"{fo.get('provider', '?')} / {fo.get('lens', '?')}"
-        text = _distill(
-            text, seat, _SEAT_DISTILLATE_BUDGET, env_hint="VNX_PANEL_SEAT_DISTILLATE_BUDGET"
-        )
+        text = _distill(text, seat, _SEAT_DISTILLATE_BUDGET, budget_name="_SEAT_DISTILLATE_BUDGET")
         parts.append(f"[{fo['provider']} / {fo['lens']}]\n{text}")
     return "\n\n".join(parts)
 
@@ -423,14 +421,14 @@ def _digest(fan_out: List[Dict[str, str]], limit: int = _REPORT_BACKSTOP) -> str
 # contrarian/verify document leads with its framing and ends with its conclusion, so a
 # head-first cut would keep the framing and drop the verdict — the same silent degradation
 # the per-seat cut fixes, one stage later.
-_DISTILLATE_BUDGET = int(os.environ.get("VNX_PANEL_DISTILLATE_BUDGET", "12000"))
+_DISTILLATE_BUDGET = 12000
 
 
 def _distill(
     text: str,
     tag: str,
     limit: int = _DISTILLATE_BUDGET,
-    env_hint: str = "VNX_PANEL_DISTILLATE_BUDGET",
+    budget_name: str = "_DISTILLATE_BUDGET",
 ) -> str:
     """Bound prior-stage material before a downstream stage's prompt carries it forward.
 
@@ -438,8 +436,8 @@ def _distill(
     synthesis) so the prompt stays bounded regardless of how many hops a piece of text has
     already passed through — the cascading-verbatim growth is exactly the OI-809 bug. The
     fan-out digest is instead bounded per seat at assembly time by _digest() under
-    _SEAT_DISTILLATE_BUDGET (OI-820). ``env_hint`` names the budget's env var in the log so
-    an operator raises the right one.
+    _SEAT_DISTILLATE_BUDGET (OI-820). ``budget_name`` names the budget constant in the log so
+    a reader knows which cut applied.
 
     A cut keeps the HEAD and the TAIL, never the head alone. A panel report opens with the
     question and framing, then echoes the shared context, and only THEN carries the analysis
@@ -456,8 +454,8 @@ def _distill(
     omitted = len(t) - limit
     logger.warning(
         "panel distillate: %s trimmed to %d chars for the downstream stage (was %d; "
-        "%d middle chars omitted) — raise %s if this loses signal",
-        tag, limit, len(t), omitted, env_hint,
+        "%d middle chars omitted) — budget %s",
+        tag, limit, len(t), omitted, budget_name,
     )
     head_budget = limit // 2
     tail_budget = limit - head_budget
@@ -591,6 +589,37 @@ def run_deliberation(
     # working — flagged via result.ledger_available, never silently.
     ledger = _ReceiptLedger.load(receipts_path)
     result.ledger_available = ledger is not None
+    present_fan_out, failed_fan_out, unmeasured_fan_out = _measure_fan_out(result, ledger, booker)
+    _log_fan_out_coverage(result, failed_fan_out, unmeasured_fan_out)
+
+    # ── Coverage floor for the synthesis (OI-1154) ──────────────────────────
+    # Decide on the SAME present/total count `coverage` reports (OI-1150), never a
+    # second tally. Below `min_seats` delivered seats the synthesis is refused
+    # LOUDLY with both counts in the message; `allow_degraded` is the conscious
+    # operator escape, and the choice is stamped on the result so the report
+    # renders it (degraded_synthesis) instead of it vanishing.
+    if _coverage_floor_refuses(result, min_seats, allow_degraded):
+        return result
+
+    digest = _digest(present_fan_out)
+    coverage_note = (
+        f"PANEL COVERAGE: {result.coverage}. Reason only from the lenses that actually "
+        "responded — a failed seat contributed NOTHING, and an unmeasured seat could not "
+        "be confirmed against the receipt ledger and is excluded; do not assume either "
+        "perspective is represented.\n"
+    ) if failed_fan_out or unmeasured_fan_out else ""
+
+    _run_downstream_stages(result, spec, mode, question, ctx_block, coverage_note, digest,
+                           roster=roster, dispatcher=dispatcher, ledger=ledger, booker=booker)
+
+    return result
+
+
+def _measure_fan_out(
+    result: DeliberationResult, ledger: Optional[_ReceiptLedger], booker: LegBooker,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Stage 1 bookkeeping for run_deliberation: measure each fan-out seat, book its leg,
+    and fill the result's coverage fields. Returns (present, failed, unmeasured) seats."""
     fan_out_measurements = []
     for fo in result.fan_out:
         raised = fo.pop("_raised", False)
@@ -624,6 +653,14 @@ def run_deliberation(
          "reason": m["reason"]}
         for m in fan_out_measurements if m["outcome"] == SEAT_UNMEASURED
     ]
+    return present_fan_out, failed_fan_out, unmeasured_fan_out
+
+
+def _log_fan_out_coverage(
+    result: DeliberationResult, failed_fan_out: List[Dict[str, Any]],
+    unmeasured_fan_out: List[Dict[str, Any]],
+) -> None:
+    """The loud coverage warnings after the fan-out: failed, unmeasured, ledger divergence."""
     if failed_fan_out:
         logger.warning(
             "panel: %d/%d seats produced no usable report (%s) — %s",
@@ -647,12 +684,11 @@ def run_deliberation(
             ", ".join(f"{d['provider']} ({d['stage']})" for d in result.ledger_divergences),
         )
 
-    # ── Coverage floor for the synthesis (OI-1154) ──────────────────────────
-    # Decide on the SAME present/total count `coverage` reports (OI-1150), never a
-    # second tally. Below `min_seats` delivered seats the synthesis is refused
-    # LOUDLY with both counts in the message; `allow_degraded` is the conscious
-    # operator escape, and the choice is stamped on the result so the report
-    # renders it (degraded_synthesis) instead of it vanishing.
+
+def _coverage_floor_refuses(
+    result: DeliberationResult, min_seats: Optional[int], allow_degraded: bool,
+) -> bool:
+    """Apply the OI-1154 synthesis floor to ``result``; True when the synthesis is refused."""
     present = len(result.present_lenses)
     total = len(result.fan_out)
     if min_seats is not None and present < min_seats:
@@ -672,16 +708,16 @@ def run_deliberation(
                 "re-run with --allow-degraded to proceed with degraded coverage",
                 present, total, min_seats,
             )
-            return result
+            return True
+    return False
 
-    digest = _digest(present_fan_out)
-    coverage_note = (
-        f"PANEL COVERAGE: {result.coverage}. Reason only from the lenses that actually "
-        "responded — a failed seat contributed NOTHING, and an unmeasured seat could not "
-        "be confirmed against the receipt ledger and is excluded; do not assume either "
-        "perspective is represented.\n"
-    ) if failed_fan_out or unmeasured_fan_out else ""
 
+def _run_downstream_stages(
+    result: DeliberationResult, spec: "ModeSpec", mode: str, question: str, ctx_block: str,
+    coverage_note: str, digest: str, *, roster: List[Tuple[str, str]], dispatcher: DispatcherFn,
+    ledger: Optional[_ReceiptLedger], booker: LegBooker,
+) -> None:
+    """Stages 2-4 of run_deliberation; sets ``result.contrarian``, ``.factcheck``, ``.synthesis``."""
     # ── Stage 2: CONTRARIAN (one red-team seat — the strongest reasoner) ──────
     # Instruction FIRST, bounded distillate of stage 1 AFTER (OI-809) — a downstream
     # truncation can then only cut into the (already bounded) context, never the task.
@@ -748,8 +784,6 @@ def run_deliberation(
         synth_prompt, f"panel-{mode}-synth",
         ledger=ledger, measure_sink=result.seat_measurements, stage="synthesis", booker=booker,
     )
-
-    return result
 
 
 def _ordered_seats(

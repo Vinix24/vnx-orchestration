@@ -149,8 +149,12 @@ class TestProviderGeminiRouted:
 class TestProviderLitellmRouted:
 
     def test_litellm_routes_to_dispatch_litellm(self):
-        """--provider litellm:deepseek calls _dispatch_litellm and returns 0 on success."""
-        argv = ["--provider", "litellm:deepseek", "--terminal-id", "T1",
+        """--provider litellm:<sub> calls _dispatch_litellm and returns 0 on success.
+
+        litellm:bedrock is used because the route constraints forbid
+        litellm:deepseek, litellm:zai and litellm:moonshot (OI-867 split).
+        """
+        argv = ["--provider", "litellm:bedrock", "--terminal-id", "T1",
                 "--dispatch-id", "test-litellm-routed", "--instruction", "noop"]
         with patch("provider_dispatch._dispatch_litellm", return_value=0) as mock_dispatch:
             rc = provider_dispatch.main(argv)

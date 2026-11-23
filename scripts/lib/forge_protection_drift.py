@@ -374,7 +374,59 @@ def parse_protection_config(raw_text: str) -> ProtectionConfig:
     _require_object_fields(rsc, _KNOWN_RSC_FIELDS, "required_status_checks")
     strict = _require_bool(rsc, "strict", "required_status_checks")
 
-    raw_checks = rsc["checks"]
+    checks = _parse_required_checks(rsc["checks"], signing_app_id)
+
+    pending_raw = doc["pending_checks"]
+    if not isinstance(pending_raw, list) or not all(isinstance(p, str) for p in pending_raw):
+        raise ProtectionConfigError("pending_checks moet een lijst van strings zijn")
+
+    (
+        ppr_present, review_count, dismiss_stale, require_code_owner, require_last_push,
+        bypass_allowances,
+    ) = _parse_pull_request_reviews(doc["required_pull_request_reviews"])
+
+    bool_values = {f: _require_bool(doc, f, "branch_protection.yaml") for f in _BOOL_TOP_LEVEL_FIELDS}
+
+    if doc["restrictions"] is not None:
+        raise ProtectionConfigError("restrictions moet null zijn (push-restricties worden hier niet gemodelleerd)")
+
+    repo_obj = doc["repo"]
+    _require_object_fields(repo_obj, _KNOWN_REPO_FIELDS, "repo")
+    allow_auto_merge = _require_bool(repo_obj, "allow_auto_merge", "repo")
+
+    rulesets_raw = doc["rulesets"]
+    if not isinstance(rulesets_raw, list) or not all(isinstance(r, str) for r in rulesets_raw):
+        raise ProtectionConfigError("rulesets moet een lijst van strings zijn")
+
+    return ProtectionConfig(
+        branch=doc["branch"],
+        strict=strict,
+        checks=tuple(checks),
+        pending_checks=tuple(pending_raw),
+        required_pull_request_reviews_present=ppr_present,
+        required_approving_review_count=review_count,
+        dismiss_stale_reviews=dismiss_stale,
+        require_code_owner_reviews=require_code_owner,
+        require_last_push_approval=require_last_push,
+        bypass_pull_request_allowances=bypass_allowances,
+        enforce_admins=bool_values["enforce_admins"],
+        required_signatures=bool_values["required_signatures"],
+        required_linear_history=bool_values["required_linear_history"],
+        allow_force_pushes=bool_values["allow_force_pushes"],
+        allow_deletions=bool_values["allow_deletions"],
+        allow_fork_syncing=bool_values["allow_fork_syncing"],
+        block_creations=bool_values["block_creations"],
+        lock_branch=bool_values["lock_branch"],
+        required_conversation_resolution=bool_values["required_conversation_resolution"],
+        allow_auto_merge=allow_auto_merge,
+        rulesets=tuple(rulesets_raw),
+        enforcement=enforcement,
+        ci_workflow=ci_workflow,
+    )
+
+
+def _parse_required_checks(raw_checks: Any, signing_app_id: Any) -> List[RequiredCheck]:
+    """``required_status_checks.checks`` of :func:`parse_protection_config`."""
     if not isinstance(raw_checks, list) or not raw_checks:
         raise ProtectionConfigError("required_status_checks.checks moet een niet-lege lijst zijn")
 
@@ -422,17 +474,18 @@ def parse_protection_config(raw_text: str) -> ProtectionConfig:
                     "in de entry gelijk aan app.app_id"
                 )
         checks.append(RequiredCheck(context, None if app_id == ANY_APP_ID else app_id))
+    return checks
 
-    pending_raw = doc["pending_checks"]
-    if not isinstance(pending_raw, list) or not all(isinstance(p, str) for p in pending_raw):
-        raise ProtectionConfigError("pending_checks moet een lijst van strings zijn")
 
+def _parse_pull_request_reviews(
+    ppr: Any,
+) -> Tuple[bool, Any, bool, bool, bool, Tuple[str, ...]]:
+    """``required_pull_request_reviews`` of :func:`parse_protection_config`."""
     # An explicit `null` here declares "no pull-request requirement at all",
     # which is what GitHub reports by omitting the subobject entirely. The
     # values below are then unused (to_normalized_dict emits None for the
     # whole block, build_put_payload sends null) — they are not a default
     # standing in for a missing declaration.
-    ppr = doc["required_pull_request_reviews"]
     ppr_present = ppr is not None
     review_count = 0
     dismiss_stale = require_code_owner = require_last_push = False
@@ -452,44 +505,9 @@ def parse_protection_config(raw_text: str) -> ProtectionConfig:
         bypass_allowances = _parse_bypass_allowances(
             ppr.get("bypass_pull_request_allowances"), "required_pull_request_reviews",
         )
-
-    bool_values = {f: _require_bool(doc, f, "branch_protection.yaml") for f in _BOOL_TOP_LEVEL_FIELDS}
-
-    if doc["restrictions"] is not None:
-        raise ProtectionConfigError("restrictions moet null zijn (push-restricties worden hier niet gemodelleerd)")
-
-    repo_obj = doc["repo"]
-    _require_object_fields(repo_obj, _KNOWN_REPO_FIELDS, "repo")
-    allow_auto_merge = _require_bool(repo_obj, "allow_auto_merge", "repo")
-
-    rulesets_raw = doc["rulesets"]
-    if not isinstance(rulesets_raw, list) or not all(isinstance(r, str) for r in rulesets_raw):
-        raise ProtectionConfigError("rulesets moet een lijst van strings zijn")
-
-    return ProtectionConfig(
-        branch=doc["branch"],
-        strict=strict,
-        checks=tuple(checks),
-        pending_checks=tuple(pending_raw),
-        required_pull_request_reviews_present=ppr_present,
-        required_approving_review_count=review_count,
-        dismiss_stale_reviews=dismiss_stale,
-        require_code_owner_reviews=require_code_owner,
-        require_last_push_approval=require_last_push,
-        bypass_pull_request_allowances=bypass_allowances,
-        enforce_admins=bool_values["enforce_admins"],
-        required_signatures=bool_values["required_signatures"],
-        required_linear_history=bool_values["required_linear_history"],
-        allow_force_pushes=bool_values["allow_force_pushes"],
-        allow_deletions=bool_values["allow_deletions"],
-        allow_fork_syncing=bool_values["allow_fork_syncing"],
-        block_creations=bool_values["block_creations"],
-        lock_branch=bool_values["lock_branch"],
-        required_conversation_resolution=bool_values["required_conversation_resolution"],
-        allow_auto_merge=allow_auto_merge,
-        rulesets=tuple(rulesets_raw),
-        enforcement=enforcement,
-        ci_workflow=ci_workflow,
+    return (
+        ppr_present, review_count, dismiss_stale, require_code_owner, require_last_push,
+        bypass_allowances,
     )
 
 
@@ -887,7 +905,7 @@ def fetch_ci_workflow_from_main(
 
     ``(None, "")`` means "the project declares none": no file on main, or a file
     that does not say. The caller's workflow name then falls to
-    ``VNX_CI_WORKFLOW_NAME`` and the fabric default. A file that exists but cannot
+    the fabric default. A file that exists but cannot
     be read or parsed is an error: guessing a workflow name would put the CI gate
     on a workflow the project never named.
     """

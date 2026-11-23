@@ -74,3 +74,27 @@ def test_emit_remap_event_import_error_swallowed(caplog, tmp_path):
 
     debug_msgs = " ".join(r.message for r in caplog.records if r.levelno == logging.DEBUG)
     assert "T1" in debug_msgs
+
+
+def test_run_tmux_returns_completed_process_and_passes_args():
+    import tmux_adapter as ta
+    done = MagicMock(returncode=0, stdout="claude\n", stderr="")
+    with patch("tmux_adapter.subprocess.run", return_value=done) as run:
+        got = ta.run_tmux(["display-message", "-p", "-t", "w:0", "#{pane_current_command}"])
+    assert got is done
+    assert run.call_args.args[0] == ["tmux", "display-message", "-p", "-t", "w:0", "#{pane_current_command}"]
+
+
+def test_run_tmux_nonzero_exit_is_returned_not_raised():
+    import tmux_adapter as ta
+    done = MagicMock(returncode=1, stdout="", stderr="no such window")
+    with patch("tmux_adapter.subprocess.run", return_value=done):
+        assert ta.run_tmux(["send-keys", "-t", "x", "Enter"]).returncode == 1
+
+
+@pytest.mark.parametrize("exc", [FileNotFoundError("tmux"), __import__("subprocess").TimeoutExpired("tmux", 10)])
+def test_run_tmux_missing_or_hung_tmux_raises_transport_error(exc):
+    import tmux_adapter as ta
+    with patch("tmux_adapter.subprocess.run", side_effect=exc):
+        with pytest.raises(ta.AdapterTransportError):
+            ta.run_tmux(["list-sessions"])

@@ -24,7 +24,6 @@ DIGEST_ENV = "VNX_PERMISSION_POLICY_DIGEST"
 def _env(tmp_path, monkeypatch):
     monkeypatch.setenv("VNX_DATA_DIR", str(tmp_path))
     monkeypatch.delenv(DIGEST_ENV, raising=False)
-    monkeypatch.delenv("VNX_CODEX_SANDBOX", raising=False)
     monkeypatch.setattr(codex_spawn, "_resolve_codex_model", lambda m: m or "gpt-test")
 
 
@@ -43,10 +42,10 @@ def _record(tmp_path, dispatch_id="d-1"):
     return json.loads(path.read_text()) if path.exists() else None
 
 
-def test_codex_record_reads_sandbox_from_env(tmp_path, monkeypatch, launch):
-    monkeypatch.setenv("VNX_CODEX_SANDBOX", "workspace-write")
-    launch({DIGEST_ENV: "a" * 64})
-    rec = _record(tmp_path)
+def test_codex_record_carries_a_sandbox_mode_from_the_argv():
+    """The record reads the mode from the argv it is given, not from the env."""
+    cmd = ["codex", "exec", "--json", "--sandbox", "workspace-write", "--model", "gpt-test"]
+    rec = codex_spawn._codex_policy_record(cmd, "/w", "a" * 64, "d-1", "T2")
     assert rec["lane"] == "codex" and rec["policy_digest"] == "a" * 64
     assert rec["layer1"]["fs"] == "workspace-write"
     assert rec["layer0"] == {"git_boundary": "worktree", "sandbox": "workspace-write", "cwd": "/w"}
@@ -55,10 +54,7 @@ def test_codex_record_reads_sandbox_from_env(tmp_path, monkeypatch, launch):
     assert "--sandbox" in rec["flags"] and "workspace-write" in rec["flags"]
 
 
-@pytest.mark.parametrize("value", [None, "", "yolo-mode", "WORKSPACE-WRITE"])
-def test_codex_fs_unsupported_when_unset_or_unknown(tmp_path, monkeypatch, value, launch):
-    if value is not None:
-        monkeypatch.setenv("VNX_CODEX_SANDBOX", value)
+def test_codex_record_is_the_bypass_route(tmp_path, launch):
     launch()
     rec = _record(tmp_path)
     assert rec["layer1"]["fs"] == "unsupported"
@@ -66,17 +62,10 @@ def test_codex_fs_unsupported_when_unset_or_unknown(tmp_path, monkeypatch, value
     assert "--dangerously-bypass-approvals-and-sandbox" in rec["flags"]
 
 
-@pytest.mark.parametrize("value,expected", [
-    (None, ["codex", "exec", "--json", "--dangerously-bypass-approvals-and-sandbox", "--model", "gpt-test"]),
-    ("bogus", ["codex", "exec", "--json", "--dangerously-bypass-approvals-and-sandbox", "--model", "gpt-test"]),
-    ("read-only", ["codex", "exec", "--json", "--sandbox", "read-only", "--model", "gpt-test"]),
-    ("workspace-write", ["codex", "exec", "--json", "--sandbox", "workspace-write", "--model", "gpt-test"]),
-    ("danger-full-access", ["codex", "exec", "--json", "--sandbox", "danger-full-access", "--model", "gpt-test"]),
-])
-def test_cmd_byte_identical_to_origin_main(monkeypatch, value, expected):
-    if value is not None:
-        monkeypatch.setenv("VNX_CODEX_SANDBOX", value)
-    assert codex_spawn._build_cmd("gpt-test") == expected
+def test_cmd_byte_identical_to_origin_main():
+    assert codex_spawn._build_cmd("gpt-test") == [
+        "codex", "exec", "--json", "--dangerously-bypass-approvals-and-sandbox", "--model", "gpt-test",
+    ]
 
 
 def test_policy_absent_when_spec_has_no_digest(tmp_path, launch):
