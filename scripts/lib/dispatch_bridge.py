@@ -468,6 +468,38 @@ def _deliverable_metadata_paths(
     return [{"path": p, "access": "read_write", "materialize_at_cwd": False} for p in raw_paths]
 
 
+def _resolve_dispatch_paths(
+    dispatch_paths: tuple[dict, ...], root: Path, project_id: str, dispatch_id: str,
+) -> "tuple[tuple[dict, ...], str]":
+    """The paths staging carries and where they came from (B10, ADR-096).
+
+    ``dispatch_paths``: the caller's non-empty paths always win (source ``caller``). An
+    empty tuple falls back to the deliverable row's ``metadata_json.dispatch_paths`` for
+    EXACTLY this dispatch and project (source ``deliverable_metadata``); the metadata
+    read never raises, so a missing or unreadable store, row or metadata is never an
+    error — staging just carries no paths (source ``none``). ``dispatch_paths_source``
+    on the spec records which of the three applied.
+    """
+    if dispatch_paths:
+        return dispatch_paths, "caller"
+    metadata_paths = _deliverable_metadata_paths(root, project_id, dispatch_id)
+    if metadata_paths:
+        return tuple(metadata_paths), "deliverable_metadata"
+    return dispatch_paths, "none"
+
+
+def _write_instruction_file(bundle_dir: Path, instruction_text: str) -> "tuple[Path, str]":
+    """Write ``instruction.md`` into the bundle and pre-bind the hash of its exact bytes.
+
+    The file is a fresh regular file and the hash is taken from the same text that
+    was written, BEFORE the door reads the bundle — nothing can swap the file
+    between the write and the door's TOCTOU check.
+    """
+    instruction_file = bundle_dir / "instruction.md"
+    atomic_write_text(instruction_file, instruction_text)
+    return instruction_file, hashlib.sha256(instruction_text.encode("utf-8")).hexdigest()
+
+
 def policy_digest_for_role(role: str) -> Optional[str]:
     """The ``policy_digest`` of the permission policy composed for *role* (permissions P5).
 
@@ -654,11 +686,8 @@ def stage_spec_bundle(
     dispatch-spec.json}. The bundle is genuinely promoted (physically under
     pending/), so the door's D11 staging gate is satisfied honestly.
 
-    ``dispatch_paths``: the caller's non-empty paths always win. An empty tuple falls
-    back to the deliverable row's ``metadata_json.dispatch_paths`` for EXACTLY this
-    dispatch and project (B10, ADR-096); ``dispatch_paths_source`` on the spec records
-    ``caller`` / ``deliverable_metadata`` / ``none``. A missing or unreadable store,
-    row or metadata is never an error — staging just carries no paths.
+    ``dispatch_paths``: caller paths win, else the deliverable's metadata, else none —
+    see ``_resolve_dispatch_paths`` (B10, ADR-096).
     """
     # 1. staging_id is DERIVED from dispatch_id and validated BEFORE any path join.
     staging_id = _require_staging_id(dispatch_id)
@@ -672,16 +701,8 @@ def stage_spec_bundle(
 
     # 4. B10: a caller that names no paths takes them from the deliverable's own metadata,
     # so the door's blast-radius check sees the scope the deliverable already knows.
-    # The caller's non-empty paths always win; the metadata read never raises.
-    if dispatch_paths:
-        dispatch_paths_source = "caller"
-    else:
-        metadata_paths = _deliverable_metadata_paths(root, effective_project_id, dispatch_id)
-        if metadata_paths:
-            dispatch_paths = tuple(metadata_paths)
-            dispatch_paths_source = "deliverable_metadata"
-        else:
-            dispatch_paths_source = "none"
+    dispatch_paths, dispatch_paths_source = _resolve_dispatch_paths(
+        dispatch_paths, root, effective_project_id, dispatch_id)
 
     # 5. deadline and difficulty validated at the trust boundary (the FIRST writer of a dispatch-spec.json).
     # Runs on the FINAL paths: an absent file_count defaults to their count.
@@ -697,20 +718,15 @@ def stage_spec_bundle(
 
     # 8. resolve the lineage BEFORE any write (D2, ADR-071 besluit 3): work_ref or a named origin fills parent_dispatch.
     parent_dispatch, edge_kind, edge_evidence, edge_parent = _stage_lineage(
-        dispatch_id, work_ref, parent_dispatch, origin_oi, origin_pr, root, round_cause,
-    )
+        dispatch_id, work_ref, parent_dispatch, origin_oi, origin_pr, root, round_cause)
 
     # 9. anchor the pending root and create the bundle dir (symlink-escape guards).
     bundle_dir = _make_bundle_dir(root, staging_id)
 
-    # 10. write the instruction as a fresh regular file inside the bundle.
-    instruction_file = bundle_dir / "instruction.md"
-    atomic_write_text(instruction_file, instruction_text)
+    # 10. write the instruction as a fresh regular file and pre-bind its hash (closes TOCTOU pre-door).
+    instruction_file, instruction_sha256 = _write_instruction_file(bundle_dir, instruction_text)
 
-    # 11. pre-bind the content hash over the exact written bytes (closes TOCTOU pre-door).
-    instruction_sha256 = hashlib.sha256(instruction_text.encode("utf-8")).hexdigest()
-
-    # 12. assemble + write the spec atomically; instruction_file is the literal absolute child path.
+    # 11. assemble + write the spec atomically; instruction_file is the literal absolute child path.
     spec_payload = {
         "schema_version": 1,
         "project_id": effective_project_id,
