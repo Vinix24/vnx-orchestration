@@ -31,8 +31,10 @@ owns lane selection (claude→headless). No Anthropic SDK import.
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import shutil
+import sqlite3
 import sys
 from pathlib import Path, PurePosixPath
 from typing import Any, Mapping, Optional
@@ -384,6 +386,88 @@ def _spec_dispatch_paths(dispatch_paths: tuple[dict, ...]) -> list[dict]:
     ]
 
 
+def _warn_metadata_paths(dispatch_id: str, reason: str) -> None:
+    """One stderr line for deliverable metadata staging could not use (never raises)."""
+    print(
+        f"[dispatch_bridge] dispatch {dispatch_id}: ignoring deliverable metadata "
+        f"dispatch_paths ({reason}); staging without paths",
+        file=sys.stderr,
+    )
+
+
+def _deliverable_metadata_paths(
+    root: Path, project_id: str, dispatch_id: str,
+) -> "Optional[list[dict]]":
+    """The ``dispatch_paths`` the deliverable row of EXACTLY this dispatch carries (B10).
+
+    The door's blast-radius check (ADR-096 B4b) and ``vnx deliverable fireable`` (B5)
+    read the paths of a fire from its staged spec, while a deliverable already stores
+    its scope in ``metadata_json.dispatch_paths`` (``vnx deliverable add|set
+    --dispatch-paths``). A caller that passes no paths used to stage a spec without
+    any, so the door saw ``scope_incomplete`` even though the deliverable knew them.
+
+    The store is read READ-ONLY (``mode=ro``). This is fail-open BY DESIGN: a missing
+    store, a missing row, unreadable/malformed metadata or a malformed path list all
+    mean "no metadata paths" (``None``) — staging then proceeds exactly as before.
+    Malformed paths are reported on stderr naming the dispatch and why; a deliverable
+    row is never a precondition for staging, so this never raises.
+
+    Only a DELIVERABLE row counts (``"deliverable": true``). The match is exact: a
+    round/part id (``<id>-r2``, ``<id>-c``) has its own row and never inherits the
+    base deliverable's paths.
+    """
+    db = root / "state" / "runtime_coordination.db"
+    if not db.is_file():
+        return None
+    try:
+        conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    except sqlite3.Error as exc:  # unreadable store: no metadata paths, never a staging failure
+        logger.warning("dispatch_bridge: cannot open %s read-only (%s)", db, type(exc).__name__)
+        return None
+    try:
+        row = conn.execute(
+            "SELECT metadata_json FROM dispatches WHERE project_id = ? AND dispatch_id = ?",
+            (project_id, dispatch_id),
+        ).fetchone()
+    except sqlite3.Error as exc:  # no dispatches table / unreadable row set: no metadata paths
+        logger.warning(
+            "dispatch_bridge: cannot read dispatches for %s (%s); no metadata paths",
+            dispatch_id, type(exc).__name__,
+        )
+        return None
+    finally:
+        conn.close()
+    if row is None or not row[0]:
+        return None
+    try:
+        metadata = json.loads(row[0])
+    except (TypeError, ValueError):
+        _warn_metadata_paths(dispatch_id, "metadata_json is not valid JSON")
+        return None
+    if not isinstance(metadata, dict):
+        _warn_metadata_paths(dispatch_id, "metadata_json is not a JSON object")
+        return None
+    if metadata.get("deliverable") is not True:
+        return None
+    raw_paths = metadata.get("dispatch_paths")
+    if raw_paths is None or raw_paths == []:
+        return None  # no scope stated is not malformed metadata
+    if not isinstance(raw_paths, list):
+        _warn_metadata_paths(
+            dispatch_id,
+            f"dispatch_paths is not a list (got {type(raw_paths).__name__})",
+        )
+        return None
+    for path in raw_paths:
+        if not isinstance(path, str) or not path.strip():
+            _warn_metadata_paths(
+                dispatch_id,
+                f"dispatch_paths is not a list of non-empty strings (got {path!r})",
+            )
+            return None
+    return [{"path": p, "access": "read_write", "materialize_at_cwd": False} for p in raw_paths]
+
+
 def policy_digest_for_role(role: str) -> Optional[str]:
     """The ``policy_digest`` of the permission policy composed for *role* (permissions P5).
 
@@ -569,42 +653,64 @@ def stage_spec_bundle(
     Bundle layout: <data_dir>/dispatches/pending/<dispatch_id>/{instruction.md,
     dispatch-spec.json}. The bundle is genuinely promoted (physically under
     pending/), so the door's D11 staging gate is satisfied honestly.
+
+    ``dispatch_paths``: the caller's non-empty paths always win. An empty tuple falls
+    back to the deliverable row's ``metadata_json.dispatch_paths`` for EXACTLY this
+    dispatch and project (B10, ADR-096); ``dispatch_paths_source`` on the spec records
+    ``caller`` / ``deliverable_metadata`` / ``none``. A missing or unreadable store,
+    row or metadata is never an error — staging just carries no paths.
     """
     # 1. staging_id is DERIVED from dispatch_id and validated BEFORE any path join.
     staging_id = _require_staging_id(dispatch_id)
 
-    # 1a. deadline and difficulty validated at the trust boundary (the FIRST writer of a dispatch-spec.json).
-    difficulty_block = _require_difficulty(difficulty, len(dispatch_paths), deadline_seconds)
-    # 1a-ter. a named skill must exist in a skill tree BEFORE the bundle is written.
-    skill = _require_known_skill(skill)
-    permission_policy_digest = policy_digest_for_role(role)  # P5: proven BEFORE any write
-
-    # 1b. resolve the effective tenant ONCE: the door derives the tenant from the bundle's
+    # 2. resolve the effective tenant ONCE: the door derives the tenant from the bundle's
     # physical location, so the staging store and the spec's project_id must be the SAME.
     effective_project_id = project_id or _project_id()
 
-    # 2. resolve the data root the SAME way the door does — anchored on the tenant.
+    # 3. resolve the data root the SAME way the door does — anchored on the tenant.
     root = (data_dir or _data_dir(effective_project_id)).resolve()
-    # 2-bis. a docs dispatch carries the configured style file (refused unreadable, BEFORE any write).
+
+    # 4. B10: a caller that names no paths takes them from the deliverable's own metadata,
+    # so the door's blast-radius check sees the scope the deliverable already knows.
+    # The caller's non-empty paths always win; the metadata read never raises.
+    if dispatch_paths:
+        dispatch_paths_source = "caller"
+    else:
+        metadata_paths = _deliverable_metadata_paths(root, effective_project_id, dispatch_id)
+        if metadata_paths:
+            dispatch_paths = tuple(metadata_paths)
+            dispatch_paths_source = "deliverable_metadata"
+        else:
+            dispatch_paths_source = "none"
+
+    # 5. deadline and difficulty validated at the trust boundary (the FIRST writer of a dispatch-spec.json).
+    # Runs on the FINAL paths: an absent file_count defaults to their count.
+    difficulty_block = _require_difficulty(difficulty, len(dispatch_paths), deadline_seconds)
+    # 6. a named skill must exist in a skill tree BEFORE the bundle is written.
+    skill = _require_known_skill(skill)
+    permission_policy_digest = policy_digest_for_role(role)  # P5: proven BEFORE any write
+
+    # 7. a docs dispatch carries the configured style file (refused unreadable, BEFORE any write).
+    # Also sees the FINAL paths: docs-only metadata paths make this a docs dispatch.
     instruction_text, style_fields = _apply_doc_style(
         instruction_text, task_class, dispatch_paths, effective_project_id, root)
 
-    # 2a. resolve the lineage BEFORE any write (D2, ADR-071 besluit 3): work_ref or a named origin fills parent_dispatch.
+    # 8. resolve the lineage BEFORE any write (D2, ADR-071 besluit 3): work_ref or a named origin fills parent_dispatch.
     parent_dispatch, edge_kind, edge_evidence, edge_parent = _stage_lineage(
         dispatch_id, work_ref, parent_dispatch, origin_oi, origin_pr, root, round_cause,
     )
 
-    # 3. anchor the pending root and create the bundle dir (symlink-escape guards).
+    # 9. anchor the pending root and create the bundle dir (symlink-escape guards).
     bundle_dir = _make_bundle_dir(root, staging_id)
 
-    # 4. write the instruction as a fresh regular file inside the bundle.
+    # 10. write the instruction as a fresh regular file inside the bundle.
     instruction_file = bundle_dir / "instruction.md"
     atomic_write_text(instruction_file, instruction_text)
 
-    # 5. pre-bind the content hash over the exact written bytes (closes TOCTOU pre-door).
+    # 11. pre-bind the content hash over the exact written bytes (closes TOCTOU pre-door).
     instruction_sha256 = hashlib.sha256(instruction_text.encode("utf-8")).hexdigest()
 
-    # 6. assemble + write the spec atomically; instruction_file is the literal absolute child path.
+    # 12. assemble + write the spec atomically; instruction_file is the literal absolute child path.
     spec_payload = {
         "schema_version": 1,
         "project_id": effective_project_id,
@@ -620,6 +726,9 @@ def stage_spec_bundle(
         "target_slot": target_slot,
         "gate": _canonical_gate(gate),
         "dispatch_paths": _spec_dispatch_paths(dispatch_paths),
+        # B10: where the paths above came from ("caller" | "deliverable_metadata" | "none").
+        # An extra key dispatch_cli.load_spec ignores — not a schema change.
+        "dispatch_paths_source": dispatch_paths_source,
         "provider": _canonical_provider(provider).value,
         "model": model or None,
         # RS-1: the verified skill slug (or null). dispatch_spec.DispatchSpec.skill
