@@ -1,17 +1,20 @@
 """blast_radius_gate — verdict clear, blast_radius_overlap or blast_radius_unknown per candidate (ADR-096 B4b); unknown is local to it and never clear."""
 from __future__ import annotations
 
+import fcntl
 import subprocess
 from collections import namedtuple
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable, List, Sequence, Tuple
+from typing import Iterable, Iterator, List, Sequence, Tuple
 
 import blast_radius as br
 import blast_radius_sources as brs
 from deliverable_predecessor_gate import append_lines
 
 MODE_KEY, MODES, DEFAULT_MODE, LEDGER = "VNX_BLAST_RADIUS_MODE", ("off", "warn", "refuse"), "warn", "blast_radius.ndjson"
+LOCK_FILENAME = "blast_radius.lock"  # the check-and-claim section (ADR-096 §15)
 CLEAR, OVERLAP, UNKNOWN = "clear", "blast_radius_overlap", "blast_radius_unknown"
 Hit = namedtuple("Hit", "source other path reason")  # reason "overlap", or why it is unknown
 
@@ -19,6 +22,25 @@ Hit = namedtuple("Hit", "source other path reason")  # reason "overlap", or why 
 def gh(argv: List[str], cwd: Path) -> str:
     """``gh <argv>`` in ``cwd``; raises on a non-zero exit or a timeout."""
     return subprocess.run(["gh", *argv], cwd=str(cwd), capture_output=True, text=True, timeout=30, check=True).stdout
+
+
+@contextmanager
+def section(state_dir: "str | Path") -> Iterator[None]:
+    """Serialise the blast-radius check and the dispatch claim (ADR-096 §15).
+
+    An exclusive ``flock`` on ``<state_dir>/blast_radius.lock``: the first fire holds
+    it from its check through its claim, so a second fire in the same second blocks
+    here and then reads the first as ``starting`` in ``live_work``. The lock is
+    released on every exit, an exception inside the section included.
+    """
+    path = Path(state_dir) / LOCK_FILENAME
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a+", encoding="utf-8") as fh:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
 
 
 def judge(candidate: br.Subject, sources: Iterable[Tuple[str, brs.Sources]], repo_root: "str | Path") -> Tuple[str, Tuple[Hit, ...]]:
