@@ -2781,29 +2781,65 @@ def _check_predecessor_verdict(
                                  f"(mode {mode}, stored {raw!r}){tail}"))
 
 
-def _check_blast_radius_verdict(
-    spec: DispatchSpec, repo_root: Path, state_dir: Path, override_reason: Optional[str] = None, dry_run: bool = False,
-) -> Optional[ConstraintVerdict]:
-    """ADR-096 B4b: overlap (or unknown overlap) with live work or an open PR warns or refuses this fire per mode; a dry run writes no line."""
+def _blast_radius_candidate(
+    spec: DispatchSpec, repo_root: Path, state_dir: Path, predecessor_override_reason: Optional[str] = None,
+) -> "br.Subject":
+    """This fire's own side of the blast-radius comparison (ADR-096 §10, OI-3070).
+
+    The identity is the staged spec's work: its ``pr_id`` as the open PR number, its
+    ``work_ref`` as the branch (``origin/x`` read as ``x``), and the dispatch-id prefix
+    branch as the fallback — ``DispatchSpec`` has no separate branch field. ``base_ref`` is
+    never identity: a stacked successor's base names its predecessor's branch, which is not
+    its own work.
+
+    A declared predecessor is excluded only when the predecessor gate itself guarantees it is
+    satisfied: a hard edge (an unknown kind counts as hard, as in ``deliverable_predecessor_gate``)
+    under mode ``refuse`` and without an ``--override-predecessor`` reason. Anything else can
+    still be live, so nothing is excluded.
+    """
     import sqlite3
-    import config_runtime
     import blast_radius as br
+    import config_runtime
+    import deliverable_predecessor_gate as dpg
+
+    base = br._round_base(spec.dispatch_id)
+    work_ref = (getattr(spec, "work_ref", None) or "").strip()
+    pr_id = getattr(spec, "pr_id", None)
+    pr_number = int(pr_id) if isinstance(pr_id, str) and pr_id.strip().isdecimal() else None
+    preds: tuple[str, ...] = ()
+    if not (predecessor_override_reason or "").strip():
+        raw_mode = config_runtime.get(dpg.MODE_KEY)
+        if (raw_mode if raw_mode in dpg.MODES else "refuse") == "refuse":
+            try:
+                preds = tuple(e.predecessor for e in dpg.read_edges(
+                    state_dir / "runtime_coordination.db", spec.project_id, base) if e.kind != "soft")
+            except sqlite3.Error:  # vnx-silent-except: predecessors unread means none excluded, which can only add overlap
+                preds = ()
+    # validation made each path a PurePosixPath, which drops the trailing "/" that marks a directory (ADR-096 §5)
+    paths = tuple(p + "/" if (Path(repo_root) / p).is_dir() else p for p in write_paths(spec.dispatch_paths))
+    return br.Subject(base, paths, _work_ref_branch(work_ref) if work_ref else br._branch_of(base),
+                      preds, pr_number)
+
+
+def _check_blast_radius_verdict(
+    spec: DispatchSpec, repo_root: Path, state_dir: Path, override_reason: Optional[str] = None,
+    dry_run: bool = False, predecessor_override_reason: Optional[str] = None,
+) -> Optional[ConstraintVerdict]:
+    """ADR-096 B4b: overlap (or unknown overlap) with live work or an open PR warns or refuses this fire per mode; a dry run writes no line.
+
+    The candidate is this fire's own work as staged (``pr_id``, ``work_ref``, else the dispatch-id
+    prefix branch), and only a hard predecessor the gate guarantees under ``refuse`` is excluded
+    (``_blast_radius_candidate``, OI-3070).
+    """
+    import config_runtime
     import blast_radius_gate as brg
     import blast_radius_sources as brs
-    import deliverable_predecessor_gate as dpg
 
     raw = config_runtime.get(brg.MODE_KEY)
     mode = brg.DEFAULT_MODE if raw is None else (raw if raw in brg.MODES else "refuse")
     if mode == "off" or not _spec_is_writing(spec):  # a dispatch that writes nothing has no blast radius
         return None
-    base = br._round_base(spec.dispatch_id)
-    try:
-        preds = tuple(e.predecessor for e in dpg.read_edges(state_dir / "runtime_coordination.db", spec.project_id, base))
-    except sqlite3.Error:  # vnx-silent-except: predecessors unread means none excluded, which can only add overlap
-        preds = ()
-    # validation made each path a PurePosixPath, which drops the trailing "/" that marks a directory (ADR-096 §5)
-    paths = tuple(p + "/" if (Path(repo_root) / p).is_dir() else p for p in write_paths(spec.dispatch_paths))
-    candidate = br.Subject(base, paths, br._branch_of(base), preds)
+    candidate = _blast_radius_candidate(spec, repo_root, state_dir, predecessor_override_reason)
     verdict, hits = brg.judge(candidate, (
         ("live_work", brs.live_subjects(state_dir, spec.project_id)),
         ("open_pr", brs.open_pr_subjects(repo_root, spec.project_id, brs.default_cache_path(state_dir), brg.gh))), repo_root)
@@ -4591,7 +4627,7 @@ def run_dispatch(
             return 1
 
         overlap_reject, attempt_id = _check_and_claim_in_section(
-            vspec, plan, snapshot, repo_root, state_dir, overlap_override_reason, refire_reason, dry_run)
+            vspec, plan, snapshot, repo_root, state_dir, overlap_override_reason, refire_reason, dry_run, predecessor_override_reason)
         if overlap_reject is not None:
             _emit_reject(overlap_reject)
             return 1
@@ -4694,6 +4730,7 @@ def run_dispatch(
 def _check_and_claim_in_section(
     vspec, plan: ExecutionPlan, snapshot, repo_root: Path, state_dir: Path,
     overlap_override_reason: Optional[str], refire_reason: Optional[str], dry_run: bool,
+    predecessor_override_reason: Optional[str] = None,
 ) -> "tuple[Optional[Reject], Optional[str]]":
     """The door's blast-radius check and dispatch claim, in ONE section on the real path.
 
@@ -4714,12 +4751,14 @@ def _check_and_claim_in_section(
     no row (best-effort — see _persist_dispatch_row).
     """
     if dry_run:
-        return _blast_radius_reject(vspec.spec, repo_root, state_dir, overlap_override_reason, dry_run), None
+        return _blast_radius_reject(
+            vspec.spec, repo_root, state_dir, overlap_override_reason, dry_run, predecessor_override_reason), None
 
     _run_scout_prepass(plan, vspec, state_dir=state_dir)
     from blast_radius_gate import section
     with section(state_dir):
-        overlap_reject = _blast_radius_reject(vspec.spec, repo_root, state_dir, overlap_override_reason, False)
+        overlap_reject = _blast_radius_reject(
+            vspec.spec, repo_root, state_dir, overlap_override_reason, False, predecessor_override_reason)
         if overlap_reject is not None:
             return overlap_reject, None
 

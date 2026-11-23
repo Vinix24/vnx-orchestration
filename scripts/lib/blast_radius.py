@@ -115,8 +115,11 @@ def overlaps(a: Sequence[str], b: Sequence[str]) -> Tuple[str, ...]:
 
 
 def is_self(candidate: Subject, other: Subject) -> bool:
-    """Same deliverable, a follow-up round on the same branch, or the PR on that branch."""
+    """Same deliverable, the same open PR (``pr_number``), a follow-up round on the same branch,
+    or the PR on that branch."""
     if candidate.deliverable_id and candidate.deliverable_id == other.deliverable_id:
+        return True
+    if candidate.pr_number is not None and candidate.pr_number == other.pr_number:
         return True
     own = _branch_of(candidate.deliverable_id) if candidate.deliverable_id else None
     for branch in (candidate.branch, own):
