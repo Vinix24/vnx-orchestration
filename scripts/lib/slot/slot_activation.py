@@ -10,7 +10,6 @@ import math
 from typing import Any, Dict, Iterable, List
 
 SEO_PROFILE = "seo-gate"
-DOCTOR_ACCOUNTS = ("vincentvandeth", "ci-runner")
 OBSERVE_MIN_SECONDS = 7 * 86400
 MIN_PROJECTS = 2
 
@@ -38,11 +37,22 @@ def _calibration(policy: Dict[str, Any], rec: Any, now: float) -> List[str]:
     return out
 
 
-def _doctor(rec: Any, now: float) -> List[str]:
+def _doctor(policy: Dict[str, Any], rec: Any, now: float) -> List[str]:
+    """Every account named in ``enforce_activation.doctor_accounts`` needs a positive run.
+
+    The policy owns the account list (ADR-062); the code names no account. A list that cannot be
+    read (missing key, no ``enforce_activation``, not a list, empty, a duplicate, a non-string or
+    blank entry) is no evidence at all: it blocks with one condition and checks no account."""
+    act = policy.get("enforce_activation")
+    accounts = act.get("doctor_accounts") if isinstance(act, dict) else None
+    if not (isinstance(accounts, list) and accounts
+            and all(isinstance(a, str) and a.strip() for a in accounts)
+            and len(set(accounts)) == len(accounts)):
+        return ["doctor: no valid doctor_accounts in the policy"]
     if not isinstance(rec, dict):
         return ["doctor: no record"]
     out = []
-    for account in DOCTOR_ACCOUNTS:
+    for account in accounts:
         run = rec.get(account)
         code = run.get("exit_code") if isinstance(run, dict) else None
         if not (isinstance(run, dict) and _time(run.get("checked_at"), now) and _ref(run.get("evidence_ref"))
@@ -110,6 +120,6 @@ def missing(policy: Dict[str, Any], events: Iterable[Dict[str, Any]], now: float
     act = policy.get("enforce_activation")
     if not isinstance(act, dict):
         return ["enforce_activation: no object"]
-    return (_calibration(policy, act.get("calibration"), now) + _doctor(act.get("doctor"), now)
+    return (_calibration(policy, act.get("calibration"), now) + _doctor(policy, act.get("doctor"), now)
             + _observe(policy, act.get("observe"), events, now)
             + _operator(act.get("operator"), act.get("observe"), now))

@@ -200,7 +200,7 @@ Lege beginlijsten worden alleen bij bewuste initialisatie gemaakt; een verdwenen
 | `mode` | Uitsluitend `off`, `observe`, `enforce`, geschreven door beleidseigenaar; pending is een uitvoeringsstatus. |
 | `enforce_activation` | Object met de vier bewijsrecords hieronder; leeg/onbekend is geen geslaagde activering. |
 | `enforce_activation.calibration` | `measured_at`, `measurement_ref`, `seo_slots`; bewijs van RS-1 op drie volle poorten, slotgetal gelijk aan het SEO-profiel. |
-| `enforce_activation.doctor` | Per account `vincentvandeth` en `ci-runner`: `checked_at`, `exit_code` exact integer 0 en `evidence_ref`; operating-logregel voor ci-runner. |
+| `enforce_activation.doctor` | De accountnamen komen uit `enforce_activation.doctor_accounts` in het beleid; op deze host zijn dat nu `vincentvandeth` en `ci-runner`. Per account: `checked_at`, `exit_code` exact integer 0 en `evidence_ref`; operating-logregel voor ci-runner. |
 | `enforce_activation.observe` | `started_at`, `ended_at`, `project_ids`, `evidence_ref`; minstens 7 dagen en zware aanvragen van minstens twee verschillende projecten in de slotlog, gelogd in modus `observe` binnen `started_at`–`ended_at`; een regel zonder of met een andere modus telt niet, een `mode_changed` naar iets anders dan `observe` binnen het interval blokkeert. |
 | `enforce_activation.operator` | `decided_at`, `decision_ref`; verwijst naar het expliciete besluit tot activering. |
 

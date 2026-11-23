@@ -16,23 +16,26 @@ sys.path.insert(0, str(ROOT / "scripts" / "lib"))
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import slot_cli  # imported after the path setup above
+from slot import slot_activation
 from slot.slot_store import SlotStore
 
 ACL = " 0: group:vnxslot allow list,add_file,search,delete_child,file_inherit,directory_inherit"
 SWAP = "vm.swapusage: total = 5120.00M  used = 100.00M  free = 5020.00M  (encrypted)\n"
 VM_STAT = "Mach Virtual Memory Statistics: (page size of 16384 bytes)\nPages occupied by compressor: 1024.\n"
 DAY = 86400
+DOCTOR_ACCOUNTS = ["vincentvandeth", "ci-runner"]
 POLICY = {"total": 3, "reserved": 1, "runner_reserve": 1, "max_bypass": 3, "max_transition": 600, "max_queue": 5,
-          "mode": "observe", "enforce_activation": {},
+          "mode": "observe", "enforce_activation": {"doctor_accounts": list(DOCTOR_ACCOUNTS)},
           "memory": {"swap_growth_mb": 256, "swap_level_mb": 4096, "compressor_gb": 8},
           "profiles": {"runner": {"slots": 1, "max_slots": 8, "max_wait_s": 30, "heavy": False, "children": ["seo-gate"]},
                        "seo-gate": {"slots": 1, "max_slots": 4, "max_wait_s": 30, "heavy": True, "children": []}}}
 
 
 def evidence(now):
-    return {"calibration": {"measured_at": now - 9 * DAY, "measurement_ref": "rs1.md", "seo_slots": 1},
+    return {"doctor_accounts": list(DOCTOR_ACCOUNTS),
+            "calibration": {"measured_at": now - 9 * DAY, "measurement_ref": "rs1.md", "seo_slots": 1},
             "doctor": {a: {"checked_at": now - DAY, "exit_code": 0, "evidence_ref": "log#1"}
-                       for a in ("vincentvandeth", "ci-runner")},
+                       for a in DOCTOR_ACCOUNTS},
             "observe": {"started_at": now - 8 * DAY, "ended_at": now - DAY, "project_ids": ["vnx-dev", "seo"],
                         "evidence_ref": "slotlog"},
             "operator": {"decided_at": now - 100, "decision_ref": "besluit 2026-11-20"}}
@@ -248,6 +251,64 @@ def test_each_missing_activation_condition_blocks(env, break_it):
     _heavy_log(env, now, ["vnx-dev", "seo"])
     assert cli(env, "mode", "set", "enforce", "--project-id", "vnx-dev")[0] == 78
     assert json.loads(env.policy_path.read_text())["mode"] == "observe"
+
+
+_MISSING = object()
+
+
+@pytest.mark.parametrize("accounts", [
+    pytest.param(_MISSING, id="missing-key"),
+    pytest.param(None, id="null"),
+    pytest.param("vincentvandeth", id="not-a-list"),
+    pytest.param([], id="empty"),
+    pytest.param([""], id="empty-string"),
+    pytest.param(["   "], id="blank"),
+    pytest.param([1], id="non-string"),
+    pytest.param(["vincentvandeth", "vincentvandeth"], id="duplicate"),
+    pytest.param(["vincentvandeth", "ci-runner", None], id="non-string-among-names"),
+])
+def test_an_unreadable_doctor_accounts_list_blocks_with_that_one_condition(env, accounts):
+    """The accounts come from the policy (ADR-062); every unreadable shape is one blocking condition."""
+    now = time.time()
+    proof = evidence(now)
+    if accounts is _MISSING:
+        proof.pop("doctor_accounts")
+    else:
+        proof["doctor_accounts"] = accounts
+    patch_policy(env, enforce_activation=proof)
+    _heavy_log(env, now, ["vnx-dev", "seo"])
+    policy = json.loads(env.policy_path.read_text())
+    assert slot_activation.missing(policy, slot_cli.read_events(env.store_dir), now) == [
+        "doctor: no valid doctor_accounts in the policy"]   # calibration, observe and operator all pass
+    assert cli(env, "mode", "set", "enforce", "--project-id", "vnx-dev")[0] == 78
+    assert json.loads(env.policy_path.read_text())["mode"] == "observe"
+
+
+@pytest.mark.parametrize("policy", [
+    pytest.param({}, id="no-enforce-activation"),
+    pytest.param({"enforce_activation": {}}, id="no-doctor-accounts"),
+    pytest.param({"enforce_activation": {"doctor_accounts": []}}, id="empty"),
+])
+def test_an_unreadable_doctor_accounts_list_checks_no_account(policy):
+    """``missing`` refuses a policy without an ``enforce_activation`` object before it gets here, so
+    the raw condition is pinned on the helper: even a positive record cannot rescue the list."""
+    now = time.time()
+    rec = {"vincentvandeth": {"checked_at": now - DAY, "exit_code": 0, "evidence_ref": "log#1"},
+           "ci-runner": {"checked_at": now - DAY, "exit_code": 1, "evidence_ref": "log#1"}}
+    assert slot_activation._doctor(policy, rec, now) == ["doctor: no valid doctor_accounts in the policy"]
+
+
+def test_a_valid_doctor_accounts_list_of_one_passes_when_that_account_has_evidence(env):
+    now = time.time()
+    proof = evidence(now)
+    proof["doctor_accounts"] = ["vincentvandeth"]
+    proof["doctor"] = {"vincentvandeth": proof["doctor"]["vincentvandeth"]}   # ci-runner is not named
+    patch_policy(env, enforce_activation=proof)
+    _heavy_log(env, now, ["vnx-dev", "seo"])
+    policy = json.loads(env.policy_path.read_text())
+    assert slot_activation.missing(policy, slot_cli.read_events(env.store_dir), now) == []
+    assert cli(env, "mode", "set", "enforce", "--project-id", "vnx-dev")[0] == 0
+    assert json.loads(env.policy_path.read_text())["mode"] == "enforce"
 
 
 def test_heavy_requests_of_only_one_project_in_the_slotlog_block(env):
