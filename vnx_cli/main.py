@@ -1144,6 +1144,16 @@ def _register_deliverable_dependency_verbs(subs: argparse.Action) -> None:
     p = subs.add_parser("deps", help="dependencies of a deliverable, both directions, active and removed")
     _common_horizon_args(p)
     p.add_argument("dispatch_id")
+    p = subs.add_parser(
+        "fireable",
+        help="the ready deliverables a T0 can fire together now: no open predecessor, no overlap "
+             "(all tracks of the project by default; --horizon narrows to one band)",
+    )
+    _common_horizon_args(p)
+    p.add_argument("--horizon", choices=_HORIZON_CHOICES, default=None,
+                   help="limit to deliverables on tracks in that horizon band (default: all tracks)")
+    p.add_argument("--repo-root", default="", dest="repo_root", metavar="PATH",
+                   help="git repo root for the open-PR and directory lookups (default: --project-dir)")
 
 
 def _register_plan_gate_sign_verb(subs: argparse.Action) -> None:

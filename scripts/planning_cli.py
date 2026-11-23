@@ -17,6 +17,7 @@ Delegated from `bin/vnx`:
   vnx deliverable close <dispatch_id> --evidence <pr>
   vnx deliverable set <dispatch_id> [--task-class <class>] [--routing-floor <floor>]
   vnx deliverable depend|undepend <dlv> --on <dlv> [--kind soft | --reason "..."]; deps <dlv> [--json]
+  vnx deliverable fireable [--horizon now|next|later] [--json]  (ADR-096 §18: all tracks by default)
                        [--dispatch-paths <p1,p2>]
 
 NO-NODE model: a deliverable is a proposed dispatch row with output_kind.
@@ -74,6 +75,7 @@ import objective_reconcile  # noqa: E402
 import plan_gate_enforcement  # noqa: E402
 import actor_class  # noqa: E402
 import deliverable_dependencies as dlv_deps
+import deliverable_fireable as dlv_fireable
 from delivery_identity import delivery_identity_fields
 import plan_scope
 import provider_switch
@@ -3119,6 +3121,47 @@ def cmd_deliverable_deps(args: argparse.Namespace) -> int:
         for r in rows:
             state = "active" if r["active"] else f"removed {r['removed_at']} ({r['removed_reason']})"
             print(f"    {r[other]:<18} {r['kind']:<5} {state}")
+    return 0
+
+
+def cmd_deliverable_fireable(args: argparse.Namespace) -> int:
+    """``deliverable fireable [--horizon now|next|later] [--json]`` (ADR-096 §18, B5): what a T0 can fire together now.
+
+    Read-only. Lists the ``ready`` deliverables whose hard predecessors are all satisfied and that
+    overlap no live work or open PR, then greedily picks a mutually overlap-free set by track
+    priority and then age. Every drop carries its reason. All tracks of the project by default;
+    ``--horizon`` narrows to one band. Exit 0 also when the list is empty.
+    """
+    state_dir = _resolve_state_dir(args.state_dir)
+    project_id = (args.project_id or "").strip()
+    if not project_id:
+        print("deliverable fireable: --project-id is required (ADR-007)", file=sys.stderr)
+        return 2
+    repo_root = Path(getattr(args, "repo_root", "") or getattr(args, "project_dir", "") or ".").resolve()
+    try:
+        selection = dlv_fireable.select(
+            state_dir=state_dir, project_id=project_id, repo_root=repo_root,
+            sources=dlv_fireable.default_sources(state_dir, project_id, repo_root),
+            horizon=args.horizon,
+        )
+    except sqlite3.Error as exc:
+        print(f"deliverable fireable: the store cannot be read: {exc}", file=sys.stderr)
+        return 2
+    if args.json:
+        print(json.dumps({
+            "fireable": [{"deliverable_id": e.deliverable_id, "track": e.track, "reason": e.reason}
+                         for e in selection.fireable],
+            "dropped": [{"deliverable_id": e.deliverable_id, "track": e.track, "reason": e.reason}
+                        for e in selection.dropped],
+        }, indent=2))
+        return 0
+    print(f"\nVNX deliverable fireable — project '{project_id}' — "
+          f"{'horizon ' + args.horizon if args.horizon else 'all tracks'}\n")
+    for title, rows in (("fireable", selection.fireable), ("dropped", selection.dropped)):
+        print(f"  {title}:" + ("" if rows else " none"))
+        for e in rows:
+            print(f"    {e.deliverable_id:<28} {e.track or '-':<20} {e.reason or '-'}")
+    print()
     return 0
 
 
@@ -6838,6 +6881,17 @@ def _add_deliverable_dependency_parsers(dlv_sub: Any, common: Any) -> None:
     common(p)
     p.add_argument("dispatch_id")
     p.set_defaults(func=cmd_deliverable_deps)
+    p = dlv_sub.add_parser(
+        "fireable",
+        help="the ready deliverables a T0 can fire together now: no open predecessor, no overlap "
+             "(all tracks of the project; --horizon narrows to one band)",
+    )
+    common(p)
+    p.add_argument("--horizon", choices=("now", "next", "later"), default=None,
+                   help="limit to deliverables on tracks in that horizon band (default: all tracks)")
+    p.add_argument("--repo-root", default="", dest="repo_root", metavar="PATH",
+                   help="git repo root for the open-PR and directory lookups (default: the project dir)")
+    p.set_defaults(func=cmd_deliverable_fireable)
 
 
 def _add_deliverable_retarget_parser(dlv_sub: Any, common: Any) -> None:

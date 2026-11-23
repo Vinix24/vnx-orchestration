@@ -41,6 +41,7 @@ class Subject:
     paths: Optional[Sequence[str]]  # None: the paths could not be read
     branch: Optional[str] = None
     predecessors: Tuple[str, ...] = ()
+    pr_number: Optional[int] = None  # set when this subject is an open PR (B5 names it as `#<pr>`)
 
 
 @dataclass(frozen=True)
