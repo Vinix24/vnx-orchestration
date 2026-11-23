@@ -57,6 +57,19 @@ trust the silent `vnx-dev` default in a multi-project context).
    `proposed`. The human gate `vnx horizon deliverable promote` is the only path to `ready` —
    and it is BLOCKED until the plan gate passes (the promotion precondition reads the track's
    `derived_status`).
+   - **Record order and paths on every add.** Pass `--depends-on <dlv>,<dlv>` for the
+     deliverables it must wait for (hard by default), taken from the plan's order column, and
+     `--dispatch-paths <p1,p2>` for the repo paths it will write: files where they are known, a
+     directory with a trailing `/` only where the files are not yet known. `tests` or `docs`
+     alone are generic and do not count as scope.
+   - **Later changes.** `vnx deliverable depend <dlv> --on <dlv> [--kind soft]` adds a
+     dependency, `vnx deliverable undepend <dlv> --on <dlv> --reason "..."` removes one, and
+     `vnx deliverable set <dlv> --dispatch-paths <p1,p2>` sets paths later. Check with
+     `vnx deliverable deps <dlv>`.
+   - A deliverable without paths says why in its title or plan row (for example a read-only
+     measurement). Without paths the door can only report the fire as `blast_radius_unknown`.
+   - A soft dependency is reported but never refuses; use it only for "better after", not for
+     "breaks without".
    - **Deliverables carry the work.** Every piece of work starts as a deliverable. A dispatch
      outside a deliverable makes the progress view (the `voortgang` mod) wrong, because the
      deliverable is the unit of a track row.
@@ -104,9 +117,16 @@ Every feature is preceded by an architect/plan phase. The PLAN (not the code) is
 one seat BEFORE any implementation, on scope, PR split, decisions and ADRs, and feasibility.
 Line numbers and test details belong to the builder and codex in the PR review.
 
-- **Plan doc** (linked from the track, output_kind `doc`): `## Problem`, `## Approach`,
-  `## Deliverables` (each tagged task_class + complexity), `## Risks`, `## Model-routing plan`
-  (the FLOOR per deliverable, not a hand-picked lane), `## Open questions`.
+- **Plan doc** (linked from the track, output_kind `doc`): the first lines name the track as
+  `` Track `<track_id>` `` (one track per plan), then `## Problem`, `## Approach`,
+  `## Deliverables`, `## Risks`, `## Model-routing plan` (the FLOOR per deliverable, not a
+  hand-picked lane), `## Open questions`.
+- **Deliverable table** (under `## Deliverables`, one row per deliverable): `#` (a short label
+  such as `B1`), `id` (the `dlv-` id once the deliverable exists), the deliverable,
+  `task_class`, the size limit, and `hangt af van` (labels or `dlv-` ids, comma-separated,
+  `(soft)` after a soft one, `geen` for none). A paths column is optional. The deliverable's
+  title starts with its label and a colon (`B1: ...`): the parser maps a label to its
+  deliverable by that prefix.
 - **One seat, a second on BLOCK** (operator decision 2026-10-17, P2; `configs/plan_gate_panel.yaml`,
   `compose_panel` in `scripts/lib/plan_gate_panel.py`). A run has ONE seat, `default_seat`
   (codex). When it returns BLOCK, `escalation_seat` (opus) reads the same plan in the same run

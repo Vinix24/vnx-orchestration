@@ -67,6 +67,13 @@ Every FEATURE_PLAN.md MUST follow this structure:
 
 ```markdown
 # Feature: [Feature Name]
+Track `<track_id>`
+
+## Deliverable table
+| # | id | Deliverable | task_class | Size limit | hangt af van |
+|---|---|---|---|---|---|
+| B1 | `dlv-...` | B1: [title] | 02_feature | 300 | geen |
+| B2 | `dlv-...` | B2: [title] | 02_feature | 300 | B1 |
 
 ## PR-1: [PR Title]
 **Track**: A
@@ -108,6 +115,14 @@ Every FEATURE_PLAN.md MUST follow this structure:
 5. **Checklist items**: Must use `- [ ]` format (markdown checkboxes)
 6. **PR separator**: Use `---` between PRs
 7. **Gate name**: Use backtick format `` `gate_prX_descriptive_name` ``
+8. **Track line**: The first lines name the track as `` Track `<track_id>` `` (one track per plan)
+9. **Deliverable table**: one row per PR: `#` (short label such as `B1`), `id` (the `dlv-` id once the deliverable exists), the deliverable, `task_class`, the size limit, and `hangt af van` (labels or `dlv-` ids, comma-separated, `(soft)` after a soft one, `geen` for none). A paths column is optional. The PR title starts with its label and a colon (`B1: ...`): the parser maps a label to its deliverable by that prefix.
+
+### Deliverable Table Rules
+The table is the plan's order and scope, and what the door reads.
+1. **Order**: `vnx deliverable add ... --depends-on <dlv>,<dlv>` from the `hangt af van` column (hard by default); a soft row is `vnx deliverable depend <dlv> --on <dlv> --kind soft`.
+2. **Paths**: `vnx deliverable add ... --dispatch-paths <p1,p2>` for the repo paths the deliverable writes: files where they are known, a directory with a trailing `/` only where the files are not yet known. `tests` or `docs` alone do not count as scope.
+A deliverable without paths says why in its title or table row (for example a read-only measurement); the door then reports `blast_radius_unknown`.
 
 ## Examples
 - `/planner Create authentication system plan`
