@@ -426,7 +426,7 @@ Planning commands (strategic-layer read surface):
                         status (human-gated: dry-run default; --apply --approval-id to write)
   queue-status        Queued deliverables per track: state, delivering PR, dependencies
                         (same as objective queue; options: --objective <id>, --all, --json)
-  deliverable add|list|promote|close|set|depend|undepend|deps  Deliverables of a track (proposed dispatch rows)
+  deliverable add|list|promote|close|set|depend|undepend|deps|fireable  Deliverables of a track (proposed dispatch rows)
                         add --objective <id> --output-kind <kind> --title "..."; list [--objective <id>] [--json]
                         promote <dispatch_id> is the human gate; close <dispatch_id> --evidence <pr>
 

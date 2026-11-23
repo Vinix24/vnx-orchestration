@@ -20,7 +20,7 @@ for _p in (str(_LIB), str(_LIB.parent)):
         sys.path.insert(0, _p)
 
 from atomic_io import atomic_write_json
-from blast_radius import Subject, _branch_of
+from blast_radius import REASON_SCOPE_INCOMPLETE, Subject, _branch_of
 
 CACHE_FILENAME = "blast_radius_pr_cache.json"
 CACHE_VERSION = 1
@@ -39,34 +39,43 @@ def default_cache_path(state_dir: "str | Path") -> Path:
     return Path(state_dir) / CACHE_FILENAME
 
 
-def _spec_paths(data_dir: Path, did: str) -> Tuple[Optional[Tuple[str, ...]], str]:
-    """The write-capable paths of the staged spec, or (None, why they cannot be read)."""
+def _spec_paths(data_dir: Path, did: str) -> Tuple[Optional[Tuple[str, ...]], str, bool]:
+    """(write paths, why they are missing, spec readable); readable True with no paths = no write grant."""
     from dispatch_spec import WRITE_GRANTING_PATH_ACCESS, PathAccess
     from review_vendor import dispatch_spec_paths
 
     specs, why = dispatch_spec_paths(did, data_dir=data_dir)
     if not specs:
-        return None, why
+        return None, why, False
     if len(specs) > 1:
-        return None, f"{len(specs)} dispatch-spec.json files for {did}: not guessed"
+        return None, f"{len(specs)} dispatch-spec.json files for {did}: not guessed", False
     try:
         raw = json.loads(specs[0].read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
-        return None, f"{specs[0]} cannot be read: {type(exc).__name__}: {exc}"
+        return None, f"{specs[0]} cannot be read: {type(exc).__name__}: {exc}", False
     entries = raw.get("dispatch_paths") if isinstance(raw, dict) else None
     if not isinstance(entries, list) or not entries:
-        return None, f"{specs[0]} declares no dispatch_paths"
+        return None, f"{specs[0]} declares no dispatch_paths", False
     paths: List[str] = []
     for e in entries:
         if not isinstance(e, dict) or not isinstance(e.get("path"), str) or not e["path"]:
-            return None, f"{specs[0]} has a malformed dispatch_paths entry: {e!r}"
+            return None, f"{specs[0]} has a malformed dispatch_paths entry: {e!r}", False
         try:
             access = PathAccess(e.get("access", PathAccess.READ_WRITE.value))
         except ValueError:
-            return None, f"{specs[0]} has an unknown access value: {e.get('access')!r}"
+            return None, f"{specs[0]} has an unknown access value: {e.get('access')!r}", False
         if access in WRITE_GRANTING_PATH_ACCESS:
             paths.append(e["path"])
-    return (tuple(paths), "") if paths else (None, f"{specs[0]} declares no write-capable path")
+    return (tuple(paths), "", True) if paths else (None, f"{specs[0]} declares no write-capable path", True)
+
+
+def spec_scope(data_dir: "str | Path", did: str) -> Tuple[Optional[Tuple[str, ...]], Optional[str]]:
+    """(write paths, None) or (None, reason) for B5: ``scope_incomplete`` when the spec is readable
+    but grants no write, else ``unknown: <why>`` — a spec that cannot be read is never "no overlap"."""
+    paths, why, readable = _spec_paths(Path(data_dir), did)
+    if paths is not None:
+        return paths, None
+    return None, REASON_SCOPE_INCOMPLETE if readable else f"unknown: {why}"
 
 
 def live_subjects(state_dir: "str | Path", project_id: Optional[str] = None) -> Sources:
@@ -92,7 +101,7 @@ def live_subjects(state_dir: "str | Path", project_id: Optional[str] = None) -> 
             if status == "unmeasured":  # the lock probe raised: not known to be live, paths unknown
                 paths, why = None, f"lock probe unmeasured: {item.get('lock')}"
             else:
-                paths, why = _spec_paths(state.parent, did)
+                paths, why, _readable = _spec_paths(state.parent, did)
             if paths is None:
                 reasons[did] = why
             subjects.append(Subject(did, paths, _branch_of(did)))
@@ -157,7 +166,7 @@ def open_pr_subjects(project_root: "str | Path", project_id: str, cache_path: "s
                 reasons[did or f"pr-{number}"] = why
             else:
                 fresh[f"{project_id}:{number}:{view_sha}"] = paths
-        subjects.append(Subject(did, tuple(paths) if paths is not None else None, branch))
+        subjects.append(Subject(did, tuple(paths) if paths is not None else None, branch, pr_number=number))
     if mine != fresh:
         try:
             atomic_write_json(cache_path, {"version": CACHE_VERSION, "entries": {

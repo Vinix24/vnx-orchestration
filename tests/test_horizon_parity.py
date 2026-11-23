@@ -341,6 +341,7 @@ _DELIVERABLE_ARGV = {
     "depend": ["dlv-fake-id", "--on", "dlv-other"],
     "undepend": ["dlv-fake-id", "--on", "dlv-other", "--reason", "parity check"],
     "deps": ["dlv-fake-id"],
+    "fireable": ["--horizon", "now"],
 }
 _PLAN_GATE_ARGV = {
     "seed": ["delegate-track"],

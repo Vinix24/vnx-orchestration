@@ -357,6 +357,12 @@ def _cmd_deliverable_deps(args: Any) -> int:
     return pc.cmd_deliverable_deps(args)
 
 
+def _cmd_deliverable_fireable(args: Any) -> int:
+    pc = _require_planning_cli()
+    _prep_repo(args)  # --repo-root defaults to --project-dir: the open-PR and directory lookups anchor there
+    return pc.cmd_deliverable_fireable(args)
+
+
 _DELIVERABLE_DISPATCH: dict[str, Callable[[Any], int]] = {
     "add": _cmd_deliverable_add,
     "list": _cmd_deliverable_list,
@@ -368,6 +374,7 @@ _DELIVERABLE_DISPATCH: dict[str, Callable[[Any], int]] = {
     "depend": _cmd_deliverable_depend,
     "undepend": _cmd_deliverable_undepend,
     "deps": _cmd_deliverable_deps,
+    "fireable": _cmd_deliverable_fireable,
 }
 
 
