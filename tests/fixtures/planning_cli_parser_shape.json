@@ -677,6 +677,114 @@
             "prog": "vnx deliverable deps",
             "subcommands": {}
           },
+          "fireable": {
+            "actions": [
+              {
+                "choices": null,
+                "class": "_HelpAction",
+                "const": null,
+                "default": "==SUPPRESS==",
+                "dest": "help",
+                "help": "show this help message and exit",
+                "metavar": null,
+                "nargs": 0,
+                "option_strings": [
+                  "-h",
+                  "--help"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": "vnx-dev",
+                "dest": "project_id",
+                "help": null,
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [
+                  "--project-id"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": "",
+                "dest": "state_dir",
+                "help": null,
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [
+                  "--state-dir"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreTrueAction",
+                "const": true,
+                "default": false,
+                "dest": "json",
+                "help": "emit JSON instead of a table",
+                "metavar": null,
+                "nargs": 0,
+                "option_strings": [
+                  "--json"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": [
+                  "now",
+                  "next",
+                  "later"
+                ],
+                "class": "_StoreAction",
+                "const": null,
+                "default": null,
+                "dest": "horizon",
+                "help": "limit to deliverables on tracks in that horizon band (default: all tracks)",
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [
+                  "--horizon"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": "",
+                "dest": "repo_root",
+                "help": "git repo root for the open-PR and directory lookups (default: the project dir)",
+                "metavar": "PATH",
+                "nargs": null,
+                "option_strings": [
+                  "--repo-root"
+                ],
+                "required": false,
+                "type": null
+              }
+            ],
+            "aliases": [],
+            "description": null,
+            "handler": "cmd_deliverable_fireable",
+            "path": [
+              "deliverable",
+              "fireable"
+            ],
+            "prog": "vnx deliverable fireable",
+            "subcommands": {}
+          },
           "list": {
             "actions": [
               {

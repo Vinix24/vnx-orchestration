@@ -66,7 +66,7 @@ This is the only source. Not `link-pr` at track level (one track has several del
 
 **17. Criterion for `refuse`.** After seven days of `warn`, B6 counts per hit whether the two deliverables later got a rebase, conflict or stacking round (`round_cause` and the round titles). If fewer than 30% of the hits are idle (no round, both merged cleanly), the advice is `refuse`; otherwise first adjust the generic directories or the overlap rule. The operator decides. Owner: B6.
 
-**18. The "fireable now" list.** `vnx deliverable fireable --project-id X` lists the deliverables on `ready` whose every hard predecessor is satisfied and that have no overlap with running work or open PRs. Within that, it greedily picks a mutually overlap-free set, by track priority and then age. Output as table and JSON, with the reason per dropped deliverable (`predecessor_open: dlv-...`, `predecessor_retired`, `overlap: <path> with #<pr>`, `scope_incomplete`). Owner: B5.
+**18. The "fireable now" list.** `vnx deliverable fireable --project-id X` lists the deliverables on `ready` whose every hard predecessor is satisfied and that have no overlap with running work or open PRs. Within that, it greedily picks a mutually overlap-free set, by track priority and then age. Output as table and JSON, with the reason per dropped deliverable (`predecessor_open: dlv-...`, `predecessor_retired`, `overlap: <path> with #<pr>`, `scope_incomplete`). It reads `ready` deliverables across **all tracks of the project**; `--horizon now|next|later` is an optional filter that narrows the list to that band (B5, decided 2026-11-23). Owner: B5.
 
 ## Open questions
 
@@ -75,7 +75,6 @@ The plan does not decide these; they are left to the owning deliverable or the o
 - Whether `--override-predecessor` and `--override-overlap` lines go into an existing ledger file or a new one (the plan only says "a line in the ledger, like `--override-main`").
 - The default content of `VNX_BLAST_RADIUS_GENERIC_DIRS` beyond `tests`, `changelog.d` and `docs`.
 - How a soft dependency is reported (door message only, or also a ledger line).
-- Whether the "fireable now" selection reads `ready` deliverables across all tracks of the project or only tracks with horizon `now`.
 
 ## Consequences
 
