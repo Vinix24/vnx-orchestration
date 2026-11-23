@@ -1,0 +1,1 @@
+- refactor(gate): delete the Vertex route of the Gemini gate (`vertex_ai_runner.py`, `VNX_GEMINI_ROUTING`, `VNX_VERTEX_PROJECT`, `VNX_VERTEX_REGION`, `VNX_VERTEX_MODEL`); the Gemini CLI stays the only route, and the prompt helpers move to `gate_prompt_files.py` (config-een-oppervlak PR-Q2)

@@ -1,4 +1,4 @@
-"""ochtendronde D1a: the pure morning-pause core and its four registry keys (ADR-095)."""
+"""morning round D1a: the pure morning-pause core and its four registry keys (ADR-095)."""
 import importlib.util
 import subprocess
 import sys
@@ -113,7 +113,7 @@ def test_is_paused_with_a_hand_built_bad_window_raises():
 
 def test_registry_keys_have_the_defaults_and_project_scope():
     expected = {
-        "VNX_MORNING_PAUSE_ENABLED": ("bool", "false"),
+        "VNX_MORNING_PAUSE_ENABLED": ("bool", "true"),
         "VNX_MORNING_PAUSE_START": ("string", "07:00"),
         "VNX_MORNING_PAUSE_DEADLINE": ("string", "09:00"),
         "VNX_MORNING_PAUSE_TZ": ("string", "Europe/Amsterdam"),
@@ -140,10 +140,13 @@ def test_canonical_flags_unchanged_for_every_main_subsystem():
         exec(compile(base, "config_registry_main", "exec"), snap.__dict__)  # origin/main's real text
     finally:
         del sys.modules[spec.name]
-    old = {e.subsystem: k for k, e in snap.CONFIG_REGISTRY.items() if e.subsystem}
+    # config-een-oppervlak PR-6v deletes this subsystem with VNX_PLAN_GATE_COMPLEX_ONLY on purpose
+    removed = {"plan-gate-task-class-scope"}
+    old = {e.subsystem: k for k, e in snap.CONFIG_REGISTRY.items() if e.subsystem and e.subsystem not in removed}
     now = _canonical_flags(cr)
     # every subsystem origin/main knows keeps its flag; a missing one shows as None
     assert {k: now.get(k) for k in old} == old
     assert now["morning-pause"] == "VNX_MORNING_PAUSE_ENABLED"
-    assert {k: v for k, v in cr.canonical_flags().items() if k in old} == snap.canonical_flags()
+    assert {k: v for k, v in cr.canonical_flags().items() if k in old} == {
+        k: v for k, v in snap.canonical_flags().items() if k not in removed}
     assert cr.canonical_flags()["morning-pause"] == "VNX_MORNING_PAUSE_ENABLED"

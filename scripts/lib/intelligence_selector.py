@@ -14,7 +14,6 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import os
 import re
 import sqlite3
 from datetime import datetime, timezone
@@ -609,17 +608,14 @@ class IntelligenceSelector:
     def _query_recent_injected_ids(self, task_class: str) -> FrozenSet[str]:
         """Return item_ids injected in the last N dispatches for task_class from coord DB.
 
-        N is controlled by env var VNX_INTEL_SUPPRESS_WINDOW (default 10).
+        N is the class default ``_SUPPRESS_WINDOW_DEFAULT`` (10).
         Rows with unparseable items_json are skipped — defensive, no crash.
         Returns empty frozenset when coord DB is unavailable.
         """
         state_dir = self._coord_state_dir
         if state_dir is None:
             return frozenset()
-        try:
-            window = int(os.environ.get("VNX_INTEL_SUPPRESS_WINDOW", self._SUPPRESS_WINDOW_DEFAULT))
-        except (ValueError, TypeError):
-            window = self._SUPPRESS_WINDOW_DEFAULT
+        window = self._SUPPRESS_WINDOW_DEFAULT
         if window <= 0:
             return frozenset()
         try:
@@ -669,10 +665,6 @@ class IntelligenceSelector:
         seen_hashes: set = set()
         governance_used = 0
         window = self._SUPPRESS_WINDOW_DEFAULT
-        try:
-            window = int(os.environ.get("VNX_INTEL_SUPPRESS_WINDOW", self._SUPPRESS_WINDOW_DEFAULT))
-        except (ValueError, TypeError):
-            pass
         for item_class in ITEM_CLASS_PRIORITY:
             class_candidates = candidates.get(item_class, [])
             if not class_candidates:

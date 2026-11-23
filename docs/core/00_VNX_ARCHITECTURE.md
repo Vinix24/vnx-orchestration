@@ -25,11 +25,12 @@ work merged after that release is marked "on main, not yet released".
 10. [Staging Workflow](#staging-workflow)
 11. [Review Seats](#review-seats)
 12. [Multi-Provider Dispatch](#multi-provider-dispatch)
-13. [Learning Loop](#learning-loop)
-14. [Dreaming](#dreaming)
-15. [Harness Portability](#harness-portability)
-16. [Unified Dashboard](#unified-dashboard)
-17. [CLI and Configuration](#cli-and-configuration)
+13. [Governed Memory and Key Decisions](#governed-memory-and-key-decisions)
+14. [Learning Loop](#learning-loop)
+15. [Dreaming](#dreaming)
+16. [Harness Portability](#harness-portability)
+17. [Unified Dashboard](#unified-dashboard)
+18. [CLI and Configuration](#cli-and-configuration)
 
 ---
 
@@ -234,11 +235,10 @@ not this doc).
 - Uses `report_parser.py` to generate a compact JSON receipt
 - Attaches evidence to tracked open items via PR-ID (does NOT close items or complete PRs)
 - Appends receipts to `state/t0_receipts.ndjson` (production receipt log)
-- Delivery to T0 is not a push: `VNX_RECEIPT_T0_PUSH=0` is the default
-  (ADR-035 §5.3). T0 reads the dispatches it still has to decide on from
-  `open_outcomes` (`t0_index.json`, or `scripts/receipt_query.py open-outcomes`)
-  and closes each with `receipt_query.py decide` (DISPATCH_RULES §13). Setting
-  the flag restores the tmux buffer-paste push.
+- Delivery to T0 is not a push: there is no pane paste. T0 reads the
+  dispatches it still has to decide on from `open_outcomes` (`t0_index.json`,
+  or `scripts/receipt_query.py open-outcomes`) and closes each with
+  `receipt_query.py decide` (DISPATCH_RULES §13).
 - Includes flood protection + singleton enforcement
 
 **Governance**: Receipt processor is evidence-only. T0 reviews evidence, closes satisfied open items, and completes PRs when all blockers/warnings are resolved.
@@ -260,7 +260,7 @@ not this doc).
 
 **Hooks actually wired in this repo's `.claude/settings.json`** (see the
 generated *Hooks Wired* table further down, which is the checkable source):
-`session_stop_rotation.py` (Stop). `t0_context_guard.py` runs at user level via
+none. `t0_context_guard.py` runs at user level via
 `vnx guard install`, not in this file (G3, dispatch dlv-2f23d1dbf443). T0's own rotation flow, the mechanism
 that actually ships, is `docs/operations/T0_CONTEXT_ROTATION.md`
 (`scripts/hooks/t0_context_guard.py`, `scripts/t0_rotate_spawn.sh`). `vnx guard install|check`
@@ -609,15 +609,15 @@ liveness with `bash scripts/vnx_supervisor_simple.sh status` or
 `python3 -c "import sys; sys.path.insert(0,'scripts/lib'); import daemon_register as d; print(d.measure_daemon_liveness())"`.
 
 <!-- BEGIN GENERATED: supervised-components -->
-- Dispatcher (native skills, multi-provider dispatch). — `dispatcher_minimal.sh` — `scripts/vnx_supervisor_simple.sh:198`
-- Smart Tap (JSON/Markdown auto-translation). — `smart_tap_json_translator.sh` — `scripts/vnx_supervisor_simple.sh:204`
-- Receipt Processor (report -> receipt -> T0 delivery, adoption tracking). — `receipt_processor.sh` — `scripts/vnx_supervisor_simple.sh:205`
-- Heartbeat ACK Monitor (ACK processing + timeout tracking). — `heartbeat_ack_monitor.py` — `scripts/vnx_supervisor_simple.sh:210`
-- Queue Watcher (dispatch review popup; falls back to auto-accept when VNX_QUEUE_POPUP_ENABLED=0). — `queue_popup_watcher.sh` or `queue_auto_accept.sh` (conditional) — `scripts/vnx_supervisor_simple.sh:212`
-- Dashboard Generator (real-time metrics -> dashboard_status.json). — `generate_valid_dashboard.sh` — `scripts/vnx_supervisor_simple.sh:217`
-- Unified State Manager (state consolidation, 5s cycle). — `unified_state_manager.py` — `scripts/vnx_supervisor_simple.sh:218`
-- Intelligence Daemon (real-time intelligence updates). — `intelligence_daemon.py` — `scripts/vnx_supervisor_simple.sh:219`
-- Recommendations Engine (T0 dispatch suggestions, max 5 pending). — `recommendations_engine_daemon.sh` — `scripts/vnx_supervisor_simple.sh:220`
+- Dispatcher (native skills, multi-provider dispatch). — `dispatcher_minimal.sh` — `scripts/vnx_supervisor_simple.sh:216`
+- Smart Tap (JSON/Markdown auto-translation). — `smart_tap_json_translator.sh` — `scripts/vnx_supervisor_simple.sh:222`
+- Receipt Processor (report -> receipt -> T0 delivery, adoption tracking). — `receipt_processor.sh` — `scripts/vnx_supervisor_simple.sh:223`
+- Heartbeat ACK Monitor (ACK processing + timeout tracking). — `heartbeat_ack_monitor.py` — `scripts/vnx_supervisor_simple.sh:228`
+- Queue Watcher (dispatch review popup; falls back to auto-accept when VNX_QUEUE_POPUP_ENABLED=0). — `queue_popup_watcher.sh` or `queue_auto_accept.sh` (conditional) — `scripts/vnx_supervisor_simple.sh:230`
+- Dashboard Generator (real-time metrics -> dashboard_status.json). — `generate_valid_dashboard.sh` — `scripts/vnx_supervisor_simple.sh:235`
+- Unified State Manager (state consolidation, 5s cycle). — `unified_state_manager.py` — `scripts/vnx_supervisor_simple.sh:236`
+- Intelligence Daemon (real-time intelligence updates). — `intelligence_daemon.py` — `scripts/vnx_supervisor_simple.sh:237`
+- Recommendations Engine (T0 dispatch suggestions, max 5 pending). — `recommendations_engine_daemon.sh` — `scripts/vnx_supervisor_simple.sh:238`
 <!-- END GENERATED: supervised-components -->
 
 ### Hooks Wired in `.claude/settings.json` (generated — do not hand-edit; regenerate with `python3 scripts/generate_architecture_doc.py --write`)
@@ -626,7 +626,7 @@ liveness with `bash scripts/vnx_supervisor_simple.sh status` or
 - **PreToolUse**: `pretooluse_block_raw_claude_spawn.sh`, `pretooluse_worker_scope_enforce.sh`, `pretooluse_block_subagent.sh`
 - **SessionEnd**: `session_reconcile_cleanup.sh`, `build_current_state.py`, `build_doc_indexes.py`
 - **SessionStart**: `session_reconcile_autoclose.sh`, `build_t0_state_hook.sh`, `path_parity_check.sh`, `monitor_tripwire.sh`, `sessionstart.sh`, `hookpin_check.sh`
-- **Stop**: `stop_report_hook.sh`, `session_stop_rotation.py`
+- **Stop**: `stop_report_hook.sh`
 <!-- END GENERATED: hooks -->
 
 `scripts/userpromptsubmit_worker_intelligence_inject.sh` is not in the list above:
@@ -1001,10 +1001,47 @@ Each skill has a `SKILL.md` with YAML frontmatter (required for Codex CLI discov
 ### Path Resolution
 
 `scripts/lib/vnx_paths.sh` provides dynamic path resolution:
-- `_resolve_node_path()` -- finds node via VNX_NODE_PATH > nvm > system PATH
+- `_resolve_node_path()` -- finds node via nvm > system PATH
 - `_resolve_venv_path()` -- finds Python venv in project or main worktree
 - `_resolve_project_root()` -- git-based resolution with worktree awareness
 - Cross-project contamination guard: validates inherited VNX_HOME matches computed default
+
+---
+
+## Governed Memory and Key Decisions
+
+### Governed memory: past, current, future
+
+Memory is where most agent systems are weakest. Most bolt a vector store onto a stateless model and call it memory. I treat memory as a governed state machine with three tenses, each with its own store and its own audit guarantees.
+
+The PAST is append-only NDJSON receipts: a forensic ledger of every dispatch, gate, and merge, with hash-chain verification tooling (`audit_chain`) available over it. The chain is opt-in per project (`VNX_CHAIN_RECEIPTS`) and off by default; the main ledger is unchained today, designed for epoch rotation once enabled ([ADR-029](../governance/decisions/ADR-029-hashchain-epoch-rotation.md)). The ledger itself is forensic, not lossy, and is in production now. Learning and dreaming read it; they change nothing without an operator approval.
+
+The CURRENT is `runtime_coordination.db` (SQLite WAL): real-time orchestration state, leases, tracks, and dispatch status that any terminal can read for situational awareness. The `dispatches` table is ADR-007 tenant-scoped on a composite `UNIQUE(dispatch_id, project_id)`, rebuilt in place by a crash-safe migration (#859).
+
+The FUTURE is the track layer and roadmap autopilot: planned features modeled as project-scoped tracks with a dependency graph, which the system can advance under human approval gates. The FUT-1 track schema, DAL, and CLI and the FUT-2 ADR-007 tenant-scoping have shipped, and the tracks layer is now activated for forward-state planning. The future-state reconciliation keeps it consistent automatically: an open-item → track bridge syncs `track_open_items` through the single-writer `tracks.py` primitives, then a reconciler derives each track's status. A track is `done` only when it has no unresolved blocking open-items, every dependency track is done, all of its dispatches are in terminal states, and any linked PR is confirmed merged. Both run inside the autopilot tick, which refuses to advance on a failed sync. The autopilot stays opt-in: it plans, but a human still approves the last step. A deliverable is promoted and closed by a human (`vnx deliverable promote` and `close`); when a track is declared done, the reconciler also completes its deliverable stubs (`deliverable_auto_completed`). A PR is linked to a track with `vnx objective link-pr` ([HORIZON_LIFECYCLE.md](../core/HORIZON_LIFECYCLE.md)).
+
+A learning layer (`quality_intelligence.db`) consolidates the past into patterns and antipatterns that get injected into future dispatch context. Two parts feed it, and both only propose.
+
+**Learning loop.** It mines the receipts for recurring failures and queues rule proposals. The queue fills only with `VNX_LEARNING_LOOP_QUEUE=1` (or persist mode, `VNX_LEARNING_LOOP_PERSIST=1`), both off by default, and an operator records the decision with `vnx learning decide-rule` ([ADR-065](../governance/decisions/ADR-065-leren-is-voorstellen.md), [SELF_LEARNING_LOOP.md](../intelligence/SELF_LEARNING_LOOP.md)). Every reader of `prevention_rules` keeps a loop rule out unless it has an active activation and the ledger verdict is fresh and `ok` or `pending`. In persist mode `ingest_approved_rules` activates only a rule whose operator decision is recorded for this project and whose proposal is unchanged since that decision, and `scripts/deactivate_pattern_activation.py` switches an activation off for good. Where a lesson belongs is fixed in [ADR-067](../governance/decisions/ADR-067-learning-capture-routing.md), and who owns a learned pattern in [ADR-068](../governance/decisions/ADR-068-learning-signaal-attributie.md). Whether injected intelligence changes outcomes is measured per arm by `scripts/intel_injection_join.py effect`, which refuses a verdict below 200 resolved dispatches per arm ([ADR-069](../governance/decisions/ADR-069-intelligence-effectmeting.md)). I have not measured an effect yet.
+
+**Dreaming.** Auto-dream consolidates the store at night. It is opt-in: `vnx dream install-scheduler` installs the nightly job (launchd label `com.vnx.auto-dream`) and a watch job (`com.vnx.dream-watch`) that runs `scripts/dream_liveness_probe.py`. `vnx doctor` reports a missed or disabled night from the same reader ([ADR-066](../governance/decisions/ADR-066-dream-liveness-watch.md); the consolidation itself is [ADR-019](../governance/decisions/ADR-019-auto-dream-memory-consolidation.md), and it runs on DeepSeek unless `VNX_DREAM_PROVIDER` names `kimi`). It stays burning in until a run of measured nights says otherwise.
+
+The point is not that the AI remembers. The point is that what it remembers is governed: every memory has a receipt, every plan has a gate, and a human owns the boundary.
+
+### Architecture decisions
+
+The decisions behind VNX are written down, not implied. The Architecture Decision Records under [docs/governance/decisions/](../governance/decisions/) cover the system end to end. The ones that shape it most:
+
+- [ADR-005](../governance/decisions/ADR-005-ndjson-audit-ledger-primary.md): append-only NDJSON ledger as the primary observability surface
+- [ADR-006](../governance/decisions/ADR-006-staging-promote-human-gate.md): staging then promote, with a mandatory human approval gate
+- [ADR-008](../governance/decisions/ADR-008-dual-llm-adversarial-review.md): cross-vendor adversarial review (codex plus deepseek, amended 2026-11-11) bound by a contract hash
+- [ADR-011](../governance/decisions/ADR-011-manager-worker-hierarchy.md): manager plus worker hierarchy with explicit depth, not depth-1 subagents
+- [ADR-012](../governance/decisions/ADR-012-hybrid-interactive-headless.md): hybrid interactive and headless execution, no retire-interactive
+- [ADR-014](../governance/decisions/ADR-014-autonomous-chain-dispatch.md): autonomous mode is pre-approved chain dispatch, never gate bypass
+- [ADR-022](../governance/decisions/ADR-022-provider-agnostic-skill-injection.md): one structured plain-text skill prompt for every provider lane, no per-CLI mechanisms
+- [ADR-030](../governance/decisions/ADR-030-plan-first-gate-enforcement.md): the plan-first gate enforced at the dispatch door and the merge gate, advisory-first: plan before work, structurally
+
+For how the architecture got here, [docs/_archive/manifesto/EVOLUTION_TIMELINE.md](../_archive/manifesto/EVOLUTION_TIMELINE.md) (archived) reconstructs the technical evolution over roughly six months, including the private incubation provenance. The public repository is the extraction, hardening, and packaging of work that started inside a private product.
 
 ---
 
@@ -1132,7 +1169,7 @@ Commands: `vnx regen-settings --merge` (update VNX keys) | `--full` (first-time 
 
 **`config.env`** (project-level, sourced by `vnx start`):
 ```bash
-VNX_PROVIDER=claude_code       # T0 provider (claude_code/codex_cli/gemini_cli)
+VNX_T0_PROVIDER=claude_code    # T0 provider (claude_code/codex_cli/gemini_cli)
 VNX_MODEL=sonnet               # Default build-worker model: provider_constraints.yaml pins the actual floor/default
 VNX_T1_PROVIDER=codex_cli      # T1 role can use a different provider
 ```

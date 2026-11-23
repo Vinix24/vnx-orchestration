@@ -1,0 +1,1 @@
+- `VNX_PLAN_GATE_COMPLEX_ONLY` is deleted and read nowhere (config-een-oppervlak PR-6v-b2): it has had no effect since P1. `complex_only_active()`, its registry row, the `plan-gate-task-class-scope` subsystem row and the effectiveness-probe `scope_skip_read_site` field are gone.

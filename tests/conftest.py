@@ -450,7 +450,20 @@ def _no_ambient_vnx_project_id(monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.fixture(autouse=True)
 def _besluiten_register_isolation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # No test reads the checkout's real daily-log/besluiten.ndjson: build_t0_state resolves the folder from here.
-    monkeypatch.setenv("VNX_BESLUITEN_LOGDIR", str(tmp_path / "_besluiten_isolated"))
+    import besluiten_adapter
+    import vnx_paths  # scripts/lib only: scripts/ is not on sys.path and must not be (shared module names)
+
+    real_state_block = besluiten_adapter.state_block
+    # The folder build_t0_state._besluiten_logdir() resolves: PROJECT_ROOT from vnx_paths, also in a worktree.
+    checkout_logdir = Path(vnx_paths.resolve_paths()["PROJECT_ROOT"]).resolve() / "daily-log"
+
+    def _isolated_state_block(project_id, logdir, **kwargs):
+        # Only the checkout's own folder is redirected; a test that names another folder keeps it.
+        if Path(logdir).resolve() == checkout_logdir:
+            logdir = tmp_path / "_besluiten_isolated"
+        return real_state_block(project_id, logdir, **kwargs)
+
+    monkeypatch.setattr(besluiten_adapter, "state_block", _isolated_state_block)
 
 
 @pytest.fixture(autouse=True)
@@ -462,6 +475,18 @@ def _launchd_guard_temp_roots(monkeypatch: pytest.MonkeyPatch) -> None:
     it too. The guard's own temp-root tests delete or re-set the variable.
     """
     monkeypatch.setenv("VNX_LAUNCHD_GUARD_TEMP_ROOTS", "/nonexistent-vnx-test-temp-root")
+
+
+@pytest.fixture(autouse=True)
+def _morning_pause_off_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The morning pause is on by default (ADR-095, D4b); a test outside it must not depend on the clock.
+
+    Inside the morning window a door or merge test without a morning snapshot, state dir or project id
+    reads ``decision_unknown`` and pauses, so the suite would turn red at 07:00-09:00 Amsterdam. The gate
+    itself stays fail-closed; the morning-pause tests inject their config (``get=``) or set the variable
+    back with their own ``monkeypatch.setenv``.
+    """
+    monkeypatch.setenv("VNX_MORNING_PAUSE_ENABLED", "false")
 
 
 @pytest.fixture(autouse=True)
@@ -537,20 +562,36 @@ def _vnx_provider_env_file_isolation(tmp_path: Path, monkeypatch: pytest.MonkeyP
     monkeypatch.setenv("VNX_PROVIDER_ENV_FILE", str(tmp_path / "absent-provider-usage.env"))
 
 
+_REAL_GH_SOURCE: dict = {}
+
+
 @pytest.fixture(autouse=True)
 def _reconcile_git_off(monkeypatch: pytest.MonkeyPatch) -> None:
-    """OI-1155: pin track_reconciler source 4 (``gh pr list``) OFF for the suite.
+    """OI-1155: stub track_reconciler source 3 (``gh pr list``) to an empty set for the suite.
 
-    source 4 is default-ON in production (_load_merged_pr_numbers), which would
+    The source is always on in production (_load_merged_pr_numbers), which would
     make every reconciler test shell out to a live, network ``gh pr list`` from
     the repo-root CWD and pollute local-only assertions with real merged PR
-    numbers. Pinning VNX_RECONCILE_GIT=0 keeps the suite deterministic and
-    offline-safe. Tests that pin the default-ON behaviour
-    (tests/test_track_reconciler_prref_evidence.py: test_gh_source_on_by_default
-    / test_gh_source_opt_out_by_flag) monkeypatch-delenv / setenv this flag
-    per-test — the last write wins within the same function scope.
+    numbers. The stub keeps the suite deterministic and offline-safe. A test that
+    needs a gh answer patches ``_load_merged_prs_from_gh`` itself (the later write
+    wins) or takes the ``real_load_merged_prs_from_gh`` fixture to run the real one.
     """
-    monkeypatch.setenv("VNX_RECONCILE_GIT", "0")
+    import track_reconciler
+
+    _REAL_GH_SOURCE.setdefault("fn", track_reconciler._load_merged_prs_from_gh)
+    monkeypatch.setattr(track_reconciler, "_load_merged_prs_from_gh", lambda *a, **k: frozenset())
+
+
+@pytest.fixture(autouse=True)
+def _blast_radius_gh_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    import blast_radius_gate
+    monkeypatch.setattr(blast_radius_gate, "gh", lambda argv, cwd: (_ for _ in ()).throw(RuntimeError("gh is off in tests")))
+
+
+@pytest.fixture
+def real_load_merged_prs_from_gh():
+    """The unstubbed gh merged-PR source, for the tests that exercise it directly."""
+    return _REAL_GH_SOURCE["fn"]
 
 
 @pytest.fixture(autouse=True)

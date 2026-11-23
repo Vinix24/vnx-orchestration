@@ -100,7 +100,6 @@ def gate(tmp_path, monkeypatch, switch):
     """A seeded, plan-blocked track, an isolated seat ledger, and a config set per test."""
     monkeypatch.setattr(track_reconciler, "reconcile_track", lambda *a, **k: None)
     monkeypatch.delenv("VNX_DATA_DIR", raising=False)
-    monkeypatch.delenv("VNX_PANEL_RETRY", raising=False)
     state_dir = _bootstrap(tmp_path)
     tracks.create_track(state_dir, TRACK, PROJECT, "t", "shipped", phase="queued")
     assert planning_cli._seed_plan_blocker(state_dir, TRACK, PROJECT)

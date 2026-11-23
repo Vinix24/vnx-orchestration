@@ -2,6 +2,7 @@
 
 import json
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -165,3 +166,81 @@ def test_state_is_rebuilt_from_the_ledger(tmp_path):
     assert oq.rebuild_state(P, state_dir=tmp_path) == json.loads(before)
     assert path.read_text() == before
     assert json.loads(before)["points"][pid]["state"] == "open"
+
+
+# -- the inbox summary the writer keeps (ADR-076 amendment 2026-11-22) -------------------------------------------
+
+def _summary(d):
+    return json.loads((d / oq.SUMMARY_FILENAME).read_text())
+
+
+def _is_current(d):
+    got = oq.read_inbox_summary(P, state_dir=d)
+    assert got["freshness"] == "current", got
+    return got["summary"]
+
+
+def test_summary_follows_every_ledger_write_path(tmp_path):
+    d, pid = tmp_path, oq.point_id(P, 1, "oi:OI-1", 1)
+    _open(d)
+    assert _is_current(d)["open_total"] == 1 and _is_current(d)["points"][0]["point_id"] == pid  # opened
+    oq.append_line(P, "answer", {"point_id": pid, "citaat": "ja", "vastgelegd_door": "T0"}, state_dir=d)
+    _is_current(d)  # answer
+    oq.append_line(P, "presented", {"point_id": pid, "kanaal": "cli", "sessie": "s"}, state_dir=d)
+    assert _is_current(d)["points"][0]["presented"] == 1  # presented
+    oq.reserve(P, lambda st: [pid], sessie="s", state_dir=d)
+    _is_current(d)  # reserve
+    (d / oq.SUMMARY_FILENAME).unlink()
+    oq.rebuild_state(P, state_dir=d)
+    assert _is_current(d)["open_total"] == 1  # rebuild_state
+    oq.close_point(P, pid, uitkomst="beantwoord", bewijs="src", state_dir=d)
+    assert _is_current(d)["open_total"] == 0 and _summary(d)["points"] == []  # closed
+    (d / oq.SUMMARY_FILENAME).unlink()
+    res = oq.compact(P, now=datetime(2030, 1, 1, tzinfo=timezone.utc), state_dir=d)
+    assert res["lines"] > 0 and _is_current(d)["open_total"] == 0  # compact rewrote the ledger and the summary
+
+
+def test_summary_ledger_bytes_equals_the_ledger_size(tmp_path):
+    _open(tmp_path)
+    _open(tmp_path, "oi:OI-2")
+    assert _summary(tmp_path)["ledger_bytes"] == (tmp_path / oq.LEDGER_FILENAME).stat().st_size
+
+
+def test_summary_points_follow_decision_10(tmp_path):
+    d = tmp_path
+    old, new = (_open(d, f"oi:{n}", asked_at=at, now=at)["point_id"] for n, at in
+                (("old", "2026-11-01T00:00:00Z"), ("new", "2026-11-10T00:00:00Z")))
+    oq.append_line(P, "presented", {"point_id": old, "kanaal": "cli", "sessie": "s"}, state_dir=d)
+    assert [p["point_id"] for p in _summary(d)["points"]] == [new, old]  # never presented outranks an older presented one
+    for n in range(6):
+        _open(d, f"oi:x{n}")
+    s = _summary(d)
+    assert len(s["points"]) == 5 and s["open_total"] == 8 and s["more"] == 3
+
+
+def test_read_inbox_summary_is_stale_after_a_raw_append_and_missing_without_a_file(tmp_path):
+    assert oq.read_inbox_summary(P, state_dir=tmp_path)["freshness"] == "missing"
+    _open(tmp_path)
+    _is_current(tmp_path)
+    with open(tmp_path / oq.LEDGER_FILENAME, "a") as raw:
+        raw.write("\n")
+    got = oq.read_inbox_summary(P, state_dir=tmp_path)
+    assert got["freshness"] == "stale" and "ledger changed" in got["reason"]
+
+
+@pytest.mark.parametrize("text", ["not json", "{}", json.dumps({"schema": "operator_inbox_summary/1", "project_id": "other"}),
+                                  json.dumps({"schema": "x", "project_id": P, "ledger_bytes": 0})])
+def test_unreadable_or_foreign_summary_is_stale_never_current(tmp_path, text):
+    (tmp_path / oq.SUMMARY_FILENAME).write_text(text)
+    got = oq.read_inbox_summary(P, state_dir=tmp_path)
+    assert got["freshness"] == "stale" and got["summary"] is None
+
+
+def test_unreadable_ledger_line_gives_status_unknown_not_a_count(tmp_path):
+    _open(tmp_path)
+    with open(tmp_path / oq.LEDGER_FILENAME, "a") as raw:
+        raw.write("{broken\n")
+    oq.rebuild_state(P, state_dir=tmp_path)
+    s = _summary(tmp_path)
+    assert s["status"] == "unknown" and s["line"] == 2 and s["open_total"] is None and s["points"] == []
+    assert oq.read_inbox_summary(P, state_dir=tmp_path)["freshness"] == "current"

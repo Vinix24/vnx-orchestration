@@ -21,6 +21,7 @@ from vnx_cli.commands.release import (
     vnx_release_publish,
     _tag_exists,
 )
+import vnx_cli.commands.release as release_module
 from vnx_cli.commands.update import INSTALL_MODE_MARKER, INSTALL_MODE_VALUE
 
 
@@ -74,7 +75,7 @@ def stub_install_central(tmp_path, monkeypatch):
     stub = tmp_path / "install-central.sh"
     stub.write_text(STUB_INSTALL_CENTRAL, encoding="utf-8")
     stub.chmod(stub.stat().st_mode | stat.S_IXUSR)
-    monkeypatch.setenv("VNX_INSTALL_CENTRAL_SCRIPT", str(stub))
+    monkeypatch.setattr(release_module, "INSTALL_CENTRAL_SCRIPT", stub)
     return stub
 
 
@@ -348,7 +349,6 @@ def test_publish_real_install_central_materialize_only(
 ):
     """Integration with the REAL install-central.sh --materialize-only: the
     version dir is produced, `current` and the shim are NOT touched."""
-    monkeypatch.delenv("VNX_INSTALL_CENTRAL_SCRIPT", raising=False)
     repo = _git_repo_with_tag(tmp_path / "origin", "v1.3.1")
     out, rc = _capture(_publish_args(repo=str(repo)))
 

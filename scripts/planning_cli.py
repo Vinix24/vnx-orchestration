@@ -16,6 +16,7 @@ Delegated from `bin/vnx`:
   vnx deliverable promote <dispatch_id>
   vnx deliverable close <dispatch_id> --evidence <pr>
   vnx deliverable set <dispatch_id> [--task-class <class>] [--routing-floor <floor>]
+  vnx deliverable depend|undepend <dlv> --on <dlv> [--kind soft | --reason "..."]; deps <dlv> [--json]
                        [--dispatch-paths <p1,p2>]
 
 NO-NODE model: a deliverable is a proposed dispatch row with output_kind.
@@ -72,6 +73,7 @@ import track_reconciler  # noqa: E402
 import objective_reconcile  # noqa: E402
 import plan_gate_enforcement  # noqa: E402
 import actor_class  # noqa: E402
+import deliverable_dependencies as dlv_deps
 from delivery_identity import delivery_identity_fields
 import plan_scope
 import provider_switch
@@ -964,6 +966,17 @@ def _normalize_pr_ref(raw: str) -> Optional[str]:
     except (TypeError, ValueError):
         return None
     return f"#{n}"
+
+
+def _normalize_pr_list_item(raw: str) -> Optional[str]:
+    ref = _normalize_pr_ref(raw)
+    return ref if ref is not None and int(ref[1:]) > 0 else None
+
+
+def _normalize_pr_ref_list(raw: object) -> Optional[str]:
+    """'#3118, 3117' -> '#3118,#3117'; None when any item is not a positive PR number."""
+    refs = [_normalize_pr_list_item(t) for t in str(raw).split(",")]
+    return ",".join(refs) if all(refs) else None
 
 
 def _merge_pr_refs(existing: Optional[str], incoming: list[str]) -> tuple[Optional[str], list[str], list[str]]:
@@ -2746,6 +2759,76 @@ def cmd_objective_set_plan_scope(args: argparse.Namespace) -> int:
     return 0
 
 
+def _plan_scope_deliverables(
+    state_dir: Path, project_id: str, track_id: str, conn: Optional[sqlite3.Connection] = None,
+) -> list[dict]:
+    """The track's deliverables as ``plan_scope.propose`` reads them (on ``conn`` when given)."""
+    recs = _fetch_deliverable_records(state_dir, project_id, track_id, include_metadata=True, conn=conn)
+    return [{**(r["metadata"] if isinstance(r.get("metadata"), dict) else {}), "ref": r.get("deliverable_ref")}
+            for r in recs]
+
+
+def _confirm_plan_scope(
+    state_dir: Path, project_id: str, printed: "plan_scope.ReviewRow", approval_id: str,
+) -> dict:
+    """Store the proposal of one printed row; a light one also resolves its OI-PLAN.
+
+    The proposal is re-read and both writes happen in one transaction
+    (``plan_scope.confirm_proposal``): a deliverable added after the review
+    makes the row skip, never close the gate of a track that is architecture again.
+    """
+    reason = f"operator-decision: {approval_id}"
+    result = plan_scope.confirm_proposal(
+        state_dir, printed.track_id, project_id, printed.proposal, reason=reason,
+        resolution_reason=_compose_plan_resolution_reason("attest", reason, approval_id),
+        deliverables_in=lambda conn, t: _plan_scope_deliverables(state_dir, project_id, t, conn=conn),
+    )
+    if result.change is None:
+        return {"track_id": printed.track_id, "outcome": "skipped", "detail": result.skipped}
+    return {"track_id": printed.track_id, "outcome": "confirmed", "detail": result.change.line()}
+
+
+def cmd_objective_plan_scope_review(args: argparse.Namespace) -> int:
+    """``plan-scope review``: read-only; ``--confirm``/``--confirm-all`` write, only with ``--approval-id``."""
+    state_dir = _resolve_state_dir(args.state_dir)
+    names = [n.strip() for n in (args.confirm or "").split(",") if n.strip()]
+    approval_id = (args.approval_id or "").strip()
+    confirming = bool(names) or args.confirm_all
+    refusal = None
+    if names and args.confirm_all:
+        refusal = "use --confirm or --confirm-all, not both"
+    elif confirming and not approval_id:
+        refusal = "--confirm and --confirm-all require --approval-id (the operator's gate token)"
+    elif approval_id and not confirming:
+        refusal = "--approval-id belongs to --confirm or --confirm-all"
+    rows = plan_scope.review(
+        state_dir, args.project_id, lambda t: _plan_scope_deliverables(state_dir, args.project_id, t))
+    unknown = [n for n in names if n not in {r.track_id for r in rows}]
+    if refusal is None and unknown:
+        refusal = f"no open OI-PLAN for: {', '.join(unknown)}"
+    if refusal:
+        print(f"objective plan-scope review: {refusal}. No change made.", file=sys.stderr)
+        return 2
+    targets = [r for r in rows if args.confirm_all or r.track_id in names]
+    results, failed = [], False
+    for row in targets if confirming else []:
+        try:
+            results.append(_confirm_plan_scope(state_dir, args.project_id, row, approval_id))
+        except Exception as exc:
+            failed = True
+            results.append({"track_id": row.track_id, "outcome": "failed", "detail": str(exc)})
+    if args.json:
+        print(json.dumps({"project_id": args.project_id, "tracks": [r.as_dict() for r in rows],
+                          "confirm": results}, indent=2))
+    else:
+        for r in rows:
+            print(f"{r.track_id}  horizon={r.horizon or '-'}  plan_scope={r.reading.scope} "
+                  f"({r.reading.source})  proposal={r.proposal.scope}  reason: {r.proposal.reason}")
+        for res in results:
+            print(f"{res['outcome']}: {res['track_id']}: {res['detail']}")
+    return 1 if failed else 0
+
+
 def cmd_objective_set_goal(args: argparse.Namespace) -> int:
     """Set a track's ``goal_state``, validated against the plan-gate threshold.
 
@@ -2861,9 +2944,11 @@ def _print_deliverable_created(
 
 def _apply_deliverable_scope_rule(
     state_dir: Path, project_id: str, track_id: str, *,
-    verb: str = "add", done: str = "created", stream: Optional[TextIO] = None,
+    task_class: Optional[str], verb: str = "add", done: str = "created",
+    stream: Optional[TextIO] = None,
 ) -> bool:
-    """The fourth deliverable makes a light track architecture (P1); one line says so.
+    """A deliverable with task_class 03_refactoring makes a light track architecture
+    (P6; the deliverable count no longer counts); one line says so.
 
     The deliverable row is already committed when this runs, so a rule that
     cannot be applied is printed as a warning naming ``vnx horizon
@@ -2872,8 +2957,7 @@ def _apply_deliverable_scope_rule(
     ``cmd_deliverable_add`` always returns 0 after this, because the store does
     hold the deliverable. ``retarget`` runs it on its target (``stream``: off a JSON stdout).
     """
-    count = len(_fetch_deliverable_records(state_dir, project_id, track_id))
-    rule = plan_scope.deliverable_rule(count)
+    rule = plan_scope.deliverable_task_class_rule(task_class)
     if rule is None:
         return True
     try:
@@ -2924,6 +3008,8 @@ def cmd_deliverable_add(args: argparse.Namespace) -> int:
 
     conn = _db_conn(state_dir)
     try:
+        # The insert and every dependency edge share one write lock: a refused edge rolls back the deliverable.
+        conn.execute("BEGIN IMMEDIATE")
         has_oaa = _has_col(conn, "dispatches", "operator_approved_at")
         has_ok = _has_col(conn, "dispatches", "output_kind")
         has_or = _has_col(conn, "dispatches", "output_ref")
@@ -2955,7 +3041,14 @@ def cmd_deliverable_add(args: argparse.Namespace) -> int:
             project_id=project_id,
             **_derived_actor("operator", metadata=delivery_identity_fields(dispatch_id, project_id)),
         )
+        for on_id in _split_dispatch_paths(getattr(args, "depends_on", None)):
+            dlv_deps.depend(conn, project_id, dispatch_id, on_id, kind="hard",
+                            created_by=actor_class.derive(), now=now)
         conn.commit()
+    except dlv_deps.DependencyRefused as exc:
+        conn.rollback()
+        print(f"deliverable add: {exc}. No change made.", file=sys.stderr)
+        return 2
     finally:
         conn.close()
 
@@ -2964,12 +3057,74 @@ def cmd_deliverable_add(args: argparse.Namespace) -> int:
     # did: a scope-raise that could not run is a warning (the way out is named),
     # never a non-zero exit that misstates the store. No caller relies on a
     # distinct code here, so the add returns 0.
-    _apply_deliverable_scope_rule(state_dir, project_id, track_id)
+    _apply_deliverable_scope_rule(state_dir, project_id, track_id,
+                                  task_class=metadata_dict.get("task_class"))
+    return 0
+
+
+def _dependency_change(args: argparse.Namespace, verb: str, change: Callable[..., str]) -> int:
+    """Run one ``depend``/``undepend`` under ``BEGIN IMMEDIATE``; a refusal prints the DAO's reason, exit 2."""
+    project_id = (args.project_id or "").strip()
+    conn = _db_conn(_resolve_state_dir(args.state_dir))
+    try:
+        conn.execute("BEGIN IMMEDIATE")  # the DAO's checks and its write under one lock
+        line = change(conn, project_id, actor_class.derive(), _now_utc())
+        conn.commit()
+    except dlv_deps.DependencyRefused as exc:
+        conn.rollback()
+        print(f"deliverable {verb}: {exc}. No change made.", file=sys.stderr)
+        return 2
+    finally:
+        conn.close()
+    print(line)
+    return 0
+
+
+def cmd_deliverable_depend(args: argparse.Namespace) -> int:
+    """``deliverable depend <dlv> --on <dlv> [--kind soft]`` (ADR-096 §1): an unknown id or a cycle is refused."""
+    def change(conn: sqlite3.Connection, pid: str, actor: str, now: str) -> str:
+        outcome = dlv_deps.depend(conn, pid, args.dispatch_id, args.on, kind=args.kind, created_by=actor, now=now)
+        return f"{outcome}: {args.dispatch_id} depends on {args.on} ({args.kind})"
+    return _dependency_change(args, "depend", change)
+
+
+def cmd_deliverable_undepend(args: argparse.Namespace) -> int:
+    """``deliverable undepend <dlv> --on <dlv> --reason "..."`` (ADR-096 §2): the row stays, marked removed."""
+    def change(conn: sqlite3.Connection, pid: str, actor: str, now: str) -> str:
+        dlv_deps.undepend(conn, pid, args.dispatch_id, args.on, reason=args.reason, removed_by=actor, now=now)
+        return f"removed: {args.dispatch_id} no longer depends on {args.on} (reason: {args.reason.strip()})"
+    return _dependency_change(args, "undepend", change)
+
+
+def cmd_deliverable_deps(args: argparse.Namespace) -> int:
+    """``deliverable deps <dlv> [--json]``: active and removed dependencies, both directions."""
+    project_id = (args.project_id or "").strip()
+    conn = _db_conn(_resolve_state_dir(args.state_dir))
+    try:
+        if not project_id:
+            raise dlv_deps.DependencyRefused("--project-id is required (ADR-007)")
+        deps = dlv_deps.dependencies(conn, project_id, args.dispatch_id)
+    except dlv_deps.DependencyRefused as exc:
+        print(f"deliverable deps: {exc}.", file=sys.stderr)
+        return 2
+    finally:
+        conn.close()
+    if args.json:
+        print(json.dumps(deps, indent=2))
+        return 0
+    print(f"{deps['deliverable']} (project {deps['project_id']})")
+    for title, rows, other in (("depends on", deps["depends_on"], "depends_on_id"),
+                               ("depended on by", deps["depended_on_by"], "deliverable_id")):
+        print(f"  {title}:" + ("" if rows else " none"))
+        for r in rows:
+            state = "active" if r["active"] else f"removed {r['removed_at']} ({r['removed_reason']})"
+            print(f"    {r[other]:<18} {r['kind']:<5} {state}")
     return 0
 
 
 def _fetch_deliverable_records(state_dir, project_id: str, objective: Optional[str] = None, *,
-                               include_metadata: bool = False, include_withdrawn: bool = False) -> list[dict]:
+                               include_metadata: bool = False, include_withdrawn: bool = False,
+                               conn: Optional[sqlite3.Connection] = None) -> list[dict]:
     """The single read path over the deliverable plane — the view rollup when
     migration 0027 has been applied, the raw-dispatches fallback otherwise.
 
@@ -2987,97 +3142,120 @@ def _fetch_deliverable_records(state_dir, project_id: str, objective: Optional[s
     ``task_class``/``routing_floor`` that are not modeled as their own view
     columns yet). A ``withdrawn`` deliverable is no open or planned work (ADR-049):
     it is left out unless ``include_withdrawn``.
+
+    ``conn`` reads on the caller's connection (a row-factory ``sqlite3.Row``
+    connection to the same store), so a caller inside a write transaction sees
+    the deliverables as that transaction does; the caller keeps ownership and
+    this function does not close it.
     """
+    if conn is not None:
+        return _deliverable_records_on(conn, project_id, objective, include_metadata, include_withdrawn)
     conn = _db_conn(state_dir)
     try:
-        has_view = any(
-            row[0] == "deliverables"
-            for row in conn.execute("SELECT name FROM sqlite_master WHERE type='view'")
-        )
-        if has_view:
-            base_cols = (
-                "deliverable_ref, output_kind, track, dispatch_count, "
-                "derived_status, last_activity"
-            )
-            meta_col = (
-                ", (SELECT d2.metadata_json FROM dispatches d2 "
-                "WHERE d2.project_id = deliverables.project_id "
-                "AND d2.output_ref = deliverables.deliverable_ref "
-                "ORDER BY d2.updated_at DESC LIMIT 1) AS metadata_json"
-                if include_metadata else ""
-            )
-            if objective:
-                rows = conn.execute(
-                    f"""
-                    SELECT {base_cols}{meta_col}
-                    FROM deliverables
-                    WHERE project_id = ? AND track = ?
-                    ORDER BY last_activity DESC
-                    """,
-                    (project_id, objective),
-                ).fetchall()
-            else:
-                rows = conn.execute(
-                    f"""
-                    SELECT {base_cols}{meta_col}
-                    FROM deliverables
-                    WHERE project_id = ?
-                    ORDER BY track, last_activity DESC
-                    """,
-                    (project_id,),
-                ).fetchall()
-            records = [dict(r) for r in rows if include_withdrawn or r["derived_status"] != WITHDRAWN_STATE]
-            if include_metadata:
-                for r in records:
-                    meta = json.loads(r.pop("metadata_json", None) or "{}")
-                    r["title"] = meta.get("title", "")
-                    r["metadata"] = meta
-        else:
-            # Fallback: read raw dispatches when view hasn't been applied yet
-            filter_clause = "AND track = ?" if objective else ""
-            params: list[Any] = [project_id]
-            if objective:
-                params.append(objective)
-            raw = conn.execute(
-                f"""
-                SELECT dispatch_id, state, track, output_kind, output_ref, metadata_json, updated_at
-                FROM dispatches
-                WHERE project_id = ? AND state IN ('proposed', 'ready') {filter_clause}
-                ORDER BY track, updated_at DESC
-                """,
-                params,
-            ).fetchall()
-            records = []
-            for r in raw:
-                meta = json.loads(r["metadata_json"] or "{}")
-                # OI-1615: state IN ('proposed', 'ready') alone is NOT unique
-                # to deliverables — it is the door's ordinary rest state for
-                # ANY accepted dispatch (dispatch_cli.py's
-                # _persist_dispatch_row). Without this check this fallback
-                # lists every plain door dispatch as a "deliverable" the
-                # moment a store hits it (a store predating migration 0027,
-                # where the `deliverables` VIEW that normally shields this
-                # path via `output_ref IS NOT NULL` does not exist yet).
-                # Same discriminator as #1747/OI-1609's
-                # the human-gate queue fix (build_t0_state, since removed by D8): only a
-                # dispatch cmd_deliverable_add actually created carries
-                # metadata_json.deliverable == true.
-                if not (isinstance(meta, dict) and meta.get("deliverable") is True):
-                    continue
-                rec = {
-                    "deliverable_ref": r["output_ref"] or r["dispatch_id"],
-                    "output_kind": r["output_kind"] or "-",
-                    "track": r["track"] or "-",
-                    "dispatch_count": 1,
-                    "derived_status": r["state"],
-                    "last_activity": r["updated_at"],
-                    "title": meta.get("title", ""),
-                }
-                if include_metadata:
-                    rec["metadata"] = meta
-                records.append(rec)
+        return _deliverable_records_on(conn, project_id, objective, include_metadata, include_withdrawn)
     finally:
         conn.close()
+
+
+def _deliverable_records_on(conn, project_id: str, objective: Optional[str],
+                            include_metadata: bool, include_withdrawn: bool) -> list[dict]:
+    """Pick the view rollup or the raw-dispatches fallback on ``conn``."""
+    has_view = any(
+        row[0] == "deliverables"
+        for row in conn.execute("SELECT name FROM sqlite_master WHERE type='view'")
+    )
+    if has_view:
+        return _deliverable_records_from_view(conn, project_id, objective, include_metadata, include_withdrawn)
+    return _deliverable_records_from_dispatches(conn, project_id, objective, include_metadata)
+
+
+def _deliverable_records_from_view(conn, project_id: str, objective: Optional[str],
+                                   include_metadata: bool, include_withdrawn: bool) -> list[dict]:
+    base_cols = (
+        "deliverable_ref, output_kind, track, dispatch_count, "
+        "derived_status, last_activity"
+    )
+    meta_col = (
+        ", (SELECT d2.metadata_json FROM dispatches d2 "
+        "WHERE d2.project_id = deliverables.project_id "
+        "AND d2.output_ref = deliverables.deliverable_ref "
+        "ORDER BY d2.updated_at DESC LIMIT 1) AS metadata_json"
+        if include_metadata else ""
+    )
+    if objective:
+        rows = conn.execute(
+            f"""
+            SELECT {base_cols}{meta_col}
+            FROM deliverables
+            WHERE project_id = ? AND track = ?
+            ORDER BY last_activity DESC
+            """,
+            (project_id, objective),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            f"""
+            SELECT {base_cols}{meta_col}
+            FROM deliverables
+            WHERE project_id = ?
+            ORDER BY track, last_activity DESC
+            """,
+            (project_id,),
+        ).fetchall()
+    records = [dict(r) for r in rows if include_withdrawn or r["derived_status"] != WITHDRAWN_STATE]
+    if include_metadata:
+        for r in records:
+            meta = json.loads(r.pop("metadata_json", None) or "{}")
+            r["title"] = meta.get("title", "")
+            r["metadata"] = meta
+    return records
+
+
+def _deliverable_records_from_dispatches(conn, project_id: str, objective: Optional[str],
+                                         include_metadata: bool) -> list[dict]:
+    # Fallback: read raw dispatches when view hasn't been applied yet
+    filter_clause = "AND track = ?" if objective else ""
+    params: list[Any] = [project_id]
+    if objective:
+        params.append(objective)
+    raw = conn.execute(
+        f"""
+        SELECT dispatch_id, state, track, output_kind, output_ref, metadata_json, updated_at
+        FROM dispatches
+        WHERE project_id = ? AND state IN ('proposed', 'ready') {filter_clause}
+        ORDER BY track, updated_at DESC
+        """,
+        params,
+    ).fetchall()
+    records = []
+    for r in raw:
+        meta = json.loads(r["metadata_json"] or "{}")
+        # OI-1615: state IN ('proposed', 'ready') alone is NOT unique
+        # to deliverables — it is the door's ordinary rest state for
+        # ANY accepted dispatch (dispatch_cli.py's
+        # _persist_dispatch_row). Without this check this fallback
+        # lists every plain door dispatch as a "deliverable" the
+        # moment a store hits it (a store predating migration 0027,
+        # where the `deliverables` VIEW that normally shields this
+        # path via `output_ref IS NOT NULL` does not exist yet).
+        # Same discriminator as #1747/OI-1609's
+        # the human-gate queue fix (build_t0_state, since removed by D8): only a
+        # dispatch cmd_deliverable_add actually created carries
+        # metadata_json.deliverable == true.
+        if not (isinstance(meta, dict) and meta.get("deliverable") is True):
+            continue
+        rec = {
+            "deliverable_ref": r["output_ref"] or r["dispatch_id"],
+            "output_kind": r["output_kind"] or "-",
+            "track": r["track"] or "-",
+            "dispatch_count": 1,
+            "derived_status": r["state"],
+            "last_activity": r["updated_at"],
+            "title": meta.get("title", ""),
+        }
+        if include_metadata:
+            rec["metadata"] = meta
+        records.append(rec)
     return records
 
 
@@ -3410,7 +3588,7 @@ def _promote_grant_view(
 def _sign_refusal(signers: Optional[Path], identity: str) -> Optional[str]:
     """Why ``plan-gate sign`` must not write, checked before any append; ``None`` when it may sign."""
     if signers is None:
-        return "no allowed_signers file found (VNX_ALLOWED_SIGNERS, .vnx-attest/ or .vnx/allowed_signers)"
+        return "no allowed_signers file found (.vnx-attest/allowed_signers or .vnx/allowed_signers)"
     try:
         lines = Path(signers).read_text(encoding="utf-8").splitlines()
     except OSError as exc:
@@ -3596,16 +3774,16 @@ def cmd_deliverable_close(args: argparse.Namespace) -> int:
         return 2
 
     raw_evidence = getattr(args, "evidence", None)
-    pr_ref = _normalize_pr_ref(raw_evidence) if raw_evidence else None
+    pr_ref = _normalize_pr_ref_list(raw_evidence) if raw_evidence else None  # ADR-096 §3 amendment: the gate reads this ordered list
     if pr_ref is None:
         print(
-            "deliverable close: --evidence <pr> is REQUIRED (the delivering PR, "
-            "as #NNN or NNN). It records an operator attestation of what delivered "
+            "deliverable close: --evidence <pr> is REQUIRED (the delivering PR, as #NNN or NNN, or a comma list "
+            "#NNN,#MMM for a deliverable shipped in parts). It records an operator attestation of what delivered "
             "the work — not just a bare flag. No change made.",
             file=sys.stderr,
         )
         return 2
-    evidence_number = int(pr_ref.lstrip("#"))
+    evidence_number = int(pr_ref.split(",")[0].lstrip("#"))
 
     conn = _db_conn(state_dir)
     try:
@@ -4353,6 +4531,17 @@ def _retarget_write(
     return False
 
 
+def _deliverable_task_class(metadata_json: Optional[str]) -> Optional[str]:
+    """The task_class a deliverable row carries, or None. Unparseable metadata
+    yields None: ``_retarget_check`` has already read it as a deliverable row."""
+    try:
+        meta = json.loads(metadata_json or "{}")
+    except (TypeError, ValueError):
+        return None
+    value = meta.get("task_class") if isinstance(meta, dict) else None
+    return value if isinstance(value, str) else None
+
+
 def cmd_deliverable_retarget(args: argparse.Namespace) -> int:
     """Move a proposed/ready deliverable to another track with one event (``close`` would attest a PR).
 
@@ -4407,7 +4596,9 @@ def cmd_deliverable_retarget(args: argparse.Namespace) -> int:
             print(f"  ready -> proposed: the promote approval was for {from_track}; promote again "
                   f"with `vnx deliverable promote {args.dispatch_id}`.")
         print()
-    _apply_deliverable_scope_rule(state_dir, project_id, args.objective, verb="retarget", done="moved",
+    _apply_deliverable_scope_rule(state_dir, project_id, args.objective,
+                                  task_class=_deliverable_task_class(row["metadata_json"]),
+                                  verb="retarget", done="moved",
                                   stream=sys.stderr if args.json else None)
     return 0
 
@@ -6556,6 +6747,9 @@ def _add_deliverable_add_parser(dlv_sub: Any, common: Any) -> None:
              "A plan-gate run without --dispatch-paths reads them: a schema or "
              "security path brings the second seat in from the start.",
     )
+    p_dadd.add_argument("--depends-on", dest="depends_on", default=None, metavar="DLV1,DLV2",
+                        help="comma-separated deliverables this one depends on (hard); an unknown id "
+                             "or a cycle refuses the whole add (ADR-096)")
     p_dadd.set_defaults(func=cmd_deliverable_add)
 
 
@@ -6590,7 +6784,8 @@ def _add_deliverable_parsers(sub: Any, common: Any) -> None:
     p_dclose.add_argument("dispatch_id")
     p_dclose.add_argument(
         "--evidence", required=True, metavar="PR",
-        help="delivering PR as #NNN or NNN (REQUIRED). Records an operator "
+        help="delivering PR as #NNN or NNN, or a comma list #NNN,#MMM for a "
+             "deliverable shipped in parts (REQUIRED). Records an operator "
              "attestation of what delivered the work; VNX does not verify the "
              "merge state at close time.",
     )
@@ -6622,6 +6817,27 @@ def _add_deliverable_parsers(sub: Any, common: Any) -> None:
     )
     p_dset.set_defaults(func=cmd_deliverable_set)
     _add_deliverable_retarget_parser(dlv_sub, common)
+    _add_deliverable_dependency_parsers(dlv_sub, common)
+
+
+def _add_deliverable_dependency_parsers(dlv_sub: Any, common: Any) -> None:
+    """``deliverable depend``, ``undepend`` and ``deps``: order between deliverables (ADR-096)."""
+    p = dlv_sub.add_parser("depend", help="record that a deliverable depends on another (a cycle is refused)")
+    common(p)
+    p.add_argument("dispatch_id")
+    p.add_argument("--on", required=True, metavar="DLV", help="the deliverable it depends on")
+    p.add_argument("--kind", choices=dlv_deps.KINDS, default="hard", help="hard (default) or soft")
+    p.set_defaults(func=cmd_deliverable_depend)
+    p = dlv_sub.add_parser("undepend", help="remove a dependency; the row stays with the reason")
+    common(p)
+    p.add_argument("dispatch_id")
+    p.add_argument("--on", required=True, metavar="DLV", help="the deliverable it no longer depends on")
+    p.add_argument("--reason", required=True, help="why it is removed (REQUIRED, may not be empty)")
+    p.set_defaults(func=cmd_deliverable_undepend)
+    p = dlv_sub.add_parser("deps", help="dependencies of a deliverable, both directions, active and removed")
+    common(p)
+    p.add_argument("dispatch_id")
+    p.set_defaults(func=cmd_deliverable_deps)
 
 
 def _add_deliverable_retarget_parser(dlv_sub: Any, common: Any) -> None:
@@ -6727,8 +6943,7 @@ def _add_plan_gate_run_parser(pg_sub: Any, common: Callable[[Any], None]) -> Non
         type=int,
         default=None,
         help="per-seat deadline in seconds before a panelist times out and books a "
-             "fabricated abstention (OI-1068). Defaults to VNX_PLAN_GATE_SEAT_TIMEOUT "
-             "(default 900) — the same env-var-knob style as VNX_PANEL_RETRY.",
+             "fabricated abstention (OI-1068). Defaults to 900.",
     )
     p_run.add_argument(
         "--dispatch-paths",
@@ -6878,7 +7093,7 @@ def _add_plan_gate_batch_parser(pg_sub: Any, common: Callable[[Any], None]) -> N
         type=int,
         default=None,
         help="per-seat deadline in seconds before a panelist times out and books a "
-             "fabricated abstention (OI-1068). Defaults to VNX_PLAN_GATE_SEAT_TIMEOUT.",
+             "fabricated abstention (OI-1068). Defaults to 900.",
     )
     p_pbatch.add_argument(
         "--dispatch-paths",
@@ -7261,6 +7476,17 @@ def _add_objective_hint_and_review_parsers(obj_sub, _common) -> None:
     p_plan_scope.add_argument("plan_scope", choices=plan_scope.PLAN_SCOPES)
     p_plan_scope.add_argument("--reason", default="", help="REQUIRED: why the scope changes")
     p_plan_scope.set_defaults(func=cmd_objective_set_plan_scope)
+
+    p_ps_review = obj_sub.add_parser(
+        "plan-scope", help="clean up open OI-PLAN: review proposes a scope per track, confirm needs --approval-id",
+    ).add_subparsers(dest="scope_action", required=True).add_parser(
+        "review", help="list tracks with an open OI-PLAN and the proposed scope (read-only)",
+    )
+    _common(p_ps_review)
+    p_ps_review.add_argument("--confirm", default="", help="comma-separated tracks whose proposal to store")
+    p_ps_review.add_argument("--confirm-all", action="store_true", help="confirm every track the review prints")
+    p_ps_review.add_argument("--approval-id", default="", help="REQUIRED with --confirm/--confirm-all")
+    p_ps_review.set_defaults(func=cmd_objective_plan_scope_review)
 
     p_rec_review = obj_sub.add_parser(
         "reconcile-review",

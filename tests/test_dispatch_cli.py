@@ -2539,7 +2539,6 @@ class TestTrackIdEndToEnd:
         bundle_dir.mkdir(parents=True)
         monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
         monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
-        monkeypatch.delenv("VNX_CURRENT_TRACK_ID", raising=False)
 
         _make_tracks_db(
             state_dir,
@@ -2572,7 +2571,6 @@ class TestTrackIdEndToEnd:
 
         assert rc == 0
         mock_execute.assert_called_once()
-        assert os.environ.get("VNX_CURRENT_TRACK_ID") == "track-linkage-enforcement"
 
         conn = sqlite3.connect(str(state_dir / "runtime_coordination.db"))
         row = conn.execute(

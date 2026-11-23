@@ -905,7 +905,7 @@ def fetch_ci_workflow_from_main(
 
     ``(None, "")`` means "the project declares none": no file on main, or a file
     that does not say. The caller's workflow name then falls to
-    ``VNX_CI_WORKFLOW_NAME`` and the fabric default. A file that exists but cannot
+    the fabric default. A file that exists but cannot
     be read or parsed is an error: guessing a workflow name would put the CI gate
     on a workflow the project never named.
     """

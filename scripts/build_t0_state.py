@@ -106,7 +106,6 @@ import json
 import logging
 import os
 import plistlib
-import select
 import shutil
 import sqlite3
 import subprocess
@@ -322,19 +321,8 @@ _STALE_STAGED_MAX_ITEMS = 10
 
 
 def _stale_staged_threshold() -> Tuple[int, Optional[str]]:
-    """(minutes, note); an invalid env value falls back to 30 and says so."""
-    raw = os.environ.get("VNX_STALE_STAGED_MINUTES")
-    if not (raw or "").strip():
-        return _STALE_STAGED_DEFAULT_MINUTES, None
-    try:
-        minutes = int(raw.strip())
-    except ValueError:
-        minutes = 0
-    if minutes <= 0:
-        return _STALE_STAGED_DEFAULT_MINUTES, (
-            f"invalid VNX_STALE_STAGED_MINUTES={raw!r}: using {_STALE_STAGED_DEFAULT_MINUTES}"
-        )
-    return minutes, None
+    """(minutes, note): the staleness threshold is the constant, and there is never a note."""
+    return _STALE_STAGED_DEFAULT_MINUTES, None
 
 
 def _receipt_dispatch_ids(receipts_path: Path) -> set:
@@ -2065,10 +2053,7 @@ def _build_system_health(
     # R6.1: DB health (locked/malformed) takes precedence over other signals.
     if db_health in ("failed", "degraded"):
         status = db_health
-    elif (
-        not (state_dir / "terminal_state.json").exists()
-        and not (state_dir / "t0_receipts.ndjson").exists()
-    ):
+    elif not (state_dir / "t0_receipts.ndjson").exists():
         status = "degraded"
     else:
         status = "healthy"
@@ -2808,110 +2793,37 @@ def _build_memory_ledger(state_dir: Path) -> Dict[str, Any]:
         return {"status": "error", "reason": f"{type(exc).__name__}: {exc}"[:200]}
 
 
-_INBOX_BUDGET_SECONDS = 0.5
-_INBOX_POINT_KEYS = ("point_id", "vraag", "age", "presented", "kopieerblok")
-
-
-def _inbox_show_child(project_id: str, state_dir: Path, out_fd: int) -> None:
-    """The detached grandchild: run show() (whose readers append to the queue), send one JSON doc, never return.
-
-    Nobody kills it: when the parent's budget runs out it closes the pipe and goes on, and this process finishes
-    its ledger append and projection rebuild on its own (OI-2899)."""
-    try:
-        try:
-            os.setsid()  # out of the caller's process group: a Ctrl-C or group kill there does not stop the writes
-        except OSError:  # vnx-silent-except: already a session leader; the writes run either way
-            pass
-        try:
-            import operator_queue_inbox as inbox
-
-            doc: Dict[str, Any] = {"data": inbox.show(project_id, limit=5, state_dir=state_dir,
-                                                      data_root=state_dir.parent)}
-        except BaseException as exc:  # carried to the parent as status=error
-            doc = {"error": f"{type(exc).__name__}: {exc}"[:200]}
-        payload = json.dumps(doc, default=str).encode("utf-8")
-        try:
-            while payload:
-                payload = payload[os.write(out_fd, payload):]
-        except OSError:  # vnx-silent-except: the parent timed out and closed the pipe; the queue writes are done
-            pass
-    finally:
-        os._exit(0)
-
-
-def _run_show_detached(project_id: str, state_dir: Path, budget: float) -> Any:
-    """show() in a double-forked grandchild. Returns its JSON doc, or ``{"timeout": True}`` after ``budget`` s."""
-    read_fd, write_fd = os.pipe()
-    pid = os.fork()
-    if pid == 0:
-        try:
-            os.close(read_fd)
-            if os.fork() == 0:
-                _inbox_show_child(project_id, state_dir, write_fd)
-        finally:
-            os._exit(0)  # the middle child exits at once, so the grandchild is reparented and never a zombie here
-    os.close(write_fd)
-    try:
-        os.waitpid(pid, 0)
-        chunks, deadline = [], time.monotonic() + budget
-        while True:
-            left = deadline - time.monotonic()
-            if left <= 0 or not select.select([read_fd], [], [], left)[0]:
-                return {"timeout": True}
-            chunk = os.read(read_fd, 65536)
-            if not chunk:
-                break
-            chunks.append(chunk)
-    finally:
-        os.close(read_fd)
-    return json.loads(b"".join(chunks).decode("utf-8"))
-
-
-def _inbox_block(data: Any) -> Dict[str, Any]:
-    """Besluit 11: status and open_total come from project_coverage(); an unknown source is never ok or zero."""
-    import operator_queue_inbox as inbox
-
-    try:
-        points = []
-        for p in data["points"][:5]:
-            item = {k: p[k] for k in _INBOX_POINT_KEYS}
-            if p.get("unknown_reden"):
-                item["unknown_reden"] = p["unknown_reden"]
-            points.append(item)
-        dekking, reden = inbox.project_coverage(data)
-        unknown = [{"name": n, "reden": r} for n, r in inbox.unknown_sources(data["coverage"])]
-        total = data["open_total"]
-        if dekking == "gelezen" and (not isinstance(total, int) or isinstance(total, bool)):
-            return {"status": "error", "reason": f"open_total malformed: {total!r}"[:200]}
-        ok = dekking == "gelezen"
-        return {"status": "ok" if ok else "unknown", "reason": reden, "coverage": data["coverage"],
-                "unknown_sources": unknown, "open_total": total if ok else None, "points": points,
-                "more": data["more"]}
-    except (KeyError, TypeError, AttributeError) as exc:
-        return {"status": "error", "reason": f"{type(exc).__name__}: {exc}"[:200]}
-
-
 def _build_operator_inbox(project_id: str, state_dir: Path) -> Dict[str, Any]:
-    """ADR-076 besluit 10: the open points. This process writes nothing; the refresh runs in its own process.
+    """ADR-076 besluit 10 and its 2026-11-22 amendment: the open points from the summary the ledger writer keeps.
 
-    An error becomes status=error, never a raise."""
+    This process runs no reader and writes nothing. A stale or missing summary is never ok and never zero;
+    an error becomes status=error, never a raise."""
     try:
-        run = _run_show_detached(project_id, state_dir, _INBOX_BUDGET_SECONDS)
-    except (OSError, ValueError) as exc:
+        import operator_queue as oq
+        import operator_queue_inbox as inbox
+
+        got = oq.read_inbox_summary(project_id, state_dir=state_dir)
+        summary = got["summary"]
+        base = {"as_of": summary["generated_at"] if summary else None, "freshness": got["freshness"],
+                "open_total": None, "more": None, "points": []}
+        if got["freshness"] != "current":
+            return {"status": "unknown", "reason": got["reason"], **base}
+        if summary["status"] != "ok":
+            return {"status": "unknown", "reason": summary["reason"], **base}
+        now = datetime.now(timezone.utc)
+        points = [{"point_id": p["point_id"], "vraag": p["vraag"], "presented": p["presented"],
+                   "kopieerblok": p["kopieerblok"],
+                   "age": inbox._age(int((now - oq.parse_ts(p["asked_at"])).total_seconds()))}
+                  for p in summary["points"]]
+        return {**base, "status": "ok", "reason": None, "open_total": summary["open_total"],
+                "more": summary["more"], "points": points}
+    except Exception as exc:  # vnx-silent-except: reported as status=error in the block itself
         return {"status": "error", "reason": f"{type(exc).__name__}: {exc}"[:200]}
-    if not isinstance(run, dict) or not ({"timeout", "error", "data"} & set(run)):
-        return {"status": "error", "reason": "show child sent a malformed result"}
-    if run.get("timeout") is True:
-        return {"status": "error", "reason": f"timeout: show took over {_INBOX_BUDGET_SECONDS:g}s "
-                                             "(the refresh finishes in its own process)"}
-    if "error" in run:
-        return {"status": "error", "reason": str(run["error"])[:200]}
-    return _inbox_block(run["data"])
 
 
 def _besluiten_logdir() -> Path:
-    """The register folder: VNX_BESLUITEN_LOGDIR when set (tests), else <project root>/daily-log."""
-    return Path(os.environ.get("VNX_BESLUITEN_LOGDIR") or _PROJECT_ROOT / "daily-log")
+    """The register folder: <project root>/daily-log."""
+    return _PROJECT_ROOT / "daily-log"
 
 
 def _build_besluiten(project_id: str, state_dir: Path) -> Dict[str, Any]:
@@ -3259,21 +3171,17 @@ def _write_detail_files(state: Dict[str, Any], detail_dir: Path) -> Dict[str, st
 # GC: retention sweep for t0_detail snapshots (W-UX-4)
 # ---------------------------------------------------------------------------
 
-def _gc_t0_detail(detail_dir: Path) -> int:
-    """Prune t0_detail/*.json files older than VNX_T0_DETAIL_RETENTION_DAYS days.
+_T0_DETAIL_RETENTION_DAYS = 14
 
-    Env-var VNX_T0_DETAIL_RETENTION_DAYS (default 14). Set to 0 to disable GC.
+
+def _gc_t0_detail(detail_dir: Path) -> int:
+    """Prune t0_detail/*.json files older than _T0_DETAIL_RETENTION_DAYS (14) days.
+
     Only touches *.json files inside detail_dir — never t0_state.json or t0_index.json.
     Idempotent: a second call after files are already pruned deletes nothing more.
     Returns the count of files deleted.
     """
-    try:
-        retention_days = int(os.environ.get("VNX_T0_DETAIL_RETENTION_DAYS", "14"))
-    except (ValueError, TypeError):
-        retention_days = 14
-
-    if retention_days == 0:
-        return 0
+    retention_days = _T0_DETAIL_RETENTION_DAYS
 
     if not detail_dir.is_dir():
         return 0

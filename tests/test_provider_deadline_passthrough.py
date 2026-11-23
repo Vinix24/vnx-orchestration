@@ -789,3 +789,41 @@ class TestPoolWorkerDeadline:
             "_deliver_provider must accept deadline_seconds kwarg"
         )
         assert sig.parameters["deadline_seconds"].default == 900
+
+
+# ---------------------------------------------------------------------------
+# OI-3062: ProviderAdapter.run (the door's lane) passes plan.deadline_seconds
+# ---------------------------------------------------------------------------
+
+class TestProviderAdapterDeadlinePassthrough:
+    """The door calls ProviderAdapter.run, which calls spawn_* directly."""
+
+    @pytest.mark.parametrize(
+        "provider_name,spawn_module,spawn_name",
+        [
+            ("CODEX", "provider_spawns.codex_spawn", "spawn_codex"),
+            ("GEMINI", "provider_spawns.gemini_spawn", "spawn_gemini"),
+            ("LITELLM_DEEPSEEK", "provider_spawns.litellm_spawn", "spawn_litellm"),
+            ("LITELLM_ZAI", "provider_spawns.litellm_spawn", "spawn_litellm"),
+        ],
+    )
+    def test_spec_deadline_reaches_spawn(
+        self, tmp_path, provider_name, spawn_module, spawn_name
+    ):
+        import dataclasses
+
+        from dispatch_envelope import ProviderAdapter
+        from dispatch_spec import Provider
+        from test_dispatch_envelope_plan import _make_provider_plan
+
+        plan = _make_provider_plan(
+            tmp_path, provider=getattr(Provider, provider_name), model="m-test"
+        )
+        plan = dataclasses.replace(plan, deadline_seconds=5400)
+        with patch(f"{spawn_module}.{spawn_name}") as spawn:
+            spawn.return_value = MagicMock(
+                exit_code=0, returncode=0, status="done", completion_text="ok"
+            )
+            ProviderAdapter().run(plan, "do it", cwd=tmp_path)
+        assert spawn.call_count == 1
+        assert spawn.call_args.kwargs.get("total_deadline") == 5400.0

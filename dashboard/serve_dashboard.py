@@ -815,8 +815,8 @@ def main() -> None:
     global _LOOPBACK_BIND, _DASHBOARD_TOKEN
     port = int(os.environ.get("PORT", "4173"))
     # Audit critical #1: default to loopback. The old all-interfaces bind exposed process-control +
-    # governance mutations to the LAN. Opt into remote with VNX_DASHBOARD_BIND (and a token).
-    bind = os.environ.get("VNX_DASHBOARD_BIND", "127.0.0.1")
+    # governance mutations to the LAN.
+    bind = "127.0.0.1"
     _LOOPBACK_BIND = _bind_is_loopback(bind)
     _DASHBOARD_TOKEN = os.environ.get("VNX_DASHBOARD_TOKEN", "")
 

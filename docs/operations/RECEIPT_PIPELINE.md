@@ -80,16 +80,16 @@ report_parser.py parses the markdown into receipt JSON
         ↓
 append_receipt.py appends to t0_receipts.ndjson  (idempotent, lock-serialized)
         ↓
-rp_delivery.sh delivers the receipt to the T0 pane (outbox pattern)
+rp_delivery.sh moves the receipt through the outbox (pending/ → processed/); no pane push
 ```
 
 - `scripts/receipt_processor.sh` watches `VNX_REPORTS_DIR` (and `VNX_REPORTS_DIR/headless`) for new reports. Monitor mode processes only reports newer than startup; catchup mode reprocesses a recent window.
 - `scripts/report_parser.py` extracts the receipt fields from the report.
 - `scripts/append_receipt.py` performs the append, via `append_receipt_internals/payload.py::append_receipt_payload`, which calls the shared append primitive that also applies hash-chaining when `VNX_CHAIN_RECEIPTS=1` (see below — as of ADR-035 §7.1, Path 1 goes through the same primitive and the same chain-stamping).
-- Delivery to T0 uses an **outbox pattern** (`scripts/lib/receipt_processor/rp_delivery.sh`): the receipt is persisted to `receipts/pending/` first, then — only when `VNX_RECEIPT_T0_PUSH=1` (opt-in transition escape hatch; **default is `0`** since ADR-035 §5.3/§9 PR-8) — delivered to the T0 tmux pane via `tmux load-buffer` → `paste-buffer` → `Enter`. A retry poller re-delivers anything still pending after a restart when the push is enabled. Write-first guarantees no receipt is lost regardless of the push flag; T0 becomes aware of receipts through `open_outcomes` (`scripts/receipt_query.py open-outcomes`, `docs/core/DISPATCH_RULES.md` §13): a dispatch without an outcome a T0 decided on (reject, investigate, only evidence, or still in `dispatches/active/` without one) stays on that list until a T0 decides.
+- Delivery to T0 is a pull, not a push. `scripts/lib/receipt_processor/rp_delivery.sh` keeps only the **outbox**: the receipt is persisted to `receipts/pending/` first and then moved to `receipts/processed/`; a retry poller drains anything still pending after a restart. T0 becomes aware of receipts through `open_outcomes` (`scripts/receipt_query.py open-outcomes`, `docs/core/DISPATCH_RULES.md` §13): a dispatch without an outcome a T0 decided on (reject, investigate, only evidence, or still in `dispatches/active/` without one) stays on that list until a T0 decides.
 - `scripts/report_watcher.sh` is **deprecated** (it exits 0 immediately); `receipt_processor.sh` is the single watcher.
 
-Report delivery via the T0 tmux pane (`VNX_RECEIPT_T0_PUSH=1`) requires a tmux pane to be present. Headless and CLI flows write the ledger line regardless; the pane paste is an opt-in T0-notification step, not the audit write — `open_outcomes` is the default way T0 learns what to look at (`docs/core/DISPATCH_RULES.md` §13).
+Headless and CLI flows write the ledger line regardless of any tmux pane; `open_outcomes` is how T0 learns what to look at (`docs/core/DISPATCH_RULES.md` §13).
 
 ## The mandatory report contract
 
@@ -167,11 +167,11 @@ tail -5 .vnx-data/state/t0_receipts.ndjson | jq -r '.dispatch_id + " " + .status
 ls .vnx-data/receipts/pending/ 2>/dev/null
 ```
 
-Common causes: processor not running; report predates monitor-mode startup (use catchup mode); report fails the contract (run `scripts/validate_report.py <report>`); no T0 tmux pane for delivery (the ledger line is still written — only the pane notification is skipped).
+Common causes: processor not running; report predates monitor-mode startup (use catchup mode); report fails the contract (run `scripts/validate_report.py <report>`).
 
 ### Receipt written but T0 did not see it
 
-As of ADR-035 §5.3 (§9 PR-8), `VNX_RECEIPT_T0_PUSH` defaults to `0` — the tmux pane paste is suppressed by default, and T0 reads `open_outcomes` instead: `python3 scripts/receipt_query.py open-outcomes --state-dir <state-dir>` (rationale: `docs/core/DISPATCH_RULES.md` §13). Set `VNX_RECEIPT_T0_PUSH=1` to re-enable the legacy pane push as a transition escape hatch — it works from a CLI or desktop tmux session but not from a mobile remote-control session. Either way, if receipts are on disk (`tail .vnx-data/state/t0_receipts.ndjson`) but T0 shows nothing, check `open_outcomes` and the push flag before suspecting the pipeline — the audit write already succeeded.
+There is no pane push: T0 reads `open_outcomes` instead: `python3 scripts/receipt_query.py open-outcomes --state-dir <state-dir>` (rationale: `docs/core/DISPATCH_RULES.md` §13). If receipts are on disk (`tail .vnx-data/state/t0_receipts.ndjson`) but T0 shows nothing, check `open_outcomes` before suspecting the pipeline — the audit write already succeeded.
 
 ### Stranded reports — refused for a missing/invalid model
 

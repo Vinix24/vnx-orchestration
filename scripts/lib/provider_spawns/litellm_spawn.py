@@ -585,19 +585,9 @@ def spawn_litellm(
     tool_call_shape triggers pre-spawn validation for format mismatch detection.
     sub_provider and lane are propagated to audit events per ADR-016.
     """
-    try:
-        chunk_timeout = float(os.environ.get("VNX_LITELLM_STALL_THRESHOLD", chunk_timeout))
-    except (TypeError, ValueError):
-        pass
-    try:
-        total_deadline = float(os.environ.get("VNX_LITELLM_TIMEOUT", total_deadline))
-    except (TypeError, ValueError):
-        pass
     # OI-903: scale the stall timeout with the total deadline so a long deadline
-    # stays the binding constraint. Skipped when VNX_LITELLM_STALL_THRESHOLD is set
-    # explicitly — env overrides retain precedence.
-    if "VNX_LITELLM_STALL_THRESHOLD" not in os.environ:
-        chunk_timeout = coerce_chunk_stall(chunk_timeout, total_deadline)
+    # stays the binding constraint.
+    chunk_timeout = coerce_chunk_stall(chunk_timeout, total_deadline)
 
     try:
         _validate_tool_shape(prompt, tool_call_shape)
@@ -640,11 +630,11 @@ def spawn_litellm(
 _AGENTIC_RUNNER_PATH = Path(__file__).resolve().parents[1] / "adapters" / "_litellm_agentic_runner.py"
 
 
-def _agentic_int_env(name: str, default: int) -> int:
-    try:
-        return int(os.environ.get(name, default))
-    except (TypeError, ValueError):
-        return default
+# Limits of one agentic run when the caller passes none.
+AGENTIC_MAX_TURNS = 30
+AGENTIC_MAX_TOKENS = 8192
+AGENTIC_COMMAND_TIMEOUT_S = 120
+AGENTIC_TOTAL_DEADLINE_S = 1800.0
 
 
 def spawn_litellm_agentic(
@@ -676,11 +666,11 @@ def spawn_litellm_agentic(
     Returns the same LiteLLMSpawnResult shape so callers (_emit_governance,
     frontmatter token_usage) need no special-casing.
     """
-    max_turns = max_turns or _agentic_int_env("VNX_LITELLM_AGENTIC_MAX_TURNS", 30)
-    max_tokens = max_tokens or _agentic_int_env("VNX_LITELLM_AGENTIC_MAX_TOKENS", 8192)
-    command_timeout = command_timeout or _agentic_int_env("VNX_LITELLM_AGENTIC_CMD_TIMEOUT", 120)
+    max_turns = max_turns or AGENTIC_MAX_TURNS
+    max_tokens = max_tokens or AGENTIC_MAX_TOKENS
+    command_timeout = command_timeout or AGENTIC_COMMAND_TIMEOUT_S
     if total_deadline is None:
-        total_deadline = float(_agentic_int_env("VNX_LITELLM_AGENTIC_DEADLINE", 1800))
+        total_deadline = AGENTIC_TOTAL_DEADLINE_S
 
     model = model or _default_litellm_model(sub_provider)
 

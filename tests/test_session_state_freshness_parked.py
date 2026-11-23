@@ -40,11 +40,9 @@ def _write(state_dir: Path, filename: str, payload: dict) -> None:
 def _populate(state_dir: Path, *, recommendations_days=None, dashboard_days=0.01) -> None:
     """Every artifact fresh, except the ones the caller ages. ``None`` for
     ``recommendations_days`` leaves t0_recommendations.json absent. The real
-    clock is used throughout because terminal_state.json has no content
-    timestamp: its age is its mtime, which is "now"."""
+    clock is used throughout."""
     _write(state_dir, "t0_state.json", {"generated_at": _iso(0.01)})
     _write(state_dir, "open_items.json", {"last_updated": _iso(0.01)})
-    _write(state_dir, "terminal_state.json", {"terminals": {}})
     _write(state_dir, "dashboard_status.json", {"timestamp": _iso(dashboard_days)})
     if recommendations_days is not None:
         _write(state_dir, "t0_recommendations.json", {"timestamp": _iso(recommendations_days)})

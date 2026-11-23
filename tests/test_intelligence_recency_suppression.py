@@ -11,7 +11,7 @@ Test matrix:
   (a) item recently injected → suppressed, alternative selected
   (b) pool goes empty after suppression → vangnet passes best through + logs reason
   (c) different task_class → no suppression applied
-  (d) window size respects VNX_INTEL_SUPPRESS_WINDOW env var
+  (d) window size respects IntelligenceSelector._SUPPRESS_WINDOW_DEFAULT
   (e) corrupt items_json row → skipped without crash
 """
 
@@ -119,7 +119,6 @@ class TestRecentlyInjectedItemSuppressed:
         for i in range(3):
             _insert_injection(state_dir, f"dispatch-{i}", "coding_interactive", [dominant_id])
 
-        monkeypatch.setenv("VNX_INTEL_SUPPRESS_WINDOW", "10")
 
         selector = _make_selector(state_dir)
         recent_ids = selector._query_recent_injected_ids("coding_interactive")
@@ -158,7 +157,6 @@ class TestVangnetWhenPoolGoesEmpty:
         item_id = "intel_sp_1"
         _insert_injection(state_dir, "dispatch-0", "coding_interactive", [item_id])
 
-        monkeypatch.setenv("VNX_INTEL_SUPPRESS_WINDOW", "10")
 
         selector = _make_selector(state_dir)
         recent_ids = frozenset({item_id})
@@ -196,7 +194,6 @@ class TestDifferentTaskClassNotSuppressed:
         # Record injection only under research_structured, not coding_interactive
         _insert_injection(state_dir, "dispatch-0", "research_structured", [item_id])
 
-        monkeypatch.setenv("VNX_INTEL_SUPPRESS_WINDOW", "10")
 
         selector = _make_selector(state_dir)
         # Query for coding_interactive — must return empty set
@@ -218,11 +215,11 @@ class TestDifferentTaskClassNotSuppressed:
 
 
 # ---------------------------------------------------------------------------
-# (d) Window size respects VNX_INTEL_SUPPRESS_WINDOW env var
+# (d) Window size respects the class default
 # ---------------------------------------------------------------------------
 
-class TestWindowSizeEnvVar:
-    """VNX_INTEL_SUPPRESS_WINDOW controls how many recent dispatches are checked."""
+class TestWindowSizeClassDefault:
+    """_SUPPRESS_WINDOW_DEFAULT controls how many recent dispatches are checked."""
 
     def test_window_zero_disables_suppression(self, tmp_path, monkeypatch):
         state_dir = tmp_path / "state"
@@ -231,7 +228,7 @@ class TestWindowSizeEnvVar:
         item_id = "intel_sp_1"
         _insert_injection(state_dir, "dispatch-0", "coding_interactive", [item_id])
 
-        monkeypatch.setenv("VNX_INTEL_SUPPRESS_WINDOW", "0")
+        monkeypatch.setattr(IntelligenceSelector, "_SUPPRESS_WINDOW_DEFAULT", 0)
 
         selector = _make_selector(state_dir)
         recent_ids = selector._query_recent_injected_ids("coding_interactive")
@@ -257,7 +254,7 @@ class TestWindowSizeEnvVar:
             injected_at="2026-06-10T12:00:00Z",
         )
 
-        monkeypatch.setenv("VNX_INTEL_SUPPRESS_WINDOW", "1")
+        monkeypatch.setattr(IntelligenceSelector, "_SUPPRESS_WINDOW_DEFAULT", 1)
 
         selector = _make_selector(state_dir)
         recent_ids = selector._query_recent_injected_ids("coding_interactive")
@@ -276,7 +273,7 @@ class TestWindowSizeEnvVar:
                 injected_at=f"2026-06-0{i+1}T00:00:00Z",
             )
 
-        monkeypatch.setenv("VNX_INTEL_SUPPRESS_WINDOW", "100")
+        monkeypatch.setattr(IntelligenceSelector, "_SUPPRESS_WINDOW_DEFAULT", 100)
 
         selector = _make_selector(state_dir)
         recent_ids = selector._query_recent_injected_ids("coding_interactive")
@@ -320,7 +317,6 @@ class TestCorruptItemsJsonRow:
         valid_id = "intel_sp_42"
         _insert_injection(state_dir, "good-dispatch", "coding_interactive", [valid_id])
 
-        monkeypatch.setenv("VNX_INTEL_SUPPRESS_WINDOW", "10")
 
         selector = _make_selector(state_dir)
         # Must not raise
@@ -339,7 +335,6 @@ class TestCorruptItemsJsonRow:
         valid_id = "intel_sp_99"
         _insert_injection(state_dir, "good-dispatch", "coding_interactive", [valid_id])
 
-        monkeypatch.setenv("VNX_INTEL_SUPPRESS_WINDOW", "10")
 
         selector = _make_selector(state_dir)
         recent_ids = selector._query_recent_injected_ids("coding_interactive")
@@ -352,7 +347,6 @@ class TestCorruptItemsJsonRow:
         # state_dir exists but no DB file — must return frozenset() gracefully
         state_dir = tmp_path / "nonexistent_state"
         # Do not call _setup_coord_db — directory absent
-        monkeypatch.setenv("VNX_INTEL_SUPPRESS_WINDOW", "10")
 
         selector = _make_selector(state_dir)
         recent_ids = selector._query_recent_injected_ids("coding_interactive")

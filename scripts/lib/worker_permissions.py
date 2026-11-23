@@ -20,7 +20,7 @@ Each role profile may also declare ``mcp_servers`` — a per-role allowlist of
 named MCP servers. Materialized by :func:`build_claude_scope_args` /
 :func:`resolve_role_mcp_config` into a scoped ``--mcp-config`` limited to just
 those names (definitions read from the ambient global config, see
-``VNX_GLOBAL_MCP_CONFIG_PATH`` / ``mcp_server_config.global_mcp_config_path``), with
+``mcp_server_config.global_mcp_config_path``), with
 ``env`` and ``headers`` reduced to ``${VAR}`` references so no literal credential
 reaches the ``--mcp-config`` argv. An empty allowlist (the default) keeps the existing
 zero-MCP posture.

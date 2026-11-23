@@ -6,8 +6,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
-import subprocess
 import sys
 from pathlib import Path
 
@@ -277,7 +275,7 @@ class TestDigestBudget:
         warnings = [r for r in caplog.records if "distillate" in r.message]
         assert warnings, "a per-seat distill cut must be logged loudly, never silently"
         assert "kimi" in warnings[0].message
-        assert "VNX_PANEL_SEAT_DISTILLATE_BUDGET" in warnings[0].message
+        assert "_SEAT_DISTILLATE_BUDGET" in warnings[0].message
         body = digest.split("]\n", 1)[1]
         assert len(body) < 12_500  # bounded to the per-seat budget (+ short truncation notice)
         assert "[kimi / risks]" in digest  # the seat still appears, bounded
@@ -304,18 +302,6 @@ class TestDigestBudget:
         synthesis stage, which fits a modern context window (OI-820)."""
         assert dp._SEAT_DISTILLATE_BUDGET == 12_000
 
-    def test_seat_distillate_budget_env_var_override(self):
-        lib_dir = str(REPO_ROOT / "scripts" / "lib")
-        code = (
-            f"import sys; sys.path.insert(0, {lib_dir!r}); import deliberation_panel as dp; "
-            "print(dp._SEAT_DISTILLATE_BUDGET)"
-        )
-        env = {**os.environ, "VNX_PANEL_SEAT_DISTILLATE_BUDGET": "777"}
-        result = subprocess.run(
-            [sys.executable, "-c", code], env=env, capture_output=True, text=True, check=True,
-        )
-        assert result.stdout.strip() == "777"
-
 
 class TestReportBackstop:
     """The generous per-report backstop replaces the old normal-case 6000-char truncation.
@@ -340,21 +326,11 @@ class TestReportBackstop:
         warnings = [r for r in caplog.records if "clipped" in r.message]
         assert warnings, "clipping must emit a loud warning, never fail silently"
         assert "codex" in warnings[0].message
-        assert "VNX_PANEL_REPORT_BACKSTOP" in warnings[0].message
 
     def test_default_backstop_is_generous(self):
         """The default backstop is a pathological-runaway guard, not a normal-case limit —
         it must comfortably exceed any realistic single-seat report."""
         assert dp._REPORT_BACKSTOP >= 40_000
-
-    def test_backstop_env_var_override(self):
-        lib_dir = str(REPO_ROOT / "scripts" / "lib")
-        code = f"import sys; sys.path.insert(0, {lib_dir!r}); import deliberation_panel as dp; print(dp._REPORT_BACKSTOP)"
-        env = {**os.environ, "VNX_PANEL_REPORT_BACKSTOP": "12345"}
-        result = subprocess.run(
-            [sys.executable, "-c", code], env=env, capture_output=True, text=True, check=True,
-        )
-        assert result.stdout.strip() == "12345"
 
     def test_downstream_slices_use_backstop_not_old_limit(self, caplog):
         """result.contrarian / result.factcheck feeding into later stages must go through the
@@ -387,25 +363,13 @@ class TestStageDistillation:
         warnings = [r for r in caplog.records if "distillate" in r.message]
         assert warnings, "distillation trim must emit a loud warning, never fail silently"
         assert "contrarian" in warnings[0].message
-        assert "VNX_PANEL_DISTILLATE_BUDGET" in warnings[0].message
+        assert "_DISTILLATE_BUDGET" in warnings[0].message
 
     def test_default_distillate_budget_is_much_smaller_than_report_backstop(self):
         """The distillate budget is a per-hop carry-forward cap, not the generous
         single-report backstop — it must be meaningfully smaller so cascading across
         3 downstream stages does not reproduce the old blow-up."""
         assert dp._DISTILLATE_BUDGET < dp._REPORT_BACKSTOP
-
-    def test_distillate_budget_env_var_override(self):
-        lib_dir = str(REPO_ROOT / "scripts" / "lib")
-        code = (
-            f"import sys; sys.path.insert(0, {lib_dir!r}); import deliberation_panel as dp; "
-            "print(dp._DISTILLATE_BUDGET)"
-        )
-        env = {**os.environ, "VNX_PANEL_DISTILLATE_BUDGET": "999"}
-        result = subprocess.run(
-            [sys.executable, "-c", code], env=env, capture_output=True, text=True, check=True,
-        )
-        assert result.stdout.strip() == "999"
 
     def test_synthesis_prompt_bounded_and_instruction_survives_huge_prior_stages(self):
         """The exact OI-809 failure mode: every stage returns a HUGE report (as a live

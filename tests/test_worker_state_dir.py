@@ -133,10 +133,6 @@ class TestDeliveryEnvInjection:
                 return_value=("instruction", None, None, "/tmp/manifest"),
             ),
             patch(
-                "subprocess_dispatch_internals.delivery._load_resume_session",
-                return_value=None,
-            ),
-            patch(
                 "subprocess_dispatch_internals.delivery._start_heartbeat",
                 return_value=(None, None, None, None),
             ),

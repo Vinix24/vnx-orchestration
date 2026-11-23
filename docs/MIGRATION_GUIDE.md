@@ -24,7 +24,7 @@ root. The full command list for both binaries is one canonical source:
 
 1. **New features**: Use `./bin/vnx new-worktree <name>` for all new work. All terminals share one worktree per feature.
 2. **Existing per-terminal worktrees**: Continue working in them until the current feature is complete.
-3. **`VNX_WORKTREES=true` is a no-op**: `./bin/vnx start` is T0-only and no longer creates fixed per-terminal worker worktrees at all (`scripts/commands/start.sh`). Setting the flag only logs "Ignoring VNX_WORKTREES=true"; it does not restore the legacy behavior.
+3. **No per-terminal worktrees at start**: `./bin/vnx start` is T0-only and no longer creates fixed per-terminal worker worktrees at all (`scripts/commands/start.sh`). No setting restores the legacy behavior.
 
 ### New Workflow
 

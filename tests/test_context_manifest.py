@@ -31,7 +31,6 @@ def env(tmp_path, monkeypatch):
     for d in (home, repo, projects / "-enc"):
         d.mkdir(parents=True)
     monkeypatch.setenv("HOME", str(home))
-    monkeypatch.delenv("VNX_CLAUDE_PROJECTS_DIR", raising=False)
     text = FIXTURE.read_text(encoding="utf-8").replace("{HOME}", str(home)).replace("{REPO}", str(repo))
     transcript = projects / "-enc" / f"{SESSION}.jsonl"
     transcript.write_text(text, encoding="utf-8")

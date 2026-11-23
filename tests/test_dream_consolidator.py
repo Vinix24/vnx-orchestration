@@ -33,6 +33,7 @@ sys.path.insert(0, str(REPO_ROOT / "scripts" / "lib"))
 sys.path.insert(0, str(REPO_ROOT / "scripts" / "dream"))
 
 import consolidator
+from content_boundary_pin import pin_boundary
 
 # Captured before the autouse fixture below monkeypatches consolidator._injection_probe_health,
 # so the real-probe-integration tests in TestActivationGate can exercise the genuine function.
@@ -57,7 +58,7 @@ def _dream_boundary_configured(monkeypatch, tmp_path_factory):
     unconfigured one, and a test must never read the operator's real boundary file."""
     boundary_file = tmp_path_factory.mktemp("dream-boundary") / "content_boundary.json"
     boundary_file.write_text(json.dumps({"version": 1}), encoding="utf-8")
-    monkeypatch.setenv("VNX_CONTENT_BOUNDARY_FILE", str(boundary_file))
+    pin_boundary(monkeypatch, str(boundary_file))
 
 
 # ---------------------------------------------------------------------------
@@ -672,10 +673,10 @@ class TestKimiTimeout:
         timeout_events = [e for e in events if e.get("event_type") == "dream_cycle_timeout"]
         assert timeout_events, "dream_cycle_timeout event not emitted"
 
-    def test_timeout_env_override(self, tmp_path, monkeypatch):
-        """VNX_DREAM_TIMEOUT env var is passed to _dispatch_kimi_consolidation."""
+    def test_timeout_default_is_passed(self, tmp_path, monkeypatch):
+        """``_DEFAULT_TIMEOUT`` is the timeout passed to _dispatch_kimi_consolidation."""
         db_path, data_root = _make_db_with_receipts(tmp_path, with_patterns=True)
-        monkeypatch.setenv("VNX_DREAM_TIMEOUT", "42")
+        monkeypatch.setattr(consolidator, "_DEFAULT_TIMEOUT", 42)
         captured = {}
 
         def _capture_timeout(patterns, project_id, timeout=180.0, data_root=None):
@@ -1443,7 +1444,7 @@ class TestDreamContentBoundaryAndSwitch:
         token_file.write_text(_CANARY, encoding="utf-8")
         boundary_file = tmp_path / "boundary" / "content_boundary.json"
         boundary_file.parent.mkdir()
-        monkeypatch.setenv("VNX_CONTENT_BOUNDARY_FILE", str(boundary_file))
+        pin_boundary(monkeypatch, str(boundary_file))
         monkeypatch.setenv("VNX_PROVIDER_SWITCH_FILE", str(tmp_path / "switch" / "providers.json"))
         for name in list(__import__("os").environ):
             if name.startswith("VNX_OVERRIDE_PROVIDER_"):

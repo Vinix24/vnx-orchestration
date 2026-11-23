@@ -140,7 +140,7 @@ def test_push_due_interval_and_closed(sdir, monkeypatch):
     assert [p["point_id"] for p in inbox.push_due(PID, sessie="s", now=NOW, state_dir=sdir)] == [pid]
     assert inbox.push_due(PID, sessie="s", now="2026-11-15T15:59:00Z", state_dir=sdir) == []
     assert len(inbox.push_due(PID, sessie="s", now="2026-11-15T16:00:00Z", state_dir=sdir)) == 1
-    monkeypatch.setenv("VNX_INBOX_PUSH_INTERVAL_H", "1")
+    monkeypatch.setattr(inbox, "_interval_h", lambda: 1.0)
     assert len(inbox.push_due(PID, sessie="s", now="2026-11-15T17:00:00Z", state_dir=sdir)) == 1
     assert len(_reserved(sdir)) == 3
 
@@ -463,3 +463,31 @@ def test_source_text_line_reason_is_capped_json_keeps_source(tmp_path, monkeypat
     text, by_id = _all_text_and_json(home, registry, capsys)
     assert "  bron 3: unknown (" + "x" * inbox.REDEN_MAX + ")" in _text_block(text, "alpha")
     assert by_id["alpha"]["sources"][0]["bron"] == 3 and by_id["alpha"]["sources"][0]["reden"] == "x" * 500
+
+
+def test_show_runs_the_readers_and_orders_exactly_like_the_summary(sdir, monkeypatch):
+    ran = []
+
+    def reader(project_id, **kw):
+        ran.append(project_id)
+        return {"bron": 3, "dekking": "gelezen", "reden": None, "unknown": []}
+
+    monkeypatch.setattr(inbox, "_MODULES", (types.SimpleNamespace(READERS=(("fake", reader),)),))
+    ids = [_open(sdir, f"r{n}", f"2026-11-0{n + 1}T00:00:00Z") for n in range(7)]
+    _present(sdir, ids[0], 2)
+    _present(sdir, ids[2], 1)
+    shown = inbox.show(PID, now=NOW, state_dir=sdir)
+    summary = oq.read_inbox_summary(PID, state_dir=sdir)
+    assert ran == [PID] and summary["freshness"] == "current"
+    assert [p["point_id"] for p in shown["points"]] == [p["point_id"] for p in summary["summary"]["points"]]
+    assert (shown["open_total"], shown["more"]) == (summary["summary"]["open_total"], summary["summary"]["more"])
+    assert inbox._order is oq.order_points and inbox._presented is oq.presented_counts
+
+
+def test_show_brings_a_stale_summary_current(sdir):
+    _open(sdir, "a", "2026-11-01T00:00:00Z")
+    with open(sdir / oq.LEDGER_FILENAME, "a") as raw:
+        raw.write("\n")
+    assert oq.read_inbox_summary(PID, state_dir=sdir)["freshness"] == "stale"
+    inbox.show(PID, now=NOW, state_dir=sdir)
+    assert oq.read_inbox_summary(PID, state_dir=sdir)["freshness"] == "current"

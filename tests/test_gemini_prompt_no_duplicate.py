@@ -2,12 +2,11 @@
 """OI-1230 regression: gate_runner must not double-inline file contents into the Gemini prompt.
 
 Background: ``gate_runner._resolve_prompt`` previously appended
-``vertex_ai_runner.collect_file_contents`` to a prompt that already carried the
+``collect_file_contents`` to a prompt that already carried the
 file bodies, producing two copies of every file section. Since #479
 (90dbf23ca) the self-built gemini prompt carries the ``gh pr diff`` text
 instead of inlined ``--- FILE:`` sections, so the diff body must appear exactly
-once and no file section may be appended on top of it. An externally supplied
-prompt is still enriched with file contents, exactly once.
+once and no file section may be appended on top of it.
 """
 
 from __future__ import annotations
@@ -48,8 +47,8 @@ DIFF_TEXT = (
 )
 
 
-def test_resolve_prompt_inlines_files_exactly_once_for_vertex(tmp_path):
-    """When using_vertex=True, the diff is in the prompt once and no FILE section is appended."""
+def test_resolve_prompt_inlines_files_exactly_once_with_branch(tmp_path):
+    """The diff is in the prompt once and no FILE section is appended."""
     file_a = tmp_path / "alpha.py"
     file_a.write_text("ALPHA_CONTENT\n")
     file_b = tmp_path / "beta.py"
@@ -64,7 +63,7 @@ def test_resolve_prompt_inlines_files_exactly_once_for_vertex(tmp_path):
 
     runner = _make_runner(tmp_path)
     prompt = runner._resolve_prompt(
-        gate="gemini_review", request_payload=payload, using_vertex=True,
+        gate="gemini_review", request_payload=payload,
     )
 
     assert prompt.count("+++ b/alpha.py") == 1
@@ -72,8 +71,8 @@ def test_resolve_prompt_inlines_files_exactly_once_for_vertex(tmp_path):
     assert str(file_b) not in prompt
 
 
-def test_resolve_prompt_inlines_files_exactly_once_without_vertex(tmp_path):
-    """Subprocess (non-Vertex) path carries the diff once, with no FILE section."""
+def test_resolve_prompt_inlines_files_exactly_once_without_branch(tmp_path):
+    """The subprocess path carries the diff once, with no FILE section."""
     file_a = tmp_path / "alpha.py"
     file_a.write_text("ALPHA_CONTENT\n")
 
@@ -86,7 +85,7 @@ def test_resolve_prompt_inlines_files_exactly_once_without_vertex(tmp_path):
 
     runner = _make_runner(tmp_path)
     prompt = runner._resolve_prompt(
-        gate="gemini_review", request_payload=payload, using_vertex=False,
+        gate="gemini_review", request_payload=payload,
     )
 
     assert prompt.count("+++ b/alpha.py") == 1
@@ -94,7 +93,7 @@ def test_resolve_prompt_inlines_files_exactly_once_without_vertex(tmp_path):
 
 
 def test_file_contents_appear_once(tmp_path):
-    """The diff body text must appear exactly once even on the Vertex path."""
+    """The diff body text must appear exactly once."""
     file_a = tmp_path / "unique.py"
     file_a.write_text("UNIQUE_MARKER_TOKEN_42\n")
 
@@ -107,33 +106,7 @@ def test_file_contents_appear_once(tmp_path):
 
     runner = _make_runner(tmp_path)
     prompt = runner._resolve_prompt(
-        gate="gemini_review", request_payload=payload, using_vertex=True,
+        gate="gemini_review", request_payload=payload,
     )
 
     assert prompt.count("UNIQUE_MARKER_TOKEN_42") == 1
-
-
-def test_external_prompt_gets_file_contents_appended_exactly_once(tmp_path):
-    """Externally supplied prompts (e.g. contract prompts) must be enriched with
-    file contents on the Vertex path, with each --- FILE: section appearing
-    exactly once.
-    """
-    file_a = tmp_path / "alpha.py"
-    file_a.write_text("ALPHA_BODY_ONLY_ONCE\n")
-
-    payload = {
-        "prompt": "EXTERNAL_CONTRACT_PROMPT",
-        "changed_files": [str(file_a)],
-        "branch": "fix/oi-1230",
-        "risk_class": "low",
-        "pr_number": 1,
-    }
-
-    runner = _make_runner(tmp_path)
-    prompt = runner._resolve_prompt(
-        gate="gemini_review", request_payload=payload, using_vertex=True,
-    )
-
-    assert "EXTERNAL_CONTRACT_PROMPT" in prompt
-    assert prompt.count(f"--- FILE: {file_a} ---") == 1
-    assert prompt.count("ALPHA_BODY_ONLY_ONCE") == 1

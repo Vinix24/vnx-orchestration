@@ -51,7 +51,7 @@ def _store(tmp_path: Path, lines: List[str], receipts: Optional[List[Dict[str, A
 
 def _run(state: Path, *args: str) -> subprocess.CompletedProcess:
     env = {k: v for k, v in os.environ.items() if not k.startswith("VNX_")}
-    env.update({"VNX_PROJECT_ID": OWN, "VNX_MODE_GATING_ENABLED": "0"})
+    env["VNX_PROJECT_ID"] = OWN
     return subprocess.run([str(REPO_ROOT / "bin" / "vnx"), "context-manifest", *args, "--state-dir", str(state)],
                           capture_output=True, text=True, env=env, timeout=60)
 
@@ -143,7 +143,6 @@ def test_json_is_one_parseable_object(tmp_path: Path) -> None:
 def test_unresolvable_store_identity_fails_closed(tmp_path: Path) -> None:
     state = _three_receipt_store(tmp_path)
     env = {k: v for k, v in os.environ.items() if not k.startswith("VNX_")}
-    env["VNX_MODE_GATING_ENABLED"] = "0"
     result = subprocess.run([str(REPO_ROOT / "bin" / "vnx"), "context-manifest", "--json", "--state-dir", str(state)],
                             capture_output=True, text=True, env=env, timeout=60, cwd=str(tmp_path))
     assert result.returncode == 1

@@ -22,7 +22,8 @@ not the signal the FileProgressHeartbeat watches.  The default is therefore
 3600-7200s dispatch deadlines) in exchange for not killing exactly the deep
 work that was requested.
 
-The default is overridable via VNX_WORKER_HEARTBEAT_SILENCE_SECONDS.
+The threshold is the constant ``_DEFAULT_SILENCE_THRESHOLD_SECONDS``; a caller passes
+``silence_threshold_seconds`` to use another one.
 
 BILLING SAFETY: No Anthropic SDK imports.  Local filesystem only.
 """
@@ -31,7 +32,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -44,38 +44,10 @@ logger = logging.getLogger(__name__)
 # Raised from 600s by OI-1130 — see module docstring for the rationale.
 _DEFAULT_SILENCE_THRESHOLD_SECONDS = 1800
 
-# Env var to override the default.
-_ENV_SILENCE_SECONDS = "VNX_WORKER_HEARTBEAT_SILENCE_SECONDS"
-
 
 def _resolve_silence_threshold() -> float:
-    """Resolve the silence threshold from env or default.
-
-    Returns the threshold in seconds.  Negative or unparseable values
-    clamp to the default.  Zero disables the heartbeat (never silent).
-    """
-    raw = os.environ.get(_ENV_SILENCE_SECONDS, "").strip()
-    if not raw:
-        return _DEFAULT_SILENCE_THRESHOLD_SECONDS
-    try:
-        val = float(raw)
-    except ValueError:
-        logger.warning(
-            "worker_heartbeat: unparseable %s=%r; using default %ds",
-            _ENV_SILENCE_SECONDS,
-            raw,
-            _DEFAULT_SILENCE_THRESHOLD_SECONDS,
-        )
-        return _DEFAULT_SILENCE_THRESHOLD_SECONDS
-    if val < 0:
-        logger.warning(
-            "worker_heartbeat: negative %s=%r; using default %ds",
-            _ENV_SILENCE_SECONDS,
-            raw,
-            _DEFAULT_SILENCE_THRESHOLD_SECONDS,
-        )
-        return _DEFAULT_SILENCE_THRESHOLD_SECONDS
-    return val
+    """The silence threshold in seconds: ``_DEFAULT_SILENCE_THRESHOLD_SECONDS``."""
+    return _DEFAULT_SILENCE_THRESHOLD_SECONDS
 
 
 # Known patterns in event data that indicate a permission prompt.

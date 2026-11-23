@@ -99,7 +99,6 @@ def _claude_subprocess_headless(
         "VNX_WORKER_SCOPED": "0",
         "VNX_BENCH_EQUAL_CONTEXT": "1",
         "VNX_BENCH_SEED_MATERIALIZE": "1",
-        "VNX_ISOLATED_WORKTREE": "1",
         "VNX_BENCH_REQUIRE_ISOLATION": "1",   # fail-loud on isolation failure; never run a worker in the shared checkout
     }
     cmd = [
@@ -155,7 +154,6 @@ def _provider_dispatch(
         "VNX_DATA_DIR_EXPLICIT": "1",  # OI-1276: events follow the bench store too
         "VNX_DISPATCH_DIR": ".vnx-data/dispatches",
         "VNX_BENCH_EQUAL_CONTEXT": "1",
-        "VNX_ISOLATED_WORKTREE": "1",
         "VNX_BENCH_REQUIRE_ISOLATION": "1",
         "VNX_BENCH_SEED_MATERIALIZE": "1",
         "VNX_BENCH_PRESERVE_WORKTREE": "1",
@@ -356,7 +354,7 @@ def dispatch(
         # Resolve the materialized worktree whenever a VALID one exists — even on the
         # rc!=0-with-report path. glm-harness produces a correct deliverable but the
         # claude CLI exits rc=1 (cosmetic loop-close via the litellm proxy); attaching
-        # its worktree here lets VNX_BENCH_SCORE_DELIVERABLE_ON_FAILURE verify the real
+        # its worktree here lets the scorer verify the real
         # on-disk deliverable instead of falling back to REPO_ROOT (which would verify
         # the untouched seed -> bogus correctness 0). _resolve_provider_workdir already
         # refuses REPO_ROOT / missing cell dirs, so this is safe on the failure path.

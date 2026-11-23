@@ -348,7 +348,7 @@ class TestIntegrationWithBuildT0State:
     def test_build_t0_state_output_feeds_index(self, tmp_path, monkeypatch):
         from test_besluiten_adapter import populate_register
         populate_register(tmp_path / "register", 60, 8)
-        monkeypatch.setenv("VNX_BESLUITEN_LOGDIR", str(tmp_path / "register"))
+        monkeypatch.setattr("build_t0_state._besluiten_logdir", lambda: tmp_path / "register")
         state_dir = tmp_path / "state"
         dispatch_dir = tmp_path / "dispatches"
         state_dir.mkdir(parents=True)

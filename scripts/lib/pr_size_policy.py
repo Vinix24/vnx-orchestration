@@ -1,4 +1,4 @@
-"""PR-size policy of the merge door (ADR-088, PG-1; wired in PG-1d): pure, every failure named, never a zero."""
+"""PR-size policy of the merge door (ADR-088, PG-1; wired in PG-1d; the grant read in PG-4): every failure named."""
 import logging
 import re
 from collections import namedtuple
@@ -47,6 +47,14 @@ class Verdict:
     waived: str = ""
     detail: str = ""
     errors: Tuple[str, ...] = ()
+    grant_point_id: str = ""  # the grant the verdict was judged under (ADR-088 decision 5); empty without one
+    grant_ceiling: Optional[int] = None
+    grant_quote: str = ""
+    grant_by: str = ""
+    grant_at: str = ""
+
+
+GRANT_FIELDS = ("grant_point_id", "grant_ceiling", "grant_quote", "grant_by", "grant_at")
 
 
 def _git(step: str, args, cwd: Path) -> str:
@@ -133,9 +141,50 @@ def is_security_path(path: str, prefixes) -> bool:
     return bool(smart_router.security_path_kind(path)) or path.startswith(tuple(prefixes))
 
 
+def read_grant(project_id, pr, state_dir=None) -> Tuple[str, Optional[dict], str]:
+    """The operator's size grant for this project and PR (ADR-088 decision 5, ``operator_queue.latest_grant``):
+    ``("granted", fields, "")``, ``("none", None, "")`` or ``("unknown", None, why)``. ADR-063: a ledger that
+    cannot be read, a malformed row or a missing project is unknown, never "no grant" and never "granted"."""
+    if not (isinstance(project_id, str) and project_id.strip()):
+        return "unknown", None, "no project id to read the inbox ledger of"
+    try:
+        import operator_queue  # lazy: the ledger is read only for a PR above its limit
+        found = operator_queue.latest_grant(project_id, pr, state_dir=state_dir)
+    except Exception as exc:  # vnx-silent-except: any read failure is returned as unknown, which refuses
+        return "unknown", None, f"inbox ledger unreadable: {type(exc).__name__}: {exc}"
+    if found is None:
+        return "none", None, ""
+    ceiling = (found.get("grant") or {}).get("ceiling")  # {} only so that a missing grant reads as unknown below
+    if not isinstance(ceiling, int) or isinstance(ceiling, bool) or ceiling < 1:
+        return "unknown", None, f"grant of point {found.get('point_id')!r} has no integer ceiling: {ceiling!r}"
+    return "granted", {"grant_point_id": str(found.get("point_id") or ""), "grant_ceiling": ceiling,
+                       "grant_quote": str(found.get("quote") or ""), "grant_by": str(found.get("by") or ""),
+                       "grant_at": str(found.get("at") or "")}, ""
+
+
+def _above_limit(pr, lines: int, limit: int, on_fail: str, fields: dict, found) -> Verdict:
+    """The verdict for a PR above its limit, judged under the grant read for it (ADR-088 decision 5)."""
+    state, grant, why = found
+    if state == "granted":
+        ceiling, point = grant["grant_ceiling"], grant["grant_point_id"]
+        if lines <= ceiling:
+            return Verdict("GO", "pr_size_within_exception", detail=(
+                f"{lines} lines above {limit}, within the granted ceiling {ceiling} (point {point})"), **fields, **grant)
+        return Verdict(on_fail, "pr_size_above_exception", detail=(
+            f"{lines} lines above the granted ceiling {ceiling} (point {point}); limit {limit}; ask a higher "
+            f"ceiling: vnx inbox ask --bron besluit --ref pr:{pr} --ceiling {lines} --reason <reason>"),
+            **fields, **grant)
+    if state == "none":
+        return Verdict(on_fail, "pr_size_above_limit", detail=(
+            f"{lines} lines above {limit}; no grant: vnx inbox ask --bron besluit --ref pr:{pr} "
+            f"--ceiling {lines} --reason <reason>"), **fields)
+    return Verdict(on_fail, "pr_size_exception_unknown", detail=(
+        f"{lines} lines above {limit}; the grant is unknown: {why or state!r}"), **fields)
+
+
 def verdict(pr, head_sha: str, base_branch, cwd: Path, *, project_id=None, resolver=None,
-            measurer=measure) -> Verdict:
-    """GO, NO-GO or WARN for one PR, with the record fields of "De preflight" (no exception yet)."""
+            measurer=measure, state_dir=None, grant_reader=read_grant) -> Verdict:
+    """GO, NO-GO or WARN for one PR, with the record fields of "De preflight"; above the limit the grant decides."""
     policy, refused = read_policy(project_id, resolver)
     if refused is not None:
         return refused
@@ -151,6 +200,6 @@ def verdict(pr, head_sha: str, base_branch, cwd: Path, *, project_id=None, resol
     limit, source = policy["security"] if hits else policy["hold"]
     fields = dict(lines=m.lines, limit=limit, limit_kind="security" if hits else "hold",
                   security_paths_hit=hits[:3], mode=mode, source=source, errors=errors)
-    if m.lines > limit:
-        return Verdict(on_fail, "pr_size_above_limit", detail=f"{m.lines} lines above {limit}", **fields)
+    if m.lines > limit:  # measured on this head every run: a grant never covers a later, larger round
+        return _above_limit(pr, m.lines, limit, on_fail, fields, grant_reader(project_id, pr, state_dir))
     return Verdict("GO", **fields)

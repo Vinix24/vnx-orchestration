@@ -28,9 +28,10 @@ REASON_AFTER_DEADLINE = "after_deadline"
 REASON_DECIDED = "decided"
 REASON_OPEN_POINTS = "open_points"
 REASON_DECISION_UNKNOWN = "decision_unknown"
+REASON_NOT_STARTED = "not_started"  # no snapshot today: no round started, so nothing to hold for
 REASONS = frozenset((
     REASON_DISABLED, REASON_BEFORE_START, REASON_AFTER_DEADLINE,
-    REASON_DECIDED, REASON_OPEN_POINTS, REASON_DECISION_UNKNOWN,
+    REASON_DECIDED, REASON_OPEN_POINTS, REASON_DECISION_UNKNOWN, REASON_NOT_STARTED,
 ))
 
 _TIME_RE = re.compile(r"^([01][0-9]|2[0-3]):([0-5][0-9])$")
@@ -85,6 +86,12 @@ def window_from_config(get: Callable[[str], object]) -> PauseWindow:
     if not start_t < deadline_t:
         raise ValueError(f"{KEY_START}: start {start!r} must be before {KEY_DEADLINE} {deadline!r}")
     return PauseWindow(enabled, start, deadline, tz)  # type: ignore[arg-type]
+
+
+def in_window(window: PauseWindow, now: datetime) -> bool:
+    """True from the start time up to, not including, the deadline in the window's zone."""
+    local = now.astimezone(_zone(window.tz)).time().replace(tzinfo=None)
+    return _parse_hhmm(KEY_START, window.start) <= local < _parse_hhmm(KEY_DEADLINE, window.deadline)
 
 
 def is_paused(window: PauseWindow, now: datetime, *, decided: Optional[bool]) -> PauseVerdict:

@@ -1,4 +1,4 @@
-"""reconcile marks an approved edit applied only on its pr_merged receipt (ochtendronde D3c part B)."""
+"""reconcile marks an approved edit applied only on its pr_merged receipt (morning round D3c part B)."""
 
 import json
 import sqlite3

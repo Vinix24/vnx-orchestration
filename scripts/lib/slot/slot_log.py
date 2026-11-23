@@ -10,7 +10,7 @@ import json
 import os
 import time
 from pathlib import Path
-from typing import Any, Dict, Iterator
+from typing import Any, Dict, Iterator, Tuple
 
 from .slot_admission import _FIELDS
 from .slot_store import SlotError
@@ -34,6 +34,20 @@ def _line(event: Dict[str, Any]) -> bytes:
         raise SlotError("store_invalid", f"slotlog event not writable as JSON: {exc}") from exc
 
 
+def _open_append(path: Path) -> Tuple[int, bool]:
+    """Open the monthly log for append; ``created`` is True only when this call made the file."""
+    for _ in range(3):
+        try:
+            return os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_EXCL, 0o660), True
+        except FileExistsError:  # vnx-silent-except: the log exists; append to it below without creating
+            pass
+        try:
+            return os.open(path, os.O_WRONLY | os.O_APPEND), False
+        except FileNotFoundError:  # vnx-silent-except: removed between the two opens; try creating again
+            continue
+    raise SlotError("store_invalid", "slotlog appeared and vanished three times while opening")
+
+
 class SlotLog:
     def __init__(self, store_dir: Path) -> None:
         self.store_dir = Path(store_dir)
@@ -48,11 +62,12 @@ class SlotLog:
                     os.chmod(path.parent, 0o2770)
                 except FileExistsError:  # vnx-silent-except: another client made it first; open below decides
                     pass
-            fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o660)
+            fd, created = _open_append(path)
         except OSError as exc:
             raise SlotError("store_invalid", f"slotlog not writable: {exc}") from exc
         try:
-            os.fchmod(fd, 0o660)
+            if created:   # only the creator owns the file; fchmod on another user's log raises EPERM
+                os.fchmod(fd, 0o660)
             view = memoryview(data)
             while view:
                 written = os.write(fd, view)

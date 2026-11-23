@@ -426,12 +426,12 @@ class TestCiOnTheHead:
             assert row["ci"]["reason"] == "workflow_unreadable"
         assert not any(a[1:3] == ["run", "list"] for a, _ in fake.calls)
 
-    def test_p10_an_override_gives_overridden_never_success(self, tmp_path, gh_env, monkeypatch):
+    def test_p10_the_deleted_override_env_overrides_nothing(self, tmp_path, gh_env, monkeypatch):
         monkeypatch.setenv("VNX_MERGE_OVERRIDE_REASON", "operator says so")
         fake = FakeGh(open_prs=[_pr(1)], runs={_sha(1): [_run(1)]})
         rows = _rows(_build(tmp_path, fake))
-        assert rows[1]["ci"]["state"] == "overridden"
-        assert rows[1]["ci_status"] == "unknown"
+        assert rows[1]["ci"]["state"] != "overridden"
+        assert any(a[1:3] == ["run", "list"] for a, _ in fake.calls)
 
     def test_the_workflow_name_is_read_once_per_rebuild(self, tmp_path, gh_env):
         fake = FakeGh(open_prs=[_pr(n) for n in range(1, 5)])

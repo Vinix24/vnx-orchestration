@@ -32,7 +32,8 @@ if command -v rg >/dev/null 2>&1; then
     --glob '!**/commands/merge_preflight.sh' \
     --glob '!**/*.deprecated' \
     --glob '!**/*.log' \
-    --glob '!**/check_installer_no_template_leak.sh' || true)
+    --glob '!**/check_installer_no_template_leak.sh' \
+    --glob '!**/check_docs_stale_refs.py' || true)
   # Also check bin/vnx (no extension, so glob won't match it)
   if [ -f "$BIN_DIR/vnx" ]; then
     local_matches=$(rg -n "$PATTERN" "$BIN_DIR/vnx" || true)
@@ -60,7 +61,8 @@ else
     --exclude='merge_preflight.sh' \
     --exclude='*.deprecated' \
     --exclude='*.log' \
-    --exclude='check_installer_no_template_leak.sh' || true)
+    --exclude='check_installer_no_template_leak.sh' \
+    --exclude='check_docs_stale_refs.py' || true)
   # Also check bin/vnx
   if [ -f "$BIN_DIR/vnx" ]; then
     local_matches=$(grep -n -E "$PATTERN" "$BIN_DIR/vnx" || true)

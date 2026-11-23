@@ -354,7 +354,7 @@ class TestStallDetection:
     def test_stall_kills_subprocess(self, gate_env, monkeypatch):
         monkeypatch.setattr("shutil.which", lambda b: "/usr/bin/fake")
         monkeypatch.setenv("VNX_CODEX_GATE_TIMEOUT", "300")
-        monkeypatch.setenv("VNX_CODEX_STALL_THRESHOLD", "2")
+        monkeypatch.setitem(sys.modules["headless_adapter"].GATE_STALL_DEFAULTS, "codex_gate", 2)
 
         runner = GateRunner(
             state_dir=gate_env["state_dir"],
@@ -902,7 +902,7 @@ class TestCodexGateExecution:
         monkeypatch.setattr("shutil.which", lambda b: "/usr/bin/fake")
         monkeypatch.setenv("VNX_CODEX_HEADLESS_ENABLED", "1")
         monkeypatch.setenv("VNX_CODEX_GATE_TIMEOUT", "5")
-        monkeypatch.setenv("VNX_CODEX_STALL_THRESHOLD", "2")
+        monkeypatch.setitem(sys.modules["headless_adapter"].GATE_STALL_DEFAULTS, "codex_gate", 2)
 
         runner = GateRunner(
             state_dir=gate_env["state_dir"],
@@ -1039,15 +1039,9 @@ class TestGateTimeoutConfig:
         assert gate_stall_threshold("claude_github_optional") == 60
         assert gate_stall_threshold("ci_gate") == 30
 
-    def test_env_override_stall_threshold(self, monkeypatch):
+    def test_kimi_stall_threshold_is_the_fixed_default(self):
         from headless_adapter import gate_stall_threshold
-        monkeypatch.setenv("VNX_CODEX_STALL_THRESHOLD", "30")
-        assert gate_stall_threshold("codex_gate") == 30
-
-    def test_env_override_kimi_stall_threshold(self, monkeypatch):
-        from headless_adapter import gate_stall_threshold
-        monkeypatch.setenv("VNX_KIMI_STALL_THRESHOLD", "30")
-        assert gate_stall_threshold("kimi_gate") == 30
+        assert gate_stall_threshold("kimi_gate") == 300
 
     def test_unknown_gate_uses_defaults(self):
         from headless_adapter import gate_timeout, gate_stall_threshold

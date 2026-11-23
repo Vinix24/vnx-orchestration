@@ -234,7 +234,6 @@ def test_load_merged_ignores_roadmap_yaml_at_repo_root(tmp_path, monkeypatch):
     """C2: a ROADMAP.yaml at the repo root names a PR no other source has, and
     that PR is no longer evidence. Source 3 is gone (ADR-047) — the file is an
     import example, not merge evidence."""
-    monkeypatch.setenv("VNX_RECONCILE_GIT", "0")
     state_dir = tmp_path / ".vnx-data" / "state"
     state_dir.mkdir(parents=True)
     (tmp_path / "ROADMAP.yaml").write_text(
@@ -257,7 +256,6 @@ def test_load_merged_ignores_roadmap_yaml_at_repo_root(tmp_path, monkeypatch):
 
 def test_load_merged_combines_ledger_and_receipt_log(tmp_path, monkeypatch):
     """Sources 1 and 2 both contribute; a root ROADMAP.yaml adds nothing."""
-    monkeypatch.setenv("VNX_RECONCILE_GIT", "0")
     state_dir = tmp_path / ".vnx-data" / "state"
     state_dir.mkdir(parents=True)
     events_dir = tmp_path / ".vnx-data" / "events"
@@ -283,7 +281,6 @@ def test_load_merged_combines_ledger_and_receipt_log(tmp_path, monkeypatch):
 def test_done_derives_from_sources_1_and_2_identically(tmp_path, monkeypatch):
     """The reconciler reaches the same 'done' with Source 3 gone: the #900 merge
     sits in the receipt log (source 2) and #676 in the NDJSON ledger (source 1)."""
-    monkeypatch.setenv("VNX_RECONCILE_GIT", "0")
     state_dir = _build_db(tmp_path)
     _seed_track(state_dir, "T-ledger", pr_ref="#676")
     _seed_track(state_dir, "T-receipt", pr_ref="#900")
@@ -303,7 +300,6 @@ def test_done_derives_from_sources_1_and_2_identically(tmp_path, monkeypatch):
 def test_roadmap_claim_alone_never_derives_done(tmp_path, monkeypatch):
     """A ROADMAP.yaml at the repo root naming the merge no other source has
     leaves the track non-done — the file is not evidence (ADR-047 / C2)."""
-    monkeypatch.setenv("VNX_RECONCILE_GIT", "0")
     state_dir = _build_db(tmp_path, deep=True)
     _seed_track(state_dir, "T-roadmap-only", pr_ref="#901")
     (tmp_path / "ROADMAP.yaml").write_text(
@@ -529,7 +525,6 @@ def test_reconcile_all_tracks_prref_evidence(tmp_path, monkeypatch):
     C2: the merged-PR set comes from sources 1/2 only. The repo-root
     ROADMAP.yaml claims #999 merged too — it must change nothing.
     """
-    monkeypatch.setenv("VNX_RECONCILE_GIT", "0")
     state_dir = _build_db(tmp_path, deep=True)
     # Track with pr_ref + merged: should derive 'done'
     _seed_track(state_dir, "T-all-a", pr_ref="#756")
@@ -600,36 +595,15 @@ def test_parse_pr_numbers_handles_comma_list():
 
 
 def test_gh_source_on_by_default(tmp_path, monkeypatch):
-    # OI-1155: source 4 is default-ON. An UNSET VNX_RECONCILE_GIT still consults
-    # gh, so a PR merged via a bare ``gh pr merge`` (no local pr_merged receipt)
+    # OI-1155: source 4 is always on. The reconciler consults gh, so a PR merged via a bare ``gh pr merge`` (no local pr_merged receipt)
     # becomes visible to the reconciler without any manual env-var.
-    monkeypatch.delenv("VNX_RECONCILE_GIT", raising=False)
     monkeypatch.setattr(track_reconciler, "_load_merged_prs_from_gh",
                         lambda *a, **k: frozenset({911, 912}))
     state = tmp_path / "state"; state.mkdir()
     assert {911, 912} <= set(_load_merged_pr_numbers(state))
 
 
-def test_gh_source_opt_out_by_flag(tmp_path, monkeypatch):
-    # Explicit opt-out (VNX_RECONCILE_GIT=0) restores local-only determinism for
-    # offline/embedded callers: source 4 must NOT run.
-    monkeypatch.setenv("VNX_RECONCILE_GIT", "0")
-    called = {"gh": False}
-    monkeypatch.setattr(track_reconciler, "_load_merged_prs_from_gh",
-                        lambda *a, **k: called.__setitem__("gh", True) or frozenset())
-    state = tmp_path / "state"; state.mkdir()
-    _load_merged_pr_numbers(state)
-    assert called["gh"] is False
-
-
-def test_gh_source_used_when_flag_set(tmp_path, monkeypatch):
-    monkeypatch.setenv("VNX_RECONCILE_GIT", "1")
-    monkeypatch.setattr(track_reconciler, "_load_merged_prs_from_gh", lambda *a, **k: frozenset({911, 912}))
-    state = tmp_path / "state"; state.mkdir()
-    assert {911, 912} <= set(_load_merged_pr_numbers(state))
-
-
-def test_gh_cache_first_no_network_on_fresh_cache(tmp_path, monkeypatch):
+def test_gh_cache_first_no_network_on_fresh_cache(tmp_path, monkeypatch, real_load_merged_prs_from_gh):
     # A fresh cache file is honoured without shelling out to gh.
     import time as _t
     state = tmp_path / "state"; state.mkdir()
@@ -639,15 +613,15 @@ def test_gh_cache_first_no_network_on_fresh_cache(tmp_path, monkeypatch):
     def _boom(*a, **k):
         raise AssertionError("gh must NOT be called when the cache is fresh")
     monkeypatch.setattr(track_reconciler.subprocess, "run", _boom)
-    assert track_reconciler._load_merged_prs_from_gh(state) == frozenset({911, 912})
+    assert real_load_merged_prs_from_gh(state) == frozenset({911, 912})
 
 
-def test_gh_silent_on_failure(tmp_path, monkeypatch):
+def test_gh_silent_on_failure(tmp_path, monkeypatch, real_load_merged_prs_from_gh):
     # gh absent/failing -> empty set, never raises (offline-safe contract).
     state = tmp_path / "state"; state.mkdir()
     monkeypatch.setattr(track_reconciler.subprocess, "run",
                         lambda *a, **k: (_ for _ in ()).throw(FileNotFoundError("gh")))
-    assert track_reconciler._load_merged_prs_from_gh(state) == frozenset()
+    assert real_load_merged_prs_from_gh(state) == frozenset()
 
 
 # ---------------------------------------------------------------------------

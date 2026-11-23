@@ -114,7 +114,7 @@ Blocks raw `claude` worker spawns at the Claude Code hook layer, enforcing the `
 Full smart-router wired for non-Claude providers + constraint-aware routing (#709). Cost-aware auto-route activated via `VNX_AUTO_ROUTE=1` (#702). Opt-in; not the default dispatch path.
 
 **Worktree + Provider Isolation**
-Per-dispatch git worktree isolation (`VNX_ISOLATED_WORKTREE`, default off) extended to `provider_dispatch` for all providers.
+Per-dispatch git worktree isolation (always on) extended to `provider_dispatch` for all providers.
 
 **Track Layer (FUT-1 + FUT-2)**
 `tracks` schema with DAL + CLI + audit-ordering (FUT-1). ADR-007 composite PK over `track_id + project_id`, tenant-scoping, composite-FK from `dispatches.track → tracks(track_id, project_id)` (FUT-2a). Structural regression tests for all track child tables (FUT-2b). Parallel execution contract: `docs/contracts/MULTI_TRACK_PARALLEL_EXECUTION_CONTRACT.md` (ADR-020, 2026-05-30).

@@ -9,9 +9,8 @@ Three modes:
   destination and a record per attempt feeds the receipt (ADR-059). The operator
   sets it per project.
 
-An unknown value reads as ``off`` and logs one WARNING. The flag is independent of
-``VNX_AGENT_FOLDERS`` (``agent_resolver.agent_folders_enabled``), which this module
-never touches.
+An unknown value reads as ``off`` and logs one WARNING. The agent-folder resolution
+(``agent_resolver``) is always on and independent of this flag.
 """
 
 from __future__ import annotations

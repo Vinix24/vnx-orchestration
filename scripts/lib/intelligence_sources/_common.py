@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import re
 import sqlite3
 import uuid
@@ -310,15 +309,14 @@ def _expand_scope_tags(tags: List[str]) -> frozenset:
 def _scope_matches(item_scope_tags: List[str], query_scope_tags: List[str]) -> bool:
     """Match item scope against query scope.
 
-    Empty query scope always matches. In strict mode (VNX_INTEL_STRICT_SCOPE=1),
-    an item with no scope tags does NOT match a non-empty query scope.
+    Empty query scope always matches. An item with no scope tags matches a
+    non-empty query scope (the lenient mode).
     Subclass names in the query are expanded to include component keywords.
     """
     if not query_scope_tags:
         return True
-    strict = os.environ.get("VNX_INTEL_STRICT_SCOPE", "0") == "1"
     if not item_scope_tags:
-        return not strict
+        return True
     expanded_query = _expand_scope_tags(query_scope_tags)
     return bool(set(item_scope_tags) & expanded_query)
 

@@ -441,7 +441,7 @@ def _is_merged(pr_data: Optional[Dict[str, Any]]) -> bool:
 # ``reconcile --apply`` close path (run_reconcile step 4c + close_track_if_done),
 # but the operator-facing ``objective close`` verb did NOT call that path — it
 # peeked/reconciled with the local-only set, fell back to _load_merged_pr_numbers
-# (whose gh source is default-ON since OI-1155, opt out via VNX_RECONCILE_GIT=0), and
+# (whose gh source is always on since OI-1155), and
 # re-derived 'queued' for a track whose PRs merged via a bare ``gh pr merge``.
 #
 # The two helpers below are the SINGLE source of the evidence set both code

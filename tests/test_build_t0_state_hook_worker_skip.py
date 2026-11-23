@@ -7,11 +7,14 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import time
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 HOOK = REPO / "scripts" / "hooks" / "build_t0_state_hook.sh"
 ACTOR_CLASS = REPO / "scripts" / "lib" / "actor_class.py"
+TRIGGER = REPO / "scripts" / "lib" / "state_rebuild_trigger.py"
+SEMANTICS = REPO / "scripts" / "lib" / "event_outcome_semantics.py"
 
 _STRIP = (
     "VNX_HOME", "VNX_PROJECT_ROOT", "PROJECT_ROOT", "VNX_CANONICAL_ROOT",
@@ -19,22 +22,41 @@ _STRIP = (
     "VNX_LOGS_DIR", "VNX_PROJECT_ID", "CLAUDE_ROLE", "VNX_TERMINAL",
     "VNX_TERMINAL_ID", "VNX_DISPATCH_ID", "VNX_CURRENT_DISPATCH_ID",
     "VNX_PROCESS_OWNER", "PYTHONPATH",
+    # conftest sets it to 0; the hook starts its build through the trigger.
+    "VNX_STATE_REBUILD_TRIGGER",
 )
 
 _STUB = (
     "import os, sys\n"
-    "out = sys.argv[sys.argv.index('--output') + 1]\n"
-    "os.makedirs(os.path.dirname(out), exist_ok=True)\n"
-    "open(os.path.join(os.path.dirname(out), 'stub_ran.txt'), 'w').write('ran')\n"
+    "state = os.path.join(os.environ['VNX_DATA_DIR'], 'state')\n"
+    "os.makedirs(state, exist_ok=True)\n"
+    "open(os.path.join(state, 'stub_ran.txt'), 'w').write('ran')\n"
 )
 
+# A builder that takes 5 s, like the real one takes 101-124 s.
+_SLOW_STUB = "import time\ntime.sleep(5)\n" + _STUB
 
-def _engine(tmp_path: Path, actor_class_source: str | None = None) -> Path:
+
+def _wait_ran(data_dir: Path, timeout: float = 20.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if (data_dir / "state" / "stub_ran.txt").exists():
+            return True
+        time.sleep(0.05)
+    return (data_dir / "state" / "stub_ran.txt").exists()
+
+
+def _engine(
+    tmp_path: Path, actor_class_source: str | None = None, builder: str = _STUB
+) -> Path:
     engine = tmp_path / "engine"
     (engine / "scripts" / "hooks").mkdir(parents=True)
     (engine / "scripts" / "lib").mkdir(parents=True)
     shutil.copy(HOOK, engine / "scripts" / "hooks" / "build_t0_state_hook.sh")
-    (engine / "scripts" / "build_t0_state.py").write_text(_STUB, encoding="utf-8")
+    shutil.copy(HOOK.parent / "lib_hook_python.sh", engine / "scripts" / "hooks" / "lib_hook_python.sh")
+    (engine / "scripts" / "build_t0_state.py").write_text(builder, encoding="utf-8")
+    shutil.copy(TRIGGER, engine / "scripts" / "lib" / "state_rebuild_trigger.py")
+    shutil.copy(SEMANTICS, engine / "scripts" / "lib" / "event_outcome_semantics.py")
     (engine / "scripts" / "lib" / "vnx_paths.py").write_text(
         "import os\n"
         "def ensure_env():\n"
@@ -87,7 +109,7 @@ def test_orchestrator_with_dispatch_marker_builds(tmp_path: Path) -> None:
         {"CLAUDE_ROLE": "orchestrator", "VNX_CURRENT_DISPATCH_ID": "x"},
     )
     assert r.returncode == 0, r.stderr
-    assert _ran(data)
+    assert _wait_ran(data)
     assert "skipped" not in r.stderr
 
 
@@ -95,14 +117,14 @@ def test_terminal_t0_with_dispatch_marker_builds(tmp_path: Path) -> None:
     data = tmp_path / "data"
     r = _run(_engine(tmp_path), data, {"VNX_TERMINAL": "T0", "VNX_DISPATCH_ID": "x"})
     assert r.returncode == 0, r.stderr
-    assert _ran(data)
+    assert _wait_ran(data)
 
 
 def test_no_markers_builds(tmp_path: Path) -> None:
     data = tmp_path / "data"
     r = _run(_engine(tmp_path), data)
     assert r.returncode == 0, r.stderr
-    assert _ran(data)
+    assert _wait_ran(data)
     assert "skipped" not in r.stderr
 
 
@@ -111,7 +133,7 @@ def test_classification_raising_builds(tmp_path: Path) -> None:
     engine = _engine(tmp_path, actor_class_source="raise RuntimeError('broken')\n")
     r = _run(engine, data, {"VNX_CURRENT_DISPATCH_ID": "x"})
     assert r.returncode == 0, r.stderr
-    assert _ran(data)
+    assert _wait_ran(data)
     assert "skipped" not in r.stderr
 
 
@@ -121,7 +143,7 @@ def test_classification_module_missing_builds(tmp_path: Path) -> None:
     (engine / "scripts" / "lib" / "actor_class.py").unlink()
     r = _run(engine, data, {"VNX_CURRENT_DISPATCH_ID": "x"})
     assert r.returncode == 0, r.stderr
-    assert _ran(data)
+    assert _wait_ran(data)
 
 
 def test_classification_unknown_output_builds(tmp_path: Path) -> None:
@@ -131,4 +153,20 @@ def test_classification_unknown_output_builds(tmp_path: Path) -> None:
     )
     r = _run(engine, data, {"VNX_CURRENT_DISPATCH_ID": "x"})
     assert r.returncode == 0, r.stderr
-    assert _ran(data)
+    assert _wait_ran(data)
+
+
+def test_hook_returns_within_two_seconds_while_the_build_runs_on(tmp_path: Path) -> None:
+    """OI-3056: the build is detached. A 5 s builder must not hold the hook:
+    it exits 0 within 2 s, says a background rebuild started, and the stub
+    still runs to completion afterwards."""
+    data = tmp_path / "data"
+    engine = _engine(tmp_path, builder=_SLOW_STUB)
+    started = time.monotonic()
+    r = _run(engine, data)
+    elapsed = time.monotonic() - started
+    assert r.returncode == 0, r.stderr
+    assert elapsed < 2.0, f"hook took {elapsed:.2f}s"
+    assert "background rebuild" in r.stderr
+    assert not _ran(data), "the build must still be running when the hook returns"
+    assert _wait_ran(data), "the detached build must run to completion"

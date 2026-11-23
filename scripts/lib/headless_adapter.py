@@ -16,7 +16,6 @@ Contracts:
 
 Feature flags:
   VNX_HEADLESS_ENABLED   "0" (default, shadow phase) = disabled, "1" = enabled
-  VNX_HEADLESS_TIMEOUT   seconds before subprocess kill (default 600)
   VNX_HEADLESS_CLI       CLI binary to invoke (default "claude")
 """
 
@@ -99,8 +98,6 @@ GATE_STALL_DEFAULTS: Dict[str, int] = {
 }
 
 GATE_STALL_ENV: Dict[str, str] = {
-    "codex_gate": "VNX_CODEX_STALL_THRESHOLD",
-    "kimi_gate": "VNX_KIMI_STALL_THRESHOLD",
     "claude_github_optional": "VNX_CLAUDE_GITHUB_STALL_THRESHOLD",
     "ci_gate": "VNX_CI_GATE_STALL_THRESHOLD",
 }
@@ -143,10 +140,7 @@ def headless_enabled() -> bool:
 
 def headless_timeout() -> int:
     """Return subprocess timeout in seconds."""
-    try:
-        return int(os.environ.get("VNX_HEADLESS_TIMEOUT", str(DEFAULT_TIMEOUT)))
-    except ValueError:
-        return DEFAULT_TIMEOUT
+    return DEFAULT_TIMEOUT
 
 
 def headless_cli_binary() -> str:

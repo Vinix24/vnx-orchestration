@@ -352,12 +352,14 @@ def test_p2_archive_and_salvage_size_thresholds(tmp_path, monkeypatch):
     assert _aggregate(store)["vnx-data-footprint"]["status"] == "degraded"
 
 
-def test_p2_window_follows_env_knob(tmp_path, monkeypatch):
+def test_p2_window_follows_the_compress_days_constant(tmp_path, monkeypatch):
+    import vnx_data_footprint_probe as probe
+
     store = tmp_path / "alpha"
     _plain_archive(store, "x.ndjson", age_days=10)
     _disk(monkeypatch, 0.5)
     assert _aggregate(store)["vnx-data-footprint"]["status"] == "ok"
-    monkeypatch.setenv("VNX_EVENTS_ARCHIVE_COMPRESS_DAYS", "3")
+    monkeypatch.setattr(probe, "DEFAULT_COMPRESS_DAYS", 3)
     assert _aggregate(store)["vnx-data-footprint"]["status"] == "degraded"
 
 

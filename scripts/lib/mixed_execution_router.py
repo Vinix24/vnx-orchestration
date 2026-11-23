@@ -93,9 +93,7 @@ def cutover_config_from_env() -> Dict[str, Any]:
         "headless_routing": headless_routing_enabled(),
         "headless_enabled": headless_enabled(),
         "broker_shadow": os.environ.get("VNX_BROKER_SHADOW", "1").strip() != "0",
-        "intelligence_injection": os.environ.get(
-            "VNX_INTELLIGENCE_INJECTION", "1"
-        ).strip() != "0",
+        "intelligence_injection": True,
     }
 
 
@@ -288,10 +286,7 @@ class MixedExecutionRouter:
         gate: Optional[str],
         evidence: List[Dict[str, Any]],
     ) -> Optional[Dict[str, Any]]:
-        """Run bounded intelligence injection if enabled, appending to evidence trail."""
-        if not config["intelligence_injection"]:
-            return None
-
+        """Run bounded intelligence injection, appending to evidence trail."""
         payload = self._inject_intelligence(
             dispatch_id=dispatch_id, injection_point=injection_point,
             task_class=task_class, skill_name=skill_name, track=track, gate=gate,

@@ -9,12 +9,12 @@ oldest first. A day collected later than ``D + 1 day + FRESH_HOURS`` after its
 end is *backfilled*: it still counts in the baseline, but not in the seven-day
 freshness check.
 
-Every limit is a module constant with an environment override that is read at
-call time (decision 18: no ``config_registry`` key):
+Every limit is a module constant, read at call time (no environment override,
+no ``config_registry`` key):
 
-- ``SETTLE_HOURS`` (default 2) — ``VNX_DAILY_METRICS_SETTLE_HOURS``
-- ``CATCHUP_DAYS`` (default 14) — ``VNX_DAILY_METRICS_CATCHUP_DAYS``
-- ``FRESH_HOURS`` (default 30) — ``VNX_DAILY_METRICS_FRESH_HOURS``
+- ``SETTLE_HOURS`` (2)
+- ``CATCHUP_DAYS`` (14)
+- ``FRESH_HOURS`` (30)
 
 All day arithmetic is in UTC and every function takes its clock. A naive
 datetime is a ``ValueError`` — there is no "assume UTC" path.
@@ -22,7 +22,6 @@ datetime is a ``ValueError`` — there is no "assume UTC" path.
 
 from __future__ import annotations
 
-import os
 from collections.abc import Mapping
 from datetime import date, datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -31,43 +30,25 @@ SETTLE_HOURS = 2
 CATCHUP_DAYS = 14
 FRESH_HOURS = 30
 
-SETTLE_HOURS_ENV = "VNX_DAILY_METRICS_SETTLE_HOURS"
-CATCHUP_DAYS_ENV = "VNX_DAILY_METRICS_CATCHUP_DAYS"
-FRESH_HOURS_ENV = "VNX_DAILY_METRICS_FRESH_HOURS"
-
 #: The only day status that means "do not collect this day again" (decision 20).
 FINAL_STATUS = "final"
 
 ONE_DAY = timedelta(days=1)
 
 
-def _int_override(env_name: str, default: int) -> int:
-    """The override for ``env_name``, or ``default``; an unusable value raises."""
-    raw = (os.environ.get(env_name) or "").strip()
-    if not raw:
-        return default
-    try:
-        value = int(raw)
-    except ValueError as exc:
-        raise ValueError(f"{env_name} must be an integer, got {raw!r}") from exc
-    if value < 0:
-        raise ValueError(f"{env_name} must not be negative, got {value}")
-    return value
-
-
 def settle_hours() -> int:
-    """``SETTLE_HOURS`` with its env override, read at call time."""
-    return _int_override(SETTLE_HOURS_ENV, SETTLE_HOURS)
+    """``SETTLE_HOURS``."""
+    return SETTLE_HOURS
 
 
 def catchup_days() -> int:
-    """``CATCHUP_DAYS`` with its env override, read at call time."""
-    return _int_override(CATCHUP_DAYS_ENV, CATCHUP_DAYS)
+    """``CATCHUP_DAYS``."""
+    return CATCHUP_DAYS
 
 
 def fresh_hours() -> int:
-    """``FRESH_HOURS`` with its env override, read at call time."""
-    return _int_override(FRESH_HOURS_ENV, FRESH_HOURS)
+    """``FRESH_HOURS``."""
+    return FRESH_HOURS
 
 
 def _as_utc(moment: datetime) -> datetime:

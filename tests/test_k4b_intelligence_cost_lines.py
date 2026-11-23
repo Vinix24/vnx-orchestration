@@ -47,7 +47,7 @@ session_id = args[args.index("--session-id") + 1]
 model = args[args.index("--model") + 1] if "--model" in args else %r
 config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
 projects = (os.path.join(config_dir, "projects") if config_dir
-            else os.environ["VNX_CLAUDE_PROJECTS_DIR"])
+            else os.path.join(os.path.expanduser("~"), ".claude", "projects"))
 target = os.path.join(projects, "-fake-worktree")
 os.makedirs(target, exist_ok=True)
 with open(os.path.join(target, session_id + ".jsonl"), "w", encoding="utf-8") as fh:
@@ -76,17 +76,19 @@ DREAM_PATTERNS = {"success_patterns": [{"id": 1, "title": "t", "description": "d
 def store(tmp_path, monkeypatch):
     data = tmp_path / "store"
     (data / "state").mkdir(parents=True)
-    projects, bin_dir = tmp_path / "claude-projects", tmp_path / "bin"
-    projects.mkdir()
+    home = tmp_path / "home"
+    projects, bin_dir = home / ".claude" / "projects", tmp_path / "bin"
+    projects.mkdir(parents=True)
     bin_dir.mkdir()
     (bin_dir / "claude").write_text(FAKE_CLAUDE, encoding="utf-8")
     (bin_dir / "claude").chmod(0o755)
     env = {"VNX_DATA_DIR": data, "VNX_DATA_DIR_EXPLICIT": "1", "VNX_STATE_DIR": data / "state",
-           "VNX_PROJECT_ID": PROJECT, "VNX_CLAUDE_PROJECTS_DIR": projects,
+           "VNX_PROJECT_ID": PROJECT,
            "DEEPSEEK_API_KEY": "sk-test-k4b-not-a-real-key",
            "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}"}
     for key, value in env.items():
         monkeypatch.setenv(key, str(value))
+    monkeypatch.setenv("HOME", str(home))  # the harvest reads ~/.claude/projects
     # This worker itself runs on a harness lane, so an inherited CLAUDE_CONFIG_DIR would
     # point the claude-lane child (and its transcript) at the real store.
     monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)

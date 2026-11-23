@@ -22,7 +22,7 @@ References:
 """
 from __future__ import annotations
 
-import os
+import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -52,10 +52,21 @@ _REQUIRED_EVIDENCE: Dict[str, List[str]] = {
 def gate_state() -> str:
     """Resolve ``VNX_EVIDENCE_BOUND_GATE`` to one of off/advisory/required.
 
-    Defaults to ``advisory`` so the D3 bootstrap never blocks merges.
-    Unknown values fall back to ``off`` (fail-safe disable).
+    Read through ``config_runtime.get`` (ADR-087): ``VNX_OVERRIDE_EVIDENCE_BOUND_GATE`` >
+    the stored ``project_config`` row > the exported env value > the ``advisory`` default,
+    so the D3 bootstrap never blocks merges. Unknown values fall back to ``off``
+    (fail-safe disable). An unreadable config is logged and reads ``advisory``.
     """
-    raw = (os.environ.get("VNX_EVIDENCE_BOUND_GATE") or "advisory").lower().strip()
+    try:
+        import config_runtime  # noqa: PLC0415
+        raw = config_runtime.get("VNX_EVIDENCE_BOUND_GATE")
+    except Exception as exc:  # vnx-silent-except: UNREADABLE config -> log + fail-soft to advisory
+        logging.getLogger(__name__).warning(
+            "evidence_bound_gate: VNX_EVIDENCE_BOUND_GATE config read failed "
+            "(falling back to advisory): %s", exc
+        )
+        raw = None
+    raw = (raw or "advisory").lower().strip()
     if raw in {"off", "advisory", "required"}:
         return raw
     return "off"

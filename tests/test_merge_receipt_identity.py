@@ -141,8 +141,12 @@ def test_refusal_receipt_is_unchanged(store):
     for name in kwargs:
         if name == "pr_number":
             kwargs[name] = 42
+        if name == "preflight_gates":
+            kwargs[name] = []
     kwargs["receipts_file"] = str(store)
     pr_merge._emit_refusal_receipt(**kwargs)
     rec = [json.loads(l) for l in store.read_text().splitlines() if l.strip()][-1]
     assert "delivery_id" not in rec
     assert rec.get("event_type") != "pr_merged"
+    assert rec["pr_size"] == pr_merge._pr_size_receipt_field([])
+    assert rec["pr_size"]["verdict"] == "not_evaluated"

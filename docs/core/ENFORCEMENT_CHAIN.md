@@ -43,7 +43,7 @@ The project's review stack (default `codex_gate,deepseek_gate` since the operato
 
 | Order | Preflight | Function | What it refuses |
 |---|---|---|---|
-| 1 | `ci` | `_run_ci_gate` | The project's CI workflow (`ci_workflow` in the protection YAML on `main`, else `VNX_CI_WORKFLOW_NAME`, else `VNX CI`) has no `conclusion=success` on exactly the PR head |
+| 1 | `ci` | `_run_ci_gate` | The project's CI workflow (`ci_workflow` in the protection YAML on `main`, else `VNX CI`) has no `conclusion=success` on exactly the PR head |
 | 2 | `review` | `_run_review_gate` | A required seat is not filled on the head (calls `closure_verifier.check_review_gate_for_merge`, which calls `evaluate_review_seats`) |
 | 3 | `adr` | `_run_adr_gate` | A new ADR number that collides |
 | 4 | `contract_invalid` | `_run_contract_invalid_gate` | The latest deliverable-outcome receipt of the PR's dispatch is `contract_invalid` |

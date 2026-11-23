@@ -40,11 +40,11 @@ import build_t0_state as bts  # noqa: E402
 from health_beacon import HealthBeacon  # noqa: E402
 
 
-def _state_dir_with_terminal_marker(tmp_path: Path) -> Path:
+def _state_dir_with_receipts(tmp_path: Path) -> Path:
     data_dir = tmp_path / "data"
     state_dir = data_dir / "state"
     state_dir.mkdir(parents=True)
-    (state_dir / "terminal_state.json").write_text("{}", encoding="utf-8")
+    (state_dir / "t0_receipts.ndjson").write_text("", encoding="utf-8")
     _write_heartbeat(state_dir)
     return state_dir
 
@@ -70,7 +70,7 @@ class TestStatusCannotBeHealthierThanBeacon:
         Reproduced live on this tree pre-fix:
             {"status": "healthy", ..., "beacon_health": {"overall": "fail", ...}}
         """
-        state_dir = _state_dir_with_terminal_marker(tmp_path)
+        state_dir = _state_dir_with_receipts(tmp_path)
         HealthBeacon(state_dir.parent, "broken_comp", expected_interval_seconds=3600).heartbeat(
             status="fail", details={}
         )
@@ -86,7 +86,7 @@ class TestStatusCannotBeHealthierThanBeacon:
     def test_stale_beacon_forbids_healthy_status(self, tmp_path: Path) -> None:
         import json as _json
 
-        state_dir = _state_dir_with_terminal_marker(tmp_path)
+        state_dir = _state_dir_with_receipts(tmp_path)
         health_dir = state_dir.parent / "health"
         health_dir.mkdir(parents=True)
         stale_payload = {
@@ -116,7 +116,7 @@ class TestStatusCannotBeHealthierThanBeacon:
         # executing the suite. Same reasoning for expected_beacon_components=()
         # (D3a): the real repo's 9 beacon-writer names would otherwise show up
         # as "absent" against this bare tmp_path and force overall to "fail".
-        state_dir = _state_dir_with_terminal_marker(tmp_path)
+        state_dir = _state_dir_with_receipts(tmp_path)
         HealthBeacon(state_dir.parent, "good_comp", expected_interval_seconds=3600).heartbeat(
             status="ok", details={}
         )
@@ -132,7 +132,7 @@ class TestStatusCannotBeHealthierThanBeacon:
     def test_db_failed_still_wins_over_beacon(self, tmp_path: Path) -> None:
         """DB health (R6.1) keeps precedence: a db failure stays 'failed'
         even when the beacon layer would only have forced 'degraded'."""
-        state_dir = _state_dir_with_terminal_marker(tmp_path)
+        state_dir = _state_dir_with_receipts(tmp_path)
         HealthBeacon(state_dir.parent, "good_comp", expected_interval_seconds=3600).heartbeat(
             status="ok", details={}
         )
@@ -152,7 +152,7 @@ class TestExpectedBeaconComponentsMonotonic:
     def test_missing_expected_beacon_component_is_absent_and_forbids_healthy_status(
         self, tmp_path: Path,
     ) -> None:
-        state_dir = _state_dir_with_terminal_marker(tmp_path)
+        state_dir = _state_dir_with_receipts(tmp_path)
         # No beacon is ever written for "never_ran" -- only declared expected.
         health = bts._build_system_health(
             state_dir, db_initialized=True,
@@ -170,7 +170,7 @@ class TestExpectedBeaconComponentsMonotonic:
         raise, and t0_state_builder (this very module's own beacon name) is
         always a real, statically-discoverable writer, so on a bare tmp_path
         with no beacons written at all it is reported absent."""
-        state_dir = _state_dir_with_terminal_marker(tmp_path)
+        state_dir = _state_dir_with_receipts(tmp_path)
         health = bts._build_system_health(
             state_dir, db_initialized=True, daemon_liveness={"overall": "ok", "daemons": {}},
         )
@@ -181,7 +181,7 @@ class TestExpectedBeaconComponentsMonotonic:
 
 class TestDaemonLivenessMonotonic:
     def test_injected_daemon_fail_forbids_healthy_status(self, tmp_path: Path) -> None:
-        state_dir = _state_dir_with_terminal_marker(tmp_path)
+        state_dir = _state_dir_with_receipts(tmp_path)
         daemon_liveness = {
             "overall": "fail",
             "daemons": {"dispatcher": {"expected": True, "state": "absent", "pid": None, "since": None}},
@@ -201,7 +201,7 @@ class TestDaemonLivenessMonotonic:
         # without it, the real (unmocked) launchctl measurement would run
         # against whatever com.vnx.* jobs happen to be loaded on the machine
         # running the suite.
-        state_dir = _state_dir_with_terminal_marker(tmp_path)
+        state_dir = _state_dir_with_receipts(tmp_path)
         daemon_liveness = {
             "overall": "ok",
             "daemons": {"dispatcher": {"expected": True, "state": "running", "pid": 1, "since": "2026-01-01T00:00:00Z"}},
@@ -216,7 +216,7 @@ class TestDaemonLivenessMonotonic:
     def test_unknown_daemon_liveness_does_not_force_degraded(self, tmp_path: Path) -> None:
         """'unknown' (could not measure) is a third branch -- it must not be
         silently treated as a failure that drags status down."""
-        state_dir = _state_dir_with_terminal_marker(tmp_path)
+        state_dir = _state_dir_with_receipts(tmp_path)
         daemon_liveness = {"overall": "unknown", "daemons": {}, "reason": "psutil unavailable"}
         health = bts._build_system_health(
             state_dir, db_initialized=True, daemon_liveness=daemon_liveness,
@@ -229,7 +229,7 @@ class TestDaemonLivenessMonotonic:
         """Default (no daemon_liveness param) exercises the real psutil-based
         measurement -- must not raise, and must surface a daemon_liveness key
         with a recognized overall value."""
-        state_dir = _state_dir_with_terminal_marker(tmp_path)
+        state_dir = _state_dir_with_receipts(tmp_path)
         health = bts._build_system_health(state_dir, db_initialized=True)
         assert "daemon_liveness" in health
         assert health["daemon_liveness"]["overall"] in ("ok", "fail", "unknown")
@@ -243,7 +243,7 @@ class TestLaunchdLivenessMonotonic:
     def test_injected_launchd_fail_forbids_healthy_status(self, tmp_path: Path) -> None:
         """THE red test this dispatch asked for: a producer measured as NOT
         running next to status=healthy is exactly the bug OI-1511 named."""
-        state_dir = _state_dir_with_terminal_marker(tmp_path)
+        state_dir = _state_dir_with_receipts(tmp_path)
         launchd_liveness = {
             "overall": "fail",
             "jobs": {"com.vnx.ledger-health": {"expected": True, "state": "not_loaded", "since": None, "since_measured": False}},
@@ -261,7 +261,7 @@ class TestLaunchdLivenessMonotonic:
         )
 
     def test_injected_launchd_ok_allows_healthy_status(self, tmp_path: Path) -> None:
-        state_dir = _state_dir_with_terminal_marker(tmp_path)
+        state_dir = _state_dir_with_receipts(tmp_path)
         health = bts._build_system_health(
             state_dir, db_initialized=True,
             daemon_liveness={"overall": "ok", "daemons": {}},
@@ -273,7 +273,7 @@ class TestLaunchdLivenessMonotonic:
     def test_unknown_launchd_liveness_does_not_force_degraded(self, tmp_path: Path) -> None:
         """'unknown' (launchctl itself could not be queried) is a third
         branch -- it must not be silently treated as a failure."""
-        state_dir = _state_dir_with_terminal_marker(tmp_path)
+        state_dir = _state_dir_with_receipts(tmp_path)
         health = bts._build_system_health(
             state_dir, db_initialized=True,
             daemon_liveness={"overall": "ok", "daemons": {}},
@@ -289,7 +289,7 @@ class TestLaunchdLivenessMonotonic:
         regardless of what is actually loaded on the machine running this
         suite (CI has no launchctl at all -- that must read 'unknown', never
         raise)."""
-        state_dir = _state_dir_with_terminal_marker(tmp_path)
+        state_dir = _state_dir_with_receipts(tmp_path)
         health = bts._build_system_health(state_dir, db_initialized=True)
         assert "launchd_liveness" in health
         assert health["launchd_liveness"]["overall"] in ("ok", "fail", "unknown")
@@ -301,7 +301,7 @@ class TestLaunchdLivenessMonotonic:
         measurement raises), launchd_liveness must ALWAYS be present: an
         absent key looks like 'nobody wired this in', an explicit 'unknown'
         says 'we tried and could not tell' -- those are different claims."""
-        state_dir = _state_dir_with_terminal_marker(tmp_path)
+        state_dir = _state_dir_with_receipts(tmp_path)
 
         def _boom(*args, **kwargs):
             raise RuntimeError("simulated total measurement failure")
@@ -325,7 +325,7 @@ class TestProducerLivenessComposedField:
     both sub-signals exist and combine them by hand."""
 
     def test_either_producer_class_failing_forbids_producer_liveness_ok(self, tmp_path: Path) -> None:
-        state_dir = _state_dir_with_terminal_marker(tmp_path)
+        state_dir = _state_dir_with_receipts(tmp_path)
         health = bts._build_system_health(
             state_dir, db_initialized=True,
             daemon_liveness={"overall": "fail", "daemons": {"dispatcher": {"state": "absent"}}},
@@ -335,7 +335,7 @@ class TestProducerLivenessComposedField:
         assert health["producer_liveness"]["overall"] == "fail"
 
     def test_launchd_failing_alone_forbids_producer_liveness_ok(self, tmp_path: Path) -> None:
-        state_dir = _state_dir_with_terminal_marker(tmp_path)
+        state_dir = _state_dir_with_receipts(tmp_path)
         health = bts._build_system_health(
             state_dir, db_initialized=True,
             daemon_liveness={"overall": "ok", "daemons": {}},
@@ -345,7 +345,7 @@ class TestProducerLivenessComposedField:
         assert health["producer_liveness"]["overall"] == "fail"
 
     def test_both_ok_yields_producer_liveness_ok(self, tmp_path: Path) -> None:
-        state_dir = _state_dir_with_terminal_marker(tmp_path)
+        state_dir = _state_dir_with_receipts(tmp_path)
         health = bts._build_system_health(
             state_dir, db_initialized=True,
             daemon_liveness={"overall": "ok", "daemons": {}},
@@ -355,7 +355,7 @@ class TestProducerLivenessComposedField:
         assert health["producer_liveness"]["overall"] == "ok"
 
     def test_both_unknown_yields_producer_liveness_unknown_not_ok(self, tmp_path: Path) -> None:
-        state_dir = _state_dir_with_terminal_marker(tmp_path)
+        state_dir = _state_dir_with_receipts(tmp_path)
         health = bts._build_system_health(
             state_dir, db_initialized=True,
             daemon_liveness={"overall": "unknown", "daemons": {}, "reason": "psutil unavailable"},
@@ -369,7 +369,7 @@ class TestProducerLivenessComposedField:
         dicts (those already sit as sibling keys -- see the size-budget note
         on the production code): producer_liveness carries each class's
         overall value, not its full breakdown."""
-        state_dir = _state_dir_with_terminal_marker(tmp_path)
+        state_dir = _state_dir_with_receipts(tmp_path)
         daemon_liveness = {"overall": "ok", "daemons": {"dispatcher": {"state": "running"}}}
         launchd_liveness = {"overall": "fail", "jobs": {"com.vnx.ledger-health": {"state": "not_loaded"}}}
         health = bts._build_system_health(
@@ -463,7 +463,7 @@ class TestProcessorLivenessFeedsSystemHealth:
         )
 
     def test_stalled_processor_heartbeat_degrades_system_health(self, tmp_path: Path) -> None:
-        state_dir = _state_dir_with_terminal_marker(tmp_path)
+        state_dir = _state_dir_with_receipts(tmp_path)
         old = "2020-01-01T00:00:00Z"
         _write_heartbeat(state_dir, updated_at=old)
         health = self._health(state_dir)
@@ -475,14 +475,14 @@ class TestProcessorLivenessFeedsSystemHealth:
         import subprocess
         proc = subprocess.Popen([sys.executable, "-c", "pass"])
         proc.wait()
-        state_dir = _state_dir_with_terminal_marker(tmp_path)
+        state_dir = _state_dir_with_receipts(tmp_path)
         _write_heartbeat(state_dir, pid=proc.pid)
         health = self._health(state_dir)
         assert health["processor_liveness"]["state"] == "dead"
         assert health["status"] == "degraded"
 
     def test_absent_heartbeat_is_unknown_and_degrades_not_healthy(self, tmp_path: Path) -> None:
-        state_dir = _state_dir_with_terminal_marker(tmp_path)
+        state_dir = _state_dir_with_receipts(tmp_path)
         (state_dir / "receipt_processor_heartbeat.json").unlink()
         health = self._health(state_dir)
         assert health["processor_liveness"]["state"] == "absent"
@@ -490,14 +490,14 @@ class TestProcessorLivenessFeedsSystemHealth:
         assert health["status"] == "degraded"
 
     def test_fresh_heartbeat_keeps_everything_ok(self, tmp_path: Path) -> None:
-        health = self._health(_state_dir_with_terminal_marker(tmp_path))
+        health = self._health(_state_dir_with_receipts(tmp_path))
         assert health["processor_liveness"]["state"] == "fresh"
         assert health["producer_liveness"]["overall"] == "ok"
         assert health["producer_liveness"]["processor_overall"] == "ok"
         assert health["status"] == "healthy"
 
     def test_injected_processor_value_other_than_ok_degrades(self, tmp_path: Path) -> None:
-        state_dir = _state_dir_with_terminal_marker(tmp_path)
+        state_dir = _state_dir_with_receipts(tmp_path)
         for bad in ({"overall": "unknown"}, {"overall": "fail"}, {"overall": None}, {}, {"overall": "weird"}):
             health = bts._build_system_health(
                 state_dir, db_initialized=True, processor_liveness=bad,
@@ -509,7 +509,7 @@ class TestProcessorLivenessFeedsSystemHealth:
             assert health["producer_liveness"]["overall"] != "ok", bad
 
     def test_raising_reader_reports_unknown_not_a_missing_key(self, tmp_path: Path) -> None:
-        state_dir = _state_dir_with_terminal_marker(tmp_path)
+        state_dir = _state_dir_with_receipts(tmp_path)
         with pytest.MonkeyPatch.context() as mp:
             import processor_liveness
             mp.setattr(processor_liveness, "read_processor_liveness", lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("boom")))
@@ -531,3 +531,24 @@ class TestCombineLivenessOverallWithProcessor:
     ])
     def test_order_is_fail_over_unknown_over_ok(self, others: tuple, strict, expected: str) -> None:
         assert bts._combine_liveness_overall(*others, strict=strict) == expected
+
+
+class TestTerminalStateIsNotAHealthSignal:
+    """OI-3058: terminal_state.json has no writer since T-G1; only the receipts leg counts."""
+
+    _NEUTRAL = dict(
+        daemon_liveness={"overall": "ok", "daemons": {}},
+        launchd_liveness={"overall": "ok", "jobs": {}},
+        expected_beacon_components=(),
+    )
+
+    def test_receipts_without_terminal_state_is_healthy(self, tmp_path: Path) -> None:
+        state_dir = _state_dir_with_receipts(tmp_path)
+        assert not (state_dir / "terminal_state.json").exists()
+        assert bts._build_system_health(state_dir, db_initialized=True, **self._NEUTRAL)["status"] == "healthy"
+
+    def test_no_receipts_is_degraded_even_with_terminal_state(self, tmp_path: Path) -> None:
+        state_dir = _state_dir_with_receipts(tmp_path)
+        (state_dir / "t0_receipts.ndjson").unlink()
+        (state_dir / "terminal_state.json").write_text("{}", encoding="utf-8")
+        assert bts._build_system_health(state_dir, db_initialized=True, **self._NEUTRAL)["status"] == "degraded"

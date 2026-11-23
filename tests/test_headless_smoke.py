@@ -164,7 +164,7 @@ class TestSmokeTimeout(_SmokeTestCase):
         result = classify_exit(exit_code=None, timed_out=True)
         self.assertEqual(result.failure_class, TIMEOUT)
         self.assertTrue(result.retryable)
-        self.assertIn("VNX_HEADLESS_TIMEOUT", result.operator_hint)
+        self.assertIn("Simplify the prompt", result.operator_hint)
 
     def test_timeout_lifecycle(self):
         """A timed-out run transitions: init -> running -> failing -> failed."""

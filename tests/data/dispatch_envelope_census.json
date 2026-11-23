@@ -51,14 +51,14 @@
     },
     {
       "file": "tests/test_codex_model_registry.py",
-      "line": 813,
+      "line": 812,
       "mechanism": "direct-call",
       "module_target": "envelope_adapters_provider",
       "symbol": "ProviderAdapter"
     },
     {
       "file": "tests/test_codex_model_registry.py",
-      "line": 865,
+      "line": 864,
       "mechanism": "patch-string",
       "module_target": "dispatch_envelope",
       "symbol": "run_envelope"
@@ -219,35 +219,35 @@
     },
     {
       "file": "tests/test_dispatch_envelope.py",
-      "line": 975,
+      "line": 976,
       "mechanism": "direct-call",
       "module_target": "dispatch_envelope",
       "symbol": "_govern"
     },
     {
       "file": "tests/test_dispatch_envelope.py",
-      "line": 988,
+      "line": 989,
       "mechanism": "direct-call",
       "module_target": "dispatch_envelope",
       "symbol": "_AdapterResult"
     },
     {
       "file": "tests/test_dispatch_envelope.py",
-      "line": 1008,
+      "line": 1009,
       "mechanism": "direct-call",
       "module_target": "dispatch_envelope",
       "symbol": "_AdapterResult"
     },
     {
       "file": "tests/test_dispatch_envelope.py",
-      "line": 1025,
+      "line": 1026,
       "mechanism": "direct-call",
       "module_target": "dispatch_envelope",
       "symbol": "_AdapterResult"
     },
     {
       "file": "tests/test_dispatch_envelope.py",
-      "line": 1048,
+      "line": 1049,
       "mechanism": "direct-call",
       "module_target": "dispatch_envelope",
       "symbol": "_AdapterResult"
@@ -2494,28 +2494,28 @@
     },
     {
       "file": "tests/test_plan_gate_panel.py",
-      "line": 1367,
+      "line": 1312,
       "mechanism": "patch.object-attr",
       "module_target": "envelope_adapters_claude",
       "symbol": "ClaudeSubprocessAdapter.run"
     },
     {
       "file": "tests/test_plan_gate_panel.py",
-      "line": 1368,
+      "line": 1313,
       "mechanism": "direct-call",
       "module_target": "envelope_adapters_claude",
       "symbol": "ClaudeSubprocessAdapter"
     },
     {
       "file": "tests/test_plan_gate_panel.py",
-      "line": 1712,
+      "line": 1657,
       "mechanism": "patch.object-attr",
       "module_target": "envelope_adapters_claude",
       "symbol": "ClaudeSubprocessAdapter.run"
     },
     {
       "file": "tests/test_plan_gate_panel.py",
-      "line": 1713,
+      "line": 1658,
       "mechanism": "direct-call",
       "module_target": "envelope_adapters_claude",
       "symbol": "ClaudeSubprocessAdapter"
@@ -2570,36 +2570,43 @@
       "symbol": "EnvelopeSpec"
     },
     {
+      "file": "tests/test_provider_deadline_passthrough.py",
+      "line": 815,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "ProviderAdapter"
+    },
+    {
       "file": "tests/test_provider_dispatch_worktree_isolation.py",
-      "line": 1200,
+      "line": 1196,
       "mechanism": "direct-call",
       "module_target": "dispatch_envelope",
       "symbol": "_AdapterResult"
     },
     {
       "file": "tests/test_provider_dispatch_worktree_isolation.py",
-      "line": 1200,
+      "line": 1196,
       "mechanism": "direct-call",
       "module_target": "dispatch_envelope",
       "symbol": "_enforce_push_pr"
     },
     {
       "file": "tests/test_provider_dispatch_worktree_isolation.py",
-      "line": 1291,
+      "line": 1287,
       "mechanism": "direct-call",
       "module_target": "dispatch_envelope",
       "symbol": "_AdapterResult"
     },
     {
       "file": "tests/test_provider_dispatch_worktree_isolation.py",
-      "line": 1291,
+      "line": 1287,
       "mechanism": "direct-call",
       "module_target": "dispatch_envelope",
       "symbol": "_enforce_push_pr"
     },
     {
       "file": "tests/test_provider_dispatch_worktree_isolation.py",
-      "line": 1307,
+      "line": 1303,
       "mechanism": "logger-name",
       "module_target": "dispatch_envelope",
       "symbol": ""
@@ -2683,28 +2690,28 @@
     },
     {
       "file": "tests/test_receipt_token_usage_normalized.py",
-      "line": 70,
+      "line": 71,
       "mechanism": "patch-string",
       "module_target": "envelope_govern",
       "symbol": "_book_ledger_run"
     },
     {
       "file": "tests/test_receipt_token_usage_normalized.py",
-      "line": 71,
+      "line": 72,
       "mechanism": "patch-string",
       "module_target": "envelope_govern",
       "symbol": "_verify_role_application"
     },
     {
       "file": "tests/test_receipt_token_usage_normalized.py",
-      "line": 213,
+      "line": 214,
       "mechanism": "patch-string",
       "module_target": "envelope_govern",
       "symbol": "_publish_phantom_verdict"
     },
     {
       "file": "tests/test_receipt_token_usage_normalized.py",
-      "line": 214,
+      "line": 215,
       "mechanism": "patch-string",
       "module_target": "envelope_govern",
       "symbol": "_resolve_fix_forward_diff"
@@ -2732,14 +2739,14 @@
     },
     {
       "file": "tests/test_report_headings_one_source.py",
-      "line": 82,
+      "line": 80,
       "mechanism": "direct-call",
       "module_target": "dispatch_envelope",
       "symbol": "EnvelopeSpec"
     },
     {
       "file": "tests/test_report_headings_one_source.py",
-      "line": 93,
+      "line": 91,
       "mechanism": "direct-call",
       "module_target": "envelope_prepare",
       "symbol": "_prepare"

@@ -16,17 +16,6 @@ def _utc(*args: int) -> datetime:
     return datetime(*args, tzinfo=timezone.utc)
 
 
-@pytest.fixture(autouse=True)
-def _clear_overrides(monkeypatch):
-    """The limits are process-wide; no ambient override may leak into a test."""
-    for name in (
-        "VNX_DAILY_METRICS_SETTLE_HOURS",
-        "VNX_DAILY_METRICS_CATCHUP_DAYS",
-        "VNX_DAILY_METRICS_FRESH_HOURS",
-    ):
-        monkeypatch.delenv(name, raising=False)
-
-
 @pytest.fixture()
 def days():
     from daily_metrics import days as module
@@ -68,7 +57,7 @@ def test_completed_days_is_fourteen_days_oldest_first_and_never_today(days):
 
 
 def test_completed_days_never_includes_today_even_at_zero_settle(days, monkeypatch):
-    monkeypatch.setenv(days.SETTLE_HOURS_ENV, "0")
+    monkeypatch.setattr(days, "SETTLE_HOURS", 0)
     completed = days.completed_days(_utc(2026, 11, 8, 0, 0, 0))
     assert completed[-1] == date(2026, 11, 7)
     assert date(2026, 11, 8) not in completed
@@ -101,8 +90,8 @@ def test_plan_catchup_is_at_most_fourteen_entries_oldest_first(days):
     assert plan[-1] == date(2026, 11, 7)
 
 
-def test_plan_catchup_cap_follows_the_catchup_days_override(days, monkeypatch):
-    monkeypatch.setenv(days.CATCHUP_DAYS_ENV, "3")
+def test_plan_catchup_cap_follows_the_catchup_days_constant(days, monkeypatch):
+    monkeypatch.setattr(days, "CATCHUP_DAYS", 3)
     plan = days.plan_catchup(_utc(2026, 11, 8, 3, 10, 0), {})
     assert plan == [date(2026, 11, 5), date(2026, 11, 6), date(2026, 11, 7)]
 
@@ -159,29 +148,17 @@ def test_a_naive_datetime_raises(days, call):
         call(days)
 
 
-def test_settle_hours_override_moves_the_boundary(days, monkeypatch):
+def test_settle_hours_constant_moves_the_boundary(days, monkeypatch):
     now = _utc(2026, 11, 8, 2, 0, 0)
     assert days.completed_days(now)[-1] == date(2026, 11, 7)
-    monkeypatch.setenv(days.SETTLE_HOURS_ENV, "6")
+    monkeypatch.setattr(days, "SETTLE_HOURS", 6)
     assert days.is_settled(date(2026, 11, 7), now) is False
     assert days.completed_days(now)[-1] == date(2026, 11, 6)
 
 
-def test_fresh_hours_override_moves_the_boundary(days, monkeypatch):
+def test_fresh_hours_constant_moves_the_boundary(days, monkeypatch):
     day = date(2026, 11, 6)
     day_end = _utc(2026, 11, 7)
     assert days.is_fresh(day, day_end + timedelta(hours=30)) is True
-    monkeypatch.setenv(days.FRESH_HOURS_ENV, "6")
+    monkeypatch.setattr(days, "FRESH_HOURS", 6)
     assert days.is_fresh(day, day_end + timedelta(hours=30)) is False
-
-
-def test_an_invalid_override_is_refused(days, monkeypatch):
-    monkeypatch.setenv(days.SETTLE_HOURS_ENV, "soon")
-    with pytest.raises(ValueError):
-        days.completed_days(_utc(2026, 11, 8, 2, 0, 0))
-
-
-def test_a_negative_override_is_refused(days, monkeypatch):
-    monkeypatch.setenv(days.CATCHUP_DAYS_ENV, "-1")
-    with pytest.raises(ValueError):
-        days.completed_days(_utc(2026, 11, 8, 2, 0, 0))

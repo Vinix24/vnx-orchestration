@@ -1381,7 +1381,6 @@ def test_objective_close_dry_run_threads_repo_root_into_evidence(tmp_path, monke
     # repo_root, but repo_root now only selects the gh working directory — a
     # ROADMAP.yaml at the repo root is NOT merge evidence any more, so the same
     # PR listed there leaves pr_merged False with gh opted out.
-    monkeypatch.setenv("VNX_RECONCILE_GIT", "0")
     sd = _build_db(tmp_path)
     _seed_track(sd, "T-dry", phase="active", pr_ref="#4242")
     _seed_dispatch(sd, "D-dry", "T-dry", state="completed")  # derives 'done'
@@ -1440,7 +1439,7 @@ def test_objective_close_dry_run_threads_repo_root_into_evidence(tmp_path, monke
 # OI-1071 — the standalone ``objective close`` verb must use the same merge
 # evidence ``reconcile`` does. Before this fix, the verb peeked/reconciled
 # with the local-only set, fell back to _load_merged_pr_numbers (whose gh source
-# is default-ON since OI-1155, opt out via VNX_RECONCILE_GIT=0), and re-derived
+# is always on since OI-1155), and re-derived
 # 'queued' for a track whose PRs merged via a bare ``gh pr merge``. The tests below pin
 # the shared helper + the verb's evidence threading + honest gh degradation.
 # ---------------------------------------------------------------------------
@@ -1494,11 +1493,10 @@ def test_close_verb_threads_nonempty_merged_set_into_close_track_if_done(tmp_pat
 
 def test_close_verb_derives_done_from_gh_only_without_vnx_reconcile_git(tmp_path, monkeypatch):
     """OI-1071: a track whose pr_ref PRs are merged but ABSENT from local
-    sources closes via the verb's gh gathering (gh pr view), with
-    VNX_RECONCILE_GIT unset. OI-1155: source 4 (gh pr list) is default-ON, so
-    an unset flag runs it; the shared subprocess.run mock returns empty for
+    sources closes via the verb's gh gathering (gh pr view).
+    OI-1155: source 4 (gh pr list) is always on, so
+    it runs; the shared subprocess.run mock returns empty for
     ``gh pr list``, keeping the verb's per-PR evidence the sole authority."""
-    monkeypatch.delenv("VNX_RECONCILE_GIT", raising=False)
     sd = _build_db(tmp_path)
     _seed_track(sd, "T-1071b", phase="queued", pr_ref="#771")
     # No local merge evidence at all: no dispatch, no pr_merged.ndjson, no
@@ -1527,7 +1525,6 @@ def test_close_verb_derives_done_from_gh_only_without_vnx_reconcile_git(tmp_path
 def test_close_verb_gh_unavailable_falls_back_and_says_so(tmp_path, monkeypatch, capsys):
     """OI-1071: gh unavailable -> falls back to local-only, refuses as before,
     and the output STATES that gh could not be consulted (not 'not done')."""
-    monkeypatch.delenv("VNX_RECONCILE_GIT", raising=False)
     sd = _build_db(tmp_path)
     _seed_track(sd, "T-1071c", phase="queued", pr_ref="#772")
     # No local merge evidence and no completed dispatch -> derived 'queued'.
@@ -1823,7 +1820,7 @@ class TestRunProvenanceSweepCommitFailureIsLoud:
 
 def test_oi1064_reconcile_closes_track_without_vnx_reconcile_git(tmp_path, monkeypatch):
     """run_reconcile derives 'done' and closes a bare-gh-merge track with
-    VNX_RECONCILE_GIT unset (source 4 default-ON; the shared subprocess.run
+    source 4 always on (the shared subprocess.run
     mock returns empty for ``gh pr list`` so the threaded gh pr-view evidence
     stays the sole authority).
 
@@ -1835,7 +1832,6 @@ def test_oi1064_reconcile_closes_track_without_vnx_reconcile_git(tmp_path, monke
     evidence reconcile gathered was discarded. Post-fix the gh-confirmed
     numbers are threaded into the derivation and the close succeeds.
     """
-    monkeypatch.delenv("VNX_RECONCILE_GIT", raising=False)
     sd = _build_db(tmp_path)
     _seed_track(sd, "T-oi1064", phase="queued", pr_ref="#1246,#1247,#1248")
     # No dispatches, no local merge evidence of any kind.
@@ -1880,7 +1876,6 @@ def test_oi1064_check_mode_derives_done_without_closing(tmp_path, monkeypatch):
     post-gh re-derivation writes 'done'. The declared phase stays untouched in
     check mode.
     """
-    monkeypatch.delenv("VNX_RECONCILE_GIT", raising=False)
     sd = _build_db(tmp_path)
     _seed_track(sd, "T-oi1064-check", phase="queued", pr_ref="#1300,#1301")
     for pn in (1300, 1301):
@@ -1916,7 +1911,6 @@ def test_oi1064_max_gh_calls_cap_holds_across_whole_run(tmp_path, monkeypatch):
     lookups, the candidate is deferred (3 > 2) — no gh calls for it, no
     re-derivation, no close. The cap governs the whole run, not per phase.
     """
-    monkeypatch.delenv("VNX_RECONCILE_GIT", raising=False)
     sd = _build_db(tmp_path)
     _seed_track(sd, "T-cap", phase="queued", pr_ref="#1400,#1401,#1402")
     for pn in (1400, 1401, 1402):
@@ -1955,7 +1949,6 @@ def test_oi1064_evidence_unions_gh_with_local_in_run_reconcile(tmp_path, monkeyp
     injected set is the union {1500, 1501}. Derived 'done' and closes. Pins
     that local evidence is never discarded when the gh evidence is threaded.
     """
-    monkeypatch.delenv("VNX_RECONCILE_GIT", raising=False)
     sd = _build_db(tmp_path)
     _seed_track(sd, "T-oi1064-union", phase="queued", pr_ref="#1500,#1501")
     _set_delivery(sd, "T-oi1064-union", 1500, "complete")

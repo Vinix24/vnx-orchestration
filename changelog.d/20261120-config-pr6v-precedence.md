@@ -1,0 +1,2 @@
+- Config precedence (config-een-oppervlak PR-6v-a): an exported env value no longer beats a stored row for `VNX_TMUX_MAX_CONCURRENT`; for a per-session change use `VNX_OVERRIDE_TMUX_MAX_CONCURRENT`.
+- Three names are deleted and read nowhere: `VNX_CLAUDE_LOCK_TIMEOUT_SECONDS` (fixed at 14400 s), `VNX_CLAUDE_LOCK_WAIT_WARN_SECONDS` (fixed at 60 s) and `VNX_LOCK_DIR` (fixed at `~/.vnx-data/locks`).

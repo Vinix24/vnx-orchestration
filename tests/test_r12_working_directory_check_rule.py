@@ -117,7 +117,6 @@ SEATS_WITHOUT_THE_RULE = {
     "kimi_gate script": _script_prompt(kimi_gate, "kimi_gate"),
     "glm_gate (harness lane)": _harness_lane_prompt("glm_gate"),
     "kimi_gate (harness lane)": _harness_lane_prompt("kimi_gate"),
-    # The gemini builder also serves the vertex route: one REST call, no tools.
     "gemini_review": _gemini_prompt,
 }
 

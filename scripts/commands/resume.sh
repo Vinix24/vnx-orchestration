@@ -87,7 +87,16 @@ _vnx_resume_start_daemons() {
 
   # Restart queue_watcher — mirrors pause.sh which stops it unconditionally.
   # Use popup watcher when popup is enabled (default), auto-accept otherwise.
-  if [ "${VNX_QUEUE_POPUP_ENABLED:-1}" != "0" ]; then
+  local queue_popup_enabled
+  queue_popup_enabled="$("$VNX_HOME/bin/vnx" config get --raw VNX_QUEUE_POPUP_ENABLED)" || {
+    err "[resume] vnx config get --raw VNX_QUEUE_POPUP_ENABLED failed; resume stopped"
+    return 1
+  }
+  if [ -z "$queue_popup_enabled" ]; then
+    err "[resume] VNX_QUEUE_POPUP_ENABLED has no value; resume stopped"
+    return 1
+  fi
+  if [ "$queue_popup_enabled" != "0" ]; then
     if [ -f "$scripts_dir/queue_popup_watcher.sh" ]; then
       log "[resume] Starting queue_popup_watcher.sh..."
       nohup bash "$scripts_dir/queue_popup_watcher.sh" \

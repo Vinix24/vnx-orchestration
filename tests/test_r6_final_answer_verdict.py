@@ -743,7 +743,7 @@ class TestOneTruthOnDisk:
         assert twice == once
         assert once.startswith(LANE_REPORT.rstrip("\n"))
 
-    def test_the_vertex_and_subprocess_strategies_never_read_a_final_answer(self, tmp_path):
+    def test_the_subprocess_strategy_never_read_a_final_answer(self, tmp_path):
         """No final_answer_dir, no fallback: the old no_verdict_block booking stands."""
         dispatch_id = "deepseek-gate-pr2066-1792100303"
         _write_archive(tmp_path, dispatch_id, _run_events(dispatch_id, _final_answer(PASS_BLOCK)))
@@ -770,7 +770,7 @@ def _panel_dispatcher(tmp_path, final_text, calls, *, report=PLAN_SEAT_REPORT, a
 
 
 def _one_seat_panel(tmp_path, dispatcher, monkeypatch):
-    monkeypatch.setenv("VNX_PANEL_RETRY", "0")
+    monkeypatch.setattr(pgp, "PANEL_RETRY_COUNT", 0)
     return pgp.run_panel(
         doc_text="## Problem\nx\n", track_id="trk", project_id="p1",
         panel=[{"label": "deepseek", "provider": "deepseek", "model_arg": "deepseek-flash"}],
@@ -1015,7 +1015,7 @@ def fake_claude(tmp_path, monkeypatch):
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
     monkeypatch.setenv("VNX_PROJECT_ROOT", str(checkout))
     monkeypatch.setenv("R6_FAKE_CLAUDE_SPEC", str(fake._spec))
-    monkeypatch.setenv("VNX_PANEL_RETRY", "0")
+    monkeypatch.setattr(pgp, "PANEL_RETRY_COUNT", 0)
     for key in ("VNX_TOTAL_DEADLINE", "VNX_CHUNK_TIMEOUT"):
         monkeypatch.delenv(key, raising=False)
     return fake

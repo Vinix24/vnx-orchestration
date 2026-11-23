@@ -107,8 +107,8 @@ failed ``git worktree list`` exits 2 with git's own stderr and prints no
 inventory at all.
 
 With ``--apply``, after its own work, the sweep also compresses the plain
-event archives of its store older than ``VNX_EVENTS_ARCHIVE_COMPRESS_DAYS``
-(default 14) through ``event_archive_compress`` with the automatic budgets
+event archives of its store older than ``DEFAULT_COMPRESS_DAYS``
+(14 days) through ``event_archive_compress`` with the automatic budgets
 (ADR-081 decision 7). That round is fail-open: an exception from it writes one
 line to stderr (the job's log) and changes neither the exit code nor the
 worktree work; a divergent plain/gz pair is logged by path and kept.

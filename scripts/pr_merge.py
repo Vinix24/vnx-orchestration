@@ -103,8 +103,15 @@ Receipt written to t0_receipts.ndjson:
     merge_method: "squash" | "merge" | "rebase"
     pr_title    : <from gh api>
     branch      : <from gh api>
-    preflight_gates: <list of 7 dicts — every preflight's own verdict; see
+    preflight_gates: <list of 9 dicts — every preflight's own verdict; see
                                  "Preflight ledger" below>
+    pr_size     : <dict — ADR-088, on both receipts and on the pr_size record:
+                                 verdict, lines, limit, limit_kind,
+                                 security_paths_hit (first three), mode, source,
+                                 reason, waived, detail, errors, and the grant
+                                 judged under (grant_point_id, grant_ceiling,
+                                 grant_quote, grant_by, grant_at; empty without
+                                 one); verdict not_evaluated when never run>
     main_admission: <dict — the ``main`` preflight's admission (ADR-073): the
                                  ``main_window.Admission`` record plus ``overridden``
                                  and ``override_reason``; ``{"mode": "off", ...}``
@@ -157,7 +164,7 @@ preflight's strictness for the project (``enforce``, ``warn`` or ``off``) and
 The door SHORT-CIRCUITS on the first NO-GO (each preflight returns
 EXIT_ERROR on its own, before the next one runs) and that stays exactly as
 it was — it is the fail-closed property golf A and B built. So a refusal can
-never carry all seven real verdicts: the gates after the deciding one never ran.
+never carry all nine real verdicts: the gates after the deciding one never ran.
 They are recorded as ``verdict: "not_evaluated"`` naming the gate that
 stopped the door, which is the point of the field — without it a gate that
 never ran is simply absent from the record, and absence reads as silent
@@ -171,7 +178,7 @@ Refusal receipt written to t0_receipts.ndjson (a refused merge):
     conclusion  : "refused"
     refused_by  : <str — the gate whose NO-GO stopped the merge>
     head_sha    : <str — the head the gates judged, "" when unresolvable>
-    preflight_gates: <list of 7 dicts, as above>
+    preflight_gates: <list of 9 dicts, as above>
     main_admission: <dict, as above — ``{"verdict": "not_evaluated"}`` when a gate
                                  before the ``main`` preflight refused>
     door_check  : <dict, as above — not_evaluated when a gate before the door refused>
@@ -323,13 +330,14 @@ _PR_LABEL_RE = re.compile(r"\bPR-([A-Z0-9]+(?:-[A-Z0-9]+)*)\b", re.IGNORECASE)
 # that is not recognized. Both must make the CLI exit non-zero.
 _RECEIPT_OK_STATUSES = frozenset({"appended", "duplicate"})
 
-#: The seven preflights, in the exact order ``main()`` runs them. This order is
+#: The nine preflights, in the exact order ``main()`` runs them. This order is
 #: what makes a refusal record readable: the door short-circuits on the first
 #: NO-GO, so everything at a later position never ran. ``door`` is last (deur D4,
 #: ADR-061 §3): its permit is evidenced by the six before it and lies closest to
 #: the merge.
 PREFLIGHT_ORDER: tuple[str, ...] = (
     "ci",
+    "pr_size",
     "review",
     "adr",
     "contract_invalid",
@@ -341,6 +349,9 @@ PREFLIGHT_ORDER: tuple[str, ...] = (
 DOOR_GATE = "door"
 MAIN_GATE = "main"
 PAUSE_GATE = "morning_pause"
+#: ADR-088: after ``ci`` and before ``review``, so an oversized PR costs no review round.
+PR_SIZE_GATE = "pr_size"
+PR_SIZE_FIELDS = ("lines", "limit", "limit_kind", "security_paths_hit", "mode", "source")
 
 #: ``main_admission`` on both receipts (ADR-073): what the ``main`` preflight read, or that it never ran.
 MAIN_ADMISSION_NOT_EVALUATED: Dict[str, Any] = {"verdict": "not_evaluated"}
@@ -434,7 +445,23 @@ def _preflight_record(name: str, gate: Dict[str, Any], head_sha: str = "") -> Di
         "override_not_applicable": bool(gate.get("override_not_applicable")),
         "reason_code": str(gate.get("reason_code") or ""),
         "mode": str(gate.get("mode") or ""),
+        "pr_size": _pr_size_block(gate.get("pr_size")) if name == PR_SIZE_GATE else None,
     }
+
+
+def _pr_size_block(block: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """``pr_size`` on its preflight record and on both receipts: every field always, empty when never measured."""
+    empty: Dict[str, Any] = {"verdict": VERDICT_NOT_EVALUATED, "lines": None, "limit": None, "limit_kind": "",
+                             "security_paths_hit": [], "mode": "", "source": "", "reason": "", "waived": "",
+                             "detail": "", "errors": [], "grant_point_id": "", "grant_ceiling": None,
+                             "grant_quote": "", "grant_by": "", "grant_at": ""}
+    return dict(empty, **(block or {}))
+
+
+def _pr_size_receipt_field(preflight_gates: Optional[list[Dict[str, Any]]]) -> Dict[str, Any]:
+    """The ``pr_size`` block of the ``pr_size`` preflight record, for the receipt; ``not_evaluated`` when absent."""
+    record = next((g for g in preflight_gates or [] if g.get("gate") == PR_SIZE_GATE), None)
+    return _pr_size_block((record or {}).get("pr_size"))
 
 
 def _preflight_ledger(
@@ -597,7 +624,7 @@ def _project_ci_workflow(override_reason: Optional[str]) -> Tuple[Optional[str],
     gate that asks for the workflow shares: main's copy, never a local one (the checkout
     the door runs beside may be on any branch, including the PR's). ``(None, "")`` means
     "the project declares none", and the workflow name then falls to
-    ``VNX_CI_WORKFLOW_NAME`` and the fabric default. A file that exists but cannot be read
+    the fabric default. A file that exists but cannot be read
     or parsed is an error: guessing a workflow name would put the CI gate on a workflow the
     project never named.
 
@@ -621,7 +648,7 @@ def _run_ci_gate(
     workflow-conclusion check to
     ``merge_preflight_ci_check.check_ci_run_for_head``, run in the merge
     target's project root. The workflow it looks for is ``ci_workflow`` from the
-    project's YAML on main, else ``VNX_CI_WORKFLOW_NAME``, else ``VNX CI``.
+    project's YAML on main, else ``VNX CI``.
     Returns ``(gate, pr_data)``; the caller merges only when
     ``gate["verdict"] == "GO"``.
 
@@ -1439,6 +1466,8 @@ def _no_go_protection(message: str, mode: str = "") -> Dict[str, Any]:
 #: This tuple lists every file whose content decides what the door allows or
 #: publishes; the two forge files (``forge_gate_publisher.py``,
 #: ``forge_check_run.py``) decide whether a permit is published (OI-2667).
+#: The ``pr_size`` preflight (ADR-088) trusts ``pr_size_policy.py`` for its verdict
+#: and ``review_risk_class.py`` for the changed-line count it judges.
 _DOOR_INTEGRITY_PATHS = (
     "scripts/pr_merge.py",
     "scripts/lib/forge_protection_drift.py",
@@ -1450,6 +1479,8 @@ _DOOR_INTEGRITY_PATHS = (
     "scripts/lib/ci_contexts.py",
     "scripts/lib/forge_gate_publisher.py",
     "scripts/lib/forge_check_run.py",
+    "scripts/lib/pr_size_policy.py",
+    "scripts/lib/review_risk_class.py",
 )
 
 
@@ -2237,6 +2268,7 @@ def _emit_receipt(
     kwargs["preflight_gates"] = preflight_gates or _preflight_ledger(
         [], unevaluated_message=GATES_NOT_RUN_MESSAGE,
     )
+    kwargs["pr_size"] = _pr_size_receipt_field(kwargs["preflight_gates"])  # ADR-088: written always
     kwargs["review_seats"] = review_seats or _unjudged_seats_record(pr_number, "", "not_evaluated")
     if shadow_seat_rule is not None:
         kwargs["shadow_seat_rule"] = shadow_seat_rule
@@ -2325,6 +2357,7 @@ def _emit_refusal_receipt(
         "conclusion": "refused",
         "refused_by": refused_by,
         "preflight_gates": preflight_gates,
+        "pr_size": _pr_size_receipt_field(preflight_gates),
         "head_sha": head_sha or "",
         "commit_sha": head_sha or "",
         "main_admission": main_admission or dict(MAIN_ADMISSION_NOT_EVALUATED),
@@ -2708,8 +2741,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--dry-run", action="store_true", help="Skip merge and receipt write")
     parser.add_argument(
         "--override-reason", default=None,
-        help="Escape hatch: skip the CI gate with this required reason (empty is refused). "
-             "Also read from VNX_MERGE_OVERRIDE_REASON.",
+        help="Escape hatch: skip the CI gate with this required reason (empty is refused).",
     )
     parser.add_argument(
         "--override-contract-invalid", default=None,
@@ -2728,7 +2760,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         "--override-morning-pause", default=None,
         help="Escape hatch (ADR-095): merge past the morning pause, with the reason "
              "revert_or_fix_forward or another non-empty operator reason (empty is refused). "
-             "Covers ONLY that preflight; every override is a line in ochtendronde.ndjson.",
+             "Covers ONLY that preflight; every override is a line in morning_round.ndjson.",
     )
     parser.add_argument(
         "--allow-weaken", default=None,
@@ -3200,10 +3232,45 @@ def _run_main_gate(args: argparse.Namespace, head_sha: str) -> Dict[str, Any]:
     return gate
 
 
+def _run_pr_size_gate(pr_number: int, pr_data: Optional[Dict[str, Any]], head_sha: str) -> Dict[str, Any]:
+    """The ``pr_size`` preflight (ADR-088): ``pr_size_policy.verdict`` on the pinned head, in the target repo.
+
+    Read with the door's own project and store (``active_store``), never GitHub's additions field; above the
+    limit the operator's grant in that store's inbox ledger decides (PG-4), and goes on the record and receipt.
+    A NO-GO verdict refuses; GO and WARN pass, WARN with its reason on the record and the receipt.
+    Any other outcome, and any exception, is a NO-GO: an unknown result is never a pass.
+    """
+    import config_store_db
+    import pr_size_policy
+
+    try:
+        state_dir, project_id = active_store()
+        resolver = config_store_db.make_db_resolver(lambda _pid: state_dir, raise_on_error=True)
+        verdict = pr_size_policy.verdict(pr_number, head_sha, (pr_data or {}).get("baseRefName"), _target_root(),
+                                         project_id=project_id, resolver=resolver, state_dir=state_dir)
+    except Exception as exc:  # vnx-silent-except: any failure to judge the size is a NO-GO naming the type
+        verdict = pr_size_policy.Verdict("NO-GO", "pr_size_unmeasured", detail=f"door: {type(exc).__name__}: {exc}")
+    block = {name: getattr(verdict, name)
+             for name in PR_SIZE_FIELDS + ("reason", "waived", "detail", "errors") + pr_size_policy.GRANT_FIELDS}
+    block.update(verdict=verdict.outcome, security_paths_hit=list(verdict.security_paths_hit),
+                 errors=list(verdict.errors))
+    passed = verdict.outcome in ("GO", "WARN")
+    if verdict.waived:
+        summary = f"mode off, waived: {verdict.waived}"
+    elif verdict.lines is None:
+        summary = f"not measured, mode {verdict.mode or '-'}"
+    else:
+        summary = f"{verdict.lines} lines, limit {verdict.limit} ({verdict.limit_kind}), mode {verdict.mode}"
+    message = f"pr_size {verdict.outcome}: {summary}" + (f"; {verdict.reason}: {verdict.detail}" if verdict.reason else "")
+    print(f"PR-size gate: {message}", file=sys.stderr if verdict.reason else sys.stdout)
+    return {"verdict": "GO" if passed else "NO-GO", "message": message, "overridden": False, "override_reason": None,
+            "reason_code": verdict.reason, "mode": verdict.mode, "pr_size": block}
+
+
 def _run_pause_gate(args: argparse.Namespace, override_recorded: bool = False) -> Dict[str, Any]:
     """The ``morning_pause`` preflight (ADR-095): NO-GO while paused, GO with ``--override-morning-pause`` and a reason.
 
-    Every refusal and override is a line in ``ochtendronde.ndjson``; a failing append is printed, never a pass.
+    Every refusal and override is a line in ``morning_round.ndjson``; a failing append is printed, never a pass.
     ``override_recorded`` (the recheck under the lock) means this merge's override line is already
     written: a paused verdict with the reason is then a GO without a second line.
     """
@@ -3375,7 +3442,7 @@ def _locked_door_merge(
 
 
 def _run_door(args: argparse.Namespace) -> int:
-    """The seven preflights, then the merge, against the active target."""
+    """The nine preflights, then the merge, against the active target."""
     method = args.merge_method or "squash"
 
     # Golf Bx, D3: every preflight's own verdict, appended as it is decided.
@@ -3400,6 +3467,11 @@ def _run_door(args: argparse.Namespace) -> int:
         print(f"OVERRIDE: {gate['message']}")
     else:
         print(f"CI gate: {gate['message']}")
+
+    size_gate = _run_pr_size_gate(args.pr, pr_data, head_sha)
+    evaluated.append(_preflight_record(PR_SIZE_GATE, size_gate, head_sha))
+    if size_gate["verdict"] != "GO":
+        return refuse(PR_SIZE_GATE, size_gate, "pr_size_gate")
 
     # ── Review gate: a passing, evidenced review-gate result must exist ────
     review_gate, _ = _run_review_gate(args.pr, override_reason=args.override_reason, dry_run=args.dry_run, **_b3_override_kwargs(args))

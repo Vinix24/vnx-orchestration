@@ -481,8 +481,13 @@ def _emit_govern_report(
     adapter_result: _AdapterResult,
     duration: float,
     emit_unified_report: Any,
+    start_time: Optional[datetime] = None,
 ) -> Optional[Path]:
     """Emit the unified report for this dispatch. Never fatal.
+
+    OI-3064: ``start_time`` is the attempt start. A report on disk older than it
+    belongs to an earlier attempt (a refire) and is rotated to
+    ``<id>.attempt-<n>.md`` so this attempt's output is not discarded.
 
     REPORT first — idempotent: worker-written file is preserved, not
     overwritten. OI-903: on failure/timeout, a killed worker's partial report
@@ -514,6 +519,7 @@ def _emit_govern_report(
             # lane (#1834, provider_dispatch._emit_governance).
             spawn_error=getattr(adapter_result, "error", None),
             preserve_partial=adapter_result.status != "success",
+            attempt_started_at=start_time,
         )
     except Exception as exc:
         logger.error(
@@ -635,7 +641,7 @@ def _govern(
 
     # REPORT first — idempotent: worker-written file is preserved, not overwritten.
     report_path = _emit_govern_report(
-        spec, adapter_result, duration, emit_unified_report,
+        spec, adapter_result, duration, emit_unified_report, start_time=start_time,
     )
 
     # OI-1017/OI-1048: binding body-contract validation on envelope lanes.
@@ -704,27 +710,9 @@ def _govern(
                 # role — a spec-bound skill is proven, or its absence reasoned.
                 _skill_app = _verify_skill_application(spec.instruction, {"skill": spec.skill}, _role)
 
-                # receipt-quality PR-B2 fix-forward (Finding C): aggregate
-                # PreToolUse-hook tool-call signals for this dispatch
-                # (toolcall_signals.py), mirroring provider_dispatch._emit_
-                # governance's wiring so the claude/subprocess-adapter lane also
-                # populates these fields when VNX_TMUX_SIGNAL_DIR is set.
-                # FAIL-OPEN — an aggregation error or absent signal log must
-                # never break receipt emission; each field simply stays None
-                # (omitted by ReceiptV2).
+                # No signal dir exists any more (VNX_TMUX_SIGNAL_DIR deleted): the
+                # tool-call fields stay None and ReceiptV2 omits them.
                 _toolcall_signals: Dict[str, int] = {}
-                try:
-                    _signal_dir = os.environ.get("VNX_TMUX_SIGNAL_DIR")
-                    if _signal_dir:
-                        from toolcall_signals import aggregate_toolcall_signals  # noqa: PLC0415
-                        _toolcall_signals = aggregate_toolcall_signals(_signal_dir) or {}
-                except Exception:  # noqa: BLE001 — observability signal must never break receipt emission
-                    logger.debug(
-                        "envelope._govern: toolcall signal aggregation failed dispatch=%s (non-fatal)",
-                        spec.dispatch_id,
-                        exc_info=True,
-                    )
-                    _toolcall_signals = {}
 
                 # ADR-005: the receipt's cost — from this attempt's ledger line on
                 # a harness builder run, else from the old event, emitted here

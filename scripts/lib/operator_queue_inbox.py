@@ -6,7 +6,6 @@ source shows the answer is never in the result. ``push_due`` decides and reserve
 
 from __future__ import annotations
 
-import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional
@@ -33,12 +32,7 @@ PUSH_MAX_POINTS = 5
 PUSH_PROJECT_GAP_MIN = 30
 
 
-def _parse(value: Any) -> Optional[datetime]:
-    try:
-        ts = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
-    except (ValueError, AttributeError):  # vnx-silent-except: absent or malformed is no time
-        return None
-    return ts if ts.tzinfo is not None else None
+_parse = oq.parse_ts
 
 
 def _stamp(now: Any) -> str:
@@ -79,17 +73,7 @@ def _ledger(project_id: str, sdir: Path) -> List[Dict[str, Any]]:
     return oq._ledger_lines(sdir, project_id)
 
 
-def _presented(lines: List[Dict[str, Any]]) -> Dict[str, int]:
-    counts: Dict[str, int] = {}
-    for line in lines:
-        if line["kind"] == "presented":
-            counts[line["point_id"]] = counts.get(line["point_id"], 0) + 1
-    return counts
-
-
-def _order(points: List[Dict[str, Any]], counts: Mapping[str, int]) -> List[Dict[str, Any]]:
-    """Decision 10: never presented first, then fewest presented, then oldest asked_at, ties on point_id."""
-    return sorted(points, key=lambda p: (counts.get(p["point_id"], 0), _parse(p["asked_at"]), p["point_id"]))
+_presented, _order = oq.presented_counts, oq.order_points
 
 
 def _age(seconds: int) -> str:
@@ -116,7 +100,7 @@ def show(project_id: str, *, limit: int = 5, now: Any = None, state_dir: Optiona
     run = refresh(project_id, data_root=data_root, now=stamp, state_dir=sdir)
     out: Dict[str, Any] = {"project_id": project_id, "status": "ok", "reason": None, "coverage": run["sources"],
                            "open_total": 0, "points": [], "more": 0}
-    state = oq.read_state(project_id, state_dir=sdir)
+    state = oq.rebuild_state(project_id, state_dir=sdir)  # the readers may have appended nothing: keep the summary current
     if state["status"] != "ok":
         return {**out, "status": "unknown", "reason": state["reason"], "open_total": None}
     try:
@@ -143,11 +127,7 @@ def present(project_id: str, point_ids: List[str], *, kanaal: str, sessie: str, 
 
 
 def _interval_h() -> float:
-    try:
-        value = float(os.environ.get("VNX_INBOX_PUSH_INTERVAL_H", "4"))
-    except ValueError:  # vnx-silent-except: a bad value is the default
-        return 4.0
-    return value if value > 0 else 4.0
+    return 4.0
 
 
 def _chooser(now: datetime):

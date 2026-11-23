@@ -167,7 +167,6 @@ def gate(monkeypatch):
         monkeypatch.setattr(PMG.subprocess, "run", _run)
         monkeypatch.setattr(PMG, "fetch_ci_workflow_from_main",
                             lambda project_root, **kw: fetches.append(project_root) or fetch)
-        monkeypatch.delenv(PMG.CI_WORKFLOW_NAME_ENV_VAR, raising=False)
         return calls, fetches
 
     return _install
@@ -258,12 +257,12 @@ def test_ci_ran_on_other_sha_holds(gate, latest, sha, concl):
         "ci_conclusion": None, "ci_ran_on_sha": False, "ci_head_sha": SHA, "ci_latest_run_sha": sha}
 
 
-def test_ci_never_ran_holds_and_env_workflow_name(gate, monkeypatch):
+def test_ci_never_ran_holds_and_ignores_the_deleted_env_workflow_name(gate, monkeypatch):
     calls, fetches = gate((0, "[]", ""))
-    monkeypatch.setenv(PMG.CI_WORKFLOW_NAME_ENV_VAR, "Env CI")
+    monkeypatch.setenv("VNX_CI_WORKFLOW_NAME", "Env CI")
     assert PMG.check_ci_workflow(P, branch="b", head_sha=SHA) == {
         "check": "ci_workflow", "status": "HOLD",
-        "detail": ("Env CI has NEVER run on branch 'b'. No runs found for HEAD abcdef123456. PR checks may "
+        "detail": ("VNX CI has NEVER run on branch 'b'. No runs found for HEAD abcdef123456. PR checks may "
                    "show green from other workflows — this is the 'green-lie' that OI-931 guards against."),
         "ci_conclusion": None, "ci_ran_on_sha": False, "ci_head_sha": SHA}
-    assert (calls, fetches) == ([(_gh("b", "Env CI"), GH_KW)], [P])
+    assert (calls, fetches) == ([(_gh("b", "VNX CI"), GH_KW)], [P])

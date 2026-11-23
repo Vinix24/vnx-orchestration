@@ -11,7 +11,6 @@ BILLING SAFETY: No Anthropic SDK. Only subprocess.Popen(["claude", ...]).
 from __future__ import annotations
 
 import logging
-import os
 import shutil
 import subprocess
 import sys
@@ -69,7 +68,7 @@ class ClaudeAdapter(ProviderAdapter):
 
         terminal_id = context.get("terminal_id", self._terminal_id)
         dispatch_id = context.get("dispatch_id", "unknown")
-        model = context.get("model", os.environ.get("VNX_DISPATCH_MODEL", "sonnet"))
+        model = context.get("model", "sonnet")
         role = context.get("role")
         lease_generation = context.get("lease_generation")
         heartbeat_interval = float(context.get("heartbeat_interval", 300.0))
@@ -132,7 +131,7 @@ class ClaudeAdapter(ProviderAdapter):
 
         terminal_id = context.get("terminal_id", self._terminal_id)
         dispatch_id = context.get("dispatch_id", "unknown")
-        model = context.get("model", os.environ.get("VNX_DISPATCH_MODEL", "sonnet"))
+        model = context.get("model", "sonnet")
         role = context.get("role")
         chunk_timeout = float(context.get("chunk_timeout", 120.0))
         total_deadline = float(context.get("total_deadline", 600.0))

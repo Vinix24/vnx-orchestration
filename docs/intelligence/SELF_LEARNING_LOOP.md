@@ -45,7 +45,7 @@ None of these files are consumed automatically. Ingestion into the live DB (`pre
 
 Persist mode adds two gates. `VNX_LEARNING_LOOP_ENABLED` (default `0`) makes the cycle a no-op; at `1` it needs `VNX_INJECTION_FEEDBACK_ENABLED=1` and an `ok` injection-effectiveness probe, else the cycle is degraded and updates no pattern. The pattern write itself needs an approval record bound to the exact rows (below). Queue and persist mode both read `ledger_verdict/1` first and stop with `ledger_source_check: <reason_code>` on `refused` ([ADR-065](../governance/decisions/ADR-065-leren-is-voorstellen.md)).
 
-Which failures become proposals: a class in `ELIGIBLE_CLASSES` (`scripts/lib/learning_failure_class.py`) seen in at least two dispatches, or an open-item class spanning three distinct origin dispatches. Receipts before `VNX_LEARNING_LOOP_CUTOFF` (default `2026-09-28T16:41:11Z`) never count, also with `--from-history`. A failure receipt with a sentinel `provider` is skipped only when its `model` is also a sentinel and it has no `report_path`.
+Which failures become proposals: a class in `ELIGIBLE_CLASSES` (`scripts/lib/learning_failure_class.py`) seen in at least two dispatches, or an open-item class spanning three distinct origin dispatches. Receipts before `DEFAULT_RECEIPT_CUTOFF` (`2026-09-28T16:41:11Z`, `scripts/learning_loop.py`; no setting moves it) never count, also with `--from-history`. A failure receipt with a sentinel `provider` is skipped only when its `model` is also a sentinel and it has no `report_path`.
 
 ---
 
@@ -73,7 +73,7 @@ Runs `LearningLoop.daily_learning_cycle()` (`scripts/learning_loop.py`) in the m
 3. Extract failure patterns from `t0_receipts.ndjson`; propose prevention rules → **`pending_rules.json`** (status=pending, G-L1 enforced: `_propose_rules`, queue or persist mode only).
 4. Write unused-pattern archival candidates → **`pending_archival.json`** (status=pending, `archive_unused_patterns`).
 5. Flush in-memory metrics to `pattern_usage` table.
-5.5. Persist high-confidence used patterns and recurring failures to `success_patterns` / `antipatterns` (off-switchable via `VNX_LEARN_PERSIST=0`).
+5.5. Persist high-confidence used patterns and recurring failures to `success_patterns` / `antipatterns`. There is no off-switch; `VNX_LEARN_PERSIST` was deleted (config-een-oppervlak PR-7b).
 5.6. Queue stale low-confidence patterns for operator-gated supersede → **`pending_archival.json`** with `action=supersede` (`_supersede_stale_patterns`). No `valid_until` is written without operator approval (D3 gate: closes the prior ungated bypass).
 5.7. Reconcile `success_patterns.confidence_score` via Beta-Laplace (`confidence_reconcile.reconcile_pattern_confidence`).
 6. Save `learning_report_<ts>.json` to state dir.
@@ -268,8 +268,6 @@ All intelligence flags default OFF (feature-dark until explicitly enabled). Prec
 | Flag | Default | What it controls | Code location |
 |------|---------|-----------------|---------------|
 | `VNX_LEARNING_ENABLED` | `0` (off) | Supervisor tick that invokes the daily learning cycle automatically. Requires `VNX_SUPERVISOR_MODE=unified`. When unset, the cycle only runs when explicitly invoked via `vnx learning run`. | `scripts/lib/dispatcher_supervisor_ticks.sh:100` |
-| `VNX_LEARN_PERSIST` | `1` (on) | Step 5.5 of the daily cycle: persists high-confidence used patterns and recurring failures to `success_patterns`/`antipatterns`. Set to `0` to run the cycle without writing to the intelligence DB (observation-only mode). | `scripts/learning_loop.py` `daily_learning_cycle` |
-| `VNX_LEARN_SUPERSEDE` | `1` (on) | Step 5.6: queues stale low-confidence patterns to `pending_archival.json`. Set to `0` to skip the supersede-candidate scan entirely. | `scripts/learning_loop.py` `_supersede_stale_patterns` |
 | `VNX_SCOUT_PREPASS` | `0` (off) | Cheap-model scout recon pre-pass in the door, before the permit (see [`SCOUT_PREPASS.md`](SCOUT_PREPASS.md)). Fail-open. | `scripts/lib/scout_prepass.py:268-272`, `config_registry.py:51` |
 | `VNX_INTEL_RANK_THEN_BUDGET` | `0` (off) | Replaces class-priority intelligence eviction with a composite-score knapsack (confidence × tag-overlap × recency × class-weight). | `scripts/lib/intelligence_selector.py:109-146`, `config_registry.py:60` |
 | `VNX_TAGGER_ENABLED` | `0` (off) | LLM tagger enrichment at persist-time. When on, enriches `success_patterns.tags` and `antipatterns.tags` with closed-vocabulary tags via the configured provider (default: DeepSeek-Flash), and writes a `tagging_events` audit row per enrichment. The selector works without it via deterministic `derive_tags()`. | `scripts/lib/vnx_tagger.py:43`, `config_registry.py:54` |
@@ -277,9 +275,9 @@ All intelligence flags default OFF (feature-dark until explicitly enabled). Prec
 | `VNX_HAIKU_CLASSIFY` | `0` (off) | LLM-based receipt classification (Haiku) at report ingestion time. When off, rule-based classification is used. | `scripts/lib/report_classifier.py:244`, `config_registry.py:66` |
 | `VNX_OUTCOME_GROUNDING_V2` | `0` (off) | Junction-grounded confidence updates. When on, `update_confidence_from_outcome()` links receipts to patterns via `dispatch_pattern_offered` (exact match, no cap). When off, uses the legacy substring join on `source_dispatch_ids` (capped at 20 entries). | `scripts/lib/intelligence_persist.py:56`, `config_registry.py:63` |
 
-### Note on `VNX_LEARN_PERSIST` and `VNX_LEARN_SUPERSEDE` defaults
+### Steps 5.5 and 5.6 have no off-switch
 
-These default ON, not off — they are off-switches for sub-steps of the learning cycle, not opt-in gates. Setting either to `0` makes the cycle run in a reduced mode (observation without DB writes). They are documented here because they provide surgical rollback if a step causes unexpected behavior.
+`VNX_LEARN_PERSIST` and `VNX_LEARN_SUPERSEDE` are deleted (config-een-oppervlak PR-7b). Both steps always run, which is what the default of both variables already gave. The supersede step only queues candidates (`pending_archival.json`); an operator approval gates the archival.
 
 ### Current per-project state — `vnx-dev`
 
@@ -417,8 +415,6 @@ Value grows as governed builds resume. The proposal tier is not a no-op even aga
 | G-L1: ingest needs an approval decision | `scripts/learning_loop.py` `ingest_approved_rules` |
 | G-L4: archival candidates land in pending | `scripts/learning_loop.py` `archive_unused_patterns` |
 | G-L4 supersede gated (D3) | `scripts/learning_loop.py` `_supersede_stale_patterns` |
-| `VNX_LEARN_SUPERSEDE=0` off-switch | `scripts/learning_loop.py` `_supersede_stale_patterns` |
-| `VNX_LEARN_PERSIST=0` off-switch | `scripts/learning_loop.py` `daily_learning_cycle`, step 5.5 |
 | `VNX_TAGGER_ENABLED` default "0" | `scripts/lib/config_registry.py:54–56` |
 | Tagger call site (persist-time) | `scripts/intelligence_daemon.py:236–247` |
 | `VNX_HAIKU_CLASSIFY` default "0" | `scripts/lib/config_registry.py:66–68` |

@@ -666,24 +666,21 @@ class TestPerRunStream:
         assert _archive_events(FIRST) == []
 
     def test_a_failed_rotation_flags_the_run_stream_and_its_move_clears_the_flag(self, monkeypatch):
-        monkeypatch.setenv("VNX_EVENT_STREAM_MAX_BYTES", "64")
         events_dir = _data_dir() / "events"
         (events_dir / "archive").mkdir(parents=True)
         (events_dir / "archive" / TERMINAL).write_text("a file where the archive dir belongs\n")
-        store = event_store.EventStore()
+        store = event_store.EventStore(rotation_threshold_bytes=64)
         store.append(TERMINAL, {"type": "text", "data": {"text": "x" * 200}}, dispatch_id=FIRST)
         flag = events_dir / TERMINAL / f"{FIRST}.oversize"
         assert store.oversize_flags() == [flag]
 
         (events_dir / "archive" / TERMINAL).unlink()
-        monkeypatch.delenv("VNX_EVENT_STREAM_MAX_BYTES")
         store.clear(TERMINAL, dispatch_id=FIRST)
         assert store.oversize_flags() == []
         assert [e["type"] for e in _archive_events(FIRST)] == ["text"]
 
     def test_a_size_rotation_of_a_run_stream_lands_in_the_terminal_archive(self, monkeypatch):
-        monkeypatch.setenv("VNX_EVENT_STREAM_MAX_BYTES", "64")
-        store = event_store.EventStore()
+        store = event_store.EventStore(rotation_threshold_bytes=64)
         store.append(TERMINAL, {"type": "text", "data": {"text": "y" * 200}}, dispatch_id=FIRST)
         rotated = list((_data_dir() / "events" / "archive" / TERMINAL).glob("size-rotation-*.ndjson"))
         assert len(rotated) == 1

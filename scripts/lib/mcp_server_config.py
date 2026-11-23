@@ -2,7 +2,7 @@
 """mcp_server_config.py: the global MCP server table, made safe to write to a file or argv.
 
 One source, two consumers. The source is the ``mcpServers`` block of ``~/.claude.json``
-(or the file named by ``VNX_GLOBAL_MCP_CONFIG_PATH``):
+(``config_path`` of ``load_global_mcp_servers`` names another file):
 
   * terminal ``.mcp.json`` generation, shared by ``vnx init``
     (``scripts/vnx_init.py``) and ``vnx bootstrap-terminals`` (``bin/vnx``);
@@ -74,7 +74,6 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import os
 import re
 import sys
 from pathlib import Path
@@ -113,10 +112,7 @@ _CREDENTIAL_FIELDS: Dict[str, str] = {
 # ---------------------------------------------------------------------------
 
 def global_mcp_config_path() -> Path:
-    """The ambient MCP server source: ``VNX_GLOBAL_MCP_CONFIG_PATH``, else ``~/.claude.json``."""
-    override = os.environ.get("VNX_GLOBAL_MCP_CONFIG_PATH")
-    if override:
-        return Path(override)
+    """The ambient MCP server source: ``~/.claude.json``."""
     return Path.home() / ".claude.json"
 
 

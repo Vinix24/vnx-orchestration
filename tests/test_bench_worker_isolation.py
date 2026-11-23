@@ -247,7 +247,6 @@ def test_provider_dispatcher_launches_from_materialized_seed(
         return spawn_result
 
     monkeypatch.setenv("VNX_BENCH_SEED_MATERIALIZE", "1")
-    monkeypatch.setenv("VNX_ISOLATED_WORKTREE", "1")
     monkeypatch.setenv("VNX_BENCH_REQUIRE_ISOLATION", "1")
     monkeypatch.setenv("VNX_BENCH_PRESERVE_WORKTREE", "1")
     with (
@@ -281,7 +280,6 @@ def test_provider_isolation_failure_dnfs_loud_without_running_in_main(
             "--dispatch-paths", str(SEED_REL),
         ]
     )
-    monkeypatch.setenv("VNX_ISOLATED_WORKTREE", "1")
     monkeypatch.setenv("VNX_BENCH_REQUIRE_ISOLATION", "1")
     spawn = MagicMock()
     with (

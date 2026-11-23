@@ -266,7 +266,6 @@ class TestModelMatchHop:
         assert review_vendor.vendor_match_hop("deepseek_gate", builder) is None
 
     def test_the_receipt_not_the_review_environment_decides(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("VNX_DEEPSEEK_HARNESS_MODEL", "deepseek-flash")
         monkeypatch.setenv("VNX_DEEPSEEK_GATE_MODEL", "deepseek-flash")
         builder = _builder(tmp_path, "deepseek-harness", "default", receipt_model="deepseek-v4-pro")
         assert builder.effective_model == "deepseek-v4-pro"

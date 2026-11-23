@@ -379,14 +379,7 @@ class TestSchedulingLifecycle:
         runner.run_once()
         assert runner.should_run() is False
 
-    def test_from_env_reads_custom_interval(self, monkeypatch):
-        monkeypatch.setenv("VNX_DIGEST_INTERVAL", "60")
-        mod = _load_daemon_module()
-        runner = mod.GovernanceDigestRunner.from_env(Path("/tmp/test"))
-        assert runner.interval == 60
-
-    def test_from_env_defaults_to_300(self, monkeypatch):
-        monkeypatch.delenv("VNX_DIGEST_INTERVAL", raising=False)
+    def test_from_env_defaults_to_300(self):
         mod = _load_daemon_module()
         runner = mod.GovernanceDigestRunner.from_env(Path("/tmp/test"))
         assert runner.interval == 300

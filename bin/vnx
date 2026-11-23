@@ -426,7 +426,7 @@ Planning commands (strategic-layer read surface):
                         status (human-gated: dry-run default; --apply --approval-id to write)
   queue-status        Queued deliverables per track: state, delivering PR, dependencies
                         (same as objective queue; options: --objective <id>, --all, --json)
-  deliverable add|list|promote|close|set  Deliverables of a track (proposed dispatch rows)
+  deliverable add|list|promote|close|set|depend|undepend|deps  Deliverables of a track (proposed dispatch rows)
                         add --objective <id> --output-kind <kind> --title "..."; list [--objective <id>] [--json]
                         promote <dispatch_id> is the human gate; close <dispatch_id> --evidence <pr>
 
@@ -456,6 +456,9 @@ Process commands (visibility and control):
                      (slot exit codes: 0 done, 75 capacity refusal after the wait, 78 invalid)
   inbox [--json] [--present]  Operator queue: open points to answer; also ask, answer, push-due
                      (exit 0 done, 2 refused, 78 ledger unreadable)
+  morning-round agenda --project-id <id> [--json]  Morning agenda: open decisions and proposals to discuss (read-only)
+  morning-round tick [--project-id <id>] [--dry-run]  Start the morning round per project (idempotent per day)
+  morning-round stop [--project-id <id>] --reason decided|deadline  End the round once per project and day
 
 Dispatch commands (one-liner delivery):
   dispatch <file.md>              Auto-detect terminal and deliver dispatch
@@ -925,14 +928,8 @@ print(f'[init] Mode set: $mode_flag')
 # ── Mode gating ──────────────────────────────────────────────────────────
 # PR-2: Check if a command is allowed in the current mode.
 # Uses Python vnx_mode.py for mode detection and command tier enforcement.
-# Disabled when VNX_MODE_GATING_ENABLED=0 (rollback control).
 _check_mode_gate() {
   local cmd="$1"
-
-  # Rollback control: disable gating entirely
-  if [ "${VNX_MODE_GATING_ENABLED:-1}" = "0" ]; then
-    return 0
-  fi
 
   # Skip gating for init, setup, help (always allowed)
   case "$cmd" in
@@ -2777,6 +2774,9 @@ main() {
       ;;
     config)
       PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" exec "$VNX_PYTHON" "$VNX_HOME/scripts/config_cli.py" "$@"
+      ;;
+    morning-round)
+      PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" exec "$VNX_PYTHON" "$VNX_HOME/scripts/morning_round_cli.py" "$@"
       ;;
     main-window)
       PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" exec "$VNX_PYTHON" "$VNX_HOME/scripts/main_window_cli.py" "$@"

@@ -63,7 +63,7 @@ def repo(tmp_path, monkeypatch):
 
 
 def _v(lines=10, paths=("a.py",), resolver=None):
-    return psp.verdict(7, "", "main", None, resolver=resolver,
+    return psp.verdict(7, "", "main", None, resolver=resolver, grant_reader=lambda *a: ("none", None, ""),
                        measurer=lambda *a: psp.Measurement(lines, tuple(paths), "origin/main", "0" * 40))
 
 

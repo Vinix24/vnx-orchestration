@@ -16,7 +16,7 @@ import operator_queue_ask as qa
 import operator_queue_grant as qg
 
 PID, HEAD, QUOTE = "proj", "a" * 40, "uitzondering 12 akkoord, 500 regels"
-MARKERS = actor_class.DISPATCH_MARKERS + actor_class.TERMINAL_MARKERS + (actor_class.ROLE_MARKER, actor_class.PROCESS_OWNER_MARKER)
+MARKERS = actor_class.DISPATCH_MARKERS + actor_class.TERMINAL_MARKERS + (actor_class.ROLE_MARKER, "VNX_PROCESS_OWNER")
 
 
 @pytest.fixture()
@@ -77,7 +77,8 @@ def test_grant_writes_one_answer_line_that_latest_grant_reads_back_and_closes_an
                      "lines": 480, "measured_at": lines[-1]["ts"]}
     assert env["gh_calls"][0][:6] == ["gh", "pr", "view", "12", "--json", "headRefOid,baseRefName,state"]
     assert env["m_calls"] == [(12, HEAD, "main")]
-    assert oq.latest_grant(PID, 12, state_dir=env["q"]) == {"grant": grant, "point_id": pid, "revision": 1}
+    assert oq.latest_grant(PID, 12, state_dir=env["q"]) == {"grant": grant, "point_id": pid, "revision": 1,
+                                                            "quote": QUOTE, "by": "T0", "at": lines[-1]["ts"]}
     qa.read_asked(PID, data_root=env["root"], state_dir=env["q"])
     assert oq.read_state(PID, state_dir=env["q"])["points"][pid]["state"] == "beantwoord"
 
@@ -88,7 +89,7 @@ def test_answer_without_grant_is_a_no_and_measures_nothing(env):
     assert oq.latest_grant(PID, 12, state_dir=env["q"]) is None
 
 
-@pytest.mark.parametrize("marker,tty,who", [({"VNX_PROCESS_OWNER": "daemon"}, False, "automation"),
+@pytest.mark.parametrize("marker,tty,who", [({"VNX_PROCESS_OWNER": "daemon"}, False, "unknown"),
                                             ({}, False, "unknown"), ({}, True, "operator")])
 def test_only_operator_or_t0_may_grant(env, marker, tty, who):
     pid = _point(env)

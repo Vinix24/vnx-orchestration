@@ -17,7 +17,7 @@ calls. I recover observability through receipts, event streams, and a captured
 conversation log instead of SDK callbacks. The rest of this doc is the map of
 which lane runs which work, and where the lanes do not yet behave identically.
 
-Verified against `origin/main` at `c41411fea` on 2026-11-12. `VERSION` says 1.8.0.
+Verified against `origin/main` at `c41411fea` on 2026-11-12, when `VERSION` said 1.8.0. It says 1.9.1 now.
 Work merged after that release is marked "on main, not yet released".
 
 ## The lanes
@@ -53,8 +53,8 @@ headless lane without an override.
 
 **Concurrency (#1017):** the claude serial lock is an N-slot semaphore, not a
 single mutex. Default `N=10` (operator directive 2026-08-21, the
-subscription-safe default); `VNX_TMUX_MAX_CONCURRENT` (env var, or the
-registry-backed config-store value) raises or lowers it as an explicit
+subscription-safe default); `VNX_TMUX_MAX_CONCURRENT` (the stored config row, else
+the env var; `VNX_OVERRIDE_TMUX_MAX_CONCURRENT` beats both) raises or lowers it as an explicit
 operator opt-in. See `DISPATCH_RULES.md` §6.
 
 ### claude-subprocess
@@ -108,6 +108,14 @@ disabled and MCP off. This is an execution lane, not a review lane: it reuses th
 governed Claude spawn path so it emits a receipt and is not the raw `claude -p`
 receipt-bypass.
 
+Why this lane exists: with the key and the hardening (`ANTHROPIC_BASE_URL`
+redirect, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`, telemetry and updater off,
+MCP off), DeepSeek runs inside the Claude harness. An operator measurement on
+Claude Code 2.1.150 (2026-05-26) showed this beats a bare DeepSeek API call on
+coding and tool tasks (internal measurement, not a published benchmark): the
+harness adds tool-use loops, context injection and structured diff output the raw
+API lacks.
+
 The hard line: this lane requires the own DeepSeek key. The dispatch fast-fails
 before any subprocess spawn when `DEEPSEEK_API_KEY` is absent. Routing DeepSeek
 through the production OAuth subscription is blocked
@@ -145,6 +153,37 @@ it. This is code behaviour; no ADR records it.
 
 Local Ollama for the resolver layer and privacy-sensitive work, where no data
 leaves the machine. Routed through the litellm `ollama` sub-provider.
+
+## Constraint source of truth
+
+The provider layer is governed by `scripts/lib/providers/provider_constraints.yaml`,
+a machine-readable source of truth for constraints such as `kimi-via-cli-only`,
+`no-anthropic-sdk` and `deepseek-harness-subscription-blocked`. VNX is not a thin
+"supports many models" wrapper.
+
+One source-of-truth skill folder composes into a structured plain-text prompt
+(role, assignment, then an on-demand index of reference and script files) applied
+uniformly to every lane, so a single skill edit propagates to all providers with
+no per-CLI sync (ADR-022).
+
+## Providers at a glance
+
+`vnx providers list` shows the state of each provider family. The operator can
+switch a family off with `vnx providers off`, and every launch function honors it
+(`PROVIDER_SWITCH.md`). Where a model name appears on more than one route, the
+route decides which build answers: the DeepSeek model reached through OpenRouter
+is not the one on DeepSeek's own API. The table names the family per route.
+
+| Provider | How VNX drives it | Billing / constraint |
+|---|---|---|
+| **claude** | headless `claude -p`, the only lane since the interactive tmux dispatch lane was removed on 2026-09-18 (#1868) | subscription (own `ANTHROPIC_API_KEY`/`ANTHROPIC_BASE_URL` routes outside) |
+| **codex** | CLI subprocess | subscription; review gate and worker |
+| **gemini** | CLI subprocess | provider subscription or credits; worker lane, not a reviewer |
+| **kimi** | Kimi CLI over OAuth | subscription, while one exists; worker lane and explicit review gate, in no default review stack since 2026-11-11; `kimi-via-cli-only`, no Moonshot SDK |
+| **GLM** (Zhipu, GLM 5 family) | OpenRouter (`litellm:zai`) or the `glm-harness` proxy | API credit; registered gate, not in the default takeover chain; `zai-via-openrouter-only` |
+| **any OpenRouter or OpenAI-compatible model** | claude-CLI harness or the local litellm proxy lane | API credit; routed generically via harness or proxy |
+| **DeepSeek V4 family** | Claude harness with your own DeepSeek key, hardened | API credit (own key); second seat of the default review stack; `deepseek-harness-subscription-blocked` |
+| **ollama** (local, for example Gemma 4 E4B) | local runtime, no network | free and local; resolver and privacy-sensitive work |
 
 ## Review stack and takeover chain
 
@@ -234,19 +273,13 @@ worker author its own report through a completion protocol, with `govern()` as t
 backstop that emitted a minimal `contract_status="synthesized"` body when no usable
 report existed. `govern()` itself stays in `dispatch_govern.py`.
 
-**claude-subprocess lane: `govern()` wiring is opt-in (`VNX_SHARED_GOVERN=1`,
-default off).** `dispatch_govern.py`'s own module docstring names the tmux lane
-(removed) and the subprocess lane as its intended callers. Behind the flag,
-`deliver_with_recovery` routes both the success and the
-budget-exhausted-failure path through `govern()`, including
-git-diff synthesis (`base_sha` = the pre-dispatch commit SHA) and schema-complete
-frontmatter, instead of the legacy stub-only `_ensure_unified_report` (success) or
-no report at all (final failure). `govern()`'s authored-report lookup also checks
-the legacy subprocess worker filename (`<dispatch_id>_report.md`, from
-`receipt_writer._ensure_unified_report`'s docstring convention) as a fallback
-alongside the canonical `<dispatch_id>.md`. Receipt writing (`_write_receipt`) is
-unchanged in both flag states. Flag default is off pending a burn-in period;
-flipping it on is a follow-up, not part of this slice.
+**claude-subprocess lane: no `govern()` wiring.** `VNX_SHARED_GOVERN` and the
+`govern()` call sites in `deliver_with_recovery` are deleted (config-een-oppervlak
+PR-7b); the flag was off by default and nothing set it. The lane writes its own
+contract-valid close-out report (`_ensure_unified_report`) on success and emits no
+report on the budget-exhausted failure path. `govern()` stays in
+`dispatch_govern.py` for the lanes that call it. Receipt writing (`_write_receipt`)
+is unchanged.
 
 **provider_dispatch lanes (codex, gemini, kimi, deepseek-harness, litellm): the
 report is synthesized.** These lanes do not author a report. `_emit_governance`
@@ -322,6 +355,9 @@ Agents are folders: each role under `agents/<role>/` carries its own `CLAUDE.md`
 and `config.yaml`, resolved by `scripts/lib/agent_resolver.py`. The skills of a
 role land at the provider's native destination under `VNX_AGENT_LAYOUT=on`
 (off by default, ADR-050 and ADR-059, on main, not yet released).
+
+One `PermissionPolicy` governs every lane (ADR-057), and a review provider is one
+registry row. Workers run on whichever lane the dispatch names.
 
 That is the extent of it. The role text reaches another harness, and the lanes
 above run workers on codex, kimi, gemini, deepseek and glm. A live T0 session on

@@ -18,9 +18,9 @@ import dispatch_cli  # noqa: E402
 import dispatch_exit  # noqa: E402
 from dispatch_serialization import LockWaitTimeout  # noqa: E402
 
-_ENV = ("VNX_CURRENT_TRACK_ID", "VNX_PARENT_DISPATCH", "VNX_TASK_CLASS", "VNX_TIER_FROM", "VNX_TIER_TO",
+_ENV = ("VNX_PARENT_DISPATCH", "VNX_TASK_CLASS", "VNX_TIER_FROM", "VNX_TIER_TO",
         "VNX_WORK_REF", "VNX_PR_ID", "VNX_CURRENT_MODEL", "VNX_CURRENT_PROVIDER", "VNX_CURRENT_TERMINAL")
-_FULL_ENV = dict(zip(_ENV, ("trk", "parent-1", "03_refactoring", "t-a", "t-b", "dispatch/x", "2899", "opus", "claude", "T9")))
+_FULL_ENV = dict(zip(_ENV, ("parent-1", "03_refactoring", "t-a", "t-b", "dispatch/x", "2899", "opus", "claude", "T9")))
 _PLAN = {"dispatch_id": "d-r29b", "lane": "claude_headless", "route_reason": "plan-reason", "warnings": (),
          "parent_dispatch": "parent-1", "task_class": "03_refactoring", "tier_from": "t-a", "tier_to": "t-b",
          "work_ref": "dispatch/x", "pr_id": "2899", "model": "opus", "provider": NT("Prov", "value")("claude"),
@@ -54,7 +54,7 @@ def _door(mp, tmp_path, *, plan=None, track_id="trk", scout_exc=None, **over):
            "_fill_gate_and_check_required": rec("gate", (None, vspec, "door2")),
            "build_runtime_snapshot": rec("snapshot", NS(worker_claude_override_reason="ovr")),
            "_compile_plan_checked": rec("compile", plan or _Plan()),
-           "_headless_isolation_guard": rec("iso", "iso-warn"), "_lane_verdict": rec("lane"),
+           "_headless_isolation_guard": rec("iso", "iso-warn"), "_lane_verdict": rec("lane"), "_blast_radius_reject": rec("blast"),
            "_record_bookkeeping_failure": rec("bk_fail"), "_persist_dispatch_row": rec("row", "att-1"),
            "_register_gate_obligation": rec("obligation"), "_door_track_bookkeeping": rec("track"),
            "issue_permit": rec("permit", "P"), "require_permit": rec("require"),
@@ -88,7 +88,7 @@ def test_headless_fire_order_env_and_output(monkeypatch, tmp_path, capsys, caplo
     calls, sd = _door(monkeypatch, tmp_path)
     caplog.set_level(logging.INFO, logger=dispatch_cli.logger.name)
     assert _run(refire_reason="rf") == 0
-    assert [c[0] for c in calls][9:] == ["lane", "scout", "row", "obligation", "track", "permit", "require",
+    assert [c[0] for c in calls][9:] == ["lane", "blast", "scout", "row", "obligation", "track", "permit", "require",
                                          "fp", "commit", "sweep", "hand_over", "lane_slot", "headless", "finish"]
     assert _env() == _FULL_ENV
     assert _get(calls, "scout")[2] == {"dispatch_id": "d-r29b", "instruction_text": "do it",
@@ -118,7 +118,7 @@ def test_headless_nonzero_bare_env_gate_reject_scout_failure(monkeypatch, tmp_pa
     assert capsys.readouterr().err == "[dispatch_cli] REJECT [obl]: none\n"
     boom = RuntimeError("scout down")
     calls, sd = _door(monkeypatch, tmp_path, scout_exc=boom)
-    assert _run() == 0 and [c[0] for c in calls][10:13] == ["scout", "bk_fail", "row"]
+    assert _run() == 0 and [c[0] for c in calls][11:14] == ["scout", "bk_fail", "row"]
     assert _get(calls, "bk_fail")[1:] == (("scout_prepass", "d-r29b", boom), {"state_dir": sd})
 
 
@@ -136,7 +136,7 @@ def test_provider_lanes_and_dry_run(monkeypatch, tmp_path, capsys):
     calls, _ = _door(monkeypatch, tmp_path, _fill_gate_and_check_required=lambda v, r: (None, v, ""),
                      _headless_isolation_guard=None)
     assert _run(dry_run=True) == 0 and _env() == {}
-    assert [c[0] for c in calls][8:] == ["lane", "permit", "require", "fp", "print"]
+    assert [c[0] for c in calls][8:] == ["lane", "blast", "permit", "require", "fp", "print"]
     assert (_get(calls, "print")[1][0].route_reason, _get(calls, "print")[1][0].warnings) == ("plan-reason", ())
 
 
@@ -161,3 +161,9 @@ def test_invariant_and_lock_wait_exits(monkeypatch, tmp_path, capsys, caplog):
         "state_dir": sd, "success": False, "failure_reason": "lock-wait timeout: slot busy"})
     assert capsys.readouterr().err == "[dispatch_cli] REJECT [lock-wait-timeout]: slot busy\n"
     assert [r.getMessage() for r in caplog.records] == ["[dispatch_cli] LOCK-WAIT TIMEOUT dispatch=d-r29b: slot busy"]
+
+
+def test_blast_radius_refusal_stops_the_door_before_scout_permit_and_lane(monkeypatch, tmp_path):
+    calls, _ = _door(monkeypatch, tmp_path, _blast_radius_reject=lambda *a: calls.append(("blast", a, {})) or dispatch_cli.Reject("c", "m"))
+    assert _run() == 1 and [c[0] for c in calls][-2:] == ["lane", "blast"] and _get(calls, "blast")[1][1:] == (tmp_path, tmp_path / "state", None, False)
+    assert not {"scout", "row", "permit", "commit", "lane_slot", "headless", "envelope"} & {c[0] for c in calls}

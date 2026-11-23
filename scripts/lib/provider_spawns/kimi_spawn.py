@@ -1037,7 +1037,7 @@ def _heartbeat_monitor_loop(
     """Poll the per-dispatch tee file for silence; kill + report if stuck.
 
     Same module (``worker_heartbeat.FileProgressHeartbeat``), same threshold
-    (``VNX_WORKER_HEARTBEAT_SILENCE_SECONDS``, default 1800s since OI-1130),
+    (``worker_heartbeat._DEFAULT_SILENCE_THRESHOLD_SECONDS``, 1800s since OI-1130),
     same failure-report
     shape (``build_heartbeat_failure_report``) as the tmux-spawn and subprocess
     lanes, so the audit trail is uniform regardless of which lane ran the
@@ -1450,7 +1450,7 @@ def spawn_kimi(
     Returns KimiSpawnResult(returncode=127) when the kimi binary is absent.
     Caller is responsible for lease/manifest/receipt/event-archive/retry.
 
-    The per-chunk stall default is 1200s (overridable via VNX_KIMI_STALL_THRESHOLD):
+    The per-chunk stall default is 1200s (scaled with the total deadline, OI-903):
     Kimi is a reasoning model whose 1.46.0 content-block output is end-loaded, so
     the first token can arrive only after a long reasoning gap (a 300s default
     spuriously killed adversarial-review dispatches mid-think). A FAILURE is
@@ -1485,8 +1485,7 @@ def spawn_kimi(
         raise ValueError("Pass either event_store OR event_writer, not both")
 
     # OI-903: scale the stall timeout with the total deadline so a long spec
-    # deadline is the binding constraint, not a fixed 1200s silence. Skipped when
-    # VNX_KIMI_STALL_THRESHOLD is set explicitly — env overrides retain precedence.
+    # deadline is the binding constraint, not a fixed 1200s silence.
     chunk_timeout, total_deadline = _resolve_kimi_timeouts(chunk_timeout, total_deadline)
 
     # OI-1619: the kimi CLI is a real worker subprocess (untrusted-model-driven,
@@ -1602,18 +1601,8 @@ def spawn_kimi(
 
 
 def _resolve_kimi_timeouts(chunk_timeout: float, total_deadline: float) -> tuple:
-    """``(chunk_timeout, total_deadline)`` of ``spawn_kimi`` after the env overrides and OI-903."""
-    try:
-        chunk_timeout = float(os.environ.get("VNX_KIMI_STALL_THRESHOLD", chunk_timeout))
-    except (TypeError, ValueError):
-        pass
-    try:
-        total_deadline = float(os.environ.get("VNX_KIMI_TIMEOUT", total_deadline))
-    except (TypeError, ValueError):
-        pass
-    if "VNX_KIMI_STALL_THRESHOLD" not in os.environ:
-        chunk_timeout = coerce_chunk_stall(chunk_timeout, total_deadline)
-    return chunk_timeout, total_deadline
+    """``(chunk_timeout, total_deadline)`` of ``spawn_kimi`` after OI-903."""
+    return coerce_chunk_stall(chunk_timeout, total_deadline), total_deadline
 
 
 def _emit_kimi_effective_argv(

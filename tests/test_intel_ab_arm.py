@@ -151,7 +151,7 @@ def test_derive_arm_is_the_writers_arm_and_reads_no_flag(monkeypatch, flag):
     import config_runtime
     for target, name in ((sel, "_ab_test_enabled"), (config_runtime, "get"), (config_runtime, "get_bool")):
         monkeypatch.setattr(target, name, no_read)
-    monkeypatch.setattr(sel, "os", None)  # an environment read inside the selector now fails
+    monkeypatch.setattr(sel, "os", None, raising=False)  # the selector imports no os; a reintroduced environment read fails here
     assert [(sel.derive_arm(dict(WINDOW), "p1", i), sel.window_stamp(dict(WINDOW))) for i in ids] == written
 
 

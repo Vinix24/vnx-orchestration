@@ -14,7 +14,6 @@ snapshot is a projection of the last line.
 from __future__ import annotations
 
 import json
-import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -31,7 +30,6 @@ from receipt_schema import DISPATCH_STARTED_EVENT_TYPE
 SCHEMA = "ledger_verdict/1"
 VERDICT_FILENAME = "learning_ledger_verdict.json"
 LEDGER_EVENT_TYPE = "learning_ledger_verdict"
-ACTIVATION_ENV = "VNX_LEDGER_ACTIVATION_COMMIT"
 STATUS_OK, STATUS_PENDING, STATUS_REFUSED = "ok", "pending", "refused"
 STATUSES = frozenset({STATUS_OK, STATUS_PENDING, STATUS_REFUSED})
 SWEEP_MAX_AGE_SECONDS = 600  # the sweep ticks every cycle: older means the processor stalled
@@ -104,9 +102,7 @@ def _stale_in_flight(unfinished: list, evaluated: datetime) -> str:
 def _evaluate(state_dir: Path, project_id: Any, activation_commit: Optional[str],
               evaluated: datetime) -> Dict[str, Any]:
     project = project_id.strip() if isinstance(project_id, str) else ""
-    activation = os.environ.get(ACTIVATION_ENV, "") if activation_commit is None \
-        else activation_commit
-    activation = activation.strip() or None if isinstance(activation, str) else None
+    activation = activation_commit.strip() or None if isinstance(activation_commit, str) else None
     cohort = activation or COHORT_ALL
 
     def verdict(status: str, code: str, reason: str, counts: Any = None) -> Dict[str, Any]:

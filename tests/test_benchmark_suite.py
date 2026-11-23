@@ -546,46 +546,7 @@ def test_dry_run_uses_custom_tasks_dir_and_models_file(
     assert "claude-opus-4-8" not in out
 
 
-def test_dry_run_env_var_fallback_for_tasks_and_models(
-    tmp_prompts: Path, tmp_models_yaml: Path, monkeypatch, capsys,
-):
-    monkeypatch.setenv("VNX_BENCH_TASKS_DIR", str(tmp_prompts))
-    monkeypatch.setenv("VNX_BENCH_MODELS_FILE", str(tmp_models_yaml))
-    monkeypatch.setattr(sys, "argv", ["run_benchmark.py", "--dry-run"])
-
-    rc = run_benchmark.main()
-    out = capsys.readouterr().out
-
-    assert rc == 0
-    assert "claude-sonnet-4-6 x 01_alpha" in out
-
-
-def test_dry_run_cli_flag_overrides_env_var(
-    tmp_prompts: Path, tmp_models_yaml: Path, tmp_path: Path, monkeypatch, capsys,
-):
-    # A second, distinct task source set via env — the explicit CLI flag must win.
-    other_prompts = tmp_path / "other_prompts"
-    other_prompts.mkdir()
-    (other_prompts / "99_gamma.txt").write_text("Do task gamma.")
-
-    monkeypatch.setenv("VNX_BENCH_TASKS_DIR", str(other_prompts))
-    monkeypatch.setattr(sys, "argv", [
-        "run_benchmark.py", "--dry-run",
-        "--tasks-dir", str(tmp_prompts),
-        "--models-file", str(tmp_models_yaml),
-    ])
-
-    rc = run_benchmark.main()
-    out = capsys.readouterr().out
-
-    assert rc == 0
-    assert "01_alpha" in out
-    assert "99_gamma" not in out
-
-
 def test_dry_run_defaults_to_bundled_seeds_when_unset(monkeypatch, capsys):
-    monkeypatch.delenv("VNX_BENCH_TASKS_DIR", raising=False)
-    monkeypatch.delenv("VNX_BENCH_MODELS_FILE", raising=False)
     monkeypatch.setattr(sys, "argv", ["run_benchmark.py", "--dry-run"])
 
     rc = run_benchmark.main()

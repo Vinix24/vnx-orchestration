@@ -67,6 +67,7 @@ def test_litellm_explicit_model_skips_every_resolver():
         "prompt": "go", "model": "glm-x", "dispatch_id": "r34b-d", "terminal_id": "T2",
         "event_writer": _writer, "sub_provider": "zai", "lane": _build_lane_key("zai", None),
         "extra_env": eap._plan_worker_env(plan, "reviewer"), "cwd": Path("/tmp"),
+        "total_deadline": 600.0,
     }
     assert (out.status, out.returncode, out.model) == ("success", 0, "glm-x")
     assert out.token_usage == _extract_token_usage(spawn.return_value, "litellm:zai")
@@ -86,6 +87,7 @@ def test_gemini_full_kwargs_and_spawn_error():
     assert spawn.call_args.kwargs == {
         "prompt": "go", "model": "gemini-explicit", "dispatch_id": "r34b-d", "terminal_id": "T2",
         "event_writer": _writer, "extra_env": eap._plan_worker_env(plan, "backend-developer"), "cwd": Path("/w"),
+        "total_deadline": 600.0,
     }
     assert (out.status, out.returncode, out.error, out.model) == ("failure", 7, "quota", "gemini-explicit")
 

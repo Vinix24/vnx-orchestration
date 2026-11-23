@@ -51,7 +51,7 @@ ALLOWED_SCOPES = frozenset(("project", "global"))
 @dataclass(frozen=True)
 class ConfigEntry:
     key: str
-    type: str  # "bool" | "string" | "enum" | "integer"
+    type: str  # "bool" | "string" | "enum" | "integer" | "float"
     default: str
     category: str  # "intelligence" | "dispatch" | "gate"
     description: str
@@ -132,6 +132,18 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
     "VNX_RECEIPT_CLASSIFIER_ENABLED": _e(
         "VNX_RECEIPT_CLASSIFIER_ENABLED", "bool", "0", "intelligence",
         "Receipt classifier opt-in.", subsystem="intelligence-self-learning-loop", status="ACTIVATE", read_site_wired=False),
+    "VNX_RECEIPT_CLASSIFIER_MODE": _e(
+        "VNX_RECEIPT_CLASSIFIER_MODE", "string", "batch", "intelligence",
+        "Receipt classifier mode: batch (default), per_receipt or failures_direct.",
+        subsystem="intelligence-self-learning-loop", status="ACTIVATE", read_site_wired=False),
+    "VNX_RECEIPT_CLASSIFIER_PROVIDER": _e(
+        "VNX_RECEIPT_CLASSIFIER_PROVIDER", "string", "haiku", "intelligence",
+        "Provider of the receipt classifier.",
+        subsystem="intelligence-self-learning-loop", status="ACTIVATE", read_site_wired=False),
+    "VNX_RECEIPT_CLASSIFIER_DAILY_COST_USD": _e(
+        "VNX_RECEIPT_CLASSIFIER_DAILY_COST_USD", "float", "0.20", "intelligence",
+        "Daily USD spend cap of the receipt classifier. Raising it waives the 0.20 USD/day classifier cost cap.",
+        approval=True, subsystem="intelligence-self-learning-loop", status="ACTIVATE", read_site_wired=False),
     "VNX_AUTO_REPORT": _e(
         "VNX_AUTO_REPORT", "bool", "1", "dispatch",
         "Auto-report Stop hook gate. Default on: the value every fabric process saw while "
@@ -163,6 +175,43 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         "VNX_T3_PROVIDER", "string", "", "dispatch",
         "Provider of terminal T3 (layer 2 of the worker pair, ADR-091). Empty: this layer delivers "
         "nothing and the worker registry decides.", subsystem="headless-dispatch-routing", status="ACTIVATE", read_site_wired=False),
+    "VNX_T0_PROVIDER": _e(
+        "VNX_T0_PROVIDER", "string", "claude_code", "dispatch",
+        "Provider of terminal T0.",
+        subsystem="headless-dispatch-routing", status="ACTIVATE", read_site_wired=False),
+    "VNX_T0_SKIP_PERMISSIONS": _e(
+        "VNX_T0_SKIP_PERMISSIONS", "bool", "0", "dispatch",
+        "Launch terminal T0 with the CLI permission prompts skipped. Setting 1 waives the permission prompts "
+        "(--dangerously-skip-permissions) for that terminal.",
+        approval=True, subsystem="headless-dispatch-routing", status="ACTIVATE", read_site_wired=False),
+    "VNX_T1_SKIP_PERMISSIONS": _e(
+        "VNX_T1_SKIP_PERMISSIONS", "bool", "0", "dispatch",
+        "Launch terminal T1 with the CLI permission prompts skipped. Setting 1 waives the permission prompts "
+        "(--dangerously-skip-permissions) for that terminal.",
+        approval=True, subsystem="headless-dispatch-routing", status="ACTIVATE", read_site_wired=False),
+    "VNX_T2_SKIP_PERMISSIONS": _e(
+        "VNX_T2_SKIP_PERMISSIONS", "bool", "0", "dispatch",
+        "Launch terminal T2 with the CLI permission prompts skipped. Setting 1 waives the permission prompts "
+        "(--dangerously-skip-permissions) for that terminal.",
+        approval=True, subsystem="headless-dispatch-routing", status="ACTIVATE", read_site_wired=False),
+    "VNX_T3_SKIP_PERMISSIONS": _e(
+        "VNX_T3_SKIP_PERMISSIONS", "bool", "0", "dispatch",
+        "Launch terminal T3 with the CLI permission prompts skipped. Setting 1 waives the permission prompts "
+        "(--dangerously-skip-permissions) for that terminal.",
+        approval=True, subsystem="headless-dispatch-routing", status="ACTIVATE", read_site_wired=False),
+    "VNX_PAID_LANE_DAILY_BUDGET_USD": _e(
+        "VNX_PAID_LANE_DAILY_BUDGET_USD", "float", "5.00", "dispatch",
+        "Daily USD cap of the paid provider lanes. Raising it waives the 5 USD/day paid-lane cost cap.",
+        approval=True, subsystem="headless-dispatch-routing", status="ACTIVATE", read_site_wired=False),
+    "VNX_REQUIRE_DISPATCH_TRACK": _e(
+        "VNX_REQUIRE_DISPATCH_TRACK", "bool", "0", "dispatch",
+        "Require a track_id on a dispatch. Off (default): the door only warns; on: a dispatch without a track is refused.",
+        subsystem="headless-dispatch-routing", status="ACTIVATE", read_site_wired=True),
+    "VNX_SUPERVISOR_MODE": _e(
+        "VNX_SUPERVISOR_MODE", "string", "legacy", "dispatch",
+        "Unified supervisor opt-in: unified switches on auto-respawn, lease sweep and runtime supervision; legacy leaves them off.",
+        subsystem="headless-dispatch-routing", status="ACTIVATE", read_site_wired=False,
+        allowed_values=("legacy", "unified")),
     "VNX_ENFORCEMENT_PROFILE": _e(
         "VNX_ENFORCEMENT_PROFILE", "string", "shadow", "gate",
         "Enforcement profile: shadow (default) | enforced.", approval=True, subsystem="governance-enforcement-stack", status="ACTIVATE", read_site_wired=True,
@@ -172,10 +221,15 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         "Claude account directories as a JSON list (ADR-090). The reader validates the content.",
         scope="global", approval=True, subsystem="headless-dispatch-routing", status="ACTIVATE", read_site_wired=False),
 
+    "VNX_SCOUT_PROVIDER": _e(
+        "VNX_SCOUT_PROVIDER", "string", "deepseek", "intelligence",
+        "Provider of the scout recon pre-pass; a value outside the allowed set falls back to deepseek.",
+        subsystem="cheap-recon-scout", status="ACTIVATE", read_site_wired=True,
+        allowed_values=("codex", "deepseek", "gemini", "ollama")),
     "VNX_SCOUT_PREPASS": _e(
         "VNX_SCOUT_PREPASS", "bool", "0", "intelligence",
         "Cheap-model scout recon pre-pass in the door (fail-open).",
-        subsystem="cheap-recon-scout", status="ACTIVATE"),
+        subsystem="cheap-recon-scout", status="ACTIVATE", cockpit_canonical=True),
     "VNX_TAGGER_ENABLED": _e(
         "VNX_TAGGER_ENABLED", "bool", "0", "intelligence",
         "Persist-time LLM tagging over the closed VNX vocabulary.",
@@ -391,28 +445,28 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         "that is not a positive integer, or below VNX_PR_SIZE_WARN, falls back to 450 and is "
         "named in the gate detail.", approval=True,
         subsystem="governance-enforcement-stack", status="LIVE"),
-    # ADR-088 besluit 1, 3 and 8 (track pr-grootte-afgedwongen PG-0). No reader yet: the merge
-    # door reads these three from PG-1 on, so read_site_wired=False until then. The door reads
+    # ADR-088 besluit 1, 3 and 8 (track pr-grootte-afgedwongen PG-0). Read by the pr_size
+    # preflight of the merge door since PG-1d (pr_size_policy.read_policy). The door reads
     # the floor (layers=("project_config", "default")) and the full chain and compares; an override only tightens.
     "VNX_PR_SIZE_ENFORCE": _e(
         "VNX_PR_SIZE_ENFORCE", "string", "warn", "gate",
         "How the merge door treats a PR above the size limit: off (not measured), warn (a line "
-        "on the receipt) or refuse (NO-GO). Read by the door from PG-1 on (ADR-088); no reader "
-        "yet. The reader validates the value until the registry carries allowed values: any "
+        "on the receipt) or refuse (NO-GO). Read by the merge door's pr_size preflight (ADR-088, "
+        "PG-1d). The reader validates the value until the registry carries allowed values: any "
         "other value reads as refuse and is named.", approval=True,
-        subsystem="governance-enforcement-stack", status="ACTIVATE", read_site_wired=False),
+        subsystem="governance-enforcement-stack", status="ACTIVATE"),
     "VNX_PR_SIZE_HOLD_SECURITY": _e(
         "VNX_PR_SIZE_HOLD_SECURITY", "integer", "300", "gate",
         "PR size limit (lines added + removed) when one changed path is a security path "
-        "(ADR-088 besluit 8). Read by the merge door from PG-1 on; no reader yet.",
+        "(ADR-088 besluit 8). Read by the merge door's pr_size preflight (PG-1d).",
         approval=True,
-        subsystem="governance-enforcement-stack", status="ACTIVATE", read_site_wired=False),
+        subsystem="governance-enforcement-stack", status="ACTIVATE"),
     "VNX_SECURITY_PATHS": _e(
         "VNX_SECURITY_PATHS", "string", "", "gate",
         "Comma-separated path prefixes this project adds to the security set of the PR-size "
         "check. It only adds to the set built from code; a shorter list removes nothing. Read "
-        "by the merge door from PG-1 on (ADR-088 besluit 8); no reader yet.", approval=True,
-        subsystem="governance-enforcement-stack", status="ACTIVATE", read_site_wired=False),
+        "by the merge door's pr_size preflight (ADR-088 besluit 8, PG-1d).", approval=True,
+        subsystem="governance-enforcement-stack", status="ACTIVATE"),
     # The admission contract of the main window (ADR-073 besluit 3 and 6), read by
     # main_window.read_admission_config. Unset N is mode off: the gate records GO and the
     # merge behaviour is unchanged.
@@ -474,7 +528,8 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         "VNX_PLAN_GATE_ENFORCE", "enum", "advisory", "gate",
         "Plan-first-gate enforcement mode: off | advisory | required (ADR-030). "
         "Advisory warns when a track-linked dispatch has an unresolved plan gate; required blocks it. "
-        "The process env var overrides this; operator override VNX_OVERRIDE_PLAN_GATE=1. Default advisory.",
+        "A stored value beats the env var; VNX_OVERRIDE_PLAN_GATE_ENFORCE beats both. "
+        "Operator override VNX_OVERRIDE_PLAN_GATE=1. Default advisory.",
         approval=True,
         subsystem="plan-gate-panel", status="SCOPE"),
     "VNX_USE_CENTRAL_DB": _e(
@@ -558,17 +613,6 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         # Explicit canonical pick (OI-1385): preserves the pre-existing last-wins winner for
         # this subsystem's 5 entries. Not re-audited by this dispatch — out of scope.
         cockpit_canonical=True),
-    "VNX_PLAN_GATE_COMPLEX_ONLY": _e(
-        "VNX_PLAN_GATE_COMPLEX_ONLY", "bool", "0", "gate",
-        "Flag with no effect since P1: plan_gate_enforcement.complex_only_active() "
-        "still reads it, but nothing consults that result to change a plan-gate run "
-        "(the LIGHT/HEAVY scope-skip and its reduced 2-seat panel were removed). "
-        "Kept until P4 reworks the effectiveness probe.",
-        # subsystem matches the docs/core/SUBSYSTEMS.md seed row
-        # "plan-gate-task-class-scope" (framework-status-audit-and-cockpit PR-3
-        # fix) — distinct from "plan-gate-panel" (VNX_PLAN_GATE_ENFORCE), so the
-        # cockpit generator has exactly one canonical flag per ledger row.
-        subsystem="plan-gate-task-class-scope", status="SCOPE"),
     "VNX_HASH_CHAIN_REQUIRED": _e(
         "VNX_HASH_CHAIN_REQUIRED", "bool", "0", "gate",
         "Tamper-evident NDJSON hash-chain requirement (display metadata only; no read-site wired).",
@@ -665,8 +709,8 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         "N-slot concurrency cap for the claude-tmux serial lock "
         "(scripts/lib/dispatch_serialization.py). ACCOUNT-wide: shared with every "
         "other project and worktree running on the same Claude subscription, not "
-        "scoped to this project. The process env var still wins over this "
-        "config-store value as an explicit per-session override.",
+        "scoped to this project. A stored value beats the env var; "
+        "VNX_OVERRIDE_TMUX_MAX_CONCURRENT beats both.",
         approval=True,
         subsystem="claude-tmux-serialization", status="ACTIVATE"),
 
@@ -834,14 +878,14 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         "types). Purely deterministic: no model call sits in the write path.",
         subsystem="ledger-lifecycle", status="LIVE"),
     # agent layout: `off` (default), `shadow` and `on`; any unknown value reads as `off` with one
-    # WARNING (scripts/lib/agent_layout.py). Independent of VNX_AGENT_FOLDERS (agent_resolver).
+    # WARNING (scripts/lib/agent_layout.py). Independent of agent-folder resolution (agent_resolver).
     "VNX_AGENT_LAYOUT": _e(
         "VNX_AGENT_LAYOUT", "string", "off", "dispatch",
         "Agent-as-folder skill layout: off (default), shadow (a non-discovered copy under "
         ".vnx-agent-skills/) or on (the skills at the provider's native, discovered destination, "
         "set per project by the operator). An unknown value reads as off.",
         subsystem="agent-layout", status="SCOPE"),
-    # ochtendronde (ADR-095): morning_pause.py reads these through a getter; since D1b the door
+    # morning round (ADR-095): morning_pause.py reads these through a getter; since D1b the door
     # (stop_conditions.check_morning_pause) and pr_merge read them (morning_pause_gate.py), so all
     # four are wired. VNX_MORNING_PAUSE_ENABLED is the subsystem's canonical flag, inserted last
     # so the CLI's last-inserted rule agrees.
@@ -858,10 +902,25 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         "IANA timezone of the morning pause window.",
         subsystem="morning-pause", status="PARK"),
     "VNX_MORNING_PAUSE_ENABLED": _e(
-        "VNX_MORNING_PAUSE_ENABLED", "bool", "false", "dispatch",
+        "VNX_MORNING_PAUSE_ENABLED", "bool", "true", "dispatch",
         "Morning pause (ADR-095): firing and merging stop from the start time until the morning "
-        "points are decided, at the latest at the deadline. Off by default; D4 turns it on.",
+        "points are decided, at the latest at the deadline. On by default (D4b); no snapshot for today inside the window means not started, not paused.",
         subsystem="morning-pause", status="PARK", cockpit_canonical=True),
+    # ADR-096 B2: the door reads it through config_runtime (dispatch_cli._check_predecessor_verdict).
+    "VNX_DELIVERABLE_PREDECESSOR_MODE": _e(
+        "VNX_DELIVERABLE_PREDECESSOR_MODE", "string", "refuse", "dispatch",
+        "Deliverable predecessors (ADR-096): the door refuses (refuse), reports (warn) or skips (off) a fire "
+        "whose hard predecessor has no pr_merged receipt.",
+        subsystem="deliverable-predecessor", status="ACTIVATE", cockpit_canonical=True,
+        allowed_values=("off", "warn", "refuse")),
+    # ADR-096 B4b: the door reads it through config_runtime (dispatch_cli._check_blast_radius_verdict).
+    "VNX_BLAST_RADIUS_MODE": _e(
+        "VNX_BLAST_RADIUS_MODE", "string", "warn", "dispatch",
+        "Blast radius (ADR-096): overlap of a fire's paths with live work or an open PR warns (warn), "
+        "refuses unless --override-overlap REASON is given (refuse), or is not read (off); "
+        "an unknown value reads as refuse.",
+        subsystem="blast-radius", status="ACTIVATE", cockpit_canonical=True,
+        allowed_values=("off", "warn", "refuse")),
 
 }
 
