@@ -213,14 +213,14 @@ def test_docs_dispatch_detection_sees_the_metadata_paths(tmp_path, state_dir, mo
     assert STYLE_HEADING in (spec_file.parent / "instruction.md").read_text(encoding="utf-8")
 
 
-def test_resolve_dispatch_paths_names_its_source(state_dir, tmp_path):
+def test_dispatch_paths_with_source_names_its_source(state_dir, tmp_path):
     # The helper stage_spec_bundle calls in one statement (B10); the three sources.
     caller = ({"path": "scripts/caller.py"},)
-    assert dispatch_bridge._resolve_dispatch_paths(caller, tmp_path, PID, DID) == (caller, "caller")
+    assert dispatch_bridge._dispatch_paths_with_source(caller, tmp_path, PID, DID) == (caller, "caller")
     _row(state_dir, DID, {"deliverable": True, "dispatch_paths": ["scripts/meta.py"]})
-    resolved, source = dispatch_bridge._resolve_dispatch_paths((), tmp_path, PID, DID)
+    resolved, source = dispatch_bridge._dispatch_paths_with_source((), tmp_path, PID, DID)
     assert source == "deliverable_metadata"
     assert resolved == (
         {"path": "scripts/meta.py", "access": "read_write", "materialize_at_cwd": False},)
     # EXACT id: a round id never inherits the base deliverable's paths.
-    assert dispatch_bridge._resolve_dispatch_paths((), tmp_path, PID, f"{DID}-r2") == ((), "none")
+    assert dispatch_bridge._dispatch_paths_with_source((), tmp_path, PID, f"{DID}-r2") == ((), "none")

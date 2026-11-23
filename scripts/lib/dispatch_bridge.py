@@ -468,7 +468,7 @@ def _deliverable_metadata_paths(
     return [{"path": p, "access": "read_write", "materialize_at_cwd": False} for p in raw_paths]
 
 
-def _resolve_dispatch_paths(
+def _dispatch_paths_with_source(
     dispatch_paths: tuple[dict, ...], root: Path, project_id: str, dispatch_id: str,
 ) -> "tuple[tuple[dict, ...], str]":
     """The paths staging carries and where they came from (B10, ADR-096).
@@ -687,7 +687,7 @@ def stage_spec_bundle(
     pending/), so the door's D11 staging gate is satisfied honestly.
 
     ``dispatch_paths``: caller paths win, else the deliverable's metadata, else none —
-    see ``_resolve_dispatch_paths`` (B10, ADR-096).
+    see ``_dispatch_paths_with_source`` (B10, ADR-096).
     """
     # 1. staging_id is DERIVED from dispatch_id and validated BEFORE any path join.
     staging_id = _require_staging_id(dispatch_id)
@@ -701,7 +701,7 @@ def stage_spec_bundle(
 
     # 4. B10: a caller that names no paths takes them from the deliverable's own metadata,
     # so the door's blast-radius check sees the scope the deliverable already knows.
-    dispatch_paths, dispatch_paths_source = _resolve_dispatch_paths(
+    dispatch_paths, dispatch_paths_source = _dispatch_paths_with_source(
         dispatch_paths, root, effective_project_id, dispatch_id)
 
     # 5. deadline and difficulty validated at the trust boundary (the FIRST writer of a dispatch-spec.json).
