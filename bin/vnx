@@ -450,6 +450,9 @@ Process commands (visibility and control):
   slot acquire <profile> --project-id <id> --owner-pid <pid>
                      Take a lease for an existing process; prints lease-id:token
   slot release <lease-id:token>  Release a lease (frees it once the owner's work is gone)
+  slot status        Show mode, free slots, holders and queue
+  slot mode show|set off|observe|enforce --project-id <id>
+                     Policy mode; enforce needs the four activation proofs (ADR-062)
                      (slot exit codes: 0 done, 75 capacity refusal after the wait, 78 invalid)
   inbox [--json] [--present]  Operator queue: open points to answer; also ask, answer, push-due
                      (exit 0 done, 2 refused, 78 ledger unreadable)

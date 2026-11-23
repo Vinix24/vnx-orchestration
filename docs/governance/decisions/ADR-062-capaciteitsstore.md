@@ -200,8 +200,8 @@ Lege beginlijsten worden alleen bij bewuste initialisatie gemaakt; een verdwenen
 | `mode` | Uitsluitend `off`, `observe`, `enforce`, geschreven door beleidseigenaar; pending is een uitvoeringsstatus. |
 | `enforce_activation` | Object met de vier bewijsrecords hieronder; leeg/onbekend is geen geslaagde activering. |
 | `enforce_activation.calibration` | `measured_at`, `measurement_ref`, `seo_slots`; bewijs van RS-1 op drie volle poorten, slotgetal gelijk aan het SEO-profiel. |
-| `enforce_activation.doctor` | Per account `vincentvandeth` en `ci-runner`: `checked_at`, `exit_code` exact integer 0 en `evidence_ref`; operating-logregel voor ci-runner. |
-| `enforce_activation.observe` | `started_at`, `ended_at`, `project_ids`, `evidence_ref`; minstens 7 dagen en zware aanvragen van minstens twee verschillende projecten in de slotlog. |
+| `enforce_activation.doctor` | De accountnamen komen uit `enforce_activation.doctor_accounts` in het beleid; op deze host zijn dat nu `vincentvandeth` en `ci-runner`. Per account: `checked_at`, `exit_code` exact integer 0 en `evidence_ref`; operating-logregel voor ci-runner. |
+| `enforce_activation.observe` | `started_at`, `ended_at`, `project_ids`, `evidence_ref`; minstens 7 dagen en zware aanvragen van minstens twee verschillende projecten in de slotlog, gelogd in modus `observe` binnen `started_at`–`ended_at`; een regel zonder of met een andere modus telt niet, een `mode_changed` naar iets anders dan `observe` binnen het interval blokkeert. |
 | `enforce_activation.operator` | `decided_at`, `decision_ref`; verwijst naar het expliciete besluit tot activering. |
 
 Bewijsverwijzingen mogen in het beleid staan, niet als pad in de slotlog. Veldpresentie alleen bewijst de vier voorwaarden niet: de validator verifieert inhoud, duur, identiteit en positieve uitkomsten. Ontbrekend, null, malformed of onbekend bewijs blokkeert activering; een policy-fout maakt nooit vanzelf `off`.
@@ -230,7 +230,7 @@ De host schrijft NDJSON naar `slotlog/YYYY-MM.ndjson`, zonder paden, commando's,
 | `released`, `reaped` | Respectievelijk releaseverzoek afgerond en opruiming na levenscheck; werkelijke houdtijd. |
 | `release_requested` | `release` op levende werklast zet de lease op `releasing`; gelogd vóór die overgang vastligt, één keer per lease. |
 | `lease_held` | Nog levende werklast na verdwijnen toezichthouder, reden `owner_gone_tree_alive`. |
-| `mode_changed` | Beleidsuitvoering verandert: `from_mode`, `to_mode`, `transition_s` (null buiten overgang); timeout vermeldt `transition_timeout`. |
+| `mode_changed` | Beleidsuitvoering verandert: `from_mode`, `to_mode`, `transition_s` (null buiten overgang); timeout vermeldt `transition_timeout`. `mode set` schrijft deze regel vóór het herschrijven van `host.json`, onder het controleslot; verandert alleen het beleid, dan `from_mode` gelijk aan `to_mode` met `policy_mode_set`. Mislukt het herschrijven, dan volgt `refused` met `store_invalid`. |
 
 ### Redencodes en exitcodes
 

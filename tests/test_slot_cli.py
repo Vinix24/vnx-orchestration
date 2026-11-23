@@ -6,6 +6,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -15,16 +16,29 @@ sys.path.insert(0, str(ROOT / "scripts" / "lib"))
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import slot_cli  # imported after the path setup above
+from slot import slot_activation
 from slot.slot_store import SlotStore
 
 ACL = " 0: group:vnxslot allow list,add_file,search,delete_child,file_inherit,directory_inherit"
 SWAP = "vm.swapusage: total = 5120.00M  used = 100.00M  free = 5020.00M  (encrypted)\n"
 VM_STAT = "Mach Virtual Memory Statistics: (page size of 16384 bytes)\nPages occupied by compressor: 1024.\n"
+DAY = 86400
+DOCTOR_ACCOUNTS = ["vincentvandeth", "ci-runner"]
 POLICY = {"total": 3, "reserved": 1, "runner_reserve": 1, "max_bypass": 3, "max_transition": 600, "max_queue": 5,
-          "mode": "observe", "enforce_activation": {},
+          "mode": "observe", "enforce_activation": {"doctor_accounts": list(DOCTOR_ACCOUNTS)},
           "memory": {"swap_growth_mb": 256, "swap_level_mb": 4096, "compressor_gb": 8},
           "profiles": {"runner": {"slots": 1, "max_slots": 8, "max_wait_s": 30, "heavy": False, "children": ["seo-gate"]},
                        "seo-gate": {"slots": 1, "max_slots": 4, "max_wait_s": 30, "heavy": True, "children": []}}}
+
+
+def evidence(now):
+    return {"doctor_accounts": list(DOCTOR_ACCOUNTS),
+            "calibration": {"measured_at": now - 9 * DAY, "measurement_ref": "rs1.md", "seo_slots": 1},
+            "doctor": {a: {"checked_at": now - DAY, "exit_code": 0, "evidence_ref": "log#1"}
+                       for a in DOCTOR_ACCOUNTS},
+            "observe": {"started_at": now - 8 * DAY, "ended_at": now - DAY, "project_ids": ["vnx-dev", "seo"],
+                        "evidence_ref": "slotlog"},
+            "operator": {"decided_at": now - 100, "decision_ref": "besluit 2026-11-20"}}
 
 
 @pytest.fixture
@@ -101,7 +115,8 @@ def test_observe_admits_at_once_and_logs_would_wait_from_the_shadow(env):
 
 
 @pytest.mark.parametrize("content", ["{", "[]", json.dumps({"holders": {}})])
-@pytest.mark.parametrize("argv", [("acquire", "runner", "--project-id", "p", "--owner-pid", "1"), ("release", "L-x:1")])
+@pytest.mark.parametrize("argv", [("status",), ("acquire", "runner", "--project-id", "p", "--owner-pid", "1"),
+                                  ("release", "L-x:1"), ("mode", "show")])
 def test_corrupt_state_refuses_78_never_off(env, content, argv):
     (env.store_dir / "state.json").write_text(content)
     assert cli(env, *argv)[0] == 78
@@ -197,6 +212,246 @@ def test_a_full_queue_refuses_75(env):
                              "uid": os.getuid(), "lease_id": "L-0", "owner": {}}])
     assert cli(env, "acquire", "runner", "--project-id", "b", "--owner-pid", str(os.getpid()))[0] == 75
     assert events(env, "refused")[-1]["reasons"] == ["queue_full"]
+
+
+def test_mode_set_enforce_without_evidence_refuses_and_leaves_the_policy(env):
+    assert cli(env, "mode", "set", "enforce", "--project-id", "vnx-dev")[0] == 78
+    assert json.loads(env.policy_path.read_text())["mode"] == "observe"
+    assert events(env, "refused")[0]["reasons"] == ["activation_incomplete"]
+
+
+_OBSERVE = object()
+
+
+def _heavy_log(env, now, projects, mode=_OBSERVE, at=None):
+    log = slot_cli.SlotLog(env.store_dir)
+    for i, project in enumerate(projects):
+        line = {"ts": (now - 5 * DAY if at is None else at) + i, "event": "requested", "project_id": project,
+                "profile": "seo-gate"}
+        line["mode"] = "observe" if mode is _OBSERVE else mode
+        log.write(line)
+
+
+@pytest.mark.parametrize("break_it", [
+    lambda e: e["doctor"]["ci-runner"].update(exit_code=True),
+    lambda e: e["doctor"]["ci-runner"].update(exit_code="0"),
+    lambda e: e["doctor"].pop("ci-runner"),
+    lambda e: e["calibration"].update(seo_slots=2),
+    lambda e: e["observe"].update(started_at=e["observe"]["ended_at"] - 6 * DAY),
+    lambda e: e["observe"].update(project_ids=["vnx-dev"]),
+    lambda e: e["operator"].update(decided_at=None),
+    lambda e: e["operator"].update(decided_at=e["observe"]["ended_at"] - 1),
+    lambda e: e.pop("calibration"),
+])
+def test_each_missing_activation_condition_blocks(env, break_it):
+    now = time.time()
+    proof = evidence(now)
+    break_it(proof)
+    patch_policy(env, enforce_activation=proof)
+    _heavy_log(env, now, ["vnx-dev", "seo"])
+    assert cli(env, "mode", "set", "enforce", "--project-id", "vnx-dev")[0] == 78
+    assert json.loads(env.policy_path.read_text())["mode"] == "observe"
+
+
+_MISSING = object()
+
+
+@pytest.mark.parametrize("accounts", [
+    pytest.param(_MISSING, id="missing-key"),
+    pytest.param(None, id="null"),
+    pytest.param("vincentvandeth", id="not-a-list"),
+    pytest.param([], id="empty"),
+    pytest.param([""], id="empty-string"),
+    pytest.param(["   "], id="blank"),
+    pytest.param([1], id="non-string"),
+    pytest.param(["vincentvandeth", "vincentvandeth"], id="duplicate"),
+    pytest.param(["vincentvandeth", "ci-runner", None], id="non-string-among-names"),
+])
+def test_an_unreadable_doctor_accounts_list_blocks_with_that_one_condition(env, accounts):
+    """The accounts come from the policy (ADR-062); every unreadable shape is one blocking condition."""
+    now = time.time()
+    proof = evidence(now)
+    if accounts is _MISSING:
+        proof.pop("doctor_accounts")
+    else:
+        proof["doctor_accounts"] = accounts
+    patch_policy(env, enforce_activation=proof)
+    _heavy_log(env, now, ["vnx-dev", "seo"])
+    policy = json.loads(env.policy_path.read_text())
+    assert slot_activation.missing(policy, slot_cli.read_events(env.store_dir), now) == [
+        "doctor: no valid doctor_accounts in the policy"]   # calibration, observe and operator all pass
+    assert cli(env, "mode", "set", "enforce", "--project-id", "vnx-dev")[0] == 78
+    assert json.loads(env.policy_path.read_text())["mode"] == "observe"
+
+
+@pytest.mark.parametrize("policy", [
+    pytest.param({}, id="no-enforce-activation"),
+    pytest.param({"enforce_activation": {}}, id="no-doctor-accounts"),
+    pytest.param({"enforce_activation": {"doctor_accounts": []}}, id="empty"),
+])
+def test_an_unreadable_doctor_accounts_list_checks_no_account(policy):
+    """``missing`` refuses a policy without an ``enforce_activation`` object before it gets here, so
+    the raw condition is pinned on the helper: even a positive record cannot rescue the list."""
+    now = time.time()
+    rec = {"vincentvandeth": {"checked_at": now - DAY, "exit_code": 0, "evidence_ref": "log#1"},
+           "ci-runner": {"checked_at": now - DAY, "exit_code": 1, "evidence_ref": "log#1"}}
+    assert slot_activation._doctor(policy, rec, now) == ["doctor: no valid doctor_accounts in the policy"]
+
+
+def test_a_valid_doctor_accounts_list_of_one_passes_when_that_account_has_evidence(env):
+    now = time.time()
+    proof = evidence(now)
+    proof["doctor_accounts"] = ["vincentvandeth"]
+    proof["doctor"] = {"vincentvandeth": proof["doctor"]["vincentvandeth"]}   # ci-runner is not named
+    patch_policy(env, enforce_activation=proof)
+    _heavy_log(env, now, ["vnx-dev", "seo"])
+    policy = json.loads(env.policy_path.read_text())
+    assert slot_activation.missing(policy, slot_cli.read_events(env.store_dir), now) == []
+    assert cli(env, "mode", "set", "enforce", "--project-id", "vnx-dev")[0] == 0
+    assert json.loads(env.policy_path.read_text())["mode"] == "enforce"
+
+
+def test_heavy_requests_of_only_one_project_in_the_slotlog_block(env):
+    now = time.time()
+    patch_policy(env, enforce_activation=evidence(now))
+    _heavy_log(env, now, ["vnx-dev", "vnx-dev"])
+    assert cli(env, "mode", "set", "enforce", "--project-id", "vnx-dev")[0] == 78
+
+
+def test_a_corrupt_slotlog_line_blocks_activation(env):
+    now = time.time()
+    patch_policy(env, enforce_activation=evidence(now))
+    _heavy_log(env, now, ["vnx-dev", "seo"])
+    with open(next((env.store_dir / "slotlog").glob("*.ndjson")), "a") as fh:
+        fh.write("{not json\n")
+    assert cli(env, "mode", "set", "enforce", "--project-id", "vnx-dev")[0] == 78
+    assert json.loads(env.policy_path.read_text())["mode"] == "observe"
+
+
+@pytest.mark.parametrize("mode", ["off", "enforce", "enforce_pending", None, "OBSERVE", 1])
+def test_heavy_requests_not_recorded_in_observe_mode_do_not_prove_observe(env, mode):
+    now = time.time()
+    patch_policy(env, enforce_activation=evidence(now))
+    _heavy_log(env, now, ["vnx-dev", "seo"], mode=mode)   # the slotlog writes null for a line without a mode
+    code = cli(env, "mode", "set", "enforce", "--project-id", "vnx-dev")[0]
+    assert code == 78 and json.loads(env.policy_path.read_text())["mode"] == "observe"
+    assert events(env, "mode_changed") == []
+
+
+@pytest.mark.parametrize("offset", [-8 * DAY - 10, -DAY + 10, 3600])
+def test_observe_requests_outside_the_interval_do_not_prove_observe(env, offset):
+    now = time.time()   # the interval is [now - 8 days, now - 1 day]
+    patch_policy(env, enforce_activation=evidence(now))
+    _heavy_log(env, now, ["vnx-dev", "seo"], at=now + offset)
+    assert cli(env, "mode", "set", "enforce", "--project-id", "vnx-dev")[0] == 78
+    assert json.loads(env.policy_path.read_text())["mode"] == "observe"
+
+
+@pytest.mark.parametrize("change", [{"to_mode": "off"}, {"to_mode": "enforce"}, {"to_mode": None}, {"ts": None}])
+def test_leaving_observe_inside_the_interval_blocks(env, change):
+    now = time.time()
+    patch_policy(env, enforce_activation=evidence(now))
+    _heavy_log(env, now, ["vnx-dev", "seo"])
+    line = {"ts": now - 3 * DAY, "event": "mode_changed", "from_mode": "observe", "to_mode": "off", **change}
+    with open(next((env.store_dir / "slotlog").glob("*.ndjson")), "a") as fh:
+        fh.write(json.dumps(line) + "\n")
+    assert cli(env, "mode", "set", "enforce", "--project-id", "vnx-dev")[0] == 78
+    assert json.loads(env.policy_path.read_text())["mode"] == "observe"
+
+
+def test_observe_requests_inside_the_interval_prove_observe(env):
+    now = time.time()
+    patch_policy(env, enforce_activation=evidence(now))
+    _heavy_log(env, now, ["vnx-dev", "seo"], at=now - 8 * DAY)   # the interval start itself counts
+    assert cli(env, "mode", "set", "enforce", "--project-id", "vnx-dev")[0] == 0
+
+
+def test_mode_change_whose_transaction_fails_leaves_policy_and_slotlog_unchanged(env, monkeypatch):
+    now = time.time()
+    patch_policy(env, enforce_activation=evidence(now))
+    _heavy_log(env, now, ["vnx-dev", "seo"])
+    before = len(events(env))
+
+    def broken(state):
+        raise slot_cli.SlotError("state_corrupt", "injected")
+
+    monkeypatch.setattr(slot_cli, "validate_state", broken)
+    assert cli(env, "mode", "set", "enforce", "--project-id", "vnx-dev")[0] == 78
+    assert json.loads(env.policy_path.read_text())["mode"] == "observe"
+    assert len(events(env)) == before and state(env)["mode"] == "observe"
+
+
+def test_mode_changed_is_written_before_the_policy_is_rewritten(env, monkeypatch):
+    seen = []
+    real = slot_cli._write_policy_mode
+
+    def spy(store, policy, mode):
+        seen.append([e["to_mode"] for e in events(env, "mode_changed")])
+        real(store, policy, mode)
+
+    monkeypatch.setattr(slot_cli, "_write_policy_mode", spy)
+    assert cli(env, "mode", "set", "off", "--project-id", "vnx-dev")[0] == 0
+    assert seen == [["off"]] and json.loads(env.policy_path.read_text())["mode"] == "off"
+
+
+def test_a_failed_policy_rewrite_keeps_the_state(env, monkeypatch):
+    def fail(store, policy, mode):
+        raise slot_cli.SlotError("store_invalid", "injected")
+
+    monkeypatch.setattr(slot_cli, "_write_policy_mode", fail)
+    assert cli(env, "mode", "set", "off", "--project-id", "vnx-dev")[0] == 78
+    assert json.loads(env.policy_path.read_text())["mode"] == "observe" and state(env)["mode"] == "observe"
+    assert [e["event"] for e in events(env)] == ["mode_changed", "refused"]   # the record, then its undoing
+    assert events(env, "refused")[0]["mode"] == "observe" and events(env, "refused")[0]["reasons"] == ["store_invalid"]
+
+
+def test_a_policy_change_without_an_execution_change_is_still_recorded(env):
+    patch_policy(env, mode="enforce")   # a timed-out transition: policy enforce, execution observe
+    assert cli(env, "mode", "set", "observe", "--project-id", "vnx-dev")[0] == 0
+    (ev,) = events(env, "mode_changed")
+    assert (ev["from_mode"], ev["to_mode"], ev["reasons"]) == ("observe", "observe", ["policy_mode_set"])
+
+
+def test_mode_set_enforce_with_evidence_activates_an_empty_host(env):
+    now = time.time()
+    patch_policy(env, enforce_activation=evidence(now))
+    _heavy_log(env, now, ["vnx-dev", "seo"])
+    assert cli(env, "mode", "set", "enforce", "--project-id", "vnx-dev")[0] == 0
+    assert json.loads(env.policy_path.read_text())["mode"] == "enforce"
+    assert state(env)["mode"] == "enforce" and state(env)["transition"]["outcome"] == "activated"
+    assert [(e["from_mode"], e["to_mode"]) for e in events(env, "mode_changed")] == [
+        ("observe", "enforce_pending"), ("enforce_pending", "enforce")]
+
+
+def test_enforce_drains_grandfathered_leases_and_times_out_to_observe(env):
+    now = time.time()
+    assert cli(env, "acquire", "runner", "--project-id", "a", "--owner-pid", str(os.getpid()))[0] == 0
+    patch_policy(env, enforce_activation=evidence(now))
+    _heavy_log(env, now, ["vnx-dev", "seo"])
+    assert cli(env, "mode", "set", "enforce", "--project-id", "vnx-dev")[0] == 0
+    (held,) = state(env)["holders"].values()   # need 7 against pool 1: unsafe, so it drains
+    assert state(env)["mode"] == "enforce_pending" and held["grandfathered"] is True and held["state"] == "grandfathered"
+    clock = Clock(now + 601)
+    assert cli(env, "acquire", "runner", "--project-id", "b", "--owner-pid", str(os.getpid()),
+               clock=clock, sleep=clock.sleep)[0] == 0   # fell back to observe: admitted at once
+    last = events(env, "mode_changed")[-1]
+    assert (last["to_mode"], last["reasons"], last["transition_s"] >= 600) == ("observe", ["transition_timeout"], True)
+    assert state(env)["transition"]["outcome"] == "timed_out" and state(env)["mode"] == "observe"
+
+
+def test_mode_set_by_someone_else_than_the_policy_owner_refuses(env, monkeypatch):
+    other = os.getuid() + 1
+    monkeypatch.setattr(os, "getuid", lambda: other)   # the policy file belongs to the real uid
+    assert cli(env, "mode", "set", "off", "--project-id", "p")[0] == 78
+    assert json.loads(env.policy_path.read_text())["mode"] == "observe"
+
+
+def test_status_shows_holders_without_tokens(env):
+    cli(env, "acquire", "runner", "--project-id", "a", "--owner-pid", str(os.getpid()))
+    code, out = cli(env, "status")
+    shown = json.loads(out[0])
+    assert code == 0 and shown["free"] == 0 and shown["pool"] == 1 and "token" not in out[0]
+    assert shown["holders"][0]["project_id"] == "a"
 
 
 def test_usage_errors_exit_2(env):
