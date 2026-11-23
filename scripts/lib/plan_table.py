@@ -1,9 +1,11 @@
 """plan_table.py — the deliverable table of one plan (ADR-096, B8/B9).
 
-Pure: no store access, no writes. ``find_plan`` finds the one plan of a track,
-``parse`` reads the first table with a ``#`` label column and an order column,
-``map_label`` turns a row label into the one deliverable id of the track.
-Unreadable parts are named with their line number; nothing is guessed.
+Pure: no store access, no writes. ``find_plan`` finds the one plan of a track and
+names every candidate it could not read (an incomplete search is never "no plan"
+and never a single match), ``parse`` reads the first table with a ``#`` label
+column and an order column, ``map_label`` turns a row label into the one
+deliverable id of the track. Unreadable parts are named with their line number;
+nothing is guessed.
 """
 
 from __future__ import annotations
@@ -56,11 +58,12 @@ def map_label(label: str, deliverables: Sequence[Tuple[str, str]]) -> Tuple[Opti
         None, f"no deliverable titled {label}")
 
 def find_plan(track_id: str, repo_root: Path) -> Tuple[Optional[Path], str]:
-    """The one plan of *track_id*, else a note naming none or several."""
+    """The one plan of *track_id*, else a note naming none, several or the unreadable ones."""
     root = Path(repo_root)
     root = root / "claudedocs" if (root / "claudedocs").is_dir() else root
     needle = f"Track `{track_id}`"
     matches: List[Path] = []
+    unreadable: List[str] = []
     for path in sorted(root.rglob("plan*.md")):
         relative = path.relative_to(root)
         if "archive" in relative.parts or relative.name.startswith("plan-gate"):
@@ -68,10 +71,13 @@ def find_plan(track_id: str, repo_root: Path) -> Tuple[Optional[Path], str]:
         try:
             with path.open("r", encoding="utf-8", errors="replace") as handle:
                 head = list(islice(handle, 12))
-        except OSError:  # vnx-silent-except: an unreadable plan cannot name the track; remaining candidates still decide
+        except OSError as exc:
+            unreadable.append(f"unreadable plan {path}: {type(exc).__name__}: {exc}")
             continue
         if any(needle in line for line in head):
             matches.append(path)
+    if unreadable:
+        return None, ", ".join(unreadable)
     if len(matches) > 1:
         return None, "several plans: " + ", ".join(str(path) for path in matches)
     return (matches[0], "") if matches else (None, "no plan")

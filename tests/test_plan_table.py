@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -19,6 +20,22 @@ def _write(root: Path, relative: str, body: str) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(body, encoding="utf-8")
     return path
+
+@pytest.fixture
+def locked():
+    """Make a plan file unreadable, and readable again after the test."""
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        pytest.skip("root reads a chmod 000 file, so no candidate read can fail")
+    paths: list[Path] = []
+
+    def make(path: Path) -> Path:
+        path.chmod(0o000)
+        paths.append(path)
+        return path
+
+    yield make
+    for path in paths:
+        path.chmod(0o600)
 
 def test_find_plan_one_none_several_and_a_path_with_a_space(tmp_path):
     one = _write(tmp_path, "claudedocs/specs/with space/plan.md", "Track `feat-x`\n")
@@ -42,6 +59,33 @@ def test_find_plan_skips_archive_and_plan_gate(tmp_path):
     _write(only, "claudedocs/archive/plan.md", "Track `gone`\n")
     _write(only, "claudedocs/x/plan-gate-one.md", "Track `gone`\n")
     assert plan_table.find_plan("gone", only) == (None, "no plan")
+
+def test_find_plan_names_an_unreadable_candidate_beside_one_readable_match(tmp_path, locked):
+    _write(tmp_path, "claudedocs/specs/ok/plan.md", "Track `feat-z`\n")
+    blocked = locked(_write(tmp_path, "claudedocs/specs/locked/plan.md", "Track `feat-z`\n"))
+    found, reason = plan_table.find_plan("feat-z", tmp_path)
+    assert found is None
+    assert reason.startswith("unreadable plan ")
+    assert str(blocked) in reason and "PermissionError" in reason
+
+def test_find_plan_never_reports_no_plan_when_a_candidate_is_unreadable(tmp_path, locked):
+    blocked = locked(_write(tmp_path, "claudedocs/specs/locked/plan.md", "Track `feat-q`\n"))
+    _write(tmp_path, "claudedocs/specs/other/plan-notes.md", "unrelated\n")
+    found, reason = plan_table.find_plan("feat-q", tmp_path)
+    assert found is None
+    assert reason != "no plan" and reason.startswith("unreadable plan ")
+    assert str(blocked) in reason and "PermissionError" in reason
+
+def test_find_plan_names_every_unreadable_candidate_and_beats_several_matches(tmp_path, locked):
+    _write(tmp_path, "claudedocs/a/plan.md", "Track `feat-w`\n")
+    _write(tmp_path, "claudedocs/b/plan.md", "Track `feat-w`\n")
+    first = locked(_write(tmp_path, "claudedocs/c/plan.md", "Track `feat-w`\n"))
+    second = locked(_write(tmp_path, "claudedocs/d/plan.md", "Track `nothing`\n"))
+    found, reason = plan_table.find_plan("feat-w", tmp_path)
+    assert found is None
+    assert reason.startswith(f"unreadable plan {first}: ")
+    assert f", unreadable plan {second}: " in reason
+    assert "several plans" not in reason
 
 @pytest.mark.parametrize("header", ["hangt af van", "Hangt af van", "depends on", "Depends On",
                                     "Na", "na", "after", "After"])
