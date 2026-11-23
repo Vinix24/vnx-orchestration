@@ -4590,49 +4590,13 @@ def run_dispatch(
             _emit_reject(lane_reject)
             return 1
 
-        if dry_run:
-            # ADR-096 §15: a dry run compares against the same sources but claims
-            # nothing and writes no ledger line, so it takes no lock.
-            overlap_reject = _blast_radius_reject(vspec.spec, repo_root, state_dir, overlap_override_reason, dry_run)
-            if overlap_reject is not None:
-                _emit_reject(overlap_reject)
-                return 1
+        overlap_reject, attempt_id = _check_and_claim_in_section(
+            vspec, plan, snapshot, repo_root, state_dir, overlap_override_reason, refire_reason, dry_run)
+        if overlap_reject is not None:
+            _emit_reject(overlap_reject)
+            return 1
 
-        # Scout pre-pass (opt-in VNX_SCOUT_PREPASS, fail-open): a cheap key-auth
-        # model ranks the deterministic anchors into a sidecar BEFORE the permit
-        # is issued. It reads vspec.instruction_text in-memory and writes a
-        # SEPARATE sidecar file — it never touches the instruction, so the
-        # permit / instruction_sha256 TOCTOU below is untouched. Never blocks the
-        # door (best-effort, never raises). It reads neither live_work nor the PR
-        # cache, so it cannot change the blast-radius outcome and stays outside
-        # the section below.
         if not dry_run:
-            _run_scout_prepass(plan, vspec, state_dir=state_dir)
-
-            # ADR-096 §15: the blast-radius check and the dispatch claim run in
-            # ONE serialised section. A fire that claims first stands as
-            # `starting` in live_work, so a second fire in the same second blocks
-            # here and then sees it as overlap instead of also reading "clear".
-            from blast_radius_gate import section
-            with section(state_dir):
-                overlap_reject = _blast_radius_reject(vspec.spec, repo_root, state_dir, overlap_override_reason, False)
-                if overlap_reject is not None:
-                    _emit_reject(overlap_reject)
-                    return 1
-
-                # The dispatch is irrevocably accepted here (validated, plan
-                # compiled): create its dispatches tracker row BEFORE the lane
-                # choice so _persist_track_id, reconcile_all_dispatch_outcomes and
-                # the TL-D2 pr_ref propagation all have a row to read. Idempotent
-                # (retry/fix-forward safe), registered+self-claimed via the real
-                # state machine (point 3, golf 1A), best-effort — never blocks
-                # the door. attempt_id (or None) is used below to close out the
-                # matching dispatch_attempts row once the lane executor returns.
-                attempt_id = _persist_dispatch_row(
-                    vspec.spec, state_dir=state_dir, refire_reason=refire_reason,
-                    worker_claude_override_reason=snapshot.worker_claude_override_reason,
-                )
-
             # OI-876/OI-881: a declared gate is an obligation, not decoration.
             # Registered here — right after the dispatch is irrevocably
             # accepted — so every accepted dispatch with gate=<name> has a
@@ -4725,6 +4689,53 @@ def run_dispatch(
         _finalize_door_exit(handover, state_dir=state_dir, reason=dispatch_exit.REASON_DOOR_ERROR)
         print(f"[dispatch_cli] REJECT [runtime-error]: {exc}", file=sys.stderr)
         return 1
+
+
+def _check_and_claim_in_section(
+    vspec, plan: ExecutionPlan, snapshot, repo_root: Path, state_dir: Path,
+    overlap_override_reason: Optional[str], refire_reason: Optional[str], dry_run: bool,
+) -> "tuple[Optional[Reject], Optional[str]]":
+    """The door's blast-radius check and dispatch claim, in ONE section on the real path.
+
+    ADR-096 §15: on the real path the check and the claim run in ONE serialised
+    section. A fire that claims first stands as ``starting`` in live_work, so a second
+    fire in the same second blocks here and then sees it as overlap instead of also
+    reading "clear". A dry run compares against the same sources but claims nothing
+    and writes no ledger line, so it takes no lock and makes a single check call.
+
+    The scout pre-pass (opt-in VNX_SCOUT_PREPASS, fail-open) runs FIRST, before the
+    section: it ranks the deterministic anchors into a sidecar before the permit is
+    issued, reads vspec.instruction_text in-memory and writes a SEPARATE sidecar file,
+    so the permit / instruction_sha256 TOCTOU stays untouched. It reads neither
+    live_work nor the PR cache, so it cannot change the blast-radius outcome.
+
+    Returns ``(reject_or_None, attempt_id)``: a reject means nothing was claimed, and
+    ``attempt_id`` is None for a refusal (or for a dry run) or when the claim produced
+    no row (best-effort — see _persist_dispatch_row).
+    """
+    if dry_run:
+        return _blast_radius_reject(vspec.spec, repo_root, state_dir, overlap_override_reason, dry_run), None
+
+    _run_scout_prepass(plan, vspec, state_dir=state_dir)
+    from blast_radius_gate import section
+    with section(state_dir):
+        overlap_reject = _blast_radius_reject(vspec.spec, repo_root, state_dir, overlap_override_reason, False)
+        if overlap_reject is not None:
+            return overlap_reject, None
+
+        # The dispatch is irrevocably accepted here (validated, plan compiled):
+        # create its dispatches tracker row BEFORE the lane choice so
+        # _persist_track_id, reconcile_all_dispatch_outcomes and the TL-D2 pr_ref
+        # propagation all have a row to read. Idempotent (retry/fix-forward safe),
+        # registered+self-claimed via the real state machine (point 3, golf 1A),
+        # best-effort — never blocks the door. attempt_id (or None) is used by
+        # run_dispatch to close out the matching dispatch_attempts row once the
+        # lane executor returns.
+        attempt_id = _persist_dispatch_row(
+            vspec.spec, state_dir=state_dir, refire_reason=refire_reason,
+            worker_claude_override_reason=snapshot.worker_claude_override_reason,
+        )
+    return None, attempt_id
 
 
 def _invariant_violation_exit(vspec, handover, exc: Exception, *, state_dir: Path) -> int:
