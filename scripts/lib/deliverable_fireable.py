@@ -96,7 +96,7 @@ def _predecessor_reason(candidate_id: str, state_dir: Path, project_id: str) -> 
         return dpg.REASON_RETIRED
     if first.reason == dpg.REASON_UNMERGED:
         return REASON_PREFIX_OPEN + first.predecessor
-    return f"{REASON_UNKNOWN_PREFIX} {first.detail or first.reason}"
+    return f"{REASON_UNKNOWN_PREFIX}{first.detail or first.reason}"
 
 
 def _label(source: str, other: br.Subject) -> str:
@@ -136,7 +136,7 @@ def _scope_or_reason(c: _Candidate, state_dir: Path, repo_root: Path) -> Tuple[O
     try:
         scope = br.scope_of(_normalised(raw, repo_root), repo_root, br.DEFAULT_GENERIC_DIRS)
     except br.ScopeInvalid as exc:
-        return None, f"{REASON_UNKNOWN_PREFIX} {exc}"
+        return None, f"{REASON_UNKNOWN_PREFIX}{exc}"
     return (None, br.REASON_SCOPE_INCOMPLETE) if scope.incomplete else (scope, None)
 
 

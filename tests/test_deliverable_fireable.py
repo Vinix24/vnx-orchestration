@@ -4,6 +4,7 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import re
 import sqlite3
 import sys
 from pathlib import Path
@@ -145,6 +146,21 @@ def test_a_missing_spec_is_unknown_never_no_overlap(store):
     add_deliverable(store, "dlv-x01")
     [reason] = reasons(run(store)).values()
     assert reason.startswith("unknown: ") and "no dispatch-spec.json" in reason
+
+
+def test_every_unknown_reason_has_exactly_one_space_after_the_prefix(store):
+    """The prefix already ends in a space: a second one leaves the reason one blank further out than a reader expects."""
+    add_deliverable(store, "dlv-nopred")
+    stage_spec(store, "dlv-nopred", ["scripts/nopred.py"])
+    add_dependency(store, "dlv-nopred", "dlv-ghost-pred")
+    with sqlite3.connect(store / tracks_lib.DB_FILENAME) as conn:  # no row for the predecessor: unknown, never clear
+        conn.execute("DELETE FROM dispatches WHERE dispatch_id = ?", ("dlv-ghost-pred",))
+    add_deliverable(store, "dlv-badscope")
+    stage_spec(store, "dlv-badscope", ["../escape.py"])
+    got = reasons(run(store))
+    assert got == {"dlv-nopred": "unknown: predecessor_unknown",
+                   "dlv-badscope": "unknown: scope_invalid: ../escape.py"}
+    assert all(re.fullmatch(r"unknown: \S.*", reason) for reason in got.values()), got
 
 
 def test_overlap_with_an_open_pr_names_the_path_and_the_pr(store):
