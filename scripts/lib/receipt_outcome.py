@@ -141,8 +141,13 @@ def is_foreign_project(receipt: Dict[str, Any], project_id: str) -> bool:
     return stamped not in (None, "") and str(stamped) != project_id
 
 
-def noise_reason(receipt: Dict[str, Any], project_id: str) -> Optional[str]:
-    """Why a receipt is test noise or out of scope, or None when it is real."""
+def noise_reason(receipt: Dict[str, Any], project_id: str, *,
+                 now: Optional[datetime] = None) -> Optional[str]:
+    """Why a receipt is test noise or out of scope, or None when it is real.
+
+    ``now`` is the moment a stale contract_invalid receipt is judged at; without
+    it the real clock is read. A caller that windows on its own fixed moment
+    passes that moment here so both agree."""
     if str(receipt.get("source") or "").strip().lower() == "pytest":
         return "pytest"
     if is_foreign_project(receipt, project_id):
@@ -151,7 +156,7 @@ def noise_reason(receipt: Dict[str, Any], project_id: str) -> Optional[str]:
         return "temp_report_path"
     if "MagicMock" in json.dumps(receipt, default=str):
         return "magicmock"
-    if is_contract_invalid(receipt) and is_stale_contract_invalid(receipt):
+    if is_contract_invalid(receipt) and is_stale_contract_invalid(receipt, now=now):
         return "stale_contract_invalid"
     return None
 

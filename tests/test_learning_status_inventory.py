@@ -93,6 +93,23 @@ def test_contract_invalid_with_only_ingested_at_is_counted_in_the_window(tmp_pat
     assert summary["unreadable"] == 0 and summary["dispatches"] == 1
 
 
+def test_stale_contract_invalid_is_judged_at_the_callers_now_not_the_real_clock(tmp_path, inventory, monkeypatch):
+    import contract_invalid_window
+
+    class FarFuture(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2031, 1, 1, tzinfo=timezone.utc)
+
+    state_dir = tmp_path / "state"
+    _write_receipts(state_dir, _ci_receipt("d-ci", "contract_invalid", NOW - timedelta(hours=1)))
+    before = inventory.corpus_summary(state_dir, "tproj", now=NOW)
+    monkeypatch.setattr(contract_invalid_window, "datetime", FarFuture)
+    after = inventory.corpus_summary(state_dir, "tproj", now=NOW)
+    assert before["dispatches"] == 1 and after["dispatches"] == 1
+    assert after["noise_reasons"].get("stale_contract_invalid", 0) == 0
+
+
 def test_contract_invalid_with_ingested_at_outside_the_window_is_not_counted(tmp_path, inventory):
     state_dir = tmp_path / "state"
     _write_receipts(state_dir, _ci_receipt("d-ci", "contract_invalid", NOW - timedelta(hours=48)))
