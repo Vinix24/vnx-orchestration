@@ -4317,6 +4317,31 @@ def _deliverable_set_fields(args: argparse.Namespace) -> dict[str, Any]:
     return fields
 
 
+def apply_deliverable_metadata_fields(
+    conn: sqlite3.Connection, project_id: str, dispatch_id: str, fields: dict[str, Any],
+    *, actor: str = "operator", reason: Optional[str] = None,
+) -> Optional[str]:
+    """Patch metadata fields on an existing deliverable; ``None`` when the row is gone.
+
+    The one write path of ``vnx deliverable set`` and the plan backfill. The
+    caller owns the transaction (there is no commit here).
+    """
+    row = conn.execute("SELECT state, metadata_json FROM dispatches "
+                       "WHERE dispatch_id = ? AND project_id = ?", (dispatch_id, project_id)).fetchone()
+    if row is None:
+        return None
+    meta = json.loads(row[1] or "{}")
+    meta.update(fields)
+    conn.execute("UPDATE dispatches SET metadata_json = ?, updated_at = ? "
+                 "WHERE dispatch_id = ? AND project_id = ?",
+                 (json.dumps(meta), _now_utc(), dispatch_id, project_id))
+    _append_coordination_event(conn, event_type="deliverable_metadata_set", dispatch_id=dispatch_id,
+                               from_state=row[0], to_state=row[0], actor=actor,
+                               reason=reason or ("deliverable set: " + "/".join(fields)),
+                               project_id=project_id, metadata=fields)
+    return row[0]
+
+
 def cmd_deliverable_set(args: argparse.Namespace) -> int:
     """Set task_class, routing_floor and/or dispatch_paths metadata on an EXISTING deliverable.
 
@@ -4365,43 +4390,17 @@ def cmd_deliverable_set(args: argparse.Namespace) -> int:
 
     conn = _db_conn(state_dir)
     try:
-        row = conn.execute(
-            "SELECT * FROM dispatches WHERE dispatch_id = ? AND project_id = ?",
-            (dispatch_id, project_id),
-        ).fetchone()
-
-        if row is None:
+        state = apply_deliverable_metadata_fields(
+            conn, project_id, dispatch_id, fields,
+            actor="operator", reason="deliverable set: " + "/".join(fields),
+        )
+        if state is None:
             print(
                 f"deliverable set: deliverable not found: {dispatch_id!r} "
                 f"(project {project_id!r}). No change made.",
                 file=sys.stderr,
             )
             return 1
-
-        meta = json.loads(row["metadata_json"] or "{}")
-        meta.update(fields)
-        new_metadata_json = json.dumps(meta)
-
-        now = _now_utc()
-        conn.execute(
-            """
-            UPDATE dispatches
-            SET metadata_json = ?, updated_at = ?
-            WHERE dispatch_id = ? AND project_id = ?
-            """,
-            (new_metadata_json, now, dispatch_id, project_id),
-        )
-        _append_coordination_event(
-            conn,
-            event_type="deliverable_metadata_set",
-            dispatch_id=dispatch_id,
-            from_state=row["state"],
-            to_state=row["state"],
-            actor="operator",
-            reason="deliverable set: " + "/".join(fields),
-            project_id=project_id,
-            metadata=fields,
-        )
         conn.commit()
     finally:
         conn.close()
