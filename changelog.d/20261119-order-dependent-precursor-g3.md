@@ -1,1 +1,0 @@
-- Two order-dependent tests no longer fail when a new test file reshuffles the Profile A shards: `test_ndjson_hash_chain.py` restores `sys.path` after itself (it left `scripts/` ahead of `scripts/lib`, so `crash_recovery_sweep` resolved to the CLI), the orphan-sweep test pins the library module, and the build-artifact test names any foreign entry in `build/` when `rmdir` fails.

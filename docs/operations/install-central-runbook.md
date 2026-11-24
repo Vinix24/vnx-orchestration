@@ -310,6 +310,14 @@ Four steps stay operator actions. VNX does not do them for you:
 
 ## Rollback procedure
 
+### Migrations in release v1.10.0
+
+Release 1.10.0 migrates one store, `runtime_coordination.db`: migration 0039 adds the table
+`deliverable_dependencies` (user_version 38 to 39), and the config store adds two audit
+columns without a version stamp. What a re-pin to 1.9.1 leaves behind is in the "Migrations
+and rollback" paragraph of the [1.10.0 section of the CHANGELOG](../../CHANGELOG.md); that
+paragraph is the source and is not copied here.
+
 ### Migrations in release v1.9.0
 
 Release 1.9.0 migrates two stores: `runtime_coordination.db` (migration 0038) and

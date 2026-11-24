@@ -1,1 +1,0 @@
-- The process-tree load runbook (`docs/operations/PROCESS_TREE_LOAD_MEASUREMENT.md`) documents the one-run SEO-gate baseline, `cores_p95`, and the three-run slot decision against the merged sampler CLI, and the live sampler test runs on macOS (expected skip on the Linux runner, RS-1c).

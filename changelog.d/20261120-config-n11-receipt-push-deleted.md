@@ -1,1 +1,0 @@
-- Deleted the T0 pane push of the receipt processor and its three variables `VNX_RECEIPT_T0_PUSH`, `VNX_RECEIPT_DIGEST_THRESHOLD` and `VNX_RECEIPT_VERIFY_MAX_RETRIES` (config-een-oppervlak N11). `rp_delivery.sh` keeps the write-first outbox (`pending/` to `processed/`) and the retry sweep; T0 keeps reading `open_outcomes`. Setting a deleted variable is now a no-op.

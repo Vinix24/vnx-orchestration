@@ -1,1 +1,0 @@
-- The CI gate availability check reads its requirement through `gate_profile.ci_requirement` (flag, dial, branch protection, review stack). A required CI gate with no `gh` on PATH is refused with a reason that names `gh` and the requirement sources; an unreadable requirement raises instead of reading as "not required" (optionele-features-expliciet OF-4).

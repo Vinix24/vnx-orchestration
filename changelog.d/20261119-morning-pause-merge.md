@@ -1,1 +1,0 @@
-- Merge preflight `morning_pause`: `pr_merge` refuses a merge inside the morning pause; `--override-morning-pause "<reason>"` merges past it (an empty reason is refused). Each refusal and override is a line in the morning-round ledger.

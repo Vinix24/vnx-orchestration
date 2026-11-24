@@ -1,1 +1,0 @@
-- `scripts/ochtendronde_sweep.py` runs the nightly learning loop and the dream cycle for every project in the register, one learning beacon per project; a failed or unreadable project is listed and sets exit 1. No job is installed by this change.

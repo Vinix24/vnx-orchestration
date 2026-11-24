@@ -1,1 +1,0 @@
-- Morning round: analyzer proposals are classified as project or fleet; fleet points open in the vnx-dev inbox ledger as project:<owner>/<ref> and close on the source project's state (opt-in via routing, library only).

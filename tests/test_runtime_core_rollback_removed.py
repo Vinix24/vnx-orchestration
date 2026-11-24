@@ -27,6 +27,8 @@ def test_no_tracked_file_names_the_rollback() -> None:
         ".",
         ":(exclude)docs/_archive",
         ":(exclude)changelog.d",
+        # the release cut folds the fragments into CHANGELOG.md, a historical record
+        ":(exclude)CHANGELOG.md",
         ":(exclude)claudedocs",
         ":(exclude)tests/test_runtime_core_rollback_removed.py",
     ]

@@ -1,1 +1,0 @@
-- ADR-086: the effect measurement of a permission rule starts at `applied_at`, and a manual `/permissions` change counts as applied only after a read-only check of the settings file; amends ADR-072 and ADR-075 by cross-reference (permissieblokkades-leren L7a0).
