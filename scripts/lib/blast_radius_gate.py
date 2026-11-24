@@ -19,9 +19,9 @@ CLEAR, OVERLAP, UNKNOWN = "clear", "blast_radius_overlap", "blast_radius_unknown
 Hit = namedtuple("Hit", "source other path reason")  # reason "overlap", or why it is unknown
 
 
-def gh(argv: List[str], cwd: Path) -> str:
-    """``gh <argv>`` in ``cwd``; raises on a non-zero exit or a timeout."""
-    return subprocess.run(["gh", *argv], cwd=str(cwd), capture_output=True, text=True, timeout=30, check=True).stdout
+def gh(argv: List[str], cwd: Path, timeout: float = 30) -> str:
+    """``gh <argv>`` in ``cwd``; raises on a non-zero exit or after ``timeout`` seconds."""
+    return subprocess.run(["gh", *argv], cwd=str(cwd), capture_output=True, text=True, timeout=timeout, check=True).stdout
 
 
 @contextmanager

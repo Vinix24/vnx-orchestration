@@ -187,3 +187,56 @@ def test_unwritable_cache_still_returns_the_subjects(tmp_path):
     (tmp_path / "file").write_text("x")
     out = src.open_pr_subjects(tmp_path, "p", tmp_path / "file" / "c.json", FakeGh([pr(1, "dispatch/d1", "a")], {1: ["a.py"]}))
     assert out.subjects[0].paths == ("a.py",)
+
+
+class _Clock:
+    def __init__(self):
+        self.now = 0.0
+
+    def __call__(self):
+        return self.now
+
+
+class _SlowGh(FakeGh):
+    def __init__(self, clock, *a, step=40.0, **kw):
+        super().__init__(*a, **kw)
+        self.clock, self.step = clock, step
+
+    def __call__(self, argv, cwd):
+        try:
+            return super().__call__(argv, cwd)
+        finally:
+            self.clock.now += self.step
+
+
+def test_total_deadline_stops_gh_calls_and_leaves_unread_prs_unknown(tmp_path):
+    clock, cache = _Clock(), tmp_path / "c.json"
+    prs = [pr(n, f"dispatch/d{n}", f"s{n}") for n in (1, 2, 3)]
+    gh = _SlowGh(clock, prs, {1: ["a.py"], 2: ["b.py"], 3: ["c.py"]})
+    out = src.open_pr_subjects(tmp_path, "p", cache, gh, deadline_at=45.0, clock=clock, deadline_s=45)
+    assert len(gh.calls) == 2 and gh.views() == ["1"]  # the list and the first view only
+    assert [(s.pr_number, s.paths) for s in out.subjects] == [(1, ("a.py",)), (2, None), (3, None)]
+    assert all(r.startswith(src.REASON_READ_DEADLINE) and "45s" in r for r in out.reasons.values())
+    assert set(out.reasons) == {"d2", "d3"} and list(entries(cache)) == ["p:1:s1"]  # unread PRs are not cached
+
+
+def test_cached_pr_after_the_deadline_is_still_served(tmp_path):
+    cache = tmp_path / "c.json"
+    src.open_pr_subjects(tmp_path, "p", cache, FakeGh([pr(1, "dispatch/d1", "s1")], {1: ["a.py"]}))
+    gh = FakeGh([pr(1, "dispatch/d1", "s1"), pr(2, "other", "s2")], {2: ["b.py"]})
+    out = src.open_pr_subjects(tmp_path, "p", cache, gh, deadline_at=50.0, clock=lambda: 40.0 if not gh.calls else 100.0)
+    assert gh.views() == [] and out.subjects[0].paths == ("a.py",)
+    assert out.subjects[1].paths is None and out.reasons["pr-2"].startswith(src.REASON_READ_DEADLINE)
+
+
+def test_list_call_past_the_deadline_is_unavailable(tmp_path):
+    gh = FakeGh([])
+    out = src.open_pr_subjects(tmp_path, "p", tmp_path / "c.json", gh, deadline_at=10.0, clock=lambda: 10.0, deadline_s=45)
+    assert gh.calls == [] and out.subjects == () and src.REASON_READ_DEADLINE in out.unavailable and "45s" in out.unavailable
+
+
+def test_without_a_deadline_every_uncached_pr_is_read(tmp_path):
+    clock = _Clock()
+    gh = _SlowGh(clock, [pr(n, f"dispatch/d{n}", f"s{n}") for n in (1, 2, 3)], {1: ["a"], 2: ["b"], 3: ["c"]}, step=1000.0)
+    out = src.open_pr_subjects(tmp_path, "p", tmp_path / "c.json", gh, clock=clock)
+    assert gh.views() == ["1", "2", "3"] and out.reasons == {}

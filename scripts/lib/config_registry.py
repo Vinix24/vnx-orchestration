@@ -921,6 +921,13 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         "an unknown value reads as refuse.",
         subsystem="blast-radius", status="ACTIVATE", cockpit_canonical=True,
         allowed_values=("off", "warn", "refuse")),
+    # ADR-096 B4b-d: read through config_runtime by dispatch_cli._blast_radius_read_bound.
+    "VNX_BLAST_RADIUS_READ_DEADLINE_S": _e(
+        "VNX_BLAST_RADIUS_READ_DEADLINE_S", "string", "45", "dispatch",
+        "Total seconds the door's blast-radius check may spend reading open PRs (gh) inside the locked "
+        "section; a PR not read in time is unknown for this fire only. A value that is not a positive "
+        "int falls back to 45.",
+        subsystem="blast-radius", status="ACTIVATE"),
 
 }
 

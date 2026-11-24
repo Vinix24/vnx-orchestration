@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import sys
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
@@ -24,6 +25,7 @@ from blast_radius import REASON_SCOPE_INCOMPLETE, Subject, _branch_of
 
 CACHE_FILENAME = "blast_radius_pr_cache.json"
 CACHE_VERSION = 1
+REASON_READ_DEADLINE = "read_deadline"  # the total open-PR read deadline ran out (ADR-096 B4b-d)
 PR_LIST_LIMIT, REASON_PRS_TRUNCATED = 200, "open_prs_truncated"  # a full gh pr list page may be cut off (OI-3055)
 Gh = Callable[[List[str], Path], str]  # gh(argv, cwd) -> stdout; raises on failure
 
@@ -133,11 +135,31 @@ def _read_files(gh: Gh, root: Path, number: int) -> Tuple[Optional[List[str]], s
     return [f["path"] for f in files], sha, ""
 
 
-def open_pr_subjects(project_root: "str | Path", project_id: str, cache_path: "str | Path", gh: Gh) -> Sources:
-    """Open PRs as Subjects; files come from the cache when the head is unchanged."""
+def _secs(seconds: Optional[float]) -> str:
+    return f"{seconds:g}s" if seconds is not None else "the total read deadline"
+
+
+def _deadline_passed(deadline_at: Optional[float], clock: Callable[[], float]) -> bool:
+    return deadline_at is not None and clock() >= deadline_at
+
+
+def open_pr_subjects(project_root: "str | Path", project_id: str, cache_path: "str | Path", gh: Gh,
+                     deadline_at: Optional[float] = None, clock: Callable[[], float] = time.monotonic,
+                     deadline_s: Optional[float] = None) -> Sources:
+    """Open PRs as Subjects; files come from the cache when the head is unchanged.
+
+    ``deadline_at`` (a ``clock()`` instant, default ``time.monotonic``) bounds the whole read: past it
+    no further gh call is made. The list call then gives ``unavailable`` (``read_deadline``); a PR that
+    is not cached and was not read in time comes back with ``paths=None`` and a ``read_deadline`` reason,
+    unknown for this candidate only and never cached. A cached PR costs no call and is still returned.
+    ``deadline_s`` is only the configured seconds named in the reason text.
+    Without ``deadline_at`` nothing is bounded here.
+    """
     root, cache_path = Path(project_root), Path(cache_path)
     if not isinstance(project_id, str) or not project_id.strip():
         return Sources(unavailable="no project_id: the PR cache is keyed per project")
+    if _deadline_passed(deadline_at, clock):
+        return Sources(unavailable=f"{REASON_READ_DEADLINE}: not read within {_secs(deadline_s)}, before gh pr list")
     try:
         listing = json.loads(gh(["pr", "list", "--state", "open", "--limit", str(PR_LIST_LIMIT),
                                  "--json", "number,headRefName,headRefOid"], root))
@@ -160,6 +182,8 @@ def open_pr_subjects(project_root: "str | Path", project_id: str, cache_path: "s
         paths = cached.get(f"{project_id}:{number}:{sha}")
         if paths is not None:
             fresh[f"{project_id}:{number}:{sha}"] = paths
+        elif _deadline_passed(deadline_at, clock):
+            reasons[did or f"pr-{number}"] = f"{REASON_READ_DEADLINE}: not read within {_secs(deadline_s)}"
         else:
             paths, view_sha, why = _read_files(gh, root, number)
             if paths is None:
