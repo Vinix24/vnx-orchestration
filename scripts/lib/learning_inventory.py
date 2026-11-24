@@ -80,7 +80,7 @@ def corpus_summary(state_dir: Path, project_id: str, *, now: Optional[datetime] 
         if not isinstance(receipt, dict):
             summary["unreadable"] += 1
             continue
-        reason = noise_reason(receipt, project_id)
+        reason = noise_reason(receipt, project_id, now=moment)
         if reason is not None:
             summary["noise"] += 1
             summary["noise_reasons"][reason] = summary["noise_reasons"].get(reason, 0) + 1

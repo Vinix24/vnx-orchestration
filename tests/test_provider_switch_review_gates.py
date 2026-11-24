@@ -54,6 +54,9 @@ def _clean_config(monkeypatch):
     for key in list(cr.CONFIG_REGISTRY):
         monkeypatch.delenv(key, raising=False)
         monkeypatch.delenv(f"VNX_OVERRIDE_{cr._bare(key)}", raising=False)
+    # The conftest guard (_morning_pause_off_by_default) sets this to false; the wipe above removed it, so
+    # put it back or the door tests pause inside 07:00-09:00 Europe/Amsterdam. Morning-pause tests set it themselves.
+    monkeypatch.setenv("VNX_MORNING_PAUSE_ENABLED", "false")
     for key in [k for k in os.environ if k.startswith("VNX_OVERRIDE_PROVIDER_")]:
         monkeypatch.delenv(key, raising=False)
     monkeypatch.delenv("VNX_PROJECT_ID", raising=False)
