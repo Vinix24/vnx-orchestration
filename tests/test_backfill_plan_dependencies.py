@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import sys
 from pathlib import Path
@@ -14,9 +15,9 @@ for _p in (_ROOT / "scripts" / "lib", _ROOT / "scripts"):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 
-import backfill_plan_dependencies as backfill  # noqa: E402
-import tracks as tracks_lib  # noqa: E402
-from fixtures.live_store_fixture import build_live_store  # noqa: E402
+import backfill_plan_dependencies as backfill
+import tracks as tracks_lib
+from fixtures.live_store_fixture import build_live_store
 
 PID, TRACK = "test-proj", "feat-plan"
 A, B, C, D = "dlv-aaaaaaaaaaaa", "dlv-bbbbbbbbbbbb", "dlv-cccccccccccc", "dlv-dddddddddddd"
@@ -234,3 +235,24 @@ def test_refusals_write_nothing(store, tmp_path, capsys):
         conn.close()
     rc, payload, err = _run(capsys, store, tmp_path, "--apply")
     assert rc == 2 and "deliverable_dependencies" in err and payload is None
+
+
+def test_unreadable_plan_candidate_is_reported_and_proposes_nothing(store, tmp_path, capsys):
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        pytest.skip("root reads a chmod 000 file, so no candidate read can fail")
+    _write_plan(tmp_path, ["| B1 | next | B0 |"])
+    locked = _write_plan(tmp_path, ["| B1 | next | B0 |"], name="plan-locked.md")
+    locked.chmod(0o000)
+    try:
+        rc, payload, err = _run(capsys, store, tmp_path)
+        assert rc == 0, err
+        report = payload["tracks"][0]
+        assert report["plan"] == "unreadable" and report["plan_path"] is None
+        assert report["plan_note"].startswith("unreadable plan ") and str(locked) in report["plan_note"]
+        assert report["proposals"] == [] and report["rows"] == 0
+        assert payload["total"]["plan"] == {"one": 0, "none": 0, "several": 0, "unreadable": 1}
+        rc, payload, err = _run(capsys, store, tmp_path, "--apply")
+        assert rc == 0, err
+        assert payload["applied"] == {"dependencies": 0, "paths": 0} and _deps(store) == []
+    finally:
+        locked.chmod(0o600)

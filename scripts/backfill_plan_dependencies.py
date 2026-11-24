@@ -24,11 +24,11 @@ for _path in (_HERE, _HERE / "lib"):
     if str(_path) not in sys.path:
         sys.path.insert(0, str(_path))
 
-import deliverable_dependencies as dlv_deps  # noqa: E402
-import git_common  # noqa: E402
-import plan_table  # noqa: E402
-import planning_cli  # noqa: E402
-import project_root as project_root_lib  # noqa: E402
+import deliverable_dependencies as dlv_deps
+import git_common
+import plan_table
+import planning_cli
+import project_root as project_root_lib
 
 CREATED_BY = "backfill_plan_dependencies"
 OPEN_STATES = ("proposed", "ready")
@@ -173,6 +173,8 @@ def _plan_track(conn, project_id: str, track_id: str, plans_root: Path, dependen
         plan_status, table = "one", plan_table.parse(plan_path)
     elif plan_note.startswith("several plans:"):
         plan_status = "several"
+    elif plan_note.startswith("unreadable plan "):
+        plan_status = "unreadable"  # never "none": a plan may exist that nobody could read
     deliverables = _deliverables(conn, project_id, track_id)
     by_id = {record["id"]: record for record in deliverables}
     titles = [(record["id"], record["title"]) for record in deliverables]
@@ -208,7 +210,7 @@ def _plan_track(conn, project_id: str, track_id: str, plans_root: Path, dependen
 
 def _totals(reports: List[Dict[str, Any]]) -> Dict[str, Any]:
     plans = Counter(report["plan"] for report in reports)
-    return {"tracks": len(reports), "plan": {s: plans.get(s, 0) for s in ("one", "none", "several")},
+    return {"tracks": len(reports), "plan": {s: plans.get(s, 0) for s in ("one", "none", "several", "unreadable")},
             "rows": sum(r["rows"] for r in reports), "rows_mapped": sum(r["rows_mapped"] for r in reports),
             "dependencies": {s: sum(r["dependencies"][s] for r in reports) for s in DEPENDENCY_STATUSES},
             "paths": {s: sum(r["paths"][s] for r in reports) for s in PATH_STATUSES},
