@@ -1,1 +1,0 @@
-- `scripts/build_t0_state.py` puts `scripts/lib` at the front of `sys.path` even when `PYTHONPATH` already lists it, so the SessionStart-hook-built `t0_state.json` imports `pr_queue_state` again instead of reporting `pr_queue.available: false` (OI-2997).

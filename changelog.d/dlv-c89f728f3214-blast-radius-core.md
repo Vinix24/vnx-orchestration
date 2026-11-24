@@ -1,1 +1,0 @@
-- `scripts/lib/blast_radius.py`: pure blast-radius core (normalisation, incomplete scope, generic directories, overlap, self-exclusion); nothing calls it yet (blast-radius-en-afhankelijkheden B3, ADR-096).

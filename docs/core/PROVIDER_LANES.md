@@ -17,8 +17,9 @@ calls. I recover observability through receipts, event streams, and a captured
 conversation log instead of SDK callbacks. The rest of this doc is the map of
 which lane runs which work, and where the lanes do not yet behave identically.
 
-Verified against `origin/main` at `c41411fea` on 2026-11-12, when `VERSION` said 1.8.0. It says 1.9.1 now.
-Work merged after that release is marked "on main, not yet released".
+Verified against `origin/main` at `c41411fea` on 2026-11-12, when `VERSION` said 1.8.0. It says 1.10.0 now
+(released 2026-11-24). Work that was on main but not in a release when this page was written is marked
+with the release that carries it.
 
 ## The lanes
 
@@ -190,8 +191,8 @@ is not the one on DeepSeek's own API. The table names the family per route.
 The default review stack is `codex_gate,deepseek_gate` (`VNX_DEFAULT_REVIEW_STACK`,
 `scripts/lib/config_registry.py`). Seat 1 is a subscription reviewer (codex); seat 2
 is `deepseek_gate` on API credit with `deepseek-v4-pro`. A project picks a gate
-profile with `vnx gate-profile` (`scripts/lib/gate_profile.py`, ADR-060, on main,
-not yet released):
+profile with `vnx gate-profile` (`scripts/lib/gate_profile.py`, ADR-060, released in
+1.9.0):
 
 | Profile | Review stack | Round cap | Takeover chain |
 |---|---|---|---|
@@ -354,7 +355,7 @@ changes nothing, and `scripts/fleet_role_drift.py` fails when a mirror diverges
 Agents are folders: each role under `agents/<role>/` carries its own `CLAUDE.md`
 and `config.yaml`, resolved by `scripts/lib/agent_resolver.py`. The skills of a
 role land at the provider's native destination under `VNX_AGENT_LAYOUT=on`
-(off by default, ADR-050 and ADR-059, on main, not yet released).
+(off by default, ADR-050 and ADR-059, released in 1.9.0).
 
 One `PermissionPolicy` governs every lane (ADR-057), and a review provider is one
 registry row. Workers run on whichever lane the dispatch names.

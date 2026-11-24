@@ -1,1 +1,0 @@
-- The harness-lane safety net (`harness_lane_touched_main_checkout`) now compares HEAD, status, HEAD's branch and the gated PR's branch, plus any non-`dispatch/` branch that appears at the PR head commit; branch churn from other worktrees no longer books the seat (OI-2711, OI-2756).

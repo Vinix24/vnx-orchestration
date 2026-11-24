@@ -1,1 +1,0 @@
-- Morning pause (off by default): the dispatch door refuses a fire inside the morning window while the day's inbox points are open or undecided, and books each refusal and override in the event ledger. The three tuning keys are now read by the gate.

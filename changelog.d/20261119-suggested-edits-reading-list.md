@@ -1,1 +1,0 @@
-- Suggested edits only target a file an agent reads (CLAUDE.md, agents/<role>/CLAUDE.md, skills/<name>/SKILL.md, base_worker.md), prevention rules come from fresh rows of the own project as `role` proposals, and `vnx suggest apply` handles the `role` category.

@@ -1,1 +1,0 @@
-- The debugger skill gains a "Test and CI failures" section (order dependency, flake versus deterministic, interpreter and platform mismatch, cancelled-as-timeout, shared repo writes, real CLI started by a test), and drops its stale ADR-010 reference and the dead `intelligence.sh` pointer.

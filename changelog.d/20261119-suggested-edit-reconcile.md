@@ -1,1 +1,0 @@
-- `vnx suggest reconcile` marks an approved suggested edit `applied` only on the `pr_merged` receipt of its staged dispatch, records `applied_ref`, `remeasure_at` (+14 days) and a baseline in `edit_history.json`; the T0 fires the staged dispatch. `apply` now points to `reconcile`.

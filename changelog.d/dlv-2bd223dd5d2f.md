@@ -1,1 +1,0 @@
-- `scripts/lib/optional_features.py`: the ADR-092 table of three optional features (`ci`, `plan_gate`, `branch_protection`), one `snapshot` per action and the one builder `waived_guarantees`; unknown or unreadable values refuse with `OptionalFeatureRefused`. No caller reads it yet (OF-2).

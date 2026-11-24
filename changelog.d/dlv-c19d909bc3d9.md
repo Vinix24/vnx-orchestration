@@ -1,1 +1,0 @@
-- `vnx-ci.yml`: Profile B and Profile C no longer declare `needs: profile-a`, so they start with the run instead of after Profile A (~17 min), taking about 2.4 min off the median PR clock time. One behaviour changes on purpose: when Profile A fails, B and C now still run instead of being skipped. Job names and required checks are unchanged (pr-ci-onder-zes-minuten C1).

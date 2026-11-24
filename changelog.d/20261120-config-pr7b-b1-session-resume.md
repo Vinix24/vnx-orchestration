@@ -1,1 +1,0 @@
-- Removed `VNX_SESSION_RESUME` and the dead session-resume plumbing in `subprocess_dispatch_internals/delivery.py` (`_load_resume_session`, `_save_resume_session`): a dispatch always starts a fresh session, which was already the default. `session_store` stays for the dashboard.
