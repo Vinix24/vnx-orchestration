@@ -17,6 +17,7 @@ Delegated from `bin/vnx`:
   vnx deliverable close <dispatch_id> --evidence <pr>
   vnx deliverable set <dispatch_id> [--task-class <class>] [--routing-floor <floor>]
   vnx deliverable depend|undepend <dlv> --on <dlv> [--kind soft | --reason "..."]; deps <dlv> [--json]
+  vnx deliverable fireable [--horizon now|next|later] [--json]  (ADR-096 §18: all tracks by default)
                        [--dispatch-paths <p1,p2>]
 
 NO-NODE model: a deliverable is a proposed dispatch row with output_kind.
@@ -74,8 +75,10 @@ import objective_reconcile  # noqa: E402
 import plan_gate_enforcement  # noqa: E402
 import actor_class  # noqa: E402
 import deliverable_dependencies as dlv_deps
+import deliverable_fireable as dlv_fireable
 from delivery_identity import delivery_identity_fields
 import plan_scope
+import plan_gaps
 import provider_switch
 import schema_manifest
 import open_outcomes
@@ -3122,6 +3125,47 @@ def cmd_deliverable_deps(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_deliverable_fireable(args: argparse.Namespace) -> int:
+    """``deliverable fireable [--horizon now|next|later] [--json]`` (ADR-096 §18, B5): what a T0 can fire together now.
+
+    Read-only. Lists the ``ready`` deliverables whose hard predecessors are all satisfied and that
+    overlap no live work or open PR, then greedily picks a mutually overlap-free set by track
+    priority and then age. Every drop carries its reason. All tracks of the project by default;
+    ``--horizon`` narrows to one band. Exit 0 also when the list is empty.
+    """
+    state_dir = _resolve_state_dir(args.state_dir)
+    project_id = (args.project_id or "").strip()
+    if not project_id:
+        print("deliverable fireable: --project-id is required (ADR-007)", file=sys.stderr)
+        return 2
+    repo_root = Path(getattr(args, "repo_root", "") or getattr(args, "project_dir", "") or ".").resolve()
+    try:
+        selection = dlv_fireable.select(
+            state_dir=state_dir, project_id=project_id, repo_root=repo_root,
+            sources=dlv_fireable.default_sources(state_dir, project_id, repo_root),
+            horizon=args.horizon,
+        )
+    except sqlite3.Error as exc:
+        print(f"deliverable fireable: the store cannot be read: {exc}", file=sys.stderr)
+        return 2
+    if args.json:
+        print(json.dumps({
+            "fireable": [{"deliverable_id": e.deliverable_id, "track": e.track, "reason": e.reason}
+                         for e in selection.fireable],
+            "dropped": [{"deliverable_id": e.deliverable_id, "track": e.track, "reason": e.reason}
+                        for e in selection.dropped],
+        }, indent=2))
+        return 0
+    print(f"\nVNX deliverable fireable — project '{project_id}' — "
+          f"{'horizon ' + args.horizon if args.horizon else 'all tracks'}\n")
+    for title, rows in (("fireable", selection.fireable), ("dropped", selection.dropped)):
+        print(f"  {title}:" + ("" if rows else " none"))
+        for e in rows:
+            print(f"    {e.deliverable_id:<28} {e.track or '-':<20} {e.reason or '-'}")
+    print()
+    return 0
+
+
 def _fetch_deliverable_records(state_dir, project_id: str, objective: Optional[str] = None, *,
                                include_metadata: bool = False, include_withdrawn: bool = False,
                                conn: Optional[sqlite3.Connection] = None) -> list[dict]:
@@ -5542,6 +5586,47 @@ def _append_verdict_text(stdout_text: list, result: dict) -> None:
             stdout_text.append(f"      · {finding}")
 
 
+def _append_planning_gaps_text(stdout_text: list, gaps: list) -> None:
+    """Append the planning-gap lines next to the verdict (B9), one per gap.
+
+    Reporting only: ``plan_gaps.find`` never changes the verdict or the exit
+    code. A clean, readable doc + store says ``planning_gaps: none`` so an
+    operator can tell "checked, clean" from "not checked" — an unreadable doc or
+    store is itself one ``unknown`` gap, never silence.
+    """
+    if not gaps:
+        stdout_text.append("planning_gaps: none")
+        return
+    for gap in gaps:
+        subject = gap.get("deliverable") or gap.get("label") or "-"
+        stdout_text.append(f"planning_gap {gap['kind']} {subject}: {gap['detail']}")
+
+
+def _persist_decision_ref(state_dir, track_id, project_id, result, stderr_lines) -> None:
+    """Persist the durable half of the plan decision onto the track (OI-1190).
+
+    The report path(s) + the rejected alternatives with their reasons, so the
+    decision is findable from the track. Written for EVERY outcome
+    (PASS/REVISE/BLOCK/INFRA_FAIL), not just PASS: a REVISE/BLOCK is exactly when
+    the rejected alternatives matter most. Best-effort: a decision_ref write must
+    never break the gate it hangs off (same contract as
+    ``_emit_plan_gate_pass_record``).
+    """
+    import plan_gate_panel
+
+    try:
+        payload = plan_gate_panel.build_decision_ref(
+            result["decision"], result["panelists"], source="plan-gate"
+        )
+        tracks_lib.set_decision_ref(
+            state_dir, track_id, project_id, payload, actor="system"
+        )
+    except Exception as exc:  # vnx-silent-except: decision_ref persistence must never break the gate
+        stderr_lines.append(
+            f"WARNING: could not persist decision_ref for track {track_id}: {exc}"
+        )
+
+
 def _record_plan_gate_pass(
     *, repo_root, track_id, project_id, resolved, seats, scope, weight, stderr_lines,
 ) -> None:
@@ -5734,33 +5819,20 @@ def run_plan_gate_for_track(
             scored_seats=scored_seats, plan_sha256=plan_hash, seat_verdicts=seat_verdicts,
         )
 
-    # OI-1190: persist the durable half of the plan decision onto the track — the
-    # report path(s) + the rejected alternatives with their reasons — so the decision
-    # is findable from the track (previously only name-pattern-matchable from
-    # unified_reports/). Written for EVERY outcome (PASS/REVISE/BLOCK/INFRA_FAIL), not
-    # just PASS: a REVISE/BLOCK is exactly when the rejected alternatives matter most.
-    # Best-effort: a decision_ref write must never break the gate it hangs off (same
-    # contract as _emit_plan_gate_pass_record).
-    try:
-        payload = plan_gate_panel.build_decision_ref(
-            result["decision"], result["panelists"], source="plan-gate"
-        )
-        tracks_lib.set_decision_ref(
-            state_dir, track_id, project_id, payload, actor="system"
-        )
-    except Exception as exc:  # vnx-silent-except: decision_ref persistence must never break the gate
-        stderr_lines.append(
-            f"WARNING: could not persist decision_ref for track {track_id}: {exc}"
-        )
+    # OI-1190: persist the durable half of the plan decision onto the track.
+    _persist_decision_ref(state_dir, track_id, project_id, result, stderr_lines)
 
     # Build the verdict output (both forms) BEFORE resolving the blocker, so the
     # verdict is rendered even when the resolution below fails or the track is
-    # still blocked.
+    # still blocked. The planning gaps ride along; they never alter the verdict.
+    gaps = plan_gaps.find(doc_path, track_id, project_id, state_dir)
     out = dict(result)
     out["plan_source"] = plan_source_info
+    out["planning_gaps"] = gaps
     stdout_json = json.dumps(out, indent=2)
 
     _append_verdict_text(stdout_text, result)
+    _append_planning_gaps_text(stdout_text, gaps)
 
     if result["decision"] == "PASS":
         # A PASS verdict only counts as "unblocked" if the track actually reconciled
@@ -6837,6 +6909,17 @@ def _add_deliverable_dependency_parsers(dlv_sub: Any, common: Any) -> None:
     common(p)
     p.add_argument("dispatch_id")
     p.set_defaults(func=cmd_deliverable_deps)
+    p = dlv_sub.add_parser(
+        "fireable",
+        help="the ready deliverables a T0 can fire together now: no open predecessor, no overlap "
+             "(all tracks of the project; --horizon narrows to one band)",
+    )
+    common(p)
+    p.add_argument("--horizon", choices=("now", "next", "later"), default=None,
+                   help="limit to deliverables on tracks in that horizon band (default: all tracks)")
+    p.add_argument("--repo-root", default="", dest="repo_root", metavar="PATH",
+                   help="git repo root for the open-PR and directory lookups (default: the project dir)")
+    p.set_defaults(func=cmd_deliverable_fireable)
 
 
 def _add_deliverable_retarget_parser(dlv_sub: Any, common: Any) -> None:

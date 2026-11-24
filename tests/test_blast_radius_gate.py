@@ -14,25 +14,29 @@ import blast_radius_gate as brg
 import blast_radius_sources as brs
 import build_t0_state as bts
 import config_runtime as crt
+import deliverable_predecessor_gate as dpg
 import dispatch_cli
 from dispatch_spec import DispatchPath
 
 C, PID = "dlv-cand00000001", "vnx-dev"
 MODE, LIVE, PRS = {"v": "warn"}, {"v": brs.Sources()}, {"v": brs.Sources()}
+PRED_MODE = {"v": None}
 
 
 @pytest.fixture(autouse=True)
 def env(tmp_path, monkeypatch):
     (tmp_path / "state").mkdir(), (tmp_path / "tests").mkdir(), (tmp_path / "scripts").mkdir()
-    MODE["v"], LIVE["v"], PRS["v"] = "warn", brs.Sources(), brs.Sources()
-    monkeypatch.setattr(crt, "get", lambda key: MODE["v"] if key == brg.MODE_KEY else None)
+    MODE["v"], LIVE["v"], PRS["v"], PRED_MODE["v"] = "warn", brs.Sources(), brs.Sources(), None
+    monkeypatch.setattr(crt, "get", lambda key: PRED_MODE["v"] if key == dpg.MODE_KEY else (
+        MODE["v"] if key == brg.MODE_KEY else None))
     monkeypatch.setattr(brs, "live_subjects", lambda sd, pid: LIVE["v"])
     monkeypatch.setattr(brs, "open_pr_subjects", lambda *a: PRS["v"])
     return tmp_path
 
 
-def _door(tmp, did=C, paths=("scripts/a.py",), **kw):
-    spec = SimpleNamespace(dispatch_id=did, project_id=PID, pr_id="x", role="backend-developer",
+def _door(tmp, did=C, paths=("scripts/a.py",), work_ref=None, pr_id="x", base_ref="origin/main", **kw):
+    spec = SimpleNamespace(dispatch_id=did, project_id=PID, pr_id=pr_id, work_ref=work_ref, base_ref=base_ref,
+                           role="backend-developer",
                            dispatch_paths=tuple(DispatchPath(PurePosixPath(p)) for p in paths))
     return dispatch_cli._check_blast_radius_verdict(spec, repo_root=tmp, state_dir=tmp / "state", **kw)
 
@@ -136,3 +140,88 @@ def test_override_fires_and_is_booked_and_an_empty_reason_is_refused(env):
     assert v.severity == "warn" and v.override_applied and _ledger(env)[0]["outcome"] == "override"
     with pytest.raises(SystemExit):
         dispatch_cli.main(["--spec-file", "/nonexistent.json", "--override-overlap", "  "])
+
+
+# --- identity comes from the staged spec (OI-3070) -----------------------------------------
+OI_DID, OI_BRANCH = "dlv-a17c847bae63-m-r3", "dispatch/dlv-a17c847bae63-mode"
+OI_PATHS = ("bin/vnx", "scripts/slot_cli.py")
+
+
+def _pr(number, did, paths, branch):
+    return br.Subject(did, tuple(paths), branch, pr_number=number)
+
+
+def test_oi3070_own_staged_pr_and_work_ref_are_not_an_overlap(env):
+    PRS["v"] = brs.Sources((_pr(3093, "dlv-a17c847bae63-mode", OI_PATHS, OI_BRANCH),))
+    assert _door(env, did=OI_DID, paths=OI_PATHS, work_ref=OI_BRANCH, pr_id="3093") is None
+
+
+def test_self_exclusion_by_pr_number_alone(env):
+    PRS["v"] = brs.Sources((_pr(3093, "dlv-other", ("scripts/a.py",), None),))
+    assert _door(env, pr_id="3093") is None
+
+
+def test_self_exclusion_by_work_ref_alone(env):
+    PRS["v"] = brs.Sources((br.Subject("dlv-other", ("scripts/a.py",), f"dispatch/{C}-mode"),))
+    assert _door(env, pr_id=None, work_ref=f"dispatch/{C}-mode") is None
+
+
+def test_an_origin_prefixed_work_ref_is_the_same_branch(env):
+    PRS["v"] = brs.Sources((br.Subject("dlv-other", ("scripts/a.py",), f"dispatch/{C}-mode"),))
+    assert _door(env, pr_id=None, work_ref=f"origin/dispatch/{C}-mode") is None
+
+
+def test_a_non_numeric_pr_id_neither_raises_nor_matches(env):
+    PRS["v"] = brs.Sources((_pr(3093, "dlv-other", ("scripts/a.py",), None),))
+    v = _door(env, pr_id="3093x")
+    assert v is not None and v.code == "blast-radius-overlap"
+
+
+def test_a_stacked_successor_does_not_own_its_base_branch(env):
+    base = "dispatch/dlv-aaaaaaaaaaaa"
+    PRS["v"] = brs.Sources((br.Subject("dlv-aaaaaaaaaaaa", ("scripts/a.py",), base),))
+    v = _door(env, did="dlv-bbbbbbbbbbbb", pr_id=None, work_ref=None, base_ref=f"origin/{base}")
+    assert v is not None and v.code == "blast-radius-overlap"
+
+
+# --- a predecessor is excluded only when the gate guarantees it ------------------------------
+def _edge(predecessor, kind):
+    return dpg.Edge(predecessor, kind, None, None, None)
+
+
+def _predecessor_open_pr():
+    return brs.Sources((br.Subject("dlv-p", ("scripts/a.py",), "dispatch/dlv-p"),))
+
+
+def test_a_gate_guaranteed_hard_predecessor_is_excluded(env, monkeypatch):
+    MODE["v"], PRED_MODE["v"], PRS["v"] = "refuse", "refuse", _predecessor_open_pr()
+    monkeypatch.setattr(dpg, "read_edges", lambda *a: (_edge("dlv-p", "hard"),))
+    assert _door(env) is None
+
+
+@pytest.mark.parametrize("pred_mode", ["warn", "off"])
+def test_a_hard_predecessor_outside_refuse_mode_still_overlaps(env, monkeypatch, pred_mode):
+    MODE["v"], PRED_MODE["v"], PRS["v"] = "refuse", pred_mode, _predecessor_open_pr()
+    monkeypatch.setattr(dpg, "read_edges", lambda *a: (_edge("dlv-p", "hard"),))
+    v = _door(env)
+    assert v is not None and v.code == "blast-radius-overlap" and v.severity == "blocking"
+
+
+def test_a_hard_predecessor_with_an_override_reason_still_overlaps(env, monkeypatch):
+    MODE["v"], PRED_MODE["v"], PRS["v"] = "refuse", "refuse", _predecessor_open_pr()
+    monkeypatch.setattr(dpg, "read_edges", lambda *a: (_edge("dlv-p", "hard"),))
+    v = _door(env, predecessor_override_reason="merging right after this fire")
+    assert v is not None and v.code == "blast-radius-overlap"
+
+
+def test_a_soft_predecessor_under_refuse_still_overlaps(env, monkeypatch):
+    MODE["v"], PRED_MODE["v"], PRS["v"] = "refuse", "refuse", _predecessor_open_pr()
+    monkeypatch.setattr(dpg, "read_edges", lambda *a: (_edge("dlv-p", "soft"),))
+    v = _door(env)
+    assert v is not None and v.code == "blast-radius-overlap"
+
+
+def test_an_unknown_stored_predecessor_mode_reads_as_refuse(env, monkeypatch):
+    MODE["v"], PRED_MODE["v"], PRS["v"] = "refuse", "bogus", _predecessor_open_pr()
+    monkeypatch.setattr(dpg, "read_edges", lambda *a: (_edge("dlv-p", "hard"),))
+    assert _door(env) is None

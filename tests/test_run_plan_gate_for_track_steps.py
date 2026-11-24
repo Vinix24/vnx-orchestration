@@ -48,6 +48,10 @@ _MIN_GOAL_CHARS = 200
 _TRACK = "feat-steps"
 _PROJECT = "p1"
 _DEFAULT_TRACE = "weight=default -> 1 seat(s) by default (codex); opus reads on BLOCK"
+# The seat round carries the planning gaps (B9); this doc has no deliverable table.
+_NO_TABLE_GAP = {"class": "planning_gap", "kind": "no_table", "deliverable": None,
+                 "label": None, "detail": "the plan document has no deliverable table"}
+_NO_TABLE_LINE = "planning_gap no_table -: the plan document has no deliverable table"
 
 
 # ---------------------------------------------------------------------------
@@ -98,6 +102,11 @@ def _bootstrap(tmp_path: Path) -> Path:
         schema_migration.apply_script_if_below(
             conn, version, (_MIGRATIONS / filename).read_text(encoding="utf-8"))
         conn.commit()
+    # 0039 is needed by the planning-gap report the seat round carries (B9); no
+    # stamp is needed here, the table is all ``plan_gaps.find`` reads.
+    conn.executescript(
+        (_MIGRATIONS / "0039_deliverable_dependencies.sql").read_text(encoding="utf-8"))
+    conn.commit()
     conn.close()
     return state_dir
 
@@ -349,10 +358,11 @@ def test_a_doc_run_ignores_the_tracks_goal_state_and_says_so(state_dir, tmp_path
             "  one revise",
             "  - codex            REVISE  too coarse",
             "      · split the PR",
+            _NO_TABLE_LINE,
         ],
         stdout_json=json.dumps({**outcome.result, "plan_source": {
             "source": "doc", "ignored_goal": True, "doc_path": str(doc),
-        }}, indent=2),
+        }, "planning_gaps": [_NO_TABLE_GAP]}, indent=2),
     )
 
 
@@ -400,12 +410,13 @@ def test_a_pass_that_resolves_the_blocker_writes_the_pass_record(state_dir, tmp_
             "Plan gate: PASS  (1 pass / 0 revise / 0 block)",
             "  one pass",
             "  - codex            PASS  solid",
+            _NO_TABLE_LINE,
             f"PASS — plan gate cleared. OI-PLAN-{_TRACK} resolved=True; "
             "track derived_status=None.",
         ],
         stdout_json=json.dumps({**_pass_result(), "plan_source": {
             "source": "doc", "ignored_goal": True, "doc_path": str(doc),
-        }}, indent=2),
+        }, "planning_gaps": [_NO_TABLE_GAP]}, indent=2),
     )
 
 
@@ -445,12 +456,13 @@ def test_a_pass_without_a_written_record_says_the_evidence_is_missing(state_dir,
             "Plan gate: PASS  (1 pass / 0 revise / 0 block)",
             "  one pass",
             "  - codex            PASS  solid",
+            _NO_TABLE_LINE,
             f"PASS — plan gate cleared. OI-PLAN-{_TRACK} resolved=True; "
             "track derived_status=None.",
         ],
         stdout_json=json.dumps({**_pass_result(), "plan_source": {
             "source": "doc", "ignored_goal": True, "doc_path": str(doc),
-        }}, indent=2),
+        }, "planning_gaps": [_NO_TABLE_GAP]}, indent=2),
     )
 
 
@@ -489,6 +501,7 @@ def test_a_truncated_revise_renders_the_verdict_text_and_json(state_dir, tmp_pat
         "      · split the PR",
         "  - opus             BLOCK  no scope",
         "      · scope is unstated",
+        _NO_TABLE_LINE,
     ]
     plan_source_info = {"source": "doc", "ignored_goal": True, "doc_path": str(doc)}
     assert asdict(outcome) == _expect(
@@ -505,13 +518,41 @@ def test_a_truncated_revise_renders_the_verdict_text_and_json(state_dir, tmp_pat
             _seat_round_note(doc.read_text(encoding="utf-8")),
             "REVISE — plan gate NOT cleared; track stays blocked. Revise the plan and re-run.",
         ],
-        stdout_json=json.dumps({**result, "plan_source": plan_source_info}, indent=2),
+        stdout_json=json.dumps({**result, "plan_source": plan_source_info,
+                                "planning_gaps": [_NO_TABLE_GAP]}, indent=2),
     )
-    # The verdict json is the panel result plus the plan source — nothing else.
-    assert json.loads(outcome.stdout_json) == {**result, "plan_source": plan_source_info}
+    # The verdict json is the panel result plus the plan source and the gaps.
+    assert json.loads(outcome.stdout_json) == {
+        **result, "plan_source": plan_source_info, "planning_gaps": [_NO_TABLE_GAP]}
     # The non-PASS round landed in the seat ledger with this plan's hash and both verdicts.
     (round_record,) = [rec for _ln, rec, _h in walk_chain(ledger)
                        if rec.get("type") == pgt.ROUND_RECORD_TYPE]
     assert round_record["plan_sha256"] == pgt.plan_sha256(doc.read_text(encoding="utf-8"))
     assert round_record["scored_seats"] == 2
     assert [v["seat"] for v in round_record["seat_verdicts"]] == ["codex", "opus"]
+
+
+# ---------------------------------------------------------------------------
+# B9 — the planning gaps ride along; the verdict and exit code do not change
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("decision, exit_code, counts", [
+    ("REVISE", 2, {"pass_count": 0, "revise_count": 1, "block_count": 0}),
+    ("PASS", 0, {"pass_count": 1, "revise_count": 0, "block_count": 0}),
+])
+def test_a_seat_round_carries_planning_gaps_without_touching_the_verdict(
+        state_dir, tmp_path, monkeypatch, decision, exit_code, counts):
+    _make_track(state_dir)
+    doc = _write_doc(tmp_path)
+    panelist = _panelist("codex", decision.lower(), rationale="as before",
+                         blocking=decision != "PASS")
+    _stub_panel(monkeypatch, _panel_result(decision, [panelist], counts=counts,
+                                           rationale="unchanged"))
+    monkeypatch.setattr(planning_cli, "_resolve_plan_blocker", lambda *a, **k: True)
+    _stub_pass_record(monkeypatch, wrote=True)
+
+    outcome = _run(state_dir, doc=str(doc))
+
+    assert (outcome.decision, outcome.exit_code) == (decision, exit_code)
+    assert json.loads(outcome.stdout_json)["planning_gaps"] == [_NO_TABLE_GAP]
+    assert _NO_TABLE_LINE in outcome.stdout_text

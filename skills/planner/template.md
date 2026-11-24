@@ -33,6 +33,17 @@ High-level overview of the plan and expected outcomes (3-4 sentences)
 2. **Phase 2**: [Description, duration, deliverables]
 3. **Phase 3**: [Description, duration, deliverables]
 
+### Deliverable Table (required in the plan doc)
+| # | id | Deliverable | task_class | Size limit | hangt af van |
+|---|---|---|---|---|---|
+| B1 | `dlv-...` | B1: [title] | 02_feature | 300 | geen |
+| B2 | `dlv-...` | B2: [title] | 02_feature | 300 | B1 |
+
+- The first lines of the plan name the track as `` Track `<track_id>` `` (one track per plan).
+- `#` is the label the deliverable title starts with (`B1: ...`); `id` is the `dlv-` id once the deliverable exists.
+- `hangt af van` lists labels or `dlv-` ids, comma-separated, `(soft)` after a soft one, `geen` for none. A paths column is optional.
+- Order goes into `--depends-on`, paths into `--dispatch-paths` (see SKILL.md).
+
 ### Resource Requirements
 - Team composition needed
 - Technical resources
