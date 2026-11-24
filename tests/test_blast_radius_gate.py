@@ -21,6 +21,10 @@ from dispatch_spec import DispatchPath
 C, PID = "dlv-cand00000001", "vnx-dev"
 MODE, LIVE, PRS = {"v": "warn"}, {"v": brs.Sources()}, {"v": brs.Sources()}
 PRED_MODE = {"v": None}
+_REAL_OPEN_PR_SUBJECTS = brs.open_pr_subjects
+
+
+READ_DEADLINE = {"v": None}
 
 
 @pytest.fixture(autouse=True)
@@ -28,9 +32,9 @@ def env(tmp_path, monkeypatch):
     (tmp_path / "state").mkdir(), (tmp_path / "tests").mkdir(), (tmp_path / "scripts").mkdir()
     MODE["v"], LIVE["v"], PRS["v"], PRED_MODE["v"] = "warn", brs.Sources(), brs.Sources(), None
     monkeypatch.setattr(crt, "get", lambda key: PRED_MODE["v"] if key == dpg.MODE_KEY else (
-        MODE["v"] if key == brg.MODE_KEY else None))
+        MODE["v"] if key == brg.MODE_KEY else (READ_DEADLINE["v"] if key == "VNX_BLAST_RADIUS_READ_DEADLINE_S" else None)))
     monkeypatch.setattr(brs, "live_subjects", lambda sd, pid: LIVE["v"])
-    monkeypatch.setattr(brs, "open_pr_subjects", lambda *a: PRS["v"])
+    monkeypatch.setattr(brs, "open_pr_subjects", lambda *a, **k: PRS["v"])
     return tmp_path
 
 
@@ -225,3 +229,41 @@ def test_an_unknown_stored_predecessor_mode_reads_as_refuse(env, monkeypatch):
     MODE["v"], PRED_MODE["v"], PRS["v"] = "refuse", "bogus", _predecessor_open_pr()
     monkeypatch.setattr(dpg, "read_edges", lambda *a: (_edge("dlv-p", "hard"),))
     assert _door(env) is None
+
+
+def test_a_hanging_gh_is_bounded_by_the_total_read_deadline(env, monkeypatch):
+    import threading
+    import time
+    fake = env / "bin"
+    fake.mkdir()
+    (fake / "gh").write_text("#!/bin/sh\nsleep 120\n")
+    (fake / "gh").chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake}:/usr/bin:/bin")
+    monkeypatch.setattr(brs, "open_pr_subjects", _REAL_OPEN_PR_SUBJECTS)
+    READ_DEADLINE["v"] = "2"
+    out = {}
+    t = threading.Thread(target=lambda: out.update(v=_try(lambda: _door(env))), daemon=True)
+    start = time.monotonic()
+    t.start()
+    t.join(10)
+    assert not t.is_alive(), "the door hung on gh past the total deadline"
+    assert time.monotonic() - start < 10
+    verdict = out["v"]
+    assert not isinstance(verdict, BaseException) and verdict.code == "blast-radius-unknown"
+    assert "gh pr list failed" in verdict.message or "read_deadline" in verdict.message
+
+
+def _try(fn):
+    try:
+        return fn()
+    except BaseException as exc:  # the test reports an exception as its value
+        return exc
+
+
+@pytest.mark.parametrize("raw,expected", [(None, 45), ("abc", 45), ("0", 45), ("-3", 45), ("7", 7)])
+def test_read_deadline_key_falls_back_to_45(env, monkeypatch, raw, expected):
+    seen = {}
+    monkeypatch.setattr(brs, "open_pr_subjects", lambda *a, **k: seen.update(k) or brs.Sources())
+    READ_DEADLINE["v"] = raw
+    _door(env)
+    assert seen["deadline_s"] == expected and seen["deadline_at"] is not None

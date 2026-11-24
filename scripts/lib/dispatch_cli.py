@@ -2821,6 +2821,29 @@ def _blast_radius_candidate(
                       preds, pr_number)
 
 
+def _blast_radius_open_pr_read(repo_root: Path, state_dir: Path, project_id: str):
+    """The open-PR read of the blast-radius section under one total deadline (ADR-096 B4b-d).
+
+    ``VNX_BLAST_RADIUS_READ_DEADLINE_S`` (not a positive int: 45) bounds the whole read; each gh call
+    gets what is left of it, at most 30 s and at least 1 s.
+    """
+    import time
+    import config_runtime
+    import blast_radius_gate as brg
+    import blast_radius_sources as brs
+
+    raw = config_runtime.get("VNX_BLAST_RADIUS_READ_DEADLINE_S")
+    try:
+        seconds = int(str(raw).strip()) if raw is not None else 45
+    except ValueError:
+        seconds = 45
+    seconds = seconds if seconds > 0 else 45
+    deadline_at = time.monotonic() + seconds
+    bound_gh = lambda argv, cwd: brg.gh(argv, cwd, timeout=max(1.0, min(30.0, deadline_at - time.monotonic())))
+    return brs.open_pr_subjects(repo_root, project_id, brs.default_cache_path(state_dir), bound_gh,
+                                deadline_at=deadline_at, deadline_s=seconds)
+
+
 def _check_blast_radius_verdict(
     spec: DispatchSpec, repo_root: Path, state_dir: Path, override_reason: Optional[str] = None,
     dry_run: bool = False, predecessor_override_reason: Optional[str] = None,
@@ -2842,7 +2865,7 @@ def _check_blast_radius_verdict(
     candidate = _blast_radius_candidate(spec, repo_root, state_dir, predecessor_override_reason)
     verdict, hits = brg.judge(candidate, (
         ("live_work", brs.live_subjects(state_dir, spec.project_id)),
-        ("open_pr", brs.open_pr_subjects(repo_root, spec.project_id, brs.default_cache_path(state_dir), brg.gh))), repo_root)
+        ("open_pr", _blast_radius_open_pr_read(repo_root, state_dir, spec.project_id))), repo_root)
     if verdict == brg.CLEAR:
         return None
     reason = (override_reason or "").strip()

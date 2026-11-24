@@ -67,7 +67,7 @@ def _door(monkeypatch, tmp_path: Path, first_holds, release):
     specs = {"/x/first.json": _spec(FIRST), "/x/second.json": _spec(SECOND)}
     files = {p: SimpleNamespace(spec=s) for p, s in specs.items()}
     monkeypatch.setattr(crt, "get", lambda key: "refuse" if key == brg.MODE_KEY else None)
-    monkeypatch.setattr(brs, "open_pr_subjects", lambda *a: brs.Sources())
+    monkeypatch.setattr(brs, "open_pr_subjects", lambda *a, **k: brs.Sources())
     # A store with the ADR-007 project_id column and no in-flight rows: the first fire
     # must read "clear" so it can reach its claim.
     dispatch_cli._rc_init_schema(state_dir)
