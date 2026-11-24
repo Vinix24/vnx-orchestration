@@ -17,8 +17,8 @@ def repo(tmp_path):
     return tmp_path
 
 
-def S(did, paths, branch=None, preds=()):
-    return br.Subject(did, paths, branch, tuple(preds))
+def S(did, paths, branch=None, preds=(), pr=None):
+    return br.Subject(did, paths, branch, tuple(preds), pr)
 
 
 # --- normalisation -------------------------------------------------------------------------
@@ -123,6 +123,27 @@ def test_self_exclusion_by_round_on_the_same_branch(repo):
 def test_self_exclusion_by_pr_branch(repo):
     cand = S("dlv-c", ["a.py"], branch="dispatch/dlv-c")
     assert run(cand, [S("", ["a.py"], branch="dispatch/dlv-c")], repo) == {}
+
+
+# --- self-exclusion by staged identity (OI-3070) -------------------------------------------
+def test_self_exclusion_by_pr_number_despite_another_branch(repo):
+    cand = S("dlv-c", ["a.py"], branch="dispatch/dlv-c-mode", pr=3093)
+    assert run(cand, [S("dlv-other", ["a.py"], branch="dispatch/dlv-other", pr=3093)], repo) == {}
+
+
+def test_a_different_pr_number_is_not_self(repo):
+    cand = S("dlv-c", ["a.py"], pr=3093)
+    res = run(cand, [S("dlv-other", ["a.py"], pr=3094)], repo)
+    assert res["dlv-other"].outcome == br.OVERLAP
+
+
+def test_two_unset_pr_numbers_are_not_self(repo):
+    res = run(S("dlv-c", ["a.py"]), [S("dlv-other", ["a.py"])], repo)
+    assert res["dlv-other"].outcome == br.OVERLAP
+
+
+def test_a_pr_number_matches_a_branch_less_subject(repo):
+    assert br.is_self(S("dlv-c", ["a.py"], pr=3093), S("dlv-other", ["a.py"], pr=3093)) is True
 
 
 def test_similar_branch_is_not_self(repo):

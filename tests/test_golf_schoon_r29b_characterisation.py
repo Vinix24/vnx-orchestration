@@ -169,6 +169,6 @@ def test_blast_radius_refusal_stops_the_door_before_the_claim_permit_and_lane(mo
     # B4b-c: the check runs inside the section, so the scout pre-pass (outside it)
     # precedes it; a refusal inside the section returns before the claim and permit.
     calls, sd = _door(monkeypatch, tmp_path, _blast_radius_reject=lambda *a: calls.append(("blast", a, {})) or dispatch_cli.Reject("c", "m"))
-    assert _run() == 1 and [c[0] for c in calls][-2:] == ["scout", "blast"] and _get(calls, "blast")[1][1:] == (tmp_path, sd, None, False)
+    assert _run() == 1 and [c[0] for c in calls][-2:] == ["scout", "blast"] and _get(calls, "blast")[1][1:] == (tmp_path, sd, None, False, None)
     assert (sd / "blast_radius.lock").exists()  # the check ran inside the section
     assert not {"row", "permit", "commit", "lane_slot", "headless", "envelope"} & {c[0] for c in calls}
