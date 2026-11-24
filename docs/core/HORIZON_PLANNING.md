@@ -177,6 +177,23 @@ Both seats from the start:
 An operator override starts `plan-gate override:` instead (`scripts/planning_cli.py`
 `_derive_panel_weight`).
 
+### Planning gaps next to the verdict (warn-first, B9)
+
+Every seat round also reports the planning gaps of the plan it read: a
+deliverable in `proposed`/`ready` with no `dispatch_paths` (`no_paths`), a plan
+row whose predecessor has no `deliverable_dependencies` row at all
+(`missing_dependency`; a row removed with `undepend` was removed on purpose and
+is not a gap), a row no deliverable of the track answers to (`unmapped_row`), a
+row the plan-table parser could not read (`unreadable_row`), and a document
+without a deliverable table (`no_table`). They appear in `--json` as
+`planning_gaps` and on stdout as one
+`planning_gap <kind> <deliverable or label>: <detail>` line each, or
+`planning_gaps: none`. An unreadable store or document is one `unknown` gap
+naming the reason, never silence. **The gaps never change the verdict or the
+exit code** (operator decision 2026-11-19: warn-first; a later measurement
+decides whether they ever weigh). `scripts/lib/plan_gaps.py` reads the store
+read-only.
+
 ### Rounds per plan version
 
 Every seat round that does not PASS appends a `plan_gate_round` record to the
