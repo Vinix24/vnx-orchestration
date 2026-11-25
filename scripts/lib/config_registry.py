@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Tuple
 
@@ -75,6 +76,8 @@ class ConfigEntry:
     scope: str = "project"
     # Enum keys only; None means no check. The write-side check is G3 (config_store_db._coerce).
     allowed_values: Optional[Tuple[str, ...]] = None
+    # Opt-in integer bound, enforced by registry resolution before a reader gets a value.
+    minimum: Optional[int] = None
 
     def __post_init__(self) -> None:
         if self.scope not in ALLOWED_SCOPES:
@@ -83,13 +86,25 @@ class ConfigEntry:
                 not isinstance(self.allowed_values, tuple) or not self.allowed_values
                 or not all(isinstance(v, str) for v in self.allowed_values)):
             raise ValueError(f"{self.key}: allowed_values must be a non-empty tuple of strings")
+        if self.minimum is not None:
+            if self.type != "integer" or type(self.minimum) is not int:
+                raise ValueError(f"{self.key}: minimum requires an integer type and bound")
+            self.validate(self.default)
+
+    def validate(self, value: str, *, source: str = "value") -> str:
+        """Return the value unchanged; raise ValueError if an opt-in integer bound fails."""
+        if self.minimum is not None and (
+                not isinstance(value, str) or re.fullmatch(r"[+-]?[0-9]+", value.strip()) is None
+                or int(value) < self.minimum):
+            raise ValueError(f"{self.key}: {source} must be a finite integer >= {self.minimum}; got {value!r}")
+        return value
 
 
 def _e(key, type_, default, category, description, *, writable=True, approval=False, planned=False,
        subsystem=None, status=None, read_site_wired=True, cockpit_canonical=False, scope="project",
-       allowed_values=None):
+       allowed_values=None, minimum=None):
     return ConfigEntry(key, type_, default, category, description, writable, approval, planned,
-                        subsystem, status, read_site_wired, cockpit_canonical, scope, allowed_values)
+                        subsystem, status, read_site_wired, cockpit_canonical, scope, allowed_values, minimum)
 
 
 # The inventory. Defaults verified against the read-sites (codex review finding: defaults must
@@ -501,6 +516,25 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         "version out; exit 0. Any other outcome (non-zero exit, unparseable output, time-out) means "
         "the full run. The VNX value points to scripts/ci/impact_select.py. Empty (the default) "
         "selects nothing and every PR runs the full suite.", approval=True,
+        subsystem="governance-enforcement-stack", status="ACTIVATE", read_site_wired=False),
+    # ADR-097: registered ahead of the M3a/M3b readers (ci-measurement-every-project M3a-k).
+    "VNX_CI_WORKFLOWS": _e(
+        "VNX_CI_WORKFLOWS", "string", "", "gate",
+        "PR-CI workflow names, comma-separated (ADR-097 section 1; owner M3a). Empty means "
+        "every workflow with a PR run counts.", scope="project",
+        subsystem="governance-enforcement-stack", status="ACTIVATE", read_site_wired=False),
+    "VNX_CI_RECORD_MAX_CALLS": _e(
+        "VNX_CI_RECORD_MAX_CALLS", "integer", "1000", "gate",
+        "GitHub call budget per project per night for ci_run/1 collection (ADR-097 section 3; "
+        "owner M3a, shared with M3b). Includes pagination, job reads, artifact discovery and "
+        "download, and retries; shared across catch-up days. A framework budget, not an adapter "
+        "key. Must be a finite positive integer; invalid configuration is rejected before collection.",
+        scope="project", minimum=1,
+        subsystem="governance-enforcement-stack", status="ACTIVATE", read_site_wired=False),
+    "VNX_CI_JUNIT_ARTIFACT": _e(
+        "VNX_CI_JUNIT_ARTIFACT", "string", "", "gate",
+        "JUnit artifact name per attempt (ADR-097 section 2; owner M3b). Empty means test fields "
+        "are unknown with junit_not_configured.", scope="project",
         subsystem="governance-enforcement-stack", status="ACTIVATE", read_site_wired=False),
     "VNX_CI_GATE_REQUIRED": _e(
         "VNX_CI_GATE_REQUIRED", "bool", "1", "gate",
@@ -1064,13 +1098,22 @@ def resolve_with_source(
     in chain order whatever order they are given in. A reader that must tell the approved
     floor apart from a loose override (ADR-088 besluit 3) resolves once with the floor layers
     and once with the full chain. An empty ``layers`` or a name outside :data:`CHAIN_LAYERS`
-    raises ``ValueError``.
+    raises ``ValueError``. Entries with a ``minimum`` raise ``ValueError`` on invalid selected
+    values; their resolver is always strict. Unavailable sources retain their explicit
+    ``(None, error_source)`` result for diagnostic callers; direct getters reject that result.
+    An unset layer remains ``(None, "unset")`` so callers can explain the precedence chain.
     """
     walked = _checked_layers(layers)
     entry = CONFIG_REGISTRY.get(key)
+    constrained = entry is not None and entry.minimum is not None
+    strict_resolver = strict_resolver or constrained
+
+    def checked(value, source):
+        return entry.validate(value, source=source) if constrained else value
+
     override = os.environ.get(f"VNX_OVERRIDE_{_bare(key)}")
     if "override" in walked and override is not None:
-        return override, "override"
+        return checked(override, "override"), "override"
     if "project_config" in walked:
         if resolver is None and use_default_resolver:
             resolver = _db_resolver
@@ -1088,7 +1131,7 @@ def resolve_with_source(
                     return None, "project_config_error"
                 db_val = None
             if db_val is not None:
-                return db_val, "project_config"
+                return checked(db_val, "project_config"), "project_config"
     if "global_config" in walked and entry is not None:
         import config_global
         try:
@@ -1103,12 +1146,12 @@ def resolve_with_source(
                     "config_registry: %s; falling through to env and the default", exc)
             global_val = None
         if global_val is not None:
-            return global_val, "global_config"
+            return checked(global_val, "global_config"), "global_config"
     env_val = os.environ.get(key)
     if "env" in walked and env_val is not None:
-        return env_val, "env"
+        return checked(env_val, "env"), "env"
     if "default" in walked and entry is not None:
-        return entry.default, "default"
+        return checked(entry.default, "default"), "default"
     return None, "unset"
 
 
@@ -1139,12 +1182,15 @@ def _resolve(key: str, project_id: Optional[str], resolver: Optional[DbResolver]
     five sources cannot drift between them. The order lives in
     :func:`resolve_with_source`; this returns its value.
     """
-    return resolve_with_source(key, project_id, resolver, use_default_resolver=False)[0]
+    value, source = resolve_with_source(key, project_id, resolver, use_default_resolver=False)
+    entry = CONFIG_REGISTRY.get(key)
+    # Diagnostic readers keep explicit unknown sources; direct getters must not use them as a budget.
+    return entry.validate(value, source=source) if entry is not None else value
 
 
 def get(key: str, project_id: Optional[str] = None) -> Optional[str]:
     """Resolve a config value via the precedence chain. Returns the registry default (or None for
-    an unknown key) when nothing overrides it. Never raises."""
+    an unknown key) when nothing overrides it. Raises ValueError for an invalid constrained value."""
     # The explicit project wins, else the process default (wired by config_runtime.autowire).
     pid = project_id if project_id is not None else _default_project_id
     return _resolve(key, pid, _db_resolver)
@@ -1158,11 +1204,14 @@ def get_for_project(key: str, project_id: str, state_dir: "Path | str") -> Optio
     read from a state dir, ``--data-dir``) gets that project's value even when
     this process is wired to a different one. The operator override and the
     process-start env value keep the precedence :func:`get` gives them; only
-    the DB source is redirected. Never raises.
+    the DB source is redirected. Raises ValueError for an invalid constrained value.
     """
     import config_store_db
 
-    return _resolve(key, project_id, config_store_db.make_db_resolver(lambda _pid: state_dir))
+    entry = CONFIG_REGISTRY.get(key)
+    constrained = entry is not None and entry.minimum is not None
+    return _resolve(key, project_id, config_store_db.make_db_resolver(
+        lambda _pid: state_dir, raise_on_error=constrained))
 
 
 _TRUTHY = frozenset(("1", "true", "yes", "on"))
