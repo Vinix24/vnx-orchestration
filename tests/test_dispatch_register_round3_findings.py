@@ -127,11 +127,11 @@ class TestRcDeliverySuccessEmptyAttemptId:
             f"for empty attempt_id path. Got: {result['failures']!r}"
         )
 
-    def test_empty_attempt_id_with_rc_disabled_is_noop(self, tmp_path):
-        """When RC is disabled there is no broker — empty attempt_id is a true no-op."""
+    def test_empty_attempt_id_cannot_bypass_runtime(self, tmp_path):
+        """A legacy disabled helper cannot bypass mandatory runtime coordination."""
         result = _run_rc_delivery_success(tmp_path, attempt_id="", rc_enabled=False)
-        assert result["rc"] == 0
-        assert result["failures"] == []
+        assert result["rc"] != 0
+        assert "delivery_success_no_attempt_id" in result["failures"]
 
     def test_nonempty_attempt_id_real_success_returns_zero(self, tmp_path):
         fn_body = _extract_function(LIFECYCLE_SH, "rc_delivery_success")

@@ -3,7 +3,7 @@
 
 Decouples dispatch identity from tmux mechanics. Primary path sends
 `load-dispatch <dispatch_id>` via send-keys. Legacy fallback uses paste-buffer.
-Feature flags: VNX_TMUX_ADAPTER_ENABLED, VNX_ADAPTER_PRIMARY.
+The adapter is always enabled; load-dispatch is the default delivery path.
 """
 
 from __future__ import annotations
@@ -48,17 +48,17 @@ _log = logging.getLogger(__name__)
 
 
 def adapter_enabled() -> bool:
-    """Return True when VNX_TMUX_ADAPTER_ENABLED != "0"."""
-    return os.environ.get("VNX_TMUX_ADAPTER_ENABLED", "1").strip() != "0"
+    """Compatibility query: the tmux adapter is always enabled."""
+    return True
 
 
 def primary_path_active() -> bool:
-    """Return True when VNX_ADAPTER_PRIMARY != "0" (load-dispatch path)."""
-    return os.environ.get("VNX_ADAPTER_PRIMARY", "1").strip() != "0"
+    """Compatibility query: load-dispatch is the default path."""
+    return True
 
 
 def adapter_config_from_env() -> Dict[str, Any]:
-    """Return adapter config dict derived from environment."""
+    """Return the fixed adapter defaults (legacy API name)."""
     return {
         "enabled": adapter_enabled(),
         "primary_path": primary_path_active(),
@@ -97,7 +97,7 @@ class AdapterTransportError(RuntimeAdapterError):
 
 
 class AdapterDisabledError(AdapterError):
-    """Raised when the adapter is accessed while VNX_TMUX_ADAPTER_ENABLED=0."""
+    """Legacy exception retained for API compatibility."""
 
 
 class PaneNotFoundError(AdapterError):
@@ -289,8 +289,6 @@ class TmuxAdapter:
 
     def capabilities(self) -> frozenset:
         """Return supported capabilities for TmuxAdapter."""
-        if not adapter_enabled():
-            return frozenset()
         return TMUX_CAPABILITIES
 
     def spawn(self, terminal_id: str, config: Dict[str, Any]) -> SpawnResult:
@@ -756,8 +754,6 @@ def reheal_panes(
         unchanged=unchanged, panes_json_updated=panes_json_updated)
 
 
-def load_adapter(state_dir: str | Path) -> Optional["TmuxAdapter"]:
-    """Return TmuxAdapter if enabled (default), else None."""
-    if not adapter_enabled():
-        return None
+def load_adapter(state_dir: str | Path) -> "TmuxAdapter":
+    """Return the always-enabled tmux adapter."""
     return TmuxAdapter(state_dir)

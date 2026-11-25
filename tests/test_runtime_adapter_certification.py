@@ -548,18 +548,17 @@ class TestContractAlignment:
 class TestFeatureFlagPreservation:
     """Certify feature flags from contract Section 7.2 are respected."""
 
-    def test_adapter_disabled_returns_empty_capabilities(self, tmp_path: Path) -> None:
+    def test_retired_flag_preserves_capabilities(self, tmp_path: Path) -> None:
         panes = {"session": "test", "T0": {"pane_id": "%0"}}
         (tmp_path / "panes.json").write_text(__import__("json").dumps(panes))
         with patch.dict("os.environ", {"VNX_TMUX_ADAPTER_ENABLED": "0"}):
             adapter = TmuxAdapter(str(tmp_path))
             caps = adapter.capabilities()
-        assert caps == frozenset()
+        assert caps == TMUX_CAPABILITIES
 
     def test_adapter_enabled_returns_full_capabilities(self, tmp_path: Path) -> None:
         panes = {"session": "test", "T0": {"pane_id": "%0"}}
         (tmp_path / "panes.json").write_text(__import__("json").dumps(panes))
-        with patch.dict("os.environ", {"VNX_TMUX_ADAPTER_ENABLED": "1"}):
-            adapter = TmuxAdapter(str(tmp_path))
-            caps = adapter.capabilities()
+        adapter = TmuxAdapter(str(tmp_path))
+        caps = adapter.capabilities()
         assert caps == TMUX_CAPABILITIES

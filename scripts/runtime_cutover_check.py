@@ -113,9 +113,6 @@ def main() -> None:
     print(f"\nVNX Runtime Core Cutover Compatibility Check")
     print(f"state_dir:    {state_dir}")
     print(f"dispatch_dir: {dispatch_dir}")
-    print(f"runtime_primary: {result['flags']['VNX_RUNTIME_PRIMARY']}")
-    print(f"broker_shadow:   {result['flags']['VNX_BROKER_SHADOW']}")
-    print(f"canonical_lease: {result['flags']['VNX_CANONICAL_LEASE_ACTIVE']}")
     print()
 
     components = result.get("components", {})
