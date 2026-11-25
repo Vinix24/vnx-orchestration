@@ -5,9 +5,11 @@
     vnx impact backtest [--since <date|Nd>] [--limit N] [--state-dir <dir>]
     vnx impact report  [--since <date|Nd>] [--json] [--state-dir <dir>]
 
-``collect`` pulls the ``impact-shadow`` and ``impact-shadow-job`` artifacts of the completed
-``VNX CI`` runs through ``gh`` into ``state/impact_shadow.ndjson``, one line per run attempt,
-never rewriting a line.  ``backtest`` rebuilds S for old pull_request runs from their
+``collect`` pulls the ``impact-shadow`` artifact of the completed ``VNX CI`` runs through ``gh``
+into ``state/impact_shadow.ndjson``, one line per run attempt, never rewriting a line.  The
+``impact-shadow-job`` artifact comes from the paired ``Impact shadow`` run of the same head sha (from
+the VNX CI run itself for runs from before the job moved); an attempt whose shadow run is not done
+yet is named as ``shadow_run_pending`` and collected again next time.  ``backtest`` rebuilds S for old pull_request runs from their
 ``profile-a-evidence`` with today's selector into ``state/impact_backtest.ndjson``.  ``report``
 reads both ledgers only and writes nothing; every count is given for live, backtest and together.
 

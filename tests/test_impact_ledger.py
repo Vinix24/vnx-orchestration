@@ -45,14 +45,18 @@ class FakeGh:
     ``("download", run_id)``) to an exception the runner raises.
     """
 
-    def __init__(self, runs, artifacts, jobs=None, fail_download=None, raises=None):
+    def __init__(self, runs, artifacts, jobs=None, fail_download=None, raises=None, shadow_runs=None):
         self.runs, self.artifacts, self.jobs = runs, artifacts, jobs or {}
+        self.shadow_runs = shadow_runs or {}  # head sha -> the answer of `gh run list --workflow "Impact shadow"`
         self.fail_download, self.raises, self.calls = fail_download, raises or {}, []
 
     def __call__(self, argv):
         self.calls.append(list(argv))
         if argv[:3] == ["gh", "repo", "view"]:
             return json.dumps({"nameWithOwner": REPO})
+        if argv[:3] == ["gh", "run", "list"] and argv[argv.index("--workflow") + 1] == "Impact shadow":
+            assert argv[argv.index("--event") + 1] == "pull_request"
+            return json.dumps(self.shadow_runs.get(argv[argv.index("--commit") + 1], []))
         if argv[:3] == ["gh", "run", "list"]:
             if "list" in self.raises:
                 raise self.raises["list"]
@@ -399,3 +403,202 @@ def test_report_names_the_unreadable_inputs_of_a_backtest_record():
 def test_parse_since_refuses_bad_input(text):
     with pytest.raises(ValueError):
         ledger.parse_since(text)
+
+
+# --- the shadow job in its own workflow: paired with the VNX CI run by head sha ---------------
+
+SHA = "a" * 40
+NOW = ledger.parse_time("2026-11-13T09:40:00Z")
+
+
+def _pair(run_id, attempt=1, status="completed"):
+    return {"databaseId": run_id, "attempt": attempt, "status": status,
+            "conclusion": "success" if status == "completed" else None, "createdAt": "2026-11-13T09:01:00Z"}
+
+
+def _jobs_without_shadow():
+    return {"jobs": [j for j in _jobs()["jobs"] if j["name"] != ledger.SHADOW_JOB]}
+
+
+def _shadow_jobs(minutes=17):
+    return {"jobs": [{"name": ledger.SHADOW_JOB, "started_at": "2026-11-13T10:00:00Z",
+                      "completed_at": f"2026-11-13T10:{minutes:02d}:00Z", "conclusion": "success"}]}
+
+
+def _new_shape(shadow_runs, artifacts=None, jobs=None, run=None):
+    artifacts = artifacts if artifacts is not None else {(1, "impact-shadow"): _shadow(1), (9, "impact-shadow-job"): _job(9, 1, wall=999)}
+    return FakeGh([run or {**_run(1), "event": "pull_request"}], artifacts, jobs={1: _jobs_without_shadow(), 9: _shadow_jobs(), **(jobs or {})},
+                  shadow_runs={SHA: shadow_runs})
+
+
+def test_new_shape_takes_the_job_record_and_timing_from_the_paired_run(tmp_path):
+    result = ledger.collect(tmp_path, _new_shape([_pair(9)]), now=NOW)
+    assert result["added"] == ["1/1"] and result["failed"] == []
+    (entry,) = _lines(tmp_path)
+    assert entry["job"]["wall_seconds"] == 999 and entry["shadow_job"]["seconds"] == 1020
+    assert entry["shadow_run_id"] == 9 and entry["shadow_run_attempt"] == 1 and entry["missing"] == []
+
+
+def test_new_shape_attributes_the_job_record_against_the_shadow_runs_attempt(tmp_path):
+    gh = _new_shape([_pair(9, 2)], {(1, "impact-shadow"): _shadow(1), (9, "impact-shadow-job"): _job(9, 2)}, jobs={})
+    ledger.collect(tmp_path, gh, now=NOW)
+    (entry,) = _lines(tmp_path)
+    assert entry["job"] is not None and not any("attempt_mismatch" in m for m in entry["missing"])
+    assert entry["shadow_run_attempt"] == 2 and entry["run_attempt"] == 1
+    assert any(c[:2] == ["gh", "api"] and "/runs/9/attempts/2/" in c[2] for c in gh.calls)
+
+
+def test_new_shape_a_job_record_stamped_with_the_other_attempt_is_still_refused(tmp_path):
+    gh = _new_shape([_pair(9, 2)], {(1, "impact-shadow"): _shadow(1), (9, "impact-shadow-job"): _job(9, 1)})
+    ledger.collect(tmp_path, gh, now=NOW)
+    (entry,) = _lines(tmp_path)
+    assert entry["job"] is None and "artifact:impact-shadow-job:attempt_mismatch" in entry["missing"]
+
+
+def test_shadow_run_in_progress_writes_no_line_until_it_completes(tmp_path):
+    first = ledger.collect(tmp_path, _new_shape([_pair(9, status="in_progress")]), now=NOW)
+    assert first["added"] == [] and first["failed"] == [{"attempt": "1/1", "error": "shadow_run_pending"}]
+    assert _lines(tmp_path) == []
+    second = ledger.collect(tmp_path, _new_shape([_pair(9)]), now=NOW)
+    assert second["added"] == ["1/1"] and len(_lines(tmp_path)) == 1
+
+
+@pytest.mark.parametrize("created, pending", [("2026-11-13T09:10:00Z", True), ("2026-11-13T06:40:00Z", False)])
+def test_no_shadow_run_is_pending_for_two_hours_and_missing_after(tmp_path, created, pending):
+    gh = _new_shape([], {(1, "impact-shadow"): _shadow(1)}, run={**_run(1), "event": "pull_request", "createdAt": created})
+    result = ledger.collect(tmp_path, gh, now=NOW)
+    if pending:
+        assert result["added"] == [] and result["failed"][0]["error"] == "shadow_run_pending" and _lines(tmp_path) == []
+        return
+    (entry,) = _lines(tmp_path)
+    assert {"job:impact-shadow", "artifact:impact-shadow-job"} <= set(entry["missing"])
+    assert entry["shadow_run_id"] is None and entry["shadow_run_attempt"] is None
+    assert not any(c[:3] == ["gh", "run", "download"] and c[5] == "impact-shadow-job" for c in gh.calls)
+
+
+def test_an_unreadable_created_at_without_a_shadow_run_stays_pending(tmp_path):
+    gh = _new_shape([], {}, run={**_run(1), "event": "pull_request", "createdAt": None})
+    result = ledger.collect(tmp_path, gh, now=NOW)
+    assert result["failed"][0]["error"] == "shadow_run_pending" and _lines(tmp_path) == []
+
+
+def test_two_shadow_runs_for_one_sha_use_the_newest(tmp_path):
+    artifacts = {(1, "impact-shadow"): _shadow(1), (9, "impact-shadow-job"): _job(9, wall=111), (12, "impact-shadow-job"): _job(12, wall=222)}
+    gh = _new_shape([_pair(9), _pair(12), _pair(10)], artifacts, jobs={12: _shadow_jobs(20)})
+    ledger.collect(tmp_path, gh, now=NOW)
+    (entry,) = _lines(tmp_path)
+    assert entry["shadow_run_id"] == 12 and entry["job"]["wall_seconds"] == 222 and entry["shadow_job"]["seconds"] == 1200
+
+
+def test_old_shape_never_looks_up_the_shadow_workflow(tmp_path):
+    gh = FakeGh([_run(1)], {(1, "impact-shadow"): _shadow(1), (1, "impact-shadow-job"): _job(1)})
+    ledger.collect(tmp_path, gh, now=NOW)
+    (entry,) = _lines(tmp_path)
+    assert entry["shadow_run_id"] is None and entry["shadow_run_attempt"] is None and entry["missing"] == []
+    assert not any("Impact shadow" in c for c in gh.calls)
+
+
+def test_a_failing_shadow_lookup_is_a_failure_not_a_hole(tmp_path):
+    class Boom(FakeGh):
+        def __call__(self, argv):
+            if "Impact shadow" in argv:
+                raise ledger.RunnerError(argv, 1, "HTTP 403")
+            return super().__call__(argv)
+    gh = Boom([{**_run(1), "event": "pull_request"}], {(1, "impact-shadow"): _shadow(1)}, jobs={1: _jobs_without_shadow()})
+    result = ledger.collect(tmp_path, gh, now=NOW)
+    assert result["added"] == [] and "403" in result["failed"][0]["error"] and _lines(tmp_path) == []
+
+
+def test_a_push_run_is_written_at_once_without_a_shadow_lookup(tmp_path):
+    gh = FakeGh([_run(1)], {(1, "impact-shadow"): _shadow(1)}, jobs={1: _jobs_without_shadow()})
+    result = ledger.collect(tmp_path, gh, now=NOW)
+    assert result["added"] == ["1/1"] and result["failed"] == []
+    (entry,) = _lines(tmp_path)
+    assert entry["event"] == "push" and entry["shadow_run_id"] is None and entry["shadow_run_attempt"] is None
+    assert entry["missing"] == ["artifact:impact-shadow-job", "job:impact-shadow"]
+    assert not any("Impact shadow" in c for c in gh.calls)
+
+
+def test_a_run_without_an_event_is_not_written_early(tmp_path):
+    gh = FakeGh([{**_run(1), "event": None}], {(1, "impact-shadow"): _shadow(1)}, jobs={1: _jobs_without_shadow()}, shadow_runs={SHA: []})
+    result = ledger.collect(tmp_path, gh, now=NOW)
+    assert result["failed"][0]["error"] == "shadow_run_pending" and _lines(tmp_path) == []
+
+
+def _identified(record, base="b" * 40, candidate="c" * 40):
+    return {**record, "base_sha": base, "candidate_sha": candidate}
+
+
+def test_pairing_skips_a_newer_run_that_tested_another_candidate(tmp_path):
+    artifacts = {(1, "impact-shadow"): _identified(_shadow(1)),
+                 (12, "impact-shadow-job"): _identified(_job(12, wall=222), candidate="d" * 40),
+                 (9, "impact-shadow-job"): _identified(_job(9, wall=111))}
+    gh = _new_shape([_pair(9), _pair(12)], artifacts, jobs={12: _shadow_jobs(20)})
+    ledger.collect(tmp_path, gh, now=NOW)
+    (entry,) = _lines(tmp_path)
+    assert entry["shadow_run_id"] == 9 and entry["job"]["wall_seconds"] == 111 and entry["missing"] == []
+
+
+def test_pairing_with_no_matching_candidate_is_pending_then_a_named_hole(tmp_path):
+    artifacts = {(1, "impact-shadow"): _identified(_shadow(1)), (9, "impact-shadow-job"): _identified(_job(9), base="e" * 40)}
+    young = {**_run(1), "event": "pull_request", "createdAt": "2026-11-13T09:10:00Z"}
+    first = ledger.collect(tmp_path, _new_shape([_pair(9)], artifacts, run=young), now=NOW)
+    assert first["failed"][0]["error"] == "shadow_run_pending" and _lines(tmp_path) == []
+    ledger.collect(tmp_path, _new_shape([_pair(9)], artifacts), now=NOW + ledger.SHADOW_RUN_GRACE)
+    (entry,) = _lines(tmp_path)
+    assert "artifact:impact-shadow-job:candidate_mismatch" in entry["missing"]
+    assert entry["job"] is None and entry["shadow_run_id"] is None
+
+
+def test_pairing_without_a_shadow_record_takes_the_newest_run(tmp_path):
+    artifacts = {(9, "impact-shadow-job"): _identified(_job(9, wall=111)), (12, "impact-shadow-job"): _identified(_job(12, wall=222), base="e" * 40)}
+    gh = _new_shape([_pair(9), _pair(12)], artifacts, jobs={12: _shadow_jobs(20)})
+    ledger.collect(tmp_path, gh, now=NOW)
+    (entry,) = _lines(tmp_path)
+    assert entry["shadow_run_id"] == 12 and "artifact:impact-shadow" in entry["missing"]
+    assert entry["job"]["wall_seconds"] == 222
+
+
+@pytest.mark.parametrize("created", ["2026-11-13T09:10:00Z", "missing", None, "", "not-a-time", 42])
+@pytest.mark.parametrize("record", [None, {}, {"schema": None}, {"schema": "unknown"}])
+def test_unreadable_candidates_stay_pending_until_a_matching_record_arrives(tmp_path, created, record):
+    shadow = _identified(_shadow(1))
+    artifacts = {(1, "impact-shadow"): shadow, (9, "impact-shadow-job"): record, (12, "impact-shadow-job"): record}
+    run = {**_run(1), "event": "pull_request", "createdAt": created}
+    if created == "missing":
+        del run["createdAt"]
+    gh = _new_shape([_pair(9), _pair(12)], artifacts, run=run)
+    result = ledger.collect(tmp_path, gh, now=NOW)
+    assert result == {"added": [], "skipped": [], "failed": [{"attempt": "1/1", "error": "shadow_run_pending"}]}
+    assert not ledger.ledger_path(tmp_path).exists()
+    with pytest.raises(ledger.ShadowRunPending, match="^shadow_run_pending$"):
+        ledger._shadow_run(gh, run, shadow, NOW)
+    artifacts[(9, "impact-shadow-job")] = _identified(_job(9))
+    assert ledger.collect(tmp_path, gh, now=NOW)["added"] == ["1/1"]
+    assert _lines(tmp_path)[0]["shadow_run_id"] == 9
+
+
+@pytest.mark.parametrize("created", ["2026-11-13T06:40:00Z", "2026-11-13T07:40:00Z"])
+@pytest.mark.parametrize("record", [None, {}, {"schema": None}, {"schema": "unknown"}])
+def test_unreadable_candidates_after_grace_leave_a_named_unpaired_hole(tmp_path, created, record):
+    artifacts = {(1, "impact-shadow"): _identified(_shadow(1)),
+                 (9, "impact-shadow-job"): record, (12, "impact-shadow-job"): record}
+    gh = _new_shape([_pair(9), _pair(12)], artifacts,
+                    run={**_run(1), "event": "pull_request", "createdAt": created})
+    assert ledger.collect(tmp_path, gh, now=NOW) == {"added": ["1/1"], "skipped": [], "failed": []}
+    (entry,) = _lines(tmp_path)
+    assert entry["missing"] == ["artifact:impact-shadow-job:candidate_unreadable", "job:impact-shadow"]
+    assert entry["job"] is None and entry["shadow_job"] is None
+    assert entry["shadow_run_id"] is None and entry["shadow_run_attempt"] is None
+
+
+@pytest.mark.parametrize("record", [None, {}, {"schema": None}, {"schema": "unknown"}])
+def test_pairing_skips_an_unreadable_candidate_for_a_readable_match(tmp_path, record):
+    artifacts = {(1, "impact-shadow"): _identified(_shadow(1)), (12, "impact-shadow-job"): record,
+                 (9, "impact-shadow-job"): _identified(_job(9, wall=111))}
+    gh = _new_shape([_pair(9), _pair(12)], artifacts)
+    assert ledger.collect(tmp_path, gh, now=NOW) == {"added": ["1/1"], "skipped": [], "failed": []}
+    (entry,) = _lines(tmp_path)
+    assert entry["shadow_run_id"] == 9 and entry["shadow_run_attempt"] == 1 and entry["missing"] == []
+    assert entry["job"]["wall_seconds"] == 111 and entry["shadow_job"]["seconds"] == 1020
+    assert [c[3] for c in gh.calls if c[:3] == ["gh", "run", "download"] and c[5] == "impact-shadow-job"] == ["12", "9"]
