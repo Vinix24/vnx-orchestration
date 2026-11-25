@@ -6,6 +6,14 @@ Without an explicit root argument, discovery starts from the current working
 directory, not the fabric's installation directory. An unresolved project root
 raises `RuntimeError`; an explicit `repo_root` remains supported.
 
+Role validation runs the fabric's `scripts/validate_skill.py --list`, located
+relative to the resolved `worker_registry.py` module path. Default loading,
+including import and reload, never selects a validator from the consumer
+project. A project without that script still has its roles validated against
+the fabric's skill list. For controlled test callers, an explicit `repo_root`
+retains its existing meaning: it binds both the project YAML root and the
+validator root. The packaged default remains relative to the module.
+
 When the project has no override, the loader reads
 `scripts/lib/defaults/vnx_workers.default.yaml` beside the package's modules.
 The existing `scripts/**/*` package-data glob includes that file. This is the

@@ -16,7 +16,7 @@ Public API:
 
 Validation:
 - terminal_id matches r"^T[0-9]+$" (T followed by one or more digits)
-- role validated against validate_skill.py --list output
+- role validated against the fabric's validate_skill.py --list output
 - provider in {claude, codex, gemini, litellm:<sub>}
 - aliases unique across all workers
 - pool_id references a pool defined in pools: section
@@ -328,13 +328,18 @@ def _load_registry(repo_root: Optional[Path] = None) -> WorkerRegistry:
 
     Falls back to hardcoded defaults only when neither YAML file exists.
     With no explicit root, project-root resolution errors propagate.
+    The default validator root comes from this module, independent of the
+    project YAML root. An explicit repo_root binds both roots for test callers.
     """
     import yaml  # Deferred import — yaml guaranteed present but keeps startup fast
 
     if repo_root is None:
+        fabric_root = Path(__file__).resolve().parents[2]
         repo_root = resolve_project_root()
+    else:
+        fabric_root = repo_root
 
-    valid_roles = _fetch_valid_roles(repo_root)
+    valid_roles = _fetch_valid_roles(fabric_root)
     yaml_path = _find_yaml_file(repo_root)
 
     if yaml_path is None:
