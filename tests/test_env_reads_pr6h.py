@@ -1,5 +1,6 @@
-"""PR-6h: enforcement precedence, hash-chain fold and retired environment readers."""
+"""PR-6h: enforcement precedence and retired environment readers."""
 import ast
+import json
 import os
 import sqlite3
 import subprocess
@@ -14,19 +15,18 @@ import check_ci_slug_match as slug
 import config_registry as registry
 import config_runtime as runtime
 import config_store_db
-import ndjson_hash_chain as chain
 import trace_token_validator as trace
 import worker_permissions as worker
 from test_env_reads_t0_rotation_flag import python_reads
+from test_t0_context_guard import _logging_git
 
 READERS = [
     ("VNX_PROVENANCE_ENFORCEMENT", lambda: trace.get_enforcement_mode() == trace.EnforcementMode.ENFORCED),
     ("VNX_SLUG_ENFORCEMENT", lambda: slug._build_parser().parse_args([]).enforce),
     ("VNX_ENFORCE_WORKER_PERMISSIONS", worker.worker_permission_enforcement_enabled),
     ("VNX_PROVENANCE_LEGACY_ACCEPTED", trace.is_legacy_accepted),
-    ("VNX_HASH_CHAIN_REQUIRED", chain.chain_receipts_variable_on),
 ]
-DELETED = ("VNX_CHAIN_RECEIPTS", "VNX_DEFAULT_BRANCHES", "VNX_RECEIPT_FALLBACK")
+DELETED = ("VNX_DEFAULT_BRANCHES", "VNX_RECEIPT_FALLBACK")
 
 
 @pytest.fixture
@@ -60,13 +60,6 @@ def test_precedence(store, monkeypatch, key, read, value, source):
     assert read() is (value == "1")
 
 
-@pytest.mark.parametrize("legacy", [False, True])
-def test_chain_default_and_retired_flag(store, monkeypatch, legacy):
-    if legacy:
-        monkeypatch.setenv("VNX_CHAIN_RECEIPTS", "1")
-    assert chain.append_chains(chain.TAIL_EMPTY) is False
-
-
 @pytest.mark.parametrize("key,read", [READERS[0], READERS[2]])
 def test_unreadable_wired_store_keeps_enforcement(store, monkeypatch, tmp_path, caplog, key, read):
     store(key, "1")
@@ -75,6 +68,39 @@ def test_unreadable_wired_store_keeps_enforcement(store, monkeypatch, tmp_path, 
     (tmp_path / "runtime_coordination.db").write_bytes(b"not sqlite")
     assert read() is True
     assert key in caplog.text and "project_config" in caplog.text
+
+
+@pytest.mark.parametrize("value", ["0", "1"])
+@pytest.mark.parametrize("pin", ["state", "state_only", "data", "local"])
+@pytest.mark.parametrize("tool", ["Bash", "Write"])
+def test_hook_stored_switch_without_git(store, tmp_path, monkeypatch, value, pin, tool):
+    key = "VNX_ENFORCE_WORKER_PERMISSIONS"
+    store(key, value)
+    monkeypatch.setenv(key, str(1 - int(value)))
+    if pin != "state":
+        state = tmp_path / (".vnx-data/state" if pin == "local" else "state")
+        state.mkdir(parents=True)
+        (tmp_path / "runtime_coordination.db").rename(state / "runtime_coordination.db")
+        monkeypatch.delenv("VNX_STATE_DIR")
+        monkeypatch.setenv("VNX_DATA_DIR", str(tmp_path))
+        if pin in ("local", "state_only"):
+            monkeypatch.delenv("VNX_DATA_DIR")
+        if pin == "state_only":
+            monkeypatch.setenv("VNX_STATE_DIR", str(state))
+    bin_dir, log = _logging_git(tmp_path)
+    payload = {"tool_name": tool, "tool_input": {"command": "git push --force origin main",
+                                               "file_path": "/etc/passwd"}}
+    env = dict(os.environ, PATH=f"{bin_dir}{os.pathsep}{os.environ['PATH']}", VNX_WORKER_ROLE="backend-developer")
+    result = subprocess.run([sys.executable, str(ROOT / "scripts/hooks/pretooluse_worker_scope_enforce.py")],
+                            input=json.dumps(payload), env=env, cwd=tmp_path, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    if value == "1":
+        assert json.loads(result.stdout)["hookSpecificOutput"]["permissionDecision"] == "deny"
+        data = Path(env["VNX_DATA_DIR"]) if env.get("VNX_DATA_DIR") else state.parent
+        assert json.loads((data / "events/worker_scope_block.ndjson").read_text())["decision"] == "block"
+    else:
+        assert result.stdout == ""
+    assert not log.exists(), log.read_text()
 
 
 def test_zero_environment_reads():

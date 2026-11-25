@@ -337,9 +337,8 @@ def unchained_write(ledger_path: Path) -> Iterator[str]:
 
 
 def chain_receipts_variable_on() -> bool:
-    """``VNX_HASH_CHAIN_REQUIRED`` is 1/true/yes/on (case-insensitive) in this process."""
-    import config_runtime
-    return config_runtime.get_bool("VNX_HASH_CHAIN_REQUIRED")
+    """``VNX_CHAIN_RECEIPTS`` is 1/true/yes/on (case-insensitive) in this process."""
+    return os.environ.get("VNX_CHAIN_RECEIPTS", "").strip().lower() in ("1", "true", "yes", "on")
 
 
 def append_chains(tail_state: str) -> bool:
@@ -353,7 +352,7 @@ def verify_chain(path: Path) -> tuple[bool, list[dict], str]:
     Returns (is_valid, violations_list, status) where status is one of:
 
     - "unchained": no entry carries prev_hash and there is no chain_epoch_start
-      marker — chaining was never enabled (VNX_HASH_CHAIN_REQUIRED default off).
+      marker — chaining was never enabled (VNX_CHAIN_RECEIPTS default off).
       Integrity cannot be verified; NOT an error. is_valid=True.
     - "verified": the ledger chains from a single GENESIS with no unchained
       prefix and no explicit epoch marker. is_valid=True.

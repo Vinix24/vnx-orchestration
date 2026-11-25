@@ -105,7 +105,7 @@ def test_flag_off_allows_without_touching_the_filesystem(monkeypatch, flag, payl
     if flag is not None:
         monkeypatch.setenv("VNX_ENFORCE_WORKER_PERMISSIONS", flag)
     assert not hook.worker_permission_enforcement_enabled()
-    monkeypatch.setattr(hook, "worker_permission_enforcement_enabled", lambda: False)
+    monkeypatch.setattr(hook, "worker_permission_enforcement_enabled", lambda **kwargs: False)
 
     def _refuse(*args, **kwargs):
         raise AssertionError("evaluate() touched the filesystem with the flag off")

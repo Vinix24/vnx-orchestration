@@ -649,9 +649,9 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         cockpit_canonical=True),
     "VNX_HASH_CHAIN_REQUIRED": _e(
         "VNX_HASH_CHAIN_REQUIRED", "bool", "0", "gate",
-        "Enable tamper-evident NDJSON receipt chaining (default off).",
+        "Tamper-evident NDJSON hash-chain requirement (display metadata only; no read-site wired).",
         approval=True,
-        subsystem="receipt-hash-chain", status="PARK", read_site_wired=True),
+        subsystem="receipt-hash-chain", status="PARK"),
     "VNX_ATTESTATION_REQUIRED": _e(
         "VNX_ATTESTATION_REQUIRED", "bool", "0", "gate",
         "SSH-signed PR attestation requirement (display metadata only; no read-site wired).",

@@ -427,7 +427,7 @@ def worker_scoped_enabled() -> bool:
     )
 
 
-def worker_permission_enforcement_enabled() -> bool:
+def worker_permission_enforcement_enabled(*, state_dir: Optional[Path] = None) -> bool:
     """Whether ADR-012 worker-permission ENFORCEMENT is active (default OFF).
 
     The 15-08 flip to ON was reverted to OFF: the measured blast radius under
@@ -465,7 +465,7 @@ def worker_permission_enforcement_enabled() -> bool:
     import config_registry
     from enforcement_profile import enforced_storeless
     key = "VNX_ENFORCE_WORKER_PERMISSIONS"
-    strict = config_runtime.strict_resolver() if config_runtime.autowire() else None
+    strict = config_runtime.strict_resolver() if config_runtime.autowire(state_dir=state_dir) else None
     value, source = (config_registry.resolve_with_source(key, strict[1], strict[0], strict_resolver=True)
                      if strict else enforced_storeless(key))
     if source in config_registry.ERROR_SOURCES:

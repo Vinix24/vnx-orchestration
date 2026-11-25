@@ -465,7 +465,7 @@ def test_t19_schema_version_transition_mid_chain_stays_verified(tmp_path, monkey
     schema_version-absent to schema_version: 2 mid-chain stays
     verified/verified-segmented — the PR-3 writer unification does not change
     hash-chain behavior; ndjson_hash_chain.py itself is untouched (ADR-035 §7)."""
-    monkeypatch.setenv("VNX_HASH_CHAIN_REQUIRED", "1")
+    monkeypatch.setenv("VNX_CHAIN_RECEIPTS", "1")
     receipt_path = tmp_path / "t0_receipts.ndjson"
     cache_path = _t9_cache_file_for(receipt_path)
 
@@ -502,7 +502,7 @@ def test_t21_path1_and_path2_concurrent_writes_never_fork(tmp_path, monkeypatch)
     regression guard for BLOCKING-1's dual-lock race (two independent locks
     on two different files, closed by routing both paths through the one
     shared append primitive, ADR-035 §7.1)."""
-    monkeypatch.setenv("VNX_HASH_CHAIN_REQUIRED", "1")
+    monkeypatch.setenv("VNX_CHAIN_RECEIPTS", "1")
     state_dir = tmp_path / "state"
     state_dir.mkdir()
     receipt_path = state_dir / "t0_receipts.ndjson"
