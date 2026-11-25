@@ -37,7 +37,7 @@ def test_every_finding_has_a_table_row_and_every_row_a_finding():
 
 def test_table_rules_hold():
     rows = on.load_table()
-    assert len(rows) == 403 and sum(r["count"] for r in rows) == 434
+    assert len(rows) == 395 and sum(r["count"] for r in rows) == 426
     assert on.validate_table(rows) == []
 
 

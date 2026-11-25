@@ -34,8 +34,9 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DISPATCH_SCRIPT = PROJECT_ROOT / "scripts" / "lib" / "provider_dispatch.py"
 REPORT_DIR_LOCAL = PROJECT_ROOT / ".vnx-data" / "unified_reports"
-REPORT_DIR_CENTRAL = Path.home() / ".vnx-data" / "vnx-dev" / "unified_reports"
 CLAUDEDOCS_DIR = PROJECT_ROOT / "claudedocs"
+sys.path.insert(0, str(PROJECT_ROOT / "scripts/lib"))
+from operator_paths import operator_data_dir
 
 # Lane behaviors differ: claude does real work (cost reflects it), kimi/deepseek
 # answer inline. Benchmark captures that as-is. Quality scoring extracts the
@@ -93,8 +94,9 @@ def _slug(text: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
 
 
-def fire_dispatch(lane_id: str, task_id: str, run_idx: int) -> dict:
+def fire_dispatch(lane_id: str, task_id: str, run_idx: int, project_id: str | None = None) -> dict:
     """Fire one provider_dispatch.py run. Returns metrics dict."""
+    reports = operator_data_dir(project_id) / "unified_reports"
     lane = LANES[lane_id]
     task = TASKS[task_id]
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -124,7 +126,7 @@ def fire_dispatch(lane_id: str, task_id: str, run_idx: int) -> dict:
         exit_code = 124
         stderr = "timeout after 300s"
 
-    central_path = REPORT_DIR_CENTRAL / f"{dispatch_id}.md"
+    central_path = reports / f"{dispatch_id}.md"
     local_path = REPORT_DIR_LOCAL / f"{dispatch_id}.md"
     receipt = parse_receipt(central_path) if central_path.exists() else parse_receipt(local_path)
     response_text = extract_response(central_path) if central_path.exists() else ""
@@ -268,7 +270,7 @@ def run_benchmark(args: argparse.Namespace) -> list:
 
     results: list = []
     with ThreadPoolExecutor(max_workers=args.parallel) as pool:
-        futures = {pool.submit(fire_dispatch, l, t, r): (l, t, r) for l, t, r in jobs}
+        futures = {pool.submit(fire_dispatch, l, t, r, args.project_id): (l, t, r) for l, t, r in jobs}
         for fut in as_completed(futures):
             l, t, r = futures[fut]
             try:
@@ -379,6 +381,7 @@ def write_summary(results: list, path: Path, args: argparse.Namespace) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Smart-lanes benchmark runner")
+    parser.add_argument("--project-id")
     parser.add_argument("--n", type=int, default=1,
                         help="Runs per (lane, task) cell (default 1)")
     parser.add_argument("--lanes", default="",
@@ -390,6 +393,7 @@ def main() -> int:
     parser.add_argument("--output-prefix", default="",
                         help="Override filename prefix")
     args = parser.parse_args()
+    operator_data_dir(args.project_id)
 
     results = run_benchmark(args)
     stamp = datetime.now().strftime("%Y%m%d-%H%M")

@@ -21,8 +21,8 @@ Usage:
     python3 scripts/intel_injection_join.py secondary [--qi <path>] [--rc <path>] [--project-id <id>]
                                                    [--as-of <ISO>] [--json]
 
-Default DB paths resolve from VNX_STATE_DIR (falling back to
-~/.vnx-data/vnx-dev/state).
+Default DB paths use ~/.vnx-data/<project-id>/state; --project-id overrides
+the project's marker/environment identity. --qi and --rc override paths.
 """
 from __future__ import annotations
 
@@ -35,16 +35,11 @@ from pathlib import Path
 _LIB_DIR = Path(__file__).resolve().parent / "lib"
 if str(_LIB_DIR) not in sys.path:
     sys.path.insert(0, str(_LIB_DIR))
+from operator_paths import operator_data_dir
 
 
-def _default_state_dir() -> Path:
-    env = (
-        __import__("os").environ.get("VNX_STATE_DIR")
-        or __import__("os").environ.get("VNX_DATA_DIR")
-    )
-    if env:
-        return Path(env) if Path(env).name == "state" else Path(env) / "state"
-    return Path.home() / ".vnx-data" / "vnx-dev" / "state"
+def _default_state_dir(project_id: str | None = None) -> Path:
+    return operator_data_dir(project_id) / "state"
 
 
 def _resolve_db(arg: str | None, default_name: str, state_dir: Path) -> Path:
@@ -420,9 +415,8 @@ def _run_ab(args: argparse.Namespace, state_dir: Path, parser: argparse.Argument
         from intel_effect_estimator import run_effect as run
     else:
         from intel_effect_secondary import run_secondary as run
-    from project_root import resolve_project_id
     try:
-        project_id = args.project_id or resolve_project_id()
+        project_id = operator_data_dir(args.project_id).name
     except RuntimeError as exc:
         parser.error(str(exc))
     return run(
@@ -450,6 +444,8 @@ def main(argv: list[str] | None = None) -> int:
 
     p_pl = sub.add_parser("placebo", help="adoption rate per injection arm (placebo discrimination)")
     p_pl.add_argument("--qi", help="path to quality_intelligence.db")
+    for command in (p_join, p_adp, p_pl):
+        command.add_argument("--project-id")
 
     # Effect PR-6, PR-7 and PR-8. No --min-per-arm: the floor is a constant no flag lowers (plan decision 7).
     for name, text in (("cohort", "A/B window cohort: per-arm counts and refusals, never a verdict"),
@@ -460,12 +456,16 @@ def main(argv: list[str] | None = None) -> int:
                                         "dispatch_metadata)" if name == "secondary" else
                                         "path to quality_intelligence.db (opened read-only, not read)"))
         p_ab.add_argument("--rc", help="path to runtime_coordination.db")
-        p_ab.add_argument("--project-id", help="tenant (default: project_root.resolve_project_id())")
+        p_ab.add_argument("--project-id", help="tenant (default: project marker/environment)")
         p_ab.add_argument("--as-of", type=_iso_arg, help="ISO timestamp (default: now, UTC)")
         p_ab.add_argument("--json", action="store_true")
 
     args = parser.parse_args(argv)
-    state_dir = _default_state_dir()
+    try:
+        needs_default = not args.qi or (hasattr(args, "rc") and not args.rc)
+        state_dir = _default_state_dir(args.project_id) if needs_default else Path(".")
+    except (RuntimeError, ValueError) as exc:
+        parser.error(str(exc))
 
     if args.cmd == "join":
         qi = _resolve_db(args.qi, "quality_intelligence.db", state_dir)

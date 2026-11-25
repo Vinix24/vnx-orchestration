@@ -11,6 +11,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from test_operator_tool_stores import operator_project
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts" / "lib"))
 
@@ -18,6 +19,20 @@ import router_baseline as rb  # noqa: E402
 
 
 SINCE = "2026-08-03"
+
+
+def test_project_store(operator_project, capsys):
+    project, data, resolved = operator_project
+    receipts = data / "state/t0_receipts.ndjson"
+    receipts.parent.mkdir(parents=True)
+    receipts.write_text(json.dumps(_rec("2026-08-04T00:00:00Z")) + "\n")
+    if resolved:
+        assert rb.main(["--json"]) == 0
+        assert json.loads(capsys.readouterr().out)["total"] == 1
+    else:
+        with pytest.raises(SystemExit, match="2"):
+            rb.main([])
+        assert "vnx init" in capsys.readouterr().err
 
 
 def _rec(timestamp, provider="claude", model="sonnet", status="success", lane=None,
