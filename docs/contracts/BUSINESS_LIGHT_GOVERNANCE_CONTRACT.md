@@ -223,7 +223,7 @@ The pilot is successful when all of these are met over a 7-day observation windo
 | **PS-3** | Review-by-exception triggers correctly | At least 1 exception-triggered review |
 | **PS-4** | Folder scope boundaries hold | No file access outside scope root |
 | **PS-5** | Open item namespace isolation works | No `OI-BL-*` items in coding lists |
-| **PS-6** | Pilot can be disabled without affecting coding | `VNX_BUSINESS_LIGHT_ENABLED=0` stops all business dispatches |
+| **PS-6** | Pilot can be disabled without affecting coding | Not demonstrated: no runtime pilot-disable switch is implemented |
 
 ### 6.3 Rollback Criteria
 
@@ -239,13 +239,12 @@ The pilot must be rolled back if any of these occur:
 
 ### 6.4 Rollback Mechanism
 
-```bash
-# Immediate disable — all business dispatches stop, coding unaffected
-export VNX_BUSINESS_LIGHT_ENABLED=0
-
-# Full revert — remove the business-light capability registration from the
-# capability matrix and revert the change that added it
-```
+There is no implemented business-only kill switch. `VNX_BUSINESS_LIGHT_ENABLED`
+has no code reader and setting it does not stop dispatches. Profile selection is
+implemented by `scripts/lib/governance_profile_selector.py::select_profile`;
+profile configuration lives in `scripts/lib/governance_profiles.py`. Neither is
+a runtime stop mechanism. PS-6 remains an unverified pilot criterion; this
+contract provides no command that guarantees business-only rollback.
 
 ---
 
@@ -280,7 +279,8 @@ export VNX_BUSINESS_LIGHT_ENABLED=0
 2. Max active workers enforced
 3. Manager closure receipts include `pilot_audit: true` during pilot
 4. Max dispatch age enforced
-5. `VNX_BUSINESS_LIGHT_ENABLED=0` stops all business dispatches
+
+PS-6 has no implemented disable mechanism to certify (see §6.4).
 
 ---
 
