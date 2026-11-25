@@ -12,9 +12,15 @@ and status all resolve the state root identically (PR-PIP-2 lockstep).
 
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 from typing import Optional
+
+
+# Validation is usable before engine bootstrap; derivation is shared lazily.
+_PROJECT_ID_RE = re.compile(r"^[a-z][a-z0-9-]{1,31}$")
+PROJECT_FILE_NAME = ".vnx-project-id"
 
 
 def engine_root() -> Path:
@@ -208,15 +214,16 @@ def read_marker_project_id(project_dir: Path) -> Optional[str]:
     return first if _PROJECT_ID_RE.match(first) else None
 
 
+def slugify_project_id(name: str) -> Optional[str]:
+    """Delegate to the shared derivation rule in the packaged engine."""
+    ensure_engine_on_path()
+    from project_id_derivation import slugify_project_id as slugify
+    return slugify(name)
+
+
 def derive_project_id(project_dir, explicit: Optional[str] = None) -> str:
     """Resolve explicit > existing marker > basename slug > path hash."""
+    ensure_engine_on_path()
+    from project_id_derivation import derive_project_id as derive
     marker = read_marker_project_id(project_dir) if explicit is None else None
-    return _derive_project_id(project_dir, explicit=explicit, marker=marker)
-
-
-# Source installs ship scripts/lib, while wheels bootstrap that same engine tree.
-ensure_engine_on_path()
-from project_id import (
-    PROJECT_FILE_NAME, _PROJECT_ID_RE, derive_project_id as _derive_project_id,
-    slugify_project_id,
-)
+    return derive(project_dir, explicit=explicit, marker=marker)

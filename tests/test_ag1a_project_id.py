@@ -129,13 +129,15 @@ def test_ag1a_source_init_temporary_home(tmp_path, name, marker, expected):
 
 def test_ag1a_shared_derivation_path_hash_and_explicit(tmp_path):
     import hashlib
-    from project_id import derive_project_id
+    from project_id_derivation import derive_project_id
     from vnx_cli import _engine
 
     project = tmp_path / "123"
     expected = "vnx-" + hashlib.sha1(str(project.resolve()).encode()).hexdigest()[:8]
     assert derive_project_id(project) == _engine.derive_project_id(project) == expected
     assert derive_project_id(tmp_path / "456") != expected
+    assert _engine.slugify_project_id("123") is None
+    assert _engine.slugify_project_id("Fresh Source Project") == "fresh-source-project"
     assert derive_project_id(project, explicit="chosen", marker="anchored") == "chosen"
     assert derive_project_id(project, marker="anchored") == "anchored"
     for invalid in ("", "../other", "/absolute", "INVALID"):

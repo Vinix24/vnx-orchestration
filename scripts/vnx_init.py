@@ -34,7 +34,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR / "lib"))
 
 from mcp_server_config import write_terminal_mcp_configs
-from project_id import PROJECT_FILE_NAME, derive_project_id
+from project_id_derivation import PROJECT_FILE_NAME, derive_project_id
 from project_id_migration import resolve_init_project_id, run_quality_intelligence_migration
 from vnx_paths import ensure_env
 from vnx_skills import is_opted_out, iter_skill_dirs
