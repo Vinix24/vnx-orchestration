@@ -95,7 +95,7 @@ def _run_harness(gate_dirs, monkeypatch, gate: str, report_text: str, pr_number:
     calls = []
 
     def fake_factory(data_dir, timeout_seconds, *, role="plan-reviewer", base_ref=None,
-            total_deadline_seconds=None):
+            total_deadline_seconds=None, project_root=None):
         def _dispatch(provider, model, instruction, dispatch_id):
             calls.append({
                 "data_dir": data_dir,

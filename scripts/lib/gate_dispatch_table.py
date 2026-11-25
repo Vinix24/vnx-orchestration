@@ -60,6 +60,7 @@ def _governed_factory(
     return plan_gate_panel._make_default_dispatcher(
         str(data_dir), timeouts["timeout_seconds"], role="review-gate", base_ref=base_ref,
         total_deadline_seconds=timeouts["total_deadline_seconds"],
+        project_root=project_root,
     )
 
 

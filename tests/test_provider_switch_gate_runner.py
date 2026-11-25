@@ -93,7 +93,7 @@ def dispatcher(monkeypatch):
     state: Dict[str, Any] = {"calls": [], "behaviour": None, "fetched": []}
 
     def factory(data_dir, timeout_seconds, *, role="plan-reviewer", base_ref=None,
-                total_deadline_seconds=None):
+                total_deadline_seconds=None, project_root=None):
         def dispatch(provider, model, instruction, dispatch_id):
             state["calls"].append({"provider": provider, "dispatch_id": dispatch_id})
             return state["behaviour"](dispatch_id)

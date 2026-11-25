@@ -167,6 +167,27 @@ def test_the_moved_dispatcher_still_builds_the_provider_lane_command(monkeypatch
     assert seen["branch"] == "pr-branch"
 
 
+@pytest.mark.parametrize("base_ref", ["origin/pr-branch", "origin/", "", None])
+def test_review_dispatcher_keeps_root_and_empty_branch_failures_visible(monkeypatch, tmp_path, base_ref):
+    import dispatch_worktree_isolation
+
+    resolutions = []
+
+    def unavailable_root():
+        resolutions.append(True)
+        raise RuntimeError("consumer root lookup failed")
+
+    monkeypatch.setattr(dispatch_worktree_isolation, "resolve_consumer_project_root", unavailable_root)
+    monkeypatch.setattr(plan_gate_panel, "_run_provider_lane_child", lambda *a, **k: pytest.fail("seat launched"))
+    dispatch = governed_lane._make_default_dispatcher(
+        str(tmp_path), 42, role="review-gate", base_ref=base_ref,
+    )
+    expected = "consumer root lookup failed" if base_ref == "origin/pr-branch" else "requires a non-empty branch"
+    with pytest.raises(RuntimeError, match=expected):
+        dispatch("kimi", "kimi-k3", "Review the PR", "root-refusal")
+    assert resolutions == ([True] if base_ref == "origin/pr-branch" else [])
+
+
 def test_the_moved_dispatcher_reads_the_report_through_the_panel_seam(monkeypatch, tmp_path):
     """GE-5a round 2: ``_dispatch`` resolves the report reader through ``_panel()``.
 

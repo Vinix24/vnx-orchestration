@@ -247,7 +247,7 @@ def _run_gate(gate_dirs, monkeypatch, lane, *, commit_sha=HEAD, pr_number=2066):
     calls = []
 
     def factory(data_dir, timeout_seconds, *, role="plan-reviewer", base_ref=None,
-                total_deadline_seconds=None):
+                total_deadline_seconds=None, project_root=None):
         def dispatch(provider, model, instruction, dispatch_id):
             calls.append(dispatch_id)
             return lane(Path(data_dir), dispatch_id)

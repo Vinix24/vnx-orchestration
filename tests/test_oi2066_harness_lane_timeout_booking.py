@@ -79,7 +79,7 @@ def _pr2058_shaped_diff(total_chars: int = PR2058_DIFF_CHARS) -> str:
 
 
 @pytest.fixture
-def isolated_config(monkeypatch):
+def isolated_config(monkeypatch, tmp_path):
     """Hold the timeout and diff-cap resolvers to their registry defaults: no
     env value, no override brake, no real project_config store."""
     for key in _CONFIG_KEYS:
@@ -87,7 +87,7 @@ def isolated_config(monkeypatch):
         monkeypatch.delenv(f"VNX_OVERRIDE_{config_registry._bare(key)}", raising=False)
     monkeypatch.delenv("VNX_TOTAL_DEADLINE", raising=False)
     monkeypatch.delenv("VNX_PROJECT_ID", raising=False)
-    monkeypatch.setattr(vnx_paths, "resolve_paths", lambda: {})
+    monkeypatch.setattr(vnx_paths, "resolve_paths", lambda: {"PROJECT_ROOT": str(tmp_path)})
     config_runtime._wired_for.clear()
     config_registry.set_db_resolver(None)
     config_registry.set_default_project_id(None)
@@ -135,7 +135,7 @@ def _recording_factory(behaviour):
     calls = []
 
     def factory(data_dir, timeout_seconds, *, role="plan-reviewer", base_ref=None,
-                total_deadline_seconds=None):
+                total_deadline_seconds=None, project_root=None):
         def dispatch(provider, model, instruction, dispatch_id):
             call = {
                 "timeout_seconds": timeout_seconds,

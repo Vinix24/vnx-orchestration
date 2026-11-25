@@ -296,19 +296,26 @@ def read_report(base: Optional[Path], dispatch_id: str, stderr: str) -> Optional
     return None
 
 
-def _review_child_env(base: Path, deadline: Optional[int], role: str, base_ref: Optional[str], dispatch_id: str) -> dict:
+def _review_child_env(
+    base: Path, deadline: Optional[int], role: str, base_ref: Optional[str], dispatch_id: str,
+    *, project_root: Optional[Path] = None,
+) -> dict:
     """Fetch a review's validated head before launch; other roles keep their env."""
     if role == "review-gate":
         from gate_worktree import fetch_branch
         branch = base_ref[len("origin/"):] if isinstance(base_ref, str) and base_ref.startswith("origin/") else ""
-        fetch_branch(branch, gate="review-gate", identifier=dispatch_id)
+        # Let fetch_branch keep its empty-branch refusal before resolving a root.
+        if branch and project_root is None:
+            from dispatch_worktree_isolation import resolve_consumer_project_root
+            project_root = resolve_consumer_project_root()
+        fetch_branch(branch, gate="review-gate", identifier=dispatch_id, project_root=project_root)
     return _panel()._seat_child_env(base, deadline)
 
 
 def _make_default_dispatcher(
     data_dir: Optional[str], timeout_seconds: int,
     *, role: str = "plan-reviewer", base_ref: Optional[str] = None,
-    total_deadline_seconds: Optional[int] = None,
+    total_deadline_seconds: Optional[int] = None, project_root: Optional[Path] = None,
 ) -> DispatcherFn:
     """Real dispatcher: run a panelist through its governed lane, return the report text.
 
@@ -338,6 +345,10 @@ def _make_default_dispatcher(
     that lane isolates via ``dispatch_worktree_isolation`` on its own dispatch_id and has
     no PR branch to isolate on either.
 
+    ``project_root``: the consumer checkout used for the review-gate fetch.
+    The runner passes its own root; standalone callers resolve the consumer
+    through ``resolve_consumer_project_root``, never from the VNX code location.
+
     ``total_deadline_seconds``: OI-2066 — the lane's OWN deadline, set as
     ``VNX_TOTAL_DEADLINE`` in the provider_dispatch child's environment (the drainer and
     the claude-harness adapter read it there). ``timeout_seconds`` stays the outer
@@ -360,7 +371,7 @@ def _make_default_dispatcher(
         # never found. The claude branch pins the same two keys — see
         # _run_claude_headless_seat, which sets them on os.environ because on that
         # lane they must bind in this process as well as in the child.
-        env = _review_child_env(base, total_deadline_seconds, role, base_ref, dispatch_id)
+        env = _review_child_env(base, total_deadline_seconds, role, base_ref, dispatch_id, project_root=project_root)
         _tmp_doc_path: Optional[str] = None
         try:
             if provider in _panel()._CLAUDE_PROVIDERS:
