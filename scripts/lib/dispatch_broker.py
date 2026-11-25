@@ -2,20 +2,11 @@
 """
 VNX Dispatch Broker — Durable dispatch registration and bundle management.
 
-Shadow mode semantics
----------------------
-The broker runs in two modes controlled by environment variables:
-
-  VNX_BROKER_ENABLED (default "1")
-    When "0", the broker is entirely disabled. load_broker() returns None.
-    The existing dispatcher_minimal.sh path operates unmodified.
-
-  VNX_BROKER_SHADOW (default "1")
-    When "1" (shadow mode ON), the broker registers dispatches and writes
-    bundles durably but does NOT replace tmux delivery. The existing
-    send-keys/paste-buffer path is still the active transport.
-    When "0" (shadow mode OFF), the broker path is authoritative. This
-    is used by PR-3 and later after shadow validation.
+Production cutover
+------------------
+load_broker() always returns an enabled, authoritative broker. Rollback is
+git revert. Explicit constructor shadow_mode remains a diagnostic/test seam;
+it does not gate writes or invoke transport. Registration alone never delivers.
 
 Immutability (G-R6)
 -------------------
@@ -150,15 +141,13 @@ class DispatchBroker:
       filesystem under {dispatch_dir}/{dispatch_id}/.
     - Record every attempt lifecycle event (claim, deliver_start,
       deliver_success, deliver_failure) in the coordination database.
-    - In shadow mode, operate alongside the existing tmux transport
-      without replacing it.
+    - Record coordination state; callers own transport invocation.
 
     Args:
         state_dir:   Directory containing runtime_coordination.db.
         dispatch_dir: Root directory for dispatch bundles
                       (e.g. .vnx-data/dispatches/).
-        shadow_mode: When True, broker registers but does not replace
-                     the existing tmux delivery transport.
+        shadow_mode: Diagnostic mode label for explicit callers/tests.
     """
 
     def __init__(
@@ -182,7 +171,7 @@ class DispatchBroker:
 
     @property
     def enabled(self) -> bool:
-        """Always True when directly instantiated. Use load_broker() for env-based toggling."""
+        """The broker is always enabled."""
         return True
 
     # ------------------------------------------------------------------
@@ -724,14 +713,13 @@ def load_broker(
     dispatch_dir: str | Path,
     *,
     quality_db_path: str | Path | None = None,
-) -> Optional[DispatchBroker]:
-    """Return a DispatchBroker if VNX_BROKER_ENABLED=1 (default), else None.
+) -> DispatchBroker:
+    """Return an enabled, authoritative DispatchBroker.
 
-    Shadow mode is determined by VNX_BROKER_SHADOW (default "1" = shadow ON).
     Intelligence injection is always enabled.
 
     This function is the standard entry point for production code that
-    needs to optionally use the broker without hard-failing when disabled.
+    needs durable registration and explicit delivery lifecycle recording.
 
     Args:
         state_dir:       Directory containing runtime_coordination.db.
@@ -740,11 +728,9 @@ def load_broker(
                          injection queries run but return empty results.
 
     Returns:
-        Configured DispatchBroker instance, or None if broker is disabled.
+        Configured DispatchBroker instance.
     """
     config = broker_config_from_env()
-    if not config["enabled"]:
-        return None
     return DispatchBroker(
         state_dir,
         dispatch_dir,
@@ -755,21 +741,15 @@ def load_broker(
 
 
 def broker_config_from_env() -> Dict[str, Any]:
-    """Return broker configuration derived from environment variables.
-
-    Reads:
-        VNX_BROKER_ENABLED  "1" (default) = enabled, "0" = disabled
-        VNX_BROKER_SHADOW   "1" (default) = shadow mode ON, "0" = OFF
+    """Return fixed production cutover values (compatibility entry point).
 
     Returns:
         Dict with keys:
             enabled (bool):     Whether the broker is enabled.
             shadow_mode (bool): Whether shadow mode is active.
     """
-    enabled = os.environ.get("VNX_BROKER_ENABLED", "1").strip() != "0"
-    shadow_mode = os.environ.get("VNX_BROKER_SHADOW", "1").strip() != "0"
     return {
-        "enabled": enabled,
-        "shadow_mode": shadow_mode,
+        "enabled": True,
+        "shadow_mode": False,
         "intelligence_enabled": True,
     }

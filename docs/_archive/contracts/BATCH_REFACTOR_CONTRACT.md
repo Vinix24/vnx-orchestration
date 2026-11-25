@@ -146,7 +146,7 @@ All modules depend on these shared variables (declared in orchestrator, exported
 |----------|---------|
 | `VNX_DIR`, `DISPATCH_DIR`, `QUEUE_DIR`, `PENDING_DIR`, `ACTIVE_DIR`, `COMPLETED_DIR`, `REJECTED_DIR` | Directory paths |
 | `STATE_DIR`, `TERMINALS_DIR`, `VNX_DISPATCH_PAYLOAD_DIR` | State/terminal paths |
-| `VNX_RUNTIME_PRIMARY`, `VNX_CANONICAL_LEASE_ACTIVE`, `VNX_BROKER_SHADOW` | Feature flags |
+| `VNX_CANONICAL_LEASE_ACTIVE` | Retained lease-GC guard; runtime and broker cutover switches removed in Q1b |
 | `VNX_DISPATCH_MAX_INLINE`, `VNX_DISPATCH_LEASE_SECONDS` | Thresholds |
 
 ### 1.5 Verification Rule
