@@ -45,8 +45,12 @@ def seed(w, account="vnx", scope="project", kind="permissie", text=None, oorzaak
 
 
 @pytest.fixture()
-def w(tmp_path):
+def w(tmp_path, monkeypatch):
     repo, home = tmp_path / "repo", tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    monkeypatch.delenv("VNX_OVERRIDE_ACCOUNT_DIRS", raising=False)
+    monkeypatch.setenv("VNX_ACCOUNT_DIRS", '[{"map":"~/.claude-salesminds","slot":"sm"}]')
     ns = SimpleNamespace(repo=repo, home=home, state=tmp_path / "state",
                          settings=write(repo / ".claude" / "settings.local.json", {"permissions": {"allow": ["Bash(ls)", RULE]}}))
     ns.pid = seed(ns)

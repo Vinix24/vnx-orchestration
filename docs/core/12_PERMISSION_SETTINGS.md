@@ -14,6 +14,8 @@ The main settings file is at: `.claude/settings.json`
 
 Since all terminal directories (T0-T3) have symlinks to the main `.claude` directory, they all share the same settings.
 
+The permission-event reader and user-scope applied check share the account mapping from [ADR-090](../governance/decisions/ADR-090-accountmappen-en-hun-slots.md): `~/.claude`, the process's `CLAUDE_CONFIG_DIR`, and the global registry key `VNX_ACCOUNT_DIRS` (a JSON list of `{map, slot}` rows). The default folder has slot `vnx` unless overridden; an unlisted config folder has slot `unknown`. Duplicate resolved folders, duplicate slots (including the default), and malformed rows refuse the load before events are written. Account files are `<folder>/.claude.json`, except `~/.claude` uses `~/.claude.json`; user-scope evidence must use the mapped slot's `<folder>/settings.json`. An unmapped slot cannot supply applied evidence. Project-scope paths are unchanged.
+
 ### additionalDirectories Setting
 
 The `additionalDirectories` setting in the permissions section grants Claude Code read access to specified directories without interactive permission prompts:

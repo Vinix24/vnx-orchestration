@@ -2,7 +2,7 @@
 
 Pure over one transcript's lines; every event is built by ``permission_events.build_event``, so nothing raw
 leaves this module. ``origin`` comes from the transcript dir slug and ``account`` from comparing the
-``session-owner`` uuid with the ``oauthAccount`` of two config files; neither slug, path, uuid nor e-mail is kept.
+``session-owner`` uuid with configured ``oauthAccount`` files; neither slug, path, uuid nor e-mail is kept.
 """
 
 from __future__ import annotations
@@ -13,13 +13,13 @@ import sys
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Tuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import permission_events as pe
+from permission_account_dirs import account_dirs
 
-DEFAULT_ACCOUNT_CONFIGS = (Path.home() / ".claude.json", Path.home() / ".claude-salesminds" / ".claude.json")
 ACCOUNT_SLOTS = ("vnx", "sm")
 ASK_PHRASES = ("draai dit", "draai deze", "draai het", "plak dit", "in een terminal", "in een eigen terminal",
                "bij jou", "met een !", "jij moet")
@@ -82,12 +82,21 @@ def _parse_config(text: str) -> Tuple[Optional[str], Optional[str]]:
     return (uuid, None) if isinstance(uuid, str) and uuid else (None, None if uuid is None else "wrong_type")
 
 
-def resolve_account_checked(owner_uuid: Any, config_paths: Sequence[Any] = DEFAULT_ACCOUNT_CONFIGS) -> Tuple[str, List[str]]:
+def default_account_configs() -> Dict[str, Path]:
+    """Resolve ADR-090 folders to account files; invalid mappings raise ValueError."""
+    default = (Path.home() / ".claude").resolve()
+    return {slot: Path.home() / ".claude.json" if folder == default else folder / ".claude.json"
+            for slot, folder in account_dirs().items()}
+
+
+def resolve_account_checked(owner_uuid: Any, config_paths=None) -> Tuple[str, List[str]]:
     """(account, reasons). A reason is ``config_<class>_<slot>``: never a path, uuid or e-mail; empty when all configs read."""
     reasons: List[str] = []
     account = "unknown"
     valid = isinstance(owner_uuid, str) and bool(owner_uuid)
-    for slot, path in zip(ACCOUNT_SLOTS, config_paths):
+    configs = default_account_configs() if config_paths is None else config_paths
+    pairs = configs.items() if isinstance(configs, Mapping) else zip(ACCOUNT_SLOTS, configs)
+    for slot, path in pairs:
         uuid, failure = _config_uuid(path)
         if failure:
             reasons.append(f"config_{failure}_{slot}")
@@ -96,8 +105,8 @@ def resolve_account_checked(owner_uuid: Any, config_paths: Sequence[Any] = DEFAU
     return account, reasons
 
 
-def resolve_account(owner_uuid: Any, config_paths: Sequence[Any] = DEFAULT_ACCOUNT_CONFIGS) -> str:
-    """``vnx`` or ``sm`` when the uuid matches the first or second config, else ``unknown``. The uuid never leaves."""
+def resolve_account(owner_uuid: Any, config_paths=None) -> str:
+    """The configured slot when the uuid matches, else ``unknown``. The uuid never leaves."""
     return resolve_account_checked(owner_uuid, config_paths)[0]
 
 
@@ -251,7 +260,7 @@ def read_b3(objs: Sequence[Dict[str, Any]], ctx: Ctx, skipped: Counter) -> Itera
 
 
 def scan_transcript(lines: Iterable[str], *, project_id: str, slug: str, stem: str,
-                    account_configs: Sequence[Any] = DEFAULT_ACCOUNT_CONFIGS) -> TranscriptScan:
+                    account_configs=None) -> TranscriptScan:
     """All B1, B2, B3 and B4a events of one transcript; ``skipped`` maps a source to its skip reasons."""
     out, objs = TranscriptScan(), []
     for raw in lines:

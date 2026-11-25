@@ -26,6 +26,8 @@ SLUG = "-proj-root"
 class Env:
     def __init__(self, tmp_path, monkeypatch, slug=SLUG, bind=True):
         monkeypatch.setenv("HOME", str(tmp_path))
+        for key in ("CLAUDE_CONFIG_DIR", "VNX_ACCOUNT_DIRS", "VNX_OVERRIDE_ACCOUNT_DIRS"):
+            monkeypatch.delenv(key, raising=False)
         self.tmp, self.projects = tmp_path, tmp_path / "projects"
         self.state = tmp_path / ".vnx-data" / "vnx-dev" / "state"
         self.dir = self.projects / slug

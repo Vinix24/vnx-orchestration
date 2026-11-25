@@ -234,7 +234,7 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
     "VNX_ACCOUNT_DIRS": _e(
         "VNX_ACCOUNT_DIRS", "string", "[]", "dispatch",
         "Claude account directories as a JSON list (ADR-090). The reader validates the content.",
-        scope="global", approval=True, subsystem="headless-dispatch-routing", status="ACTIVATE", read_site_wired=False),
+        scope="global", approval=True, subsystem="headless-dispatch-routing", status="ACTIVATE", read_site_wired=True),
 
     "VNX_SCOUT_PROVIDER": _e(
         "VNX_SCOUT_PROVIDER", "string", "deepseek", "intelligence",

@@ -60,7 +60,7 @@ def test_row_has_the_declared_shape(key):
     type_, default, scope, allowed = ROWS[key]
     entry = cr.CONFIG_REGISTRY[key]
     assert (entry.type, entry.default, entry.scope, entry.allowed_values) == (type_, default, scope, allowed)
-    assert entry.read_site_wired is (key in ("VNX_ENFORCEMENT_PROFILE", "VNX_AUTO_REPORT")) and entry.writable_from_ui is True
+    assert entry.read_site_wired is (key in ("VNX_ENFORCEMENT_PROFILE", "VNX_AUTO_REPORT", "VNX_ACCOUNT_DIRS")) and entry.writable_from_ui is True
     if allowed:
         assert entry.default in allowed
 
@@ -79,6 +79,8 @@ def test_approval_flags():
 def test_global_key_refuses_a_project_row(conn):
     with pytest.raises(PermissionError, match="VNX_ANALYZER_LLM is a global key"):
         cs.set_config(conn, "vnx-dev", "VNX_ANALYZER_LLM", "auto", actor="op")
+    with pytest.raises(PermissionError, match="VNX_ACCOUNT_DIRS is a global key"):
+        cs.set_config(conn, "vnx-dev", "VNX_ACCOUNT_DIRS", "[]", actor="op", approval_id="ap-1")
 
 
 def test_enforcement_profile_refuses_unknown_value_and_needs_approval(conn):
