@@ -67,7 +67,10 @@ the only way to make the check green again without losing the alarm.
 Exit codes: 0 all healthy, 1 findings, 2 cannot measure (a required file is
 missing or unreadable) — mirrors ``pre_merge_gate.py``'s ``SKIPPED_UNVERIFIED``
 (#1468): an unmeasurable state is never conflated with a pass, and outranks a
-finding in the overall rollup.
+finding in the overall rollup. An uncaught exception is exit 70 (EX_SOFTWARE), never 1, so a
+crash cannot read as a finding. A text run (not ``--json``, not ``acknowledge``) ends on one
+closing line ``ledger_health: <ok|finding|unmeasurable|crash> (exit N)``
+(``scripts/lib/job_exit.py``).
 
   lifecycle_count — (ADR-045 K-9) the five lifecycle defects over this project's
       ``v3`` lines (``scripts/lib/lifecycle_count.py``), reported BESIDE the four
@@ -798,4 +801,11 @@ def main(argv: Optional[List[str]] = None) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    from job_exit import argv_has_flag, run_job
+
+    # `acknowledge` has its own meanings for exits 1 and 2, and `--json` keeps stdout parseable.
+    _args = sys.argv[1:]
+    raise SystemExit(run_job(
+        "ledger_health", main, {0: "ok", 1: "finding", 2: "unmeasurable"},
+        closing_line=not (argv_has_flag(_args, "--json") or "acknowledge" in _args),
+    ))

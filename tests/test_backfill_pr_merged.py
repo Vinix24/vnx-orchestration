@@ -320,3 +320,41 @@ class TestBackfillIntegration:
         assert receipts[0]["pr_number"] == 700
         assert receipts[0]["event_type"] == "pr_merged"
         assert receipts[0]["backfilled"] is True
+
+
+class TestCrashExitAndClosingLine:
+    """OI-3079: a crash is exit 70, and a door-audit text run ends on one closing line."""
+
+    SCRIPT = VNX_ROOT / "scripts" / "backfill_pr_merged_receipts.py"
+
+    def test_crash_is_70_with_traceback(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from test_job_exit import run_script_crashing
+        proc = run_script_crashing(self.SCRIPT, "--all-projects")
+        assert proc.returncode == 70
+        assert "Traceback" in proc.stderr
+
+    def test_fleet_text_run_ends_on_the_closing_line_after_the_fleet_line(self, tmp_path):
+        import re
+        import subprocess
+        registry = tmp_path / "projects.json"
+        registry.write_text("[]")
+        proc = subprocess.run(
+            [sys.executable, str(self.SCRIPT), "--all-projects", "--registry", str(registry)],
+            capture_output=True, text=True, timeout=120,
+        )
+        lines = proc.stdout.splitlines()
+        assert proc.returncode in (0, 1, 2)
+        assert any(l.startswith("Door audit fleet:") for l in lines[:-1])
+        m = re.fullmatch(r"door_audit: (\w+) \(exit (\d+)\)", lines[-1])
+        assert m and int(m.group(2)) == proc.returncode
+
+    def test_json_run_stays_parseable(self, tmp_path):
+        import subprocess
+        registry = tmp_path / "projects.json"
+        registry.write_text("[]")
+        proc = subprocess.run(
+            [sys.executable, str(self.SCRIPT), "--all-projects", "--json", "--registry", str(registry)],
+            capture_output=True, text=True, timeout=120,
+        )
+        assert isinstance(json.loads(proc.stdout), dict)
