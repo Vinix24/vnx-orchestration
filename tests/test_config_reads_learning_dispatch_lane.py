@@ -116,7 +116,7 @@ def test_placebo_arm_reads_the_stored_value(tmp_path, monkeypatch):
 def test_placebo_arm_has_no_env_fallback_when_config_runtime_fails(monkeypatch):
     import intelligence_selector
 
-    def boom(key):
+    def boom(key, **kwargs):
         raise RuntimeError("store unreadable")
 
     monkeypatch.setattr(config_runtime, "get_bool", boom)
