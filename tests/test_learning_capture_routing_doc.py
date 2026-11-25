@@ -116,12 +116,11 @@ def test_rollback_paragraph(adr):
     assert "geen datamigratie" in section.lower()
 
 
-def test_working_copy_has_table_adoption_order_and_waarom(working):
+def test_working_copy_is_quick_reference_with_adr_link_and_adoption_order(working):
     assert "## Adoptievolgorde" in working
-    assert "## Waarom" in working
-    waarom = working.split("## Waarom", 1)[1]
-    lines = [ln for ln in waarom.splitlines() if ln.startswith("- **")]
-    assert len(lines) == 4, lines
+    assert working.startswith("# Learning capture routing — snelle referentie\n")
+    assert "[ADR-067](../governance/decisions/ADR-067-learning-capture-routing.md)" in working
+    assert re.findall(r"^## (.+)$", working, flags=re.M) == ["Kies één home", "Bronnen binden", "Adoptievolgorde"]
     adoption = working.split("## Adoptievolgorde", 1)[1].split("\n## ", 1)[0]
     order = ["nachtelijke run", "report", "dismiss", "volgende run"]
     pos = [adoption.find(step) for step in order]

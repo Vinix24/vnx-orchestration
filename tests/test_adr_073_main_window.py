@@ -13,7 +13,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 ADR_PATH = REPO_ROOT / "docs" / "governance" / "decisions" / "ADR-073-main-venster-in-plaats-van-wachten-per-merge.md"
-METING_PATH = REPO_ROOT / "docs" / "operations" / "CI_COST_METING.md"
+METING_PATH = REPO_ROOT / "docs" / "_archive" / "operations" / "CI_COST_METING.md"
 DOCS_INDEX = REPO_ROOT / "docs" / "DOCS_INDEX.md"
 
 
