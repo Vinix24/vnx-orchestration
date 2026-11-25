@@ -232,7 +232,8 @@ def discover_attempts(reader, project, repo, rows, first, last, workflows, issue
         if start is None or not positive(count):
             issues.append(f"source_invalid: attempt identity run {row['id']}")
             continue
-        if start.date() < first:
+        updated = parse_timestamp(row.get("updated_at"))
+        if start.date() < first and (count == 1 or (updated is not None and updated.date() < first)):
             continue
         for number in range(1, count + 1):
             saved = existing.get((repo, project, row["id"], number))
@@ -281,10 +282,13 @@ def write_runs(project_id, from_day, to_day, *, now, project_root, state_dir=Non
     reader = RunReader(project_root, max_calls, runner)
     existing = existing_records(state / "ci_runs.ndjson")
     issues, records, skipped = [], [], []
-    repo = reader.read(["repo", "view", "--json", "nameWithOwner"]).get("nameWithOwner")
+    info = reader.read(["repo", "view", "--json", "nameWithOwner,createdAt"])
+    repo, created = info.get("nameWithOwner"), parse_timestamp(info.get("createdAt"))
     if not isinstance(repo, str) or not re.fullmatch(REPOSITORY, repo):
         raise ValueError("unresolved repository")
-    rows, error = reader.pages(f"repos/{repo}/actions/runs", "workflow_runs")
+    if created is None:
+        raise ValueError("unresolved repository creation time")
+    rows, error = reader.runs(repo, created, parse_timestamp(f"{to_day}T23:59:59Z"))
     if error:
         issues.append(error)
     attempts = discover_attempts(reader, project_id, repo, rows, from_day, to_day,
