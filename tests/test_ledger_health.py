@@ -346,7 +346,7 @@ class TestReceiptCoveragePerProject:
 
 class TestChainStatus:
     def test_unchained_default_config_is_ok_but_its_own_class(self, state_dir, monkeypatch):
-        monkeypatch.delenv("VNX_CHAIN_RECEIPTS", raising=False)
+        monkeypatch.delenv("VNX_HASH_CHAIN_REQUIRED", raising=False)
         _write_ndjson(state_dir / lh.LEDGER_NAME, _receipt("d-001"))
 
         result = lh.check_chain_status(state_dir)
@@ -355,7 +355,7 @@ class TestChainStatus:
         assert result["status"] == lh.STATUS_OK
 
     def test_unchained_while_configured_on_is_a_finding(self, state_dir, monkeypatch):
-        monkeypatch.setenv("VNX_CHAIN_RECEIPTS", "1")
+        monkeypatch.setenv("VNX_HASH_CHAIN_REQUIRED", "1")
         _write_ndjson(state_dir / lh.LEDGER_NAME, _receipt("d-001"))
 
         result = lh.check_chain_status(state_dir)
@@ -364,7 +364,7 @@ class TestChainStatus:
         assert result["status"] == lh.STATUS_FINDING
 
     def test_verified_chain_is_ok(self, state_dir, monkeypatch):
-        monkeypatch.delenv("VNX_CHAIN_RECEIPTS", raising=False)
+        monkeypatch.delenv("VNX_HASH_CHAIN_REQUIRED", raising=False)
         ledger_path = state_dir / lh.LEDGER_NAME
         for i in range(3):
             append_chained_entry(ledger_path, {"seq": i, "dispatch_id": f"d-{i:03d}"})
@@ -391,7 +391,7 @@ class TestChainStatus:
         assert result["status"] == lh.STATUS_FINDING
 
     def test_sealed_ledger_with_an_unchained_line_is_a_finding_without_the_variable(self, state_dir, monkeypatch):
-        monkeypatch.delenv("VNX_CHAIN_RECEIPTS", raising=False)
+        monkeypatch.delenv("VNX_HASH_CHAIN_REQUIRED", raising=False)
         ledger_path = state_dir / lh.LEDGER_NAME
         _write_ndjson(ledger_path, _receipt("d-001"))
         append_epoch_marker(ledger_path, 1)
@@ -525,7 +525,7 @@ class TestMigrationStaleness:
         """compute_health includes migration_staleness in its checks dict and
         a finding there rolls up to overall STATUS_FINDING (vnx doctor reads
         this via the existing beacon-fail fallback — see _check_ledger_health)."""
-        monkeypatch.delenv("VNX_CHAIN_RECEIPTS", raising=False)
+        monkeypatch.delenv("VNX_HASH_CHAIN_REQUIRED", raising=False)
         _write_ndjson(state_dir / lh.REGISTER_NAME, _register_entry("d-001"))
         _write_ndjson(state_dir / lh.LEDGER_NAME, _receipt("d-001"))
         _db_at_version(state_dir, 31)
@@ -548,7 +548,7 @@ class TestMigrationStaleness:
 
 class TestComputeHealth:
     def test_all_ok_rolls_up_to_ok_exit_0(self, tmp_path, state_dir, monkeypatch):
-        monkeypatch.delenv("VNX_CHAIN_RECEIPTS", raising=False)
+        monkeypatch.delenv("VNX_HASH_CHAIN_REQUIRED", raising=False)
         _write_ndjson(state_dir / lh.REGISTER_NAME, _register_entry("d-001"))
         _write_ndjson(state_dir / lh.LEDGER_NAME, _receipt("d-001"))
 
@@ -558,7 +558,7 @@ class TestComputeHealth:
         assert result["exit_code"] == lh.EXIT_OK
 
     def test_any_finding_rolls_up_to_finding_exit_1(self, tmp_path, state_dir, monkeypatch):
-        monkeypatch.delenv("VNX_CHAIN_RECEIPTS", raising=False)
+        monkeypatch.delenv("VNX_HASH_CHAIN_REQUIRED", raising=False)
         _write_ndjson(state_dir / lh.REGISTER_NAME, _register_entry("d-001"), _register_entry("d-orphan"))
         _write_ndjson(state_dir / lh.LEDGER_NAME, _receipt("d-001"))
 
@@ -585,7 +585,7 @@ class TestComputeHealth:
         alone (no missing receipts, no stale open outcome, no chain finding) now
         actually produces that SKIPPED_UNVERIFIED in the first place.
         """
-        monkeypatch.delenv("VNX_CHAIN_RECEIPTS", raising=False)
+        monkeypatch.delenv("VNX_HASH_CHAIN_REQUIRED", raising=False)
         register_path = state_dir / lh.REGISTER_NAME
         register_path.write_text(
             json.dumps(_register_entry("d-001")) + "\n" + "{not json\n", encoding="utf-8"
@@ -959,7 +959,7 @@ class TestReceiptCoverageAcknowledged:
         assert "acknowledg" in result["reason"]
 
     def test_acknowledged_gap_rolls_up_to_healthy_exit_0(self, tmp_path, state_dir, monkeypatch):
-        monkeypatch.delenv("VNX_CHAIN_RECEIPTS", raising=False)
+        monkeypatch.delenv("VNX_HASH_CHAIN_REQUIRED", raising=False)
         _write_ndjson(state_dir / lh.REGISTER_NAME, _register_entry("d-001"), _register_entry("d-fixture"))
         _write_ndjson(state_dir / lh.LEDGER_NAME, _receipt("d-001"))
         _write_ack(state_dir, _ack_record("d-fixture"))
@@ -971,7 +971,7 @@ class TestReceiptCoverageAcknowledged:
         assert result["exit_code"] == lh.EXIT_OK
 
     def test_acknowledgement_stays_visible_in_the_beacon(self, tmp_path, state_dir, monkeypatch):
-        monkeypatch.delenv("VNX_CHAIN_RECEIPTS", raising=False)
+        monkeypatch.delenv("VNX_HASH_CHAIN_REQUIRED", raising=False)
         _write_ndjson(state_dir / lh.REGISTER_NAME, _register_entry("d-fixture"))
         _write_ndjson(state_dir / lh.LEDGER_NAME, _receipt("d-other"))
         _write_ack(state_dir, _ack_record("d-fixture", reason="zichtbaar in de beacon"))
@@ -1144,7 +1144,7 @@ class TestAcknowledgeCli:
 
     def test_acknowledge_then_check_round_trip(self, tmp_path, state_dir, monkeypatch):
         """The CLI writes what the check reads: run both for real."""
-        monkeypatch.delenv("VNX_CHAIN_RECEIPTS", raising=False)
+        monkeypatch.delenv("VNX_HASH_CHAIN_REQUIRED", raising=False)
         _write_ndjson(state_dir / lh.REGISTER_NAME, _register_entry("d-001"), _register_entry("d-gap"))
         _write_ndjson(state_dir / lh.LEDGER_NAME, _receipt("d-001"))
 

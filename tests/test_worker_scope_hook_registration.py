@@ -116,6 +116,7 @@ def test_flag_off_allows_without_touching_the_filesystem(monkeypatch, flag, payl
     monkeypatch.setattr(os, "stat", _refuse)
 
     assert hook.evaluate(payload) == ("allow", None)
+    monkeypatch.undo()
 
 
 def test_explicit_skip_beats_an_enabled_flag(monkeypatch):

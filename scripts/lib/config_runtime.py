@@ -180,9 +180,12 @@ def get(key: str) -> Optional[str]:
     return config_registry.get(key)
 
 
-def get_bool(key: str) -> bool:
-    """Bool view of get() — true for any truthy spelling (1/true/yes/on), via config_registry.get_bool."""
-    autowire()
+def get_bool(key: str, *, state_dir: "str | Path | None" = None) -> bool:
+    """Bool view of get(); an explicit state_dir binds its store without git discovery."""
+    if not autowire(state_dir=state_dir) and state_dir is not None:
+        # An explicit missing store must never reuse a previously bound project.
+        config_registry.set_db_resolver(None)
+        config_registry.set_default_project_id(None)
     return config_registry.get_bool(key)
 
 

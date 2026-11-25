@@ -272,7 +272,7 @@ def test_rebuild_dry_run_does_not_write_index(tmp_path):
 
 
 def test_flag_off_no_chain_fields_but_has_outcome_id(tmp_path, monkeypatch):
-    monkeypatch.delenv("VNX_CHAIN_RECEIPTS", raising=False)
+    monkeypatch.delenv("VNX_HASH_CHAIN_REQUIRED", raising=False)
     receipt_path = tmp_path / "t0_receipts.ndjson"
     r = {"event_type": "task_complete", "dispatch_id": "disp-chain-off", "status": "success"}
 
