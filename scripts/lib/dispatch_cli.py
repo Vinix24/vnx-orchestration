@@ -357,6 +357,7 @@ def _print_plan(plan: ExecutionPlan, fp: str, *, spec: "Optional[DispatchSpec]" 
     print(f"  target_id:    {plan.target_id}")
     print(f"  billing:      {plan.billing}")
     print(f"  requires_mcp: {plan.requires_mcp}")
+    print(f"  waived_guarantees: {json.dumps(plan.waived_guarantees)}")
     print(f"  route_reason: {plan.route_reason}")
     # Chain-link (dispatch-20260802-model-ssot-en-ketenlink): printed so a dry-run
     # proves the spec fields landed on the plan.
@@ -1268,16 +1269,43 @@ def _lookup_track_phase(db_path: Path, track_id: str, project_id: str) -> Option
         conn.close()
 
 
-def _check_track_link_verdict(spec: DispatchSpec, *, state_dir: Path) -> Optional[ConstraintVerdict]:
+def _plan_gate_evidence_refusal(code: str, message: str, waived: list) -> ConstraintVerdict:
+    import plan_gate_enforcement as pge
+    overridden = pge.override_active()
+    if overridden:
+        waived.append(dict(feature="plan_gate", key="VNX_OVERRIDE_PLAN_GATE", value="1",
+                           source="override", reason=code))
+    return ConstraintVerdict(code=code, severity="warn" if overridden else "blocking",
+                             message=message, override_applied=overridden)
+
+
+def _dispatch_feature_mode(spec, waived_guarantees):
+    import optional_features as of
+    import plan_gate_enforcement as pge
+    if waived_guarantees is None:
+        return pge.enforce_mode()
+    taken = of.snapshot(spec.project_id, project_root=Path(os.environ.get("PROJECT_ROOT") or _resolve_repo_root()))
+    waived_guarantees.extend(of.waived_guarantees(spec.project_id, snapshot=taken))
+    return taken[of.PLAN_GATE].value
+
+
+def _check_track_link_verdict(spec: DispatchSpec, *, state_dir: Path, waived_guarantees=None) -> Optional[ConstraintVerdict]:
     """Validate spec.track_id at the door.
 
     - track_id present, references a nonexistent or already-done track -> blocking Reject
       (the tag-vs-link mistake becomes impossible).
     - track_id present, references a live track -> None (passes clean).
-    - tracks DB unavailable while checking a present track_id -> WARN, never crash.
+    - tracks DB unavailable -> blocking under required, otherwise WARN.
     - track_id absent -> staged advisory (VNX_REQUIRE_DISPATCH_TRACK OFF, default) WARN,
       or required (ON) blocking Reject unless tags carries a 'no-track:<reason>' escape.
     """
+    import optional_features as of
+    import plan_gate_enforcement as _pge
+    waived = waived_guarantees if waived_guarantees is not None else []
+    try:
+        mode = _dispatch_feature_mode(spec, waived_guarantees)
+    except of.OptionalFeatureRefused as exc:
+        return ConstraintVerdict(code=exc.code, severity="blocking", message=str(exc))
     track_id = (spec.track_id or "").strip()
     db_path = _tracks_db_path(state_dir)
 
@@ -1285,6 +1313,9 @@ def _check_track_link_verdict(spec: DispatchSpec, *, state_dir: Path) -> Optiona
         try:
             phase = _lookup_track_phase(db_path, track_id, spec.project_id)
         except Exception as exc:
+            if mode == "required":
+                return _plan_gate_evidence_refusal("plan_gate_evidence_unreadable",
+                    f"track_id={track_id!r}: {exc}; retry the tracks DB read", waived)
             return ConstraintVerdict(
                 code="tracks-db-unavailable",
                 severity="warn",
@@ -1293,62 +1324,51 @@ def _check_track_link_verdict(spec: DispatchSpec, *, state_dir: Path) -> Optiona
                     "degrading to warn"
                 ),
             )
-        if phase is None:
-            return ConstraintVerdict(
-                code="bad-track-link",
-                severity="blocking",
-                message=(
-                    f"track_id={track_id!r} does not reference an existing track "
-                    f"for project_id={spec.project_id!r}"
-                ),
-            )
-        if phase == "done":
-            return ConstraintVerdict(
-                code="bad-track-link",
-                severity="blocking",
-                message=f"track_id={track_id!r} references a track already in phase='done'",
-            )
+        if phase is None or phase == "done":
+            return ConstraintVerdict(code="bad-track-link", severity="blocking",
+                message=f"track_id={track_id!r} does not reference an existing live track "
+                        f"for project_id={spec.project_id!r} (phase={phase!r})")
 
         # Plan-first-gate enforcement (advisory-first). A live track whose OI-PLAN
         # plan-first gate is unresolved must not be dispatched: building before
         # planning is exactly what the gate exists to prevent, yet the gate used to
         # bind only closure bookkeeping. Shared read-only check lives in
         # plan_gate_enforcement so the merge gate applies the same rule.
-        import plan_gate_enforcement as _pge  # noqa: PLC0415
-        mode = _pge.enforce_mode()
         if mode != "off":
             try:
                 pg_state = _pge.plan_gate_state(db_path, track_id, spec.project_id)
-            except Exception:
-                # DB race between the phase read and here; already fail-open above.
+            except Exception as exc:
+                if mode == "required":
+                    return _plan_gate_evidence_refusal("plan_gate_evidence_unreadable",
+                        f"track_id={track_id!r}: {exc}; retry the plan-gate read", waived)
                 pg_state = _pge.UNSUPPORTED
             if pg_state == _pge.UNRESOLVED:
                 run_cmd = f"vnx horizon plan-gate run {track_id} --doc <plan-doc>"
-                if mode == "required" and not _pge.override_active():
-                    return ConstraintVerdict(
-                        code="plan-gate-unresolved",
-                        severity="blocking",
-                        message=(
-                            f"track_id={track_id!r} has not passed its plan-first gate "
-                            f"(OI-PLAN-{track_id} unresolved). Plan before work: run "
-                            f"`{run_cmd}` (or `vnx horizon plan-gate attest {track_id}`), or "
-                            f"operator-override with VNX_OVERRIDE_PLAN_GATE=1."
-                        ),
-                    )
                 overridden = mode == "required" and _pge.override_active()
+                if overridden:
+                    waived.append(dict(feature="plan_gate", key="VNX_OVERRIDE_PLAN_GATE", value="1",
+                                       source="override", reason="plan-gate-unresolved"))
                 return ConstraintVerdict(
                     code="plan-gate-unresolved",
-                    severity="warn",
+                    severity="blocking" if mode == "required" and not overridden else "warn",
                     message=(
                         f"track_id={track_id!r} plan-first gate unresolved "
                         f"(VNX_PLAN_GATE_ENFORCE={mode}"
                         + (", operator override applied" if overridden else "")
-                        + f"); advisory. Run `{run_cmd}` before dispatching."
+                        + f"). Run `{run_cmd}` before dispatching, or set VNX_OVERRIDE_PLAN_GATE=1."
                     ),
                     override_applied=overridden,
                 )
+            if pg_state == _pge.PASSED:
+                return None
+            if mode == "required":
+                return _plan_gate_evidence_refusal("plan_gate_evidence_unsupported",
+                    f"track_id={track_id!r}: unsupported plan-gate evidence {pg_state!r}", waived)
         return None
 
+    source = next((t for t in spec.tags if _NO_TRACK_ESCAPE_RE.match(t)), "track_unlinked")
+    waived.append(dict(feature="plan_gate", key="track_id", value="none", source=source,
+                       guarantee="this build hangs on no plan"))
     import config_runtime
     required = config_runtime.get_bool("VNX_REQUIRE_DISPATCH_TRACK")
     if not required:
@@ -2667,12 +2687,12 @@ def _check_b3_cap_verdict(spec: DispatchSpec, *, state_dir: Path) -> Optional[Co
 
 
 def _project_state_verdicts(
-    spec: DispatchSpec, *, state_dir: Path, predecessor_override_reason: Optional[str] = None, dry_run: bool = False,
+    spec: DispatchSpec, *, state_dir: Path, predecessor_override_reason: Optional[str] = None, dry_run: bool = False, waived_guarantees=None,
 ) -> "tuple[ConstraintVerdict, ...]":
     """The door's checks against this project's own state: the track link (TL-D1), the B3 cap (R1) and the
     hard predecessors of the fire's deliverable (ADR-096 B2, per candidate: not a stop condition)."""
     verdicts = (
-        _check_track_link_verdict(spec, state_dir=state_dir),
+        _check_track_link_verdict(spec, state_dir=state_dir, waived_guarantees=waived_guarantees),
         _check_b3_cap_verdict(spec, state_dir=state_dir),
         _check_predecessor_verdict(dispatch_id=spec.dispatch_id, project_id=spec.project_id, state_dir=state_dir,
                                    override_reason=predecessor_override_reason, dry_run=dry_run),
@@ -3202,7 +3222,8 @@ def build_runtime_snapshot(
     # branch of a PR at the B3 cap is refused early (_check_b3_cap_verdict). The
     # B3 override DECISION rides the ``b3-cap-override-applied`` verdict and is
     # booked only at the commit-to-fire point (R1d), never here.
-    constraint_verdicts = constraint_verdicts + _project_state_verdicts(spec, state_dir=data_dir / "state", predecessor_override_reason=predecessor_override_reason, dry_run=dry_run)
+    waived_guarantees = []
+    constraint_verdicts += _project_state_verdicts(spec, state_dir=data_dir / "state", predecessor_override_reason=predecessor_override_reason, dry_run=dry_run, waived_guarantees=waived_guarantees)
 
     # golf 2A: T0 autonomous-chain stop-conditions, measured live on every fire.
     # OI-1694: scoped to THIS dispatch's own provider/gate — see
@@ -3278,7 +3299,7 @@ def build_runtime_snapshot(
 
     return RuntimeSnapshot(
         constraint_verdicts=constraint_verdicts,
-        staging_promoted=staging_promoted,
+        staging_promoted=staging_promoted, waived_guarantees=tuple(waived_guarantees),
         target_health=target_health,
         target_capable=target_capable,
         model_pins=snapshot_model_pins,
@@ -3286,8 +3307,7 @@ def build_runtime_snapshot(
         valid_task_classes=valid_task_classes,
         parent_dispatch=chain_parent,
         task_class=chain_task_class,
-        tier_from=chain_tier_from, tier_to=chain_tier_to,
-        difficulty=spec.difficulty,
+        tier_from=chain_tier_from, tier_to=chain_tier_to, difficulty=spec.difficulty,
         worker_claude_override_reason=worker_claude_override_reason,
         # RS-2: the same root the role registry above came from, so a declared
         # skill is resolved against the checkout the dispatch will run in.

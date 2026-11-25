@@ -21,3 +21,12 @@ Background: [dispatch rules](../core/DISPATCH_RULES.md) and [enforcement chain](
 ## Flag
 
 `VNX_PLAN_GATE_ENFORCE`
+
+The dispatch door follows [ADR-092](../governance/decisions/ADR-092-optionele-features-expliciet.md):
+unknown or unreadable modes refuse by name. With a track and `required`, unreadable evidence
+refuses with `plan_gate_evidence_unreadable` (including the error); unsupported evidence refuses
+with `plan_gate_evidence_unsupported`. Retry after restoring the evidence. `VNX_OVERRIDE_PLAN_GATE=1`
+waives those refusals or an unresolved plan, recording the refusal code in `waived_guarantees`.
+Without a track, the existing track requirement still applies and a waiver names `track_unlinked`
+or `no-track:<reason>`. Advisory and off keep their evidence behavior. The list includes the optional
+feature snapshot, participates in the plan digest, and reaches the receipt under `route_decision.decision`.
