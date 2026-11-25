@@ -71,6 +71,7 @@ def _door(monkeypatch, tmp_path: Path, first_holds, release):
     # A store with the ADR-007 project_id column and no in-flight rows: the first fire
     # must read "clear" so it can reach its claim.
     dispatch_cli._rc_init_schema(state_dir)
+    (state_dir / ".vnx-project-id").write_text(PID + "\n")
     project_id_migration.run_runtime_coordination_migration(
         coordination_db.db_path_from_state_dir(state_dir), default_project_id=PID)
 
