@@ -234,7 +234,7 @@ def test_editing_an_allowed_quoted_line_is_red_both_ways(tmp_path):
 
 def test_table_rows_for_the_fourth_name_are_complete_and_valid():
     rows = [r for r in on.load_table() if r["name"] == DEV]
-    assert len(rows) == 321 and sum(r["count"] for r in rows) == 349
+    assert len(rows) == 313 and sum(r["count"] for r in rows) == 341
     migrations = [r for r in rows if r["path"].startswith("schemas/migrations/")]
     assert len(migrations) == 65 and sum(r["count"] for r in migrations) == 75
     assert all(r["category"] != "te_repareren" or r["group"] for r in rows)

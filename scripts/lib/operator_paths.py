@@ -1,4 +1,3 @@
-"""Lazy, fail-closed project/store resolution for operator tools."""
 from pathlib import Path
 from project_scope import resolve_stamp_project_id
 from vnx_paths import resolve_central_data_dir

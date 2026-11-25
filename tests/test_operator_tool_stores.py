@@ -1,4 +1,3 @@
-"""Operator defaults must read the current project's central store."""
 import os
 from pathlib import Path
 import subprocess
