@@ -315,6 +315,11 @@ still resolve as a backward-compat alias). It is the model-invocable front door
 to the same surface — it plans work into Horizon and reasons over the tracks
 DB, delegating the actual mutations to `vnx horizon`.
 
+Load `skills/proportionality/SKILL.md` alongside planning to identify touched
+risk classes, justify mechanisms and write a removal list. The same rubric is
+available for manual plan-gate and code review use. Automatic integration is
+separate work (doorloop-per-feature R4b/R4c); R4a adds no gate or receipt field.
+
 ## Related
 
 - `docs/core/HORIZON_LIFECYCLE.md` — the narrative: a track from born-planned to closed (plan-gate → work → reconcile → close → auto-close), the ADR-030 enforcement, and the build-before-plan failure mode.

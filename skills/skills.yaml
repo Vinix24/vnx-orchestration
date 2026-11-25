@@ -28,6 +28,11 @@ skills:
     file: "horizon/SKILL.md"
     type: planning
 
+  proportionality:
+    name: "@proportionality"
+    file: "proportionality/SKILL.md"
+    type: reference
+
   architect:
     name: "@architect"
     file: "architect/SKILL.md"
