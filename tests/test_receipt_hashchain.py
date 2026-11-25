@@ -38,8 +38,7 @@ SCRIPTS_DIR = VNX_ROOT / "scripts"
 LIB_DIR = SCRIPTS_DIR / "lib"
 
 for _p in (str(SCRIPTS_DIR), str(LIB_DIR)):
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
+    sys.path.insert(0, _p)
 
 from append_receipt_internals.idempotency import (  # noqa: E402
     _cache_file_for,
@@ -168,9 +167,10 @@ def _concurrent_worker(receipt_path_str: str, worker_id: int, n_workers: int) ->
     os.environ["VNX_HASH_CHAIN_REQUIRED"] = "1"
     # Re-resolve imports inside the spawned process.
     for _p in (str(SCRIPTS_DIR), str(LIB_DIR)):
-        if _p not in sys.path:
-            sys.path.insert(0, _p)
+        sys.path.insert(0, _p)
     from append_receipt_internals import idempotency
+    import config_runtime
+    assert Path(config_runtime.__file__).resolve() == LIB_DIR / "config_runtime.py", config_runtime.__file__
 
     receipt_path = Path(receipt_path_str)
     if os.environ.get(_NO_APPEND_LOCK_ENV) == "1":
@@ -192,8 +192,15 @@ def _concurrent_worker(receipt_path_str: str, worker_id: int, n_workers: int) ->
 # the same tail already fork the chain, and eight spawned processes interleave far more than
 # two; a sixteenth adds spawn time and no new interleaving the eight have not shown.
 @pytest.mark.parametrize("n_workers", [8])
-def test_concurrent_appends_no_fork(tmp_path, n_workers):
+@pytest.mark.parametrize("foreign_lib", [False, True])
+def test_concurrent_appends_no_fork(tmp_path, monkeypatch, n_workers, foreign_lib):
     receipt_path = tmp_path / f"t0_receipts_{n_workers}.ndjson"
+    if foreign_lib:
+        foreign = tmp_path / "foreign-lib"
+        foreign.mkdir()
+        (foreign / "config_runtime.py").write_text(
+            'raise AssertionError("foreign config_runtime imported")\n')
+        monkeypatch.syspath_prepend(str(foreign))
 
     ctx = mp.get_context("spawn")
     procs = [
