@@ -362,6 +362,8 @@ def test_real_scripts_tree_gives_the_nine_measured_writers() -> None:
     ``scripts/daily_metrics.py daily`` run. Periodic (36 h, ADR-097), so
     opt-in remains per project: ``expected_component_names()`` excludes it,
     while existing project-local beacons still get the 36-hour deadline.
+
+    ADR-097 M3a adds ``ci_runs`` for attempt population coverage and writer failures.
     """
     reg = br.read_beacon_register()
     names = {s.name for s in reg}
@@ -391,6 +393,7 @@ def test_real_scripts_tree_gives_the_nine_measured_writers() -> None:
         "lifecycle_count",
         "door_audit",
         "daily_metrics",
+        "ci_runs",
         "dream_liveness",
         "rework_attribution",
     }

@@ -125,6 +125,14 @@ def test_filter_and_configured_artifact(writer, tmp_path):
     assert "junit" in record["failed_tests"]["source"] and "M3b" in record["failed_tests"]["source"]
 
 
+@pytest.mark.parametrize("head", [None, "b" * 40])
+def test_saved_identity_cannot_clear_contradictory_head(writer, tmp_path, head):
+    execute(writer, tmp_path)
+    row = dict(run_row(), head_sha=head)
+    result, records, _ = execute(writer, tmp_path, [row])
+    assert result["coverage"] == "incomplete" and result["written"] == 0
+
+
 @pytest.mark.parametrize("kind", ["wall", "queue"])
 def test_negative_elapsed(writer, tmp_path, kind):
     def override(args, count):

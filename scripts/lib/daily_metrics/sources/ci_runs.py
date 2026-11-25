@@ -237,7 +237,9 @@ def discover_attempts(reader, project, repo, rows, first, last, workflows, issue
         for number in range(1, count + 1):
             saved = existing.get((repo, project, row["id"], number))
             if saved is not None:
-                if first.isoformat() <= saved["day"] <= last.isoformat():
+                if saved["head_sha"] != row.get("head_sha"):
+                    issues.append(f"source_invalid: stored head contradicts run {row['id']}")
+                elif first.isoformat() <= saved["day"] <= last.isoformat():
                     attempts.append((saved, None, None))
                 continue
             source = f"repos/{repo}/actions/runs/{row['id']}/attempts/{number}"
