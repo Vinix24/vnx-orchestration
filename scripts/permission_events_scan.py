@@ -13,7 +13,7 @@ import sys
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, TextIO
+from typing import Dict, List, Optional, TextIO
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
 
@@ -67,9 +67,10 @@ def _coverage_args(result: source.SourceResult, read: int, unreadable: int) -> D
 
 
 def run_scan(project_id: str, since: str, projects_root: Path, state_dir: Optional[Path] = None,
-             account_configs: Sequence[Path] = sources.DEFAULT_ACCOUNT_CONFIGS, now: Optional[datetime] = None,
+             account_configs=None, now: Optional[datetime] = None,
              out: Optional[TextIO] = None) -> int:
     out = out or sys.stdout
+    account_configs = sources.default_account_configs() if account_configs is None else account_configs
     state = pe._state_dir(project_id, state_dir)  # the single gate: fleet project id, central store
     derived = project_id_from_state_dir(state)
     if derived and derived != project_id:
@@ -146,12 +147,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--since", default="7d", help="<N>d or <N>h (default 7d)")
     parser.add_argument("--projects-root", default=str(source.DEFAULT_PROJECTS_ROOT))
     parser.add_argument("--state-dir", help="project state dir (default: central store of the project)")
-    parser.add_argument("--vnx-config", default=str(sources.DEFAULT_ACCOUNT_CONFIGS[0]), help="config whose oauthAccount is slot vnx")
-    parser.add_argument("--sm-config", default=str(sources.DEFAULT_ACCOUNT_CONFIGS[1]), help="config whose oauthAccount is slot sm")
+    parser.add_argument("--vnx-config", help="explicit config whose oauthAccount is slot vnx")
+    parser.add_argument("--sm-config", help="explicit config whose oauthAccount is slot sm")
     args = parser.parse_args(argv)
     try:
+        configs = sources.default_account_configs()
+        configs.update({slot: Path(value) for slot, value in (("vnx", args.vnx_config), ("sm", args.sm_config)) if value})
         return run_scan(args.project_id, args.since, Path(args.projects_root), Path(args.state_dir) if args.state_dir else None,
-                        (Path(args.vnx_config), Path(args.sm_config)))
+                        configs)
     except (ValueError, PermissionError) as exc:
         print(f"scan refused: {exc}", file=sys.stderr)
         return 2

@@ -174,9 +174,14 @@ def strict_resolver() -> "Optional[tuple[config_registry.DbResolver, str]]":
     return None
 
 
-def get(key: str) -> Optional[str]:
-    """Resolve a config value for this process's project (autowiring the DB layer on first use)."""
+def get(key: str, *, strict: bool = False) -> Optional[str]:
+    """Resolve a runtime value; strict readers raise ValueError on registry error sources."""
     autowire()
+    if strict:
+        value, source = config_registry.resolve_with_source(key, strict_resolver=True)
+        if source in config_registry.ERROR_SOURCES:
+            raise ValueError(f"{key}={value!r}: {source}")
+        return value
     return config_registry.get(key)
 
 

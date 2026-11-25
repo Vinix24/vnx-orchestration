@@ -73,7 +73,7 @@
   ["scripts/lib/migrations/apply_0020.py", "vnx-dev", "243ac6452cf3f704", 1], ["scripts/lib/migrations/apply_0026.py", "vnx-dev", "eae6031e02467c76", 1], ["scripts/lib/migrations/apply_0031.py", "vnx-dev", "a31cf1138573bd69", 1],
   ["scripts/lib/migrations/apply_0034.py", "vnx-dev", "42157072f0127760", 1], ["scripts/lib/morning_round_routing.py", "vnx-dev", "775cb30658c03167", 1], ["scripts/lib/operator_queue_dream_analyzer.py", "vnx-dev", "0524ff4b811e8939", 1],
   ["scripts/lib/operator_queue_dream_analyzer.py", "vnx-dev", "3558737bf1f8ce11", 1], ["scripts/lib/operator_steering_source.py", "salesminds", "179943baf5316da7", 1], ["scripts/lib/orphan_sweep.py", "vnx-dev", "53ccc8dcb6f37c81", 1],
-  ["scripts/lib/pattern_dedup.py", "vnx-dev", "243ebead13135458", 1], ["scripts/lib/permission_applied_check.py", "claude-salesminds", "42e5fbf6e025e0e5", 1], ["scripts/lib/permission_events_sources.py", "claude-salesminds", "374fdf3fc913c2b5", 1],
+  ["scripts/lib/pattern_dedup.py", "vnx-dev", "243ebead13135458", 1],
   ["scripts/lib/plan_gate_panel.py", "Vinix24", "6ac4ff1b2a2f1376", 1], ["scripts/lib/plan_gate_panel.py", "kimi-k3", "83bfba7c234cb7a8", 1], ["scripts/lib/plan_gate_panel.py", "vnx-dev", "823bdbfb1cd4980e", 1],
   ["scripts/lib/pool_worker_runner.py", "kimi-k3", "c2f69b3cf3bfdd43", 1], ["scripts/lib/project_id_migration.py", "vnx-dev", "22cf1a54c136a06b", 1], ["scripts/lib/project_id_migration.py", "vnx-dev", "3e40a3ce39b27014", 1],
   ["scripts/lib/project_id_migration.py", "vnx-dev", "7dfa1f528ffb5de1", 1], ["scripts/lib/project_id_migration.py", "vnx-dev", "a9a58738dd0e7257", 1], ["scripts/lib/project_id_migration.py", "vnx-dev", "bf9402960b1521da", 1],

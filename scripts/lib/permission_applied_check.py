@@ -18,11 +18,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Mapping, Tuple
 
+from permission_account_dirs import account_dirs
+
 REF = re.compile(r"settings:(?P<path>[^#\n]+)#(?P<digest>[0-9a-f]{16})")
 OORZAAK = re.compile(r"permission_form:permissie:(?P<account>vnx|sm):(?P<scope>project|user):[0-9a-f]{16}")
 RULE = re.compile(r"Add `(?P<rule>[^`\n]+)` via /permissions, scope ")  # the text of permission_proposals._voorstel
 PROJECT_FILES = (".claude/settings.json", ".claude/settings.local.json")  # under the repo of the project
-USER_FILES = {"vnx": ".claude/settings.json", "sm": ".claude-salesminds/settings.json"}  # under the home dir
 
 
 class Refused(ValueError):
@@ -30,10 +31,16 @@ class Refused(ValueError):
 
 
 def allowed_paths(scope: str, account: str, repo: Path, home: Path) -> Tuple[str, ...]:
-    """The settings files ADR-086 allows for this scope and account, as absolute path strings."""
+    """ADR-090 user paths, ADR-086 project paths; missing or invalid user mappings raise Refused."""
     if scope == "project":
         return tuple(str(Path(repo) / name) for name in PROJECT_FILES)
-    return (str(Path(home) / USER_FILES[account]),)
+    try:
+        folders = account_dirs(home)
+    except ValueError as exc:
+        raise Refused(f"path: {exc}") from exc
+    if account not in ("vnx", "sm") or account not in folders:
+        raise Refused(f"path: no mapped folder for account {account}")
+    return (str(folders[account] / "settings.json"),)
 
 
 def _target(entry: Mapping[str, Any]) -> Tuple[str, str, str]:

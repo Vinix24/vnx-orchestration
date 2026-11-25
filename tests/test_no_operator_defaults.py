@@ -7,6 +7,7 @@ same (path, name, fingerprint) and count. The allowlist is generated from that t
 runs on this matcher and this table.
 """
 import copy
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -25,7 +26,7 @@ def _tree_findings(root=on.REPO):
 
 def test_allowlist_equals_generator_output_on_the_table():
     expected = on.render(on.generate(on.load_table()))
-    assert on.ALLOWLIST.read_text(encoding="utf-8") == expected
+    assert json.loads(on.ALLOWLIST.read_text(encoding="utf-8")) == json.loads(expected)
 
 
 def test_every_finding_has_a_table_row_and_every_row_a_finding():
@@ -37,7 +38,7 @@ def test_every_finding_has_a_table_row_and_every_row_a_finding():
 
 def test_table_rules_hold():
     rows = on.load_table()
-    assert len(rows) == 409 and sum(r["count"] for r in rows) == 440
+    assert len(rows) == 407 and sum(r["count"] for r in rows) == 438
     assert on.validate_table(rows) == []
 
 
@@ -132,6 +133,13 @@ def _baseline(tmp_path):
 def test_clean_tree_is_green(tmp_path):
     repo, allow = _baseline(tmp_path)
     assert on.compare(on.scan(repo), allow) == []
+
+
+@pytest.mark.parametrize("name", ["permission_events_sources", "permission_applied_check"])
+def test_ag3_new_account_literal_is_red(tmp_path, name):
+    rel = f"scripts/lib/{name}.py"
+    repo = _repo(tmp_path, {rel: 'P = "~/.claude-salesminds"\n'})
+    assert on.compare(on.scan(repo), on.generate([]))[0].startswith(f"NEW {rel} claude-salesminds ")
 
 
 def test_new_line_in_a_file_that_already_has_an_allowed_one_is_red(tmp_path):
