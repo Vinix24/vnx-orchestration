@@ -84,7 +84,7 @@ SUBSYSTEM_DESCRIPTIONS: Dict[str, str] = {
     "injection-effectiveness-eval-loop": (
         "Instrument WHY patterns are ignored before tuning generation."
     ),
-    "plan-gate-panel": "5-model deliberation panel for plan-first enforcement.",
+    "plan-gate-panel": "Configurable plan-review panel: one default seat, BLOCK escalation, path/profile floors.",
     "cheap-recon-scout": "Cheap-model scout recon pre-pass in the dispatch door (fail-open).",
     "horizon-planning": "Autonomous roadmap auto-next loading (starts work unattended).",
     "headless-dispatch-routing": "Headless dispatch routing mode selector.",
@@ -133,8 +133,7 @@ SUBSYSTEM_DESCRIPTIONS: Dict[str, str] = {
         "dispatch; empty is off, an unreadable set path refuses staging."
     ),
     "agent-layout": (
-        "Agent-as-folder skill layout (track agents-als-map-fase-1): off or "
-        "shadow; `on` is phase 2 and reads as off."
+        "Agent-skill materialisation: off, shadow copy or on at the provider's native discovery location."
     ),
 }
 
@@ -206,6 +205,10 @@ _ROW_ORDER: List[str] = [
     # doorloop-en-effectiviteit-dagelijks (lean builder context, part 2): the key
     # is read at staging, no effectiveness probe yet.
     "docs-style-file",
+    # M3/M4 module candidates: implemented, with no measured health claimed.
+    "pool", "merge-door", "provider-switch", "cost-ledger", "daily-metrics",
+    "worker-permissions", "receipt-pipeline", "event-streams", "control-centre",
+    "unified-supervisor", "state-aggregator", "producer-freshness-monitor", "wiring-gate",
     # SCOPE
     "plan-gate-panel",
     "agent-layout",
@@ -254,6 +257,7 @@ def build_rows(project_id: Optional[str] = None) -> List[Dict[str, Any]]:
         rows.append({
             "subsystem": subsystem,
             "what": meta.get("description", ""),
+            "doc": meta["doc"],
             "flag": None,
             "status": status,
             "status_display": _STATUS_DISPLAY.get(status, status),
@@ -267,6 +271,7 @@ def build_rows(project_id: Optional[str] = None) -> List[Dict[str, Any]]:
         rows.append({
             "subsystem": subsystem,
             "what": SUBSYSTEM_DESCRIPTIONS.get(subsystem, entry.description),
+            "doc": entry.doc,
             "flag": flag_key,
             "status": status,
             "status_display": _STATUS_DISPLAY.get(status, status),
