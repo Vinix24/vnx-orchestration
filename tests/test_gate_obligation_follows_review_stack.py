@@ -191,10 +191,10 @@ def test_obligation_gate_is_a_member_of_the_stack_the_executor_will_request(
     reached production (D-894b16a1 was booked ``fulfilled_by_takeover_evidence``
     from glm_gate against a codex_gate obligation).
     """
+    import review_gate_manager as rgm
+
     stack = "glm_gate,claude_github_optional"
     _set_stack(monkeypatch, stack)
-
-    import review_gate_manager as rgm
 
     executor_stack = rgm._build_default_review_stack()
     record = _declare(tmp_path, "D-stackchoice04")
