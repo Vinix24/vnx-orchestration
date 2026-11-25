@@ -24,11 +24,11 @@ ROWS = {
     "VNX_REQUIRE_DISPATCH_TRACK": ("bool", "0", False, None, True),
     "VNX_SCOUT_PROVIDER": ("string", "deepseek", False, SCOUT, True),
     "VNX_SUPERVISOR_MODE": ("string", "legacy", False, ("legacy", "unified"), False),
-    "VNX_T0_PROVIDER": ("string", "claude_code", False, None, False),
-    "VNX_T0_SKIP_PERMISSIONS": ("bool", "0", True, None, False),
-    "VNX_T1_SKIP_PERMISSIONS": ("bool", "0", True, None, False),
-    "VNX_T2_SKIP_PERMISSIONS": ("bool", "0", True, None, False),
-    "VNX_T3_SKIP_PERMISSIONS": ("bool", "0", True, None, False),
+    "VNX_T0_PROVIDER": ("string", "claude_code", False, None, True),
+    "VNX_T0_SKIP_PERMISSIONS": ("bool", "0", True, None, True),
+    "VNX_T1_SKIP_PERMISSIONS": ("bool", "0", True, None, True),
+    "VNX_T2_SKIP_PERMISSIONS": ("bool", "0", True, None, True),
+    "VNX_T3_SKIP_PERMISSIONS": ("bool", "0", True, None, True),
 }
 
 
