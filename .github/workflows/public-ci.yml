@@ -40,8 +40,6 @@ jobs:
           chmod +x ./install.sh
           TMP_PROJECT="$(mktemp -d)"
           ./install.sh "$TMP_PROJECT"
-          mkdir -p "$TMP_PROJECT/.vnx-data"
-          printf '%s\n' 'ci-test-project' > "$TMP_PROJECT/.vnx-data/.vnx-project-id"
           "$TMP_PROJECT/.vnx/bin/vnx" init
           "$TMP_PROJECT/.vnx/bin/vnx" doctor
 

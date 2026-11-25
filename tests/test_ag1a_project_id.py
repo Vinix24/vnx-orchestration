@@ -1,6 +1,7 @@
 """AG-1a: real store and CLI boundaries refuse an unresolved tenant."""
 import argparse
 import os
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -90,3 +91,117 @@ def test_ag1a_vnx_init_temporary_home(tmp_path, monkeypatch):
     args = argparse.Namespace(project_dir=str(project), project_id="ag1a-project")
     assert vnx_init(args) == 0
     assert resolve_init_project_id(data / "state/runtime_coordination.db") == "ag1a-project"
+
+
+@pytest.mark.parametrize("name,marker,expected", [
+    ("Fresh Source Project", None, "fresh-source-project"),
+    ("renamed-project", "anchored-project", "anchored-project"),
+    ("another-project", None, "another-project"),
+])
+def test_ag1a_source_init_temporary_home(tmp_path, name, marker, expected):
+    project = tmp_path / name
+    engine = project / ".vnx"
+    for directory in ("scripts", "schemas"):
+        shutil.copytree(ROOT / directory, engine / directory,
+                        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+    home = tmp_path / "home"
+    home.mkdir()
+    data = project / ".vnx-data"
+    if marker:
+        data.mkdir()
+        (data / ".vnx-project-id").write_text(marker + "\n")
+    env = {k: v for k, v in os.environ.items()
+           if not k.startswith("VNX_") and k not in ("PROJECT_ROOT", "PYTHONPATH")}
+    env["HOME"] = str(home)
+    result = subprocess.run(
+        [sys.executable, str(engine / "scripts/vnx_init.py"), "--step", "init-db"],
+        cwd=project, env=env, capture_output=True, text=True, timeout=60,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (data / ".vnx-project-id").read_text().strip() == expected
+    assert expected != "vnx-dev"
+    with sqlite3.connect(data / "state/quality_intelligence.db") as conn:
+        default = next(r[4] for r in conn.execute("PRAGMA table_info(success_patterns)")
+                       if r[1] == "project_id")
+        assert default == repr(expected)
+        assert "vnx-dev" not in "\n".join(conn.iterdump())
+
+
+def test_ag1a_shared_derivation_path_hash_and_explicit(tmp_path):
+    import hashlib
+    from project_id import derive_project_id
+    from vnx_cli import _engine
+
+    project = tmp_path / "123"
+    expected = "vnx-" + hashlib.sha1(str(project.resolve()).encode()).hexdigest()[:8]
+    assert derive_project_id(project) == _engine.derive_project_id(project) == expected
+    assert derive_project_id(tmp_path / "456") != expected
+    assert derive_project_id(project, explicit="chosen", marker="anchored") == "chosen"
+    assert derive_project_id(project, marker="anchored") == "anchored"
+    for invalid in ("", "../other", "/absolute", "INVALID"):
+        with pytest.raises(ValueError):
+            derive_project_id(project, explicit=invalid)
+        with pytest.raises(ValueError):
+            derive_project_id(project, marker=invalid)
+
+
+@pytest.mark.parametrize("fault", [
+    "empty", "invalid", "directory", "unreadable", "symlink", "layout", "project", "env",
+])
+def test_ag1a_source_marker_failure_is_visible(tmp_path, monkeypatch, fault):
+    from vnx_init import FAIL, init_db
+
+    project = tmp_path / "renamed-project"
+    data = project / ".vnx-data"
+    data.mkdir(parents=True)
+    marker = data / ".vnx-project-id"
+    marker.write_text("anchored-project\n")
+    state = data / "state"
+    if fault == "empty":
+        marker.write_text("")
+    elif fault == "invalid":
+        marker.write_text("../other\n")
+    elif fault == "directory":
+        marker.unlink()
+        marker.mkdir()
+    elif fault == "unreadable":
+        marker.chmod(0)
+    elif fault == "symlink":
+        target = tmp_path / "foreign-marker"
+        marker.replace(target)
+        marker.symlink_to(target)
+    elif fault == "layout":
+        state = tmp_path / ".vnx-data/foreign/state"
+    elif fault == "project":
+        (project / ".vnx-project-id").write_text("foreign\n")
+    elif fault == "env":
+        monkeypatch.setenv("VNX_PROJECT_ID", "foreign")
+    paths = dict(PROJECT_ROOT=str(project), VNX_HOME=str(ROOT),
+                 VNX_DATA_DIR=str(data), VNX_STATE_DIR=str(state))
+    try:
+        result = init_db(paths)
+        assert result.status == FAIL and result.message
+        assert not (state / "quality_intelligence.db").exists()
+        assert "VNX_PROJECT_ID" not in paths
+    finally:
+        if fault == "unreadable":
+            marker.chmod(0o600)
+    if fault in ("layout", "project", "env", "symlink"):
+        assert marker.read_text() == "anchored-project\n"
+
+
+@pytest.mark.parametrize("source", ["project", "environment"])
+def test_ag1a_source_init_preserves_existing_identity_source(tmp_path, monkeypatch, source):
+    from vnx_init import anchor_init_project_id
+
+    project = tmp_path / "renamed-project"
+    project.mkdir()
+    if source == "project":
+        (project / ".vnx-project-id").write_text("anchored-project\nagent-line\n")
+    else:
+        monkeypatch.setenv("VNX_PROJECT_ID", "anchored-project")
+    data = project / ".vnx-data"
+    paths = dict(PROJECT_ROOT=str(project), VNX_DATA_DIR=str(data),
+                 VNX_STATE_DIR=str(data / "state"))
+    assert anchor_init_project_id(paths) == "anchored-project"
+    assert (data / ".vnx-project-id").read_text() == "anchored-project\n"

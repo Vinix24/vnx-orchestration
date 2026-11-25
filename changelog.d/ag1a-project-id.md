@@ -1,1 +1,1 @@
-- Refuse stores without a project-id source instead of stamping `vnx-dev`; run `vnx init` in the project. QI initialization now fails when tenant reconciliation fails.
+- Refuse stores without a project-id source instead of stamping `vnx-dev`; run `vnx init` in the project. QI initialization now fails when tenant reconciliation fails. Source and pip init share project-id derivation; fresh source init anchors its marker before store bootstrap.

@@ -12,16 +12,9 @@ and status all resolve the state root identically (PR-PIP-2 lockstep).
 
 from __future__ import annotations
 
-import hashlib
-import re
 import sys
 from pathlib import Path
 from typing import Optional
-
-# Mirror of vnx_ids.PROJECT_ID_RE / vnx_paths PROJECT_ID_RE. Duplicated here so a
-# project_id can be validated before the engine path is bootstrapped; the engine
-# regex is the single source of truth and is asserted identical in tests.
-_PROJECT_ID_RE = re.compile(r"^[a-z][a-z0-9-]{1,31}$")
 
 
 def engine_root() -> Path:
@@ -199,28 +192,6 @@ def _override_owner(store: Path) -> Optional[str]:
     return None
 
 
-def slugify_project_id(name: str) -> Optional[str]:
-    """Derive a valid project_id (``^[a-z][a-z0-9-]{1,31}$``) from a free name.
-
-    Lowercases, maps any run of non ``[a-z0-9]`` to a single ``-``, strips
-    leading characters until the first ascii letter, trims trailing ``-`` and
-    truncates to 32 chars. Returns None when nothing valid can be derived (e.g.
-    a name with no ascii letters) — callers must then refuse to guess a shared
-    id (PR-PIP-2 collision-safety) rather than substitute a default.
-    """
-    lowered = (name or "").lower()
-    collapsed = re.sub(r"[^a-z0-9]+", "-", lowered)
-    # Must start with a letter; drop any leading digits/hyphens.
-    collapsed = re.sub(r"^[^a-z]+", "", collapsed)
-    collapsed = collapsed.strip("-")[:32].rstrip("-")
-    if collapsed and _PROJECT_ID_RE.match(collapsed):
-        return collapsed
-    return None
-
-
-PROJECT_FILE_NAME = ".vnx-project-id"
-
-
 def read_marker_project_id(project_dir: Path) -> Optional[str]:
     """Return the validated project_id from ``project_dir/.vnx-project-id``.
 
@@ -238,29 +209,14 @@ def read_marker_project_id(project_dir: Path) -> Optional[str]:
 
 
 def derive_project_id(project_dir, explicit: Optional[str] = None) -> str:
-    """Resolve a valid, collision-safe project_id for a project directory.
+    """Resolve explicit > existing marker > basename slug > path hash."""
+    marker = read_marker_project_id(project_dir) if explicit is None else None
+    return _derive_project_id(project_dir, explicit=explicit, marker=marker)
 
-    Order: explicit (validated) > existing ``.vnx-project-id`` marker > slug of
-    the directory basename > a deterministic ``vnx-<8 hex>`` derived from the
-    absolute path. The last fallback is *path-unique* (not a shared default), so
-    a directory whose name carries no usable letters still gets its own state
-    dir instead of colliding with other projects — PR-PIP-2 collision-safety.
 
-    Raises ValueError if ``explicit`` is given but invalid, so a typo surfaces
-    instead of being silently slugified.
-    """
-    project_dir = Path(project_dir)
-    if explicit is not None:
-        if not _PROJECT_ID_RE.match(explicit):
-            raise ValueError(
-                f"invalid --project-id {explicit!r}: must match {_PROJECT_ID_RE.pattern}"
-            )
-        return explicit
-    existing = read_marker_project_id(project_dir)
-    if existing:
-        return existing
-    slug = slugify_project_id(project_dir.resolve().name)
-    if slug:
-        return slug
-    digest = hashlib.sha1(str(project_dir.resolve()).encode("utf-8")).hexdigest()[:8]
-    return f"vnx-{digest}"
+# Source installs ship scripts/lib, while wheels bootstrap that same engine tree.
+ensure_engine_on_path()
+from project_id import (
+    PROJECT_FILE_NAME, _PROJECT_ID_RE, derive_project_id as _derive_project_id,
+    slugify_project_id,
+)
