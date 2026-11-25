@@ -73,6 +73,7 @@ class CodexAdapter:
                 event_writer=event_writer,
                 extra_env=_switch_stamps(spec),
                 cwd=cwd,
+                total_deadline=float(spec.deadline_seconds),
                 **_codex_skill_inputs(spec),
             )
         except BrokenPipeError as exc:
