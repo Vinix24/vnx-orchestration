@@ -98,7 +98,8 @@ def get_provider_name() -> str:
 
 
 def get_daily_budget_usd() -> float:
-    raw = os.environ.get(ENV_DAILY_BUDGET)
+    import config_runtime
+    raw = config_runtime.get(ENV_DAILY_BUDGET)
     if raw is None or raw == "":
         return DEFAULT_DAILY_BUDGET_USD
     try:
