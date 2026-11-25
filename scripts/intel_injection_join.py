@@ -451,7 +451,7 @@ def main(argv: list[str] | None = None) -> int:
     for name, text in (("cohort", "A/B window cohort: per-arm counts and refusals, never a verdict"),
                        ("effect", "A/B effect: stratified risk difference, 95% interval and verdict class"),
                       ("secondary", "A/B falsifications F1-F3 plus mean CQS and open items per arm, each with status and coverage")):
-        p_ab = sub.add_parser(name, help=text, description=text)
+        p_ab = sub.add_parser(name, help=text.replace("%", "%%"), description=text)
         p_ab.add_argument("--qi", help=("path to quality_intelligence.db (opened read-only; read for its offers, outcomes and "
                                         "dispatch_metadata)" if name == "secondary" else
                                         "path to quality_intelligence.db (opened read-only, not read)"))

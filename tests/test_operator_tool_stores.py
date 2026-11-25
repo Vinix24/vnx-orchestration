@@ -3,8 +3,6 @@ from pathlib import Path
 import subprocess
 import sys
 import pytest
-ROOT = Path(__file__).resolve().parents[1]
-
 @pytest.fixture(params=[True, False])
 def operator_project(tmp_path, monkeypatch, request):
     for key in tuple(os.environ):
@@ -17,7 +15,6 @@ def operator_project(tmp_path, monkeypatch, request):
         (project / ".vnx-project-id").write_text("other\n")
     monkeypatch.chdir(project)
     return project, tmp_path / ".vnx-data" / "other", request.param
-
 @pytest.mark.parametrize("tool,read", [
     ("analysis/worker_scope_enforcement_measure.py", "m['load_specs']()"),
     ("benchmarks/run_lane_bench.py", "str(m['operator_data_dir']() / 'unified_reports' if 'operator_data_dir' in m else m['REPORT_DIR_CENTRAL'])"),
@@ -29,7 +26,7 @@ def test_operator_store(operator_project, tool, read):
     pending.mkdir(parents=True)
     (pending / "dispatch-spec.json").write_text('{"dispatch_id": "d1"}')
     result = subprocess.run([sys.executable, "-c",
-        f"import runpy; m=runpy.run_path({str(ROOT / 'scripts' / tool)!r}); print({read})"],
+        f"import runpy; m=runpy.run_path({str(Path(__file__).resolve().parents[1] / 'scripts' / tool)!r}); print({read})"],
         capture_output=True, text=True)
     if resolved:
         assert result.returncode == 0, result.stderr

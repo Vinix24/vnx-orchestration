@@ -23,6 +23,7 @@ _SCRIPT = _REPO_ROOT / "scripts" / "intel_injection_join.py"
 
 def test_project_store(operator_project):
     project, data, resolved = operator_project
+    assert _run("--help", cwd=project).returncode == 0
     state = data / "state"
     state.mkdir(parents=True)
     _make_store(state)
