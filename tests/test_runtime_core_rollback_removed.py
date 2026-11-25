@@ -30,6 +30,8 @@ def test_no_tracked_file_names_the_rollback() -> None:
         # the release cut folds the fragments into CHANGELOG.md, a historical record
         ":(exclude)CHANGELOG.md",
         ":(exclude)claudedocs",
+        # The fixture is the file list of historical sha a052c0e38.
+        ":(exclude)tests/fixtures/docs_layers",
         ":(exclude)tests/test_runtime_core_rollback_removed.py",
     ]
     proc = subprocess.run(args, capture_output=True, text=True)
