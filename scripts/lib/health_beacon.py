@@ -248,6 +248,11 @@ def all_beacons(
     canonical file wins over a root-level copy. ADR-097 applies the 36 h
     interval even to legacy event-driven files, using this same age check.
     Its overdue/absent verdict is ``fail``, with project, reason and hours.
+    An existing beacon is the opt-in signal: both supported paths are opened
+    directly, so unreadable signals stay named ``corrupt`` rows even if a glob
+    cannot see them. With neither file present, daily metrics is omitted unless
+    the caller explicitly expects it. Uninstalled, never-run projects therefore
+    gain no expectation from the periodic writer alone.
 
     Classification rules (in order):
       * unreadable JSON                              -> ``health = "corrupt"``
@@ -292,9 +297,8 @@ def all_beacons(
     out: Dict[str, Dict[str, Any]] = {}
     now = time.time()
 
-    paths = sorted(health_dir.glob("*.json"))
-    daily_path = state_dir / "state" / "health" / "daily_metrics.json"
-    paths.append(daily_path)
+    daily_paths = (health_dir / "daily_metrics.json", state_dir / "state" / "health" / "daily_metrics.json")
+    paths = sorted(set(health_dir.glob("*.json")) - set(daily_paths)) + list(daily_paths)
     if paths:
         for path in paths:
             try:
@@ -303,8 +307,13 @@ def all_beacons(
                 if not isinstance(data, dict):
                     raise ValueError("beacon payload not a JSON object")
             except (OSError, ValueError, json.JSONDecodeError) as exc:
-                if path == daily_path and isinstance(exc, FileNotFoundError):
-                    continue  # Truly absent; the expected-component pass below names it.
+                if path in daily_paths and isinstance(exc, FileNotFoundError):
+                    try:
+                        path.lstat()  # A dangling symlink is a corrupt signal, not absence.
+                    except FileNotFoundError:
+                        continue
+                    except OSError as probe_error:
+                        exc = probe_error  # Unverifiable absence stays a named corrupt row.
                 out[path.stem] = {
                     "component": path.stem,
                     "health": "corrupt",
@@ -362,10 +371,7 @@ def all_beacons(
     if expected:
         for name in expected:
             if name not in out:
-                if parked and name in parked:
-                    out[name] = {"component": name, "health": "parked"}
-                else:
-                    out[name] = {"component": name, "health": "absent"}
+                out[name] = {"component": name, "health": "parked" if parked and name in parked else "absent"}
 
     return _with_measurement_details(out, state_dir)
 

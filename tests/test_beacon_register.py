@@ -360,7 +360,8 @@ def test_real_scripts_tree_gives_the_nine_measured_writers() -> None:
     daily-metrics PR-3 adds the 15th: ``daily_metrics``, written by
     ``scripts/lib/daily_metrics/collect.py::write_beacon`` on the daily
     ``scripts/daily_metrics.py daily`` run. Periodic (36 h, ADR-097), so
-    ``expected_component_names()`` includes projects that never measured.
+    opt-in remains per project: ``expected_component_names()`` excludes it,
+    while existing project-local beacons still get the 36-hour deadline.
     """
     reg = br.read_beacon_register()
     names = {s.name for s in reg}
@@ -369,7 +370,7 @@ def test_real_scripts_tree_gives_the_nine_measured_writers() -> None:
     assert "cost-ledger" not in br.expected_component_names()
     (daily_metrics_spec,) = [s for s in reg if s.name == "daily_metrics"]
     assert (daily_metrics_spec.source_file, daily_metrics_spec.event_driven) == ("scripts/lib/daily_metrics/collect.py", False)
-    assert "daily_metrics" in br.expected_component_names()
+    assert "daily_metrics" not in br.expected_component_names()
     (dream_liveness_spec,) = [s for s in reg if s.name == "dream_liveness"]
     assert (dream_liveness_spec.source_file, dream_liveness_spec.event_driven) == ("scripts/dream_liveness_probe.py", False)
     assert "dream_liveness" in br.expected_component_names()

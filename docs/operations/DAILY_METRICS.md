@@ -47,7 +47,16 @@ The `daily_metrics` health beacon has a separate 36-hour deadline (ADR-097).
 Readers measure the age of its last completed collection run (`last_run_ts`,
 the epoch form of `last_run_iso`), including legacy beacons with a null interval.
 After 36 hours it reads `fail`, reason `no_measurement_36h`, with `age_hours`.
-An expected beacon never written reads `fail` with `never_measured`.
+Participation remains opt-in per project (ADR-063 decision 29): the presence of
+that project's beacon is the signal used by health readers. `daily_metrics` is
+excluded from the universal expected-component set, so a project without a beacon
+gets no `never_measured` row and no health downgrade. Both supported beacon paths
+are read directly; an unreadable or corrupt signal, including a dangling symlink,
+stays a named `corrupt` row. Another project's beacon cannot opt this project in.
+A caller that explicitly expects `daily_metrics` still gets `fail` with
+`never_measured` when its beacon is absent. This signal cannot detect an installed
+job that has never written its first beacon, or a removed beacon; requiring the
+family for every project is the separate M7a operator decision.
 The existing content rule is unchanged: no final file in the last three settled
 days gives `fail` (`no_final_settled_day`), even with a fresh heartbeat.
 Readers include `state/health/daily_metrics.json` under the supplied project data

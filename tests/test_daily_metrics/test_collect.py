@@ -194,7 +194,7 @@ def test_write_beacon_ok_and_fail(tmp_path: Path):
     assert payload["status"] == "fail"
 
 
-def test_beacon_register_expects_daily_metrics():
+def test_beacon_register_keeps_daily_metrics_opt_in():
     from beacon_register import expected_component_names
 
-    assert "daily_metrics" in expected_component_names()
+    assert "daily_metrics" not in expected_component_names()
