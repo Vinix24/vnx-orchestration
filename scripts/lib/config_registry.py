@@ -163,7 +163,7 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
     "VNX_RECEIPT_CLASSIFIER_DAILY_COST_USD": _e(
         "VNX_RECEIPT_CLASSIFIER_DAILY_COST_USD", "float", "0.20", "intelligence",
         "Daily USD spend cap of the receipt classifier. Raising it waives the 0.20 USD/day classifier cost cap.",
-        approval=True, subsystem="intelligence-self-learning-loop", status="ACTIVATE", read_site_wired=False),
+        approval=True, subsystem="intelligence-self-learning-loop", status="ACTIVATE", read_site_wired=True),
     "VNX_AUTO_REPORT": _e(
         "VNX_AUTO_REPORT", "bool", "1", "dispatch",
         "Auto-report Stop hook gate. Default on: the value every fabric process saw while "
@@ -222,7 +222,7 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
     "VNX_PAID_LANE_DAILY_BUDGET_USD": _e(
         "VNX_PAID_LANE_DAILY_BUDGET_USD", "float", "5.00", "dispatch",
         "Daily USD cap of the paid provider lanes. Raising it waives the 5 USD/day paid-lane cost cap.",
-        approval=True, subsystem="headless-dispatch-routing", status="ACTIVATE", read_site_wired=False),
+        approval=True, subsystem="headless-dispatch-routing", status="ACTIVATE", read_site_wired=True),
     "VNX_REQUIRE_DISPATCH_TRACK": _e(
         "VNX_REQUIRE_DISPATCH_TRACK", "bool", "0", "dispatch",
         "Require a track_id on a dispatch. Off (default): the door only warns; on: a dispatch without a track is refused.",
