@@ -21,6 +21,8 @@ import pytest
 
 # The project root where install.sh lives
 VNX_REPO = Path(__file__).resolve().parent.parent
+# The full source copy and template scan exceed 60s under parallel neighbour load.
+INSTALL_TIMEOUT = 180
 
 
 # ---------------------------------------------------------------------------
@@ -79,7 +81,7 @@ class TestInstallFlow:
         target = tmp_path / "test-project"
         target.mkdir()
         _make_git_repo(target)
-        rc, out, err = _run(["bash", str(VNX_REPO / "install.sh"), str(target)])
+        rc, out, err = _run(["bash", str(VNX_REPO / "install.sh"), str(target)], timeout=INSTALL_TIMEOUT)
         assert rc == 0, f"install.sh failed: {err}"
         assert (target / ".vnx" / "bin" / "vnx").exists(), "bin/vnx not created"
 
@@ -87,7 +89,7 @@ class TestInstallFlow:
         target = tmp_path / "test-project"
         target.mkdir()
         _make_git_repo(target)
-        _run(["bash", str(VNX_REPO / "install.sh"), str(target)])
+        _run(["bash", str(VNX_REPO / "install.sh"), str(target)], timeout=INSTALL_TIMEOUT)
         scripts_dir = target / ".vnx" / "scripts"
         assert scripts_dir.is_dir(), "scripts/ not installed"
         assert (scripts_dir / "lib" / "vnx_paths.py").exists(), "vnx_paths.py missing"
@@ -118,7 +120,7 @@ class TestInitFlow:
         target = tmp_path / "init-project"
         target.mkdir()
         _make_git_repo(target)
-        rc, out, err = _run(["bash", str(VNX_REPO / "install.sh"), str(target)])
+        rc, out, err = _run(["bash", str(VNX_REPO / "install.sh"), str(target)], timeout=INSTALL_TIMEOUT)
         if rc != 0:
             pytest.skip(f"install.sh failed: {err}")
         return target
@@ -168,7 +170,7 @@ class TestDoctorFlow:
         target = tmp_path / "doctor-project"
         target.mkdir()
         _make_git_repo(target)
-        rc, _, err = _run(["bash", str(VNX_REPO / "install.sh"), str(target)])
+        rc, _, err = _run(["bash", str(VNX_REPO / "install.sh"), str(target)], timeout=INSTALL_TIMEOUT)
         if rc != 0:
             pytest.skip(f"install.sh failed: {err}")
         vnx_bin = target / ".vnx" / "bin" / "vnx"
@@ -232,7 +234,7 @@ class TestFullQuickstart:
         _make_git_repo(target)
 
         # Step 1: install
-        rc, _, err = _run(["bash", str(VNX_REPO / "install.sh"), str(target)])
+        rc, _, err = _run(["bash", str(VNX_REPO / "install.sh"), str(target)], timeout=INSTALL_TIMEOUT)
         assert rc == 0, f"install failed: {err}"
 
         vnx_bin = target / ".vnx" / "bin" / "vnx"
@@ -256,7 +258,7 @@ class TestFullQuickstart:
         target = tmp_path / "idempotent"
         target.mkdir()
         _make_git_repo(target)
-        _run(["bash", str(VNX_REPO / "install.sh"), str(target)])
+        _run(["bash", str(VNX_REPO / "install.sh"), str(target)], timeout=INSTALL_TIMEOUT)
         vnx_bin = target / ".vnx" / "bin" / "vnx"
 
         # Init twice
