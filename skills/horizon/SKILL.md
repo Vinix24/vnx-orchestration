@@ -113,6 +113,16 @@ trust the silent `vnx-dev` default in a multi-project context).
 
 ## The plan-first gate (one seat, a second on BLOCK)
 
+When planning a feature, load `skills/proportionality/SKILL.md` and apply its
+three questions. It is the sole source for the T1-T8 classes, their minimum
+mechanisms and the O1-O6 removal triggers; do not duplicate the rubric here.
+State the smallest version that delivers the whole user flow, with deliverable
+1 proving that flow end to end. For every deliverable, write its touched T1-T8
+classes and their minimum mechanisms, current users, acceptance evidence and
+smaller alternative. Include an explicit removal list per deliverable: an
+explained "None" counts; an omitted section does not. Keep this alongside the
+existing order, paths, task class and size limit.
+
 Every feature is preceded by an architect/plan phase. The PLAN (not the code) is reviewed by
 one seat BEFORE any implementation, on scope, PR split, decisions and ADRs, and feasibility.
 Line numbers and test details belong to the builder and codex in the PR review.
