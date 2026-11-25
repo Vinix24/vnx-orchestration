@@ -197,6 +197,7 @@ def test_store_worker_pid_fails_before_heal_succeeds_after(tmp_path: Path) -> No
 # ---------------------------------------------------------------------------
 
 def test_runtime_migration_reports_worker_pid_added(tmp_path: Path) -> None:
+    (tmp_path / ".vnx-project-id").write_text("test-project\n")
     db_path = tmp_path / "runtime_coordination.db"
     _make_legacy_leases_db(db_path)
 
@@ -210,6 +211,7 @@ def test_runtime_migration_reports_worker_pid_added(tmp_path: Path) -> None:
 
 
 def test_runtime_migration_fresh_db_worker_pid_present(tmp_path: Path) -> None:
+    (tmp_path / ".vnx-project-id").write_text("test-project\n")
     state_dir = tmp_path / "state"
     state_dir.mkdir()
     db_path = _init_runtime_db(state_dir)

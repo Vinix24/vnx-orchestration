@@ -260,6 +260,10 @@ class TestSelectPlaceboPattern:
 # ---------------------------------------------------------------------------
 
 class TestMigrationV32:
+    @pytest.fixture(autouse=True)
+    def store_identity(self, tmp_path):
+        (tmp_path / ".vnx-project-id").write_text("test-project\n")
+
     def test_ab_arm_columns_added(self, tmp_path):
         db_path = tmp_path / "qi.db"
         assert bootstrap_qi_db(db_path, schema_file=_SCHEMA_FILE) is True

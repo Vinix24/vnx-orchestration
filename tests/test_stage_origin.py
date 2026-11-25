@@ -23,6 +23,7 @@ PID = "tproj"
 
 @pytest.fixture
 def store(tmp_path):
+    (tmp_path / ".vnx-project-id").write_text(PID + "\n")
     assert qdi.bootstrap_qi_db(tmp_path / "state" / "quality_intelligence.db") is True
     return tmp_path
 

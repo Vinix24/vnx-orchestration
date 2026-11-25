@@ -30,6 +30,7 @@ EXPECTED_COLUMNS = {
 
 def _minimal_db(path: Path) -> None:
     """Create a minimal quality_intelligence.db with just the tables needed for migration."""
+    (path.parent / ".vnx-project-id").write_text("test-project\n")
     conn = sqlite3.connect(str(path))
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS snippet_metadata (

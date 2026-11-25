@@ -55,7 +55,10 @@ def _run(cmd, cwd=None, env=None, timeout=60):
 
 
 def _make_git_repo(path):
-    """Initialize a git repo so vnx_paths.sh resolves PROJECT_ROOT correctly."""
+    """Initialize a git repo and explicitly owned local store for the source installer."""
+    data = path / ".vnx-data"
+    data.mkdir()
+    (data / ".vnx-project-id").write_text("test-project\n")
     subprocess.run(["git", "init"], cwd=str(path), capture_output=True, check=True)
     subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=str(path), capture_output=True)
     subprocess.run(["git", "config", "user.name", "Test"], cwd=str(path), capture_output=True)

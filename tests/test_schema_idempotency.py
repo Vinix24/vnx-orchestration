@@ -310,6 +310,6 @@ def test_split_sql_statements_quote_and_comment_safe():
 
 
 @pytest.fixture(autouse=True)
-def ag1a_legacy_store_identity(tmp_path):
-    """Schema tests use an explicitly owned legacy store."""
-    (tmp_path / ".vnx-project-id").write_text("vnx-dev\n")
+def ag1a_store_identity(tmp_path):
+    """Schema tests use an explicitly owned temporary store."""
+    (tmp_path / ".vnx-project-id").write_text("test-project\n")

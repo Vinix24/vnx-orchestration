@@ -69,7 +69,8 @@ def test_merge_accepts_list_directly():
 def test_migration_v25_adds_tags_columns(tmp_path):
     from quality_db_init import bootstrap_qi_db, HIGHEST_QI_VERSION
     db = tmp_path / "qi.db"
-    bootstrap_qi_db(db)
+    (tmp_path / ".vnx-project-id").write_text("test-project\n")
+    assert bootstrap_qi_db(db) is True
     conn = sqlite3.connect(str(db))
     try:
         assert conn.execute("PRAGMA user_version").fetchone()[0] == HIGHEST_QI_VERSION
