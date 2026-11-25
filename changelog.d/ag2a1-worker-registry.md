@@ -1,0 +1,1 @@
+- Read the worker registry from the project root and ship the default registry as package data under `scripts/lib/defaults/`.

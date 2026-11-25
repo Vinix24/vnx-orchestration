@@ -75,7 +75,7 @@ Key deliverables: `docs/operations/CONTROL_CENTRE.md`, ADR-017.
 
 Configurable worker pool with queue-aware + cost-aware scaling policies, dead-worker reap, and `vnx pool` CLI. PoolManager core (schema v14), pluggable scaling policies (`queue_depth_v1` + `cost_aware_v1`), provider-mix per pool, health monitoring + dead-worker reap tick cycle.
 
-Key deliverables: `scripts/lib/pool_manager.py`, `.vnx/vnx_workers.default.yaml`, ADR-018.
+Key deliverables: `scripts/lib/pool_manager.py`, `scripts/lib/defaults/vnx_workers.default.yaml`, ADR-018.
 
 ### Wave 7 — Multi-Provider via LiteLLM
 **Status**: `Completed` — SHIPPED 2026-05-17

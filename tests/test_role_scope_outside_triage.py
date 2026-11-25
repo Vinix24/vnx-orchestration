@@ -222,3 +222,4 @@ class TestOwner:
         assert owner("vnx_cli/main.py") == "backend-developer"
         assert owner("dashboard/ui.py") == "frontend-developer"
         assert owner(".vnx/worker_permissions.yaml") == "security-engineer"
+        assert owner("scripts/lib/defaults/vnx_workers.default.yaml") == "security-engineer"

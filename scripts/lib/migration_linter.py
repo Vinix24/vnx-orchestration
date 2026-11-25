@@ -8,7 +8,7 @@ operator-name guard does not list.
 
 It owns no list and no scope of its own. The matcher is
 ``scripts/ci/operator_names.py`` (``scan``): tracked files under scripts/,
-vnx_cli/, schemas/, bin/, hooks/ and .vnx/vnx_workers.default.yaml, tests and
+vnx_cli/, schemas/, bin/ and hooks/ (including the packaged worker default), tests and
 markdown excluded. The list is the guard's per-finding table
 ``tests/fixtures/operator_names/findings.tsv``. A finding is listed by
 (path, name, fingerprint of the normalised line) and a count; a new line, an

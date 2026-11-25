@@ -61,7 +61,8 @@ MINIMAL_YAML = textwrap.dedent("""\
         provider_mix: []
 """)
 
-DEFAULT_YAML_TEXT = (_REPO_ROOT / ".vnx" / "vnx_workers.default.yaml").read_text()
+DEFAULT_YAML_PATH = _REPO_ROOT / "scripts/lib/defaults/vnx_workers.default.yaml"
+DEFAULT_YAML_TEXT = DEFAULT_YAML_PATH.read_text()
 
 SIX_WORKER_YAML_TEXT = (
     _REPO_ROOT / ".vnx" / "vnx_workers.examples" / "six_worker_pool.yaml"
@@ -583,23 +584,21 @@ class TestOperatorYamlOverride:
                 scaling_policy: fixed
                 provider_mix: []
         """), encoding="utf-8")
-        (vnx_dir / "vnx_workers.default.yaml").write_text(DEFAULT_YAML_TEXT, encoding="utf-8")
 
         reg = _load_registry(repo_root=tmp_path)
         workers = reg.list_workers()
         assert len(workers) == 1
         assert workers[0].terminal_id == "T5"
 
-    def test_missing_yaml_falls_back_to_hardcoded_default(self, tmp_path: Path):
+    def test_missing_yaml_falls_back_to_hardcoded_default(self, tmp_path: Path, monkeypatch, caplog):
+        monkeypatch.setattr("worker_registry.__file__", str(tmp_path / "worker_registry.py"))
         reg = _load_registry(repo_root=tmp_path)
         ids = [w.terminal_id for w in reg.list_workers()]
         assert ids == ["T0", "T1", "T2", "T3"]
+        assert "using hardcoded fallback" in caplog.text
 
     def test_default_yaml_used_when_no_operator_override(self, tmp_path: Path):
-        vnx_dir = tmp_path / ".vnx"
-        vnx_dir.mkdir()
-        (vnx_dir / "vnx_workers.default.yaml").write_text(DEFAULT_YAML_TEXT, encoding="utf-8")
-
+        assert _find_yaml_file(tmp_path) == DEFAULT_YAML_PATH
         reg = _load_registry(repo_root=tmp_path)
         assert len(reg.list_workers()) == 4
 
@@ -673,20 +672,14 @@ class TestFindYamlFile:
         vnx_dir.mkdir()
         op = vnx_dir / "vnx_workers.yaml"
         op.write_text("schema_version: 1\nworkers: []\npools: []")
-        default = vnx_dir / "vnx_workers.default.yaml"
-        default.write_text("schema_version: 1\nworkers: []\npools: []")
 
         found = _find_yaml_file(tmp_path)
         assert found == op
 
     def test_falls_back_to_default_yaml(self, tmp_path: Path):
-        vnx_dir = tmp_path / ".vnx"
-        vnx_dir.mkdir()
-        default = vnx_dir / "vnx_workers.default.yaml"
-        default.write_text("schema_version: 1\nworkers: []\npools: []")
-
         found = _find_yaml_file(tmp_path)
-        assert found == default
+        assert found == DEFAULT_YAML_PATH
 
-    def test_returns_none_when_neither_exists(self, tmp_path: Path):
+    def test_returns_none_when_neither_exists(self, tmp_path: Path, monkeypatch):
+        monkeypatch.setattr("worker_registry.__file__", str(tmp_path / "worker_registry.py"))
         assert _find_yaml_file(tmp_path) is None

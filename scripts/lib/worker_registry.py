@@ -2,8 +2,8 @@
 """worker_registry.py — YAML-driven worker registry.
 
 Replaces hardcoded CANONICAL_TERMINALS in runtime_facade.py.
-Loads .vnx/vnx_workers.yaml (operator-edited), falling back to
-.vnx/vnx_workers.default.yaml when no operator override exists.
+Loads the project's .vnx/vnx_workers.yaml (operator-edited), falling back to
+scripts/lib/defaults/vnx_workers.default.yaml from the installed package.
 
 Public API:
 - WORKER_REGISTRY: module-level instance loaded at import time
@@ -32,6 +32,11 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, FrozenSet, List, Optional
+
+if __package__:
+    from .project_root import resolve_project_root
+else:
+    from project_root import resolve_project_root
 
 logger = logging.getLogger(__name__)
 
@@ -218,13 +223,13 @@ class WorkerRegistry:
 # ---------------------------------------------------------------------------
 
 def _find_yaml_file(repo_root: Optional[Path] = None) -> Optional[Path]:
-    """Search order: operator .vnx/vnx_workers.yaml, then .vnx/vnx_workers.default.yaml."""
+    """Find the project override, then the packaged default; root errors propagate."""
     if repo_root is None:
-        repo_root = Path(__file__).resolve().parents[2]
+        repo_root = resolve_project_root()
     operator_yaml = repo_root / ".vnx" / "vnx_workers.yaml"
     if operator_yaml.is_file():
         return operator_yaml
-    default_yaml = repo_root / ".vnx" / "vnx_workers.default.yaml"
+    default_yaml = Path(__file__).resolve().parent / "defaults" / "vnx_workers.default.yaml"
     if default_yaml.is_file():
         return default_yaml
     return None
@@ -321,19 +326,20 @@ def _build_registry(data: dict, valid_roles: Optional[FrozenSet[str]] = None) ->
 def _load_registry(repo_root: Optional[Path] = None) -> WorkerRegistry:
     """Resolve YAML path, parse, validate, and return WorkerRegistry.
 
-    Falls back to hardcoded defaults when .vnx/ is absent or no yaml found.
+    Falls back to hardcoded defaults only when neither YAML file exists.
+    With no explicit root, project-root resolution errors propagate.
     """
     import yaml  # Deferred import — yaml guaranteed present but keeps startup fast
 
     if repo_root is None:
-        repo_root = Path(__file__).resolve().parents[2]
+        repo_root = resolve_project_root()
 
     valid_roles = _fetch_valid_roles(repo_root)
     yaml_path = _find_yaml_file(repo_root)
 
     if yaml_path is None:
         logger.warning(
-            ".vnx/vnx_workers.yaml and .vnx/vnx_workers.default.yaml not found; "
+            "Project .vnx/vnx_workers.yaml and packaged defaults/vnx_workers.default.yaml not found; "
             "using hardcoded fallback (T0-T3)."
         )
         return _build_registry(_HARDCODED_FALLBACK, valid_roles)
