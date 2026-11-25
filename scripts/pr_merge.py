@@ -282,6 +282,7 @@ import forge_gate_publisher
 from forge_gate_publisher import CONCLUSION_FAILURE, DOOR_CHECK_NAME, REVOKE_FAILED, REVOKED, ForgeCheckRunError
 from merge_preflight_ci_check import check_ci_run_for_head, _resolve_override_reason
 from merge_preflight_adr_check import check_adr_numbers_for_pr
+from review_vendor import dispatch_spec_paths
 from contract_invalid_ledger import (
     CODE_CONTRACT_INVALID,
     evaluate_deliverable_acceptance,
@@ -688,6 +689,77 @@ def _run_ci_gate(
         **workflow_kwargs,
     )
     return gate, pr_data
+
+
+def _plain_base_ref(value: Any) -> str:
+    """Strip leading origin/ and refs/heads/ prefixes; reject missing or empty refs."""
+    if not isinstance(value, str) or not value or value != value.strip():
+        raise ValueError(f"invalid base ref {value!r}")
+    branch = re.sub(r"^(?:origin/|refs/heads/)+", "", value)
+    if not branch:
+        raise ValueError(f"empty branch in base ref {value!r}")
+    return branch
+
+
+def _check_dispatch_base_ref(
+    pr_number: int, pr_base: Any, dispatch_id: str, *, data_dir: Path,
+) -> Dict[str, Any]:
+    """Compare PR baseRefName with every staged spec's base_ref for this dispatch.
+
+    Both refs lose leading origin/ and refs/heads/ prefixes. Outcomes: GO on
+    agreement; NO-GO base_ref_mismatch on disagreement (including conflicting
+    specs); GO with one WARNING when no spec or a base_ref field is absent.
+    Invalid/unreadable evidence is NO-GO base_ref_unverifiable, never a warning.
+    """
+    missing, bases = [], {}
+    try:
+        paths, why = (dispatch_spec_paths(dispatch_id, data_dir=data_dir.resolve())
+                      if dispatch_id else ([], "no dispatch id supplied"))
+        if paths is None:
+            raise ValueError(why)
+        for path in paths:
+            if path.resolve() != path:
+                raise ValueError(f"symlinked dispatch spec refused: {path}")
+            spec = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(spec, dict):
+                raise ValueError(f"dispatch spec is not an object: {path}")
+            if "schema_version" in spec and (type(spec["schema_version"]) is not int or spec["schema_version"] != 1):
+                raise ValueError(f"unsupported dispatch schema_version {spec['schema_version']!r}: {path}")
+            if "base_ref" not in spec:
+                missing.append(str(path))
+            else:
+                bases[str(path)] = _plain_base_ref(spec["base_ref"])
+        if bases:
+            actual = _plain_base_ref(pr_base)
+            expected = set(bases.values())
+            if len(expected) > 1 or actual not in expected:
+                asked = repr(next(iter(expected))) if len(expected) == 1 else str(bases)
+                return dict(_door_gate("NO-GO", f"base_ref_mismatch: PR #{pr_number} targets {actual!r}, "
+                                       f"dispatch {dispatch_id} asked for {asked}"), reason_code="base_ref_mismatch")
+    except (OSError, UnicodeError, ValueError) as exc:
+        return dict(_door_gate("NO-GO", f"base_ref_unverifiable: dispatch {dispatch_id}: {exc}"),
+                    reason_code="base_ref_unverifiable")
+    if not paths or missing:
+        reason = why if not paths else f"base_ref absent in {', '.join(missing)}"
+        return dict(_door_gate("GO", f"WARNING: dispatch {dispatch_id!r}: base check could not apply: {reason}"),
+                    reason_code="base_ref_not_applied")
+    return _door_gate("GO", f"dispatch {dispatch_id}: PR base agrees with {actual!r}")
+
+
+def _apply_dispatch_base_ref(
+    args: argparse.Namespace, gate: Dict[str, Any], pr_data: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """After CI GO, apply the dispatch base check and emit any non-application warning."""
+    if gate["verdict"] == "GO":
+        base_gate = _check_dispatch_base_ref(
+            args.pr, (pr_data or {}).get("baseRefName"), args.dispatch_id,
+            data_dir=Path(ensure_env()["VNX_DATA_DIR"]),
+        )
+        if base_gate["verdict"] != "GO":
+            return base_gate
+        if base_gate.get("reason_code") == "base_ref_not_applied":
+            print(base_gate["message"], file=sys.stderr)
+    return gate
 
 
 def _norm_pr_id(pr_id: str) -> str:
@@ -3453,6 +3525,7 @@ def _run_door(args: argparse.Namespace) -> int:
 
     # ── Merge gate: VNX CI conclusion=success for the exact PR head ──────
     gate, pr_data = _run_ci_gate(args.pr, override_reason=args.override_reason)
+    gate = _apply_dispatch_base_ref(args, gate, pr_data)
     # The head SHA the gates approve is established once, here: the merge is
     # pinned to it (--match-head-commit) and every preflight record names it.
     head_sha = (pr_data or {}).get("headRefOid") or ""
@@ -3512,8 +3585,7 @@ def _run_door(args: argparse.Namespace) -> int:
     # weaken that YAML relative to main. Only --allow-weaken overrides a
     # weakening; drift between live and main's own YAML has no override.
     protection_gate = _run_branch_protection_gate(
-        args.pr, pr_data=pr_data, allow_weaken_reason=args.allow_weaken,
-    )
+        args.pr, pr_data=pr_data, allow_weaken_reason=args.allow_weaken)
     evaluated.append(_preflight_record("branch_protection", protection_gate, head_sha))
     if protection_gate["verdict"] != "GO":
         return refuse("branch_protection", protection_gate, "branch_protection_gate")
