@@ -160,3 +160,64 @@ def fetch_merged(
             cache[key] = population
         return population
     return cache[key]
+
+
+class RunReadFailure(ValueError):
+    """A named, blocking Actions read failure; never an empty population."""
+
+
+class RunReader:
+    """One project/night budget, including discovery, pagination and any retries."""
+
+    def __init__(self, root, maximum, runner=None):
+        if type(maximum) is not int or maximum <= 0:
+            raise ValueError("VNX_CI_RECORD_MAX_CALLS must be a positive integer")
+        self.root, self.maximum = root, maximum
+        self.runner, self.calls, self.stopped = runner or _default_runner, 0, None
+
+    def read(self, args):
+        if self.stopped is None and self.calls >= self.maximum:
+            self.stopped = "call_budget_exhausted"
+        if self.stopped:
+            raise RunReadFailure(self.stopped)
+        self.calls += 1
+        try:
+            code, stdout, stderr = self.runner(["gh", *args], cwd=self.root)
+        except Exception as exc:
+            raise RunReadFailure("source_missing") from exc
+        if type(code) is not int or code != 0:
+            if isinstance(stderr, str) and any(s in stderr.lower() for s in ("rate limit", "http 429")):
+                self.stopped = "rate_limited"
+            raise RunReadFailure(self.stopped or "source_missing")
+        try:
+            data = json.loads(stdout)
+        except (ValueError, TypeError) as exc:
+            raise RunReadFailure("source_invalid") from exc
+        if not isinstance(data, dict):
+            raise RunReadFailure("source_invalid")
+        return data
+
+    def pages(self, endpoint, key):
+        """Return observed rows plus a failure reason unless every page is proven."""
+        rows, seen, total, page = [], set(), None, 1
+        while True:
+            try:
+                data = self.read(["api", f"{endpoint}?per_page=100&page={page}"])
+                batch, count = data.get(key), data.get("total_count")
+                if (not isinstance(batch, list) or type(count) is not int or count < 0
+                        or (total is not None and total != count)):
+                    raise RunReadFailure("source_invalid")
+                total = count
+                for row in batch:
+                    ident = row.get("id") if isinstance(row, dict) else None
+                    if type(ident) is not int or ident <= 0 or ident in seen:
+                        raise RunReadFailure("source_invalid")
+                    seen.add(ident)
+                    rows.append(row)
+                if len(rows) == total:
+                    return rows, None
+                if not batch or len(rows) > total:
+                    raise RunReadFailure("source_invalid")
+                page += 1
+            except RunReadFailure as exc:
+                return rows, str(exc)

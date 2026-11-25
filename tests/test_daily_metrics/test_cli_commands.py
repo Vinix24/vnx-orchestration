@@ -130,7 +130,7 @@ def _args(tmp_path: Path, extra: list[str] | None = None) -> list[str]:
 
 
 def _stderr_failures(proc: subprocess.CompletedProcess) -> list[dict]:
-    return [json.loads(line) for line in proc.stderr.splitlines() if line.startswith("{")]
+    return [json.loads(line) for line in proc.stderr.splitlines() if line.startswith("{") and "command_import_failed" in line]
 
 
 @pytest.fixture()
@@ -164,7 +164,7 @@ def test_command_module_with_future_annotations_and_dataclass_is_discovered(tmp_
     assert failures == []
     proc = _run_cli(tmp_path, commands, ["daily", *_args(tmp_path)])
     assert proc.returncode == 0, proc.stderr
-    assert proc.stderr == ""
+    assert json.loads(proc.stderr)["ci_runs"]["reason"] == "writer_failed"
 
 
 def test_broken_command_exits_one_reports_it_and_keeps_the_days(tmp_path):
@@ -186,7 +186,7 @@ def test_equal_daily_steps_run_in_module_name_order_and_a_lower_step_first(tmp_p
     })
     proc = _run_cli(tmp_path, commands, ["daily", *_args(tmp_path)])
     assert proc.returncode == 0, proc.stderr
-    assert proc.stderr == ""
+    assert json.loads(proc.stderr)["ci_runs"]["reason"] == "writer_failed"
     steps = [json.loads(line) for line in (tmp_path / "order.jsonl").read_text().splitlines()]
     assert [item["step"] for item in steps] == ["first_step", "alpha_step", "zeta_step"]
     assert steps[0]["project_id"] == "p"
@@ -208,7 +208,7 @@ def test_module_without_register_or_run_is_neither_command_nor_failure(tmp_path)
     commands = _commands(tmp_path, {"not_a_command": NOT_A_COMMAND_MODULE})
     daily = _run_cli(tmp_path, commands, ["daily", *_args(tmp_path)])
     assert daily.returncode == 0, daily.stderr
-    assert daily.stderr == ""
+    assert json.loads(daily.stderr)["ci_runs"]["reason"] == "writer_failed"
     assert not (tmp_path / "order.jsonl").exists()
     named = _run_cli(tmp_path, commands, ["not_a_command"])
     assert named.returncode == 2
@@ -218,6 +218,6 @@ def test_init_is_never_imported_as_a_command(tmp_path):
     commands = _commands(tmp_path, {}, init=NEVER_IMPORTED_INIT)
     daily = _run_cli(tmp_path, commands, ["daily", *_args(tmp_path)])
     assert daily.returncode == 0, daily.stderr
-    assert daily.stderr == ""
+    assert json.loads(daily.stderr)["ci_runs"]["reason"] == "writer_failed"
     named = _run_cli(tmp_path, commands, ["__init__"])
     assert named.returncode == 2
