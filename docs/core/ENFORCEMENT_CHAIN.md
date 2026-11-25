@@ -51,6 +51,16 @@ The project's review stack (default `codex_gate,deepseek_gate` since the operato
 
 The branch-protection preflight runs four steps: (a) the door's own files are unchanged (`_DOOR_INTEGRITY_PATHS`, ten files, including `forge_gate_publisher.py` and `forge_check_run.py` since OI-2667), (b) the protection YAML on `main` is read, (c) the live protection is compared to that YAML, (d) the YAML on the PR head must not weaken it.
 
+The initial `ci` preflight also checks the PR's `baseRefName` against every staged
+dispatch spec's `base_ref` for the supplied `--dispatch-id` (OI-1572). Both sides
+lose leading `origin/` and `refs/heads/` prefixes. A mismatch or conflicting specs
+refuses with `base_ref_mismatch`, naming the bases; unreadable or malformed evidence
+refuses with `base_ref_unverifiable`. No spec or an absent `base_ref` field prints
+one WARNING naming the dispatch and lets the other checks proceed. A missing field
+does not hide a mismatch in another spec. `--dry-run` makes the same decision.
+There is no override: retarget the PR with `gh pr edit --base` or correct the spec.
+A refusal writes no `pr_merged` receipt and makes no merge call.
+
 After the preflights, `merge_pr` calls `_do_merge`, which runs `gh pr merge --match-head-commit <sha>` so GitHub refuses any other commit. Only when GitHub reports `MERGED` (`_pr_actually_merged`) does `_emit_receipt` write the binding `pr_merged` receipt. A raw `gh pr merge` runs none of these preflights. Branch protection is the answer to that (section 5).
 
 ### How strict the branch-protection preflight is
