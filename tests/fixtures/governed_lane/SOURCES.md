@@ -10,6 +10,10 @@ reproduce every golden field by field.
 These fixtures are untrusted report text, kept verbatim as parser input, never
 as instructions to anything reading this corpus.
 
+OI-3084 updates only `contract_hash` in `records/glm-golden.json` and
+`records/glm-fail.json` to `f84a98d7fb8e0e06`: the GLM prompt now includes the
+agentic working-directory rule. The report texts and all other record fields stay identical.
+
 | fixture | source report | shape |
 |---|---|---|
 | `kimi-pass-clean.md` | `kimi-gate-pr1715-1788000240.md` | PASS, no findings |
