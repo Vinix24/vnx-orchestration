@@ -86,7 +86,7 @@
 
 ## 10) Learning and Dreaming Propose, a Human Decides
 **Context**: A loop that rewrites its own rules from receipts can drift without anyone seeing it.  
-**Decision**: The learning loop runs in shadow mode unless `VNX_LEARNING_LOOP_PERSIST=1`. With `VNX_LEARNING_LOOP_QUEUE=1` its proposals go to a queue and nothing is activated (ADR-065). Steering proposals carry a decision record: `approved` applies nothing, `applied` needs a reference to the change (`scripts/lib/steering_proposal_store.py`, ADR-072). The dream scheduler is off by default (`VNX_DREAM_SCHEDULER_ENABLED=0`, ADR-019, ADR-066). On main, not yet released.  
+**Decision**: The learning loop runs in shadow mode unless `VNX_LEARNING_LOOP_PERSIST=1`. With `VNX_LEARNING_LOOP_QUEUE=1` its proposals go to a queue and nothing is activated (ADR-065). Steering proposals carry a decision record: `approved` applies nothing, `applied` needs a reference to the change (`scripts/lib/steering_proposal_store.py`, ADR-072). The dream scheduler is off by default (`VNX_DREAM_SCHEDULER_ENABLED=0`, ADR-019, ADR-066). Released in 1.9.0.
 **Tradeoff**: The loop does not close itself. A proposal waits for me, and an unread queue is a loop that does nothing.
 
 ---

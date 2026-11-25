@@ -58,7 +58,7 @@ This document is the single source of truth for which VNX subsystems are live, p
 
 The rows above are feature flags. Two CI guards are not, and are described here
 because they are subsystems an operator has to know the state of. Both are on `main`,
-not yet released. This is code behaviour; no ADR records them.
+and were released in 1.9.0. This is code behaviour; no ADR records them.
 
 **Profile A and pytest-xdist.** Since D4, Profile A (the core test job) runs a
 two-phase shape: the entries of `scripts/ci/serial_tests.txt` in one process with xdist

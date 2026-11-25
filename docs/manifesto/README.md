@@ -39,9 +39,9 @@ _Completion is evidence-based: warnings are surfaced and tracked before closure.
 - Builders who need governance and traceability, not just “agent swarms”.
 - Teams experimenting with local-first, file-based orchestration patterns.
 
-## What Is On Main, Not Yet Released
+## Released in 1.9.0
 
-`VERSION` is 1.8.0. Review seats, the takeover chain, the provider switch, the plan-gate with one seat, open outcomes, T0 guard and rotation are in it. After it, these landed on `origin/main` (c41411fea, 2026-11-12). The canonical file owns the mechanism.
+`VERSION` is 1.10.0. Review seats, the takeover chain, the provider switch, the plan-gate with one seat, open outcomes, T0 guard and rotation are in it. The mechanisms below were on `origin/main` at c41411fea on 2026-11-12 and were released in 1.9.0. The canonical file owns the mechanism.
 
 - **Merge door permit.** A sixth preflight, `door`, publishes `vnx-gate/door` for one exact head and pins the merge to it. ADR-061.
 - **One permission policy.** One digest over the role boundary (`scripts/lib/permission_policy.py`). The binding to every dispatch is the decision of ADR-057.

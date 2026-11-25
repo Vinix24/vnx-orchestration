@@ -1,6 +1,6 @@
 # VNX Self-Learning Loop — Operator-Gated Intelligence
 
-**Status**: Verified against `origin/main` at f0c113253 on 2026-11-12. The loop is a proposal tier: shadow mode is the default and every activation is a separate operator step. Work merged after the 1.8.0 release is marked "on main, not yet released".
+**Status**: Verified against `origin/main` at f0c113253 on 2026-11-12. The loop is a proposal tier: shadow mode is the default and every activation is a separate operator step. Work merged after the 1.10.0 release is marked "on main, not yet released".
 **Related doc**: [`SCOUT_PREPASS.md`](SCOUT_PREPASS.md) covers the scout pre-pass and rank-then-budget
 selection in depth — this doc summarizes rank-then-budget below and defers detail there.
 **Ground truth**: the code modules cited throughout this doc (`scripts/learning_loop.py`,
