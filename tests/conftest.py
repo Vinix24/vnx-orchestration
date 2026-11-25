@@ -803,6 +803,13 @@ def _stub_branch_protection_gate_gh_calls(monkeypatch: pytest.MonkeyPatch) -> No
     except ImportError:
         return
     from forge_protection_drift import YamlFetchResult
+    from optional_features import FeatureState
+
+    # OF-3's own tests restore the real snapshot; unrelated door tests retain required CI.
+    monkeypatch.setattr(pr_merge, "_door_features", lambda: {
+        "ci": FeatureState("ci", True, "required", "test"),
+        "branch_protection": FeatureState("branch_protection", False, "absent", "file_absent"),
+    })
 
     monkeypatch.setattr(
         pr_merge, "_door_blob_hash_gate",
