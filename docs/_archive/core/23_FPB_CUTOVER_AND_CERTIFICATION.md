@@ -235,3 +235,11 @@ Rows from `22_FPB_CERTIFICATION_MATRIX.md`:
 **FP-B is CERTIFIED** — all quality gates pass, all certification matrix rows verified.
 
 FP-C (execution mode expansion) is unblocked pending this certification.
+
+
+Q1b-a update: runtime-core, adapter, CLI and recovery readers no longer accept
+runtime/adapter rollback environment switches. Rollback is `git revert`.
+`runtime_cutover_check.py` retains its component checks and drops the `flags` output.
+Canonical-lease readers remain pending dispatcher (1) versus standalone (0)
+entry-point reconciliation; broker/mixed-router shadow defaults also remain pending.
+Dispatcher and broker flag removal is assigned to Q1b part b.

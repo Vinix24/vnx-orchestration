@@ -295,8 +295,8 @@ The `TmuxAdapter` formalization must preserve these existing behaviors:
 |----------|----------------------|---------------------|
 | Session naming | `vnx-$(basename "$PROJECT_ROOT")` | `TmuxAdapter.initialize()` must use this naming convention |
 | Pane layout | 2x2 grid in home window (T0-T3) | `TmuxAdapter.spawn()` must create panes matching `session_profile.json` layout |
-| Load-dispatch delivery | `tmux send-keys "load-dispatch <id>" Enter` | `TmuxAdapter.deliver()` primary path. Feature flag `VNX_ADAPTER_PRIMARY` preserved. |
-| Legacy paste-buffer fallback | `tmux load-buffer` + `paste-buffer` | `TmuxAdapter.deliver()` fallback path. Feature flag `VNX_ADAPTER_PRIMARY=0`. |
+| Load-dispatch delivery | `tmux send-keys "load-dispatch <id>" Enter` | `TmuxAdapter.deliver()` primary path. Default production path. |
+| Legacy paste-buffer fallback | `tmux load-buffer` + `paste-buffer` | `TmuxAdapter.deliver()` fallback path. Explicit `primary_path=False` constructor seam. |
 | Pane reheal by work_dir | Rediscover panes by `pane_current_path` match | `TmuxAdapter.reheal()` using work directory as identity anchor |
 | Profile drift detection | Compare `session_profile.json` vs live `tmux list-panes` | `TmuxAdapter.observe()` and `TmuxAdapter.health()` must detect drift |
 | Dynamic window management | ops, recovery, events windows created on-demand | Out of scope for `RuntimeAdapter` contract (operator UX, not dispatch transport) |
@@ -305,9 +305,9 @@ The `TmuxAdapter` formalization must preserve these existing behaviors:
 
 | Flag | Default | Purpose | Contract Rule |
 |------|---------|---------|--------------|
-| `VNX_TMUX_ADAPTER_ENABLED` | `"1"` | Enable/disable tmux adapter entirely | Must be checked in `TmuxAdapter.initialize()`. When `"0"`, adapter reports all capabilities as unavailable. |
-| `VNX_ADAPTER_PRIMARY` | `"1"` | Toggle load-dispatch vs legacy paste-buffer | Internal to `TmuxAdapter.deliver()`. Not exposed in contract interface. |
-| `VNX_RUNTIME_PRIMARY` | `"1"` | Toggle RuntimeCore vs legacy dispatcher | Consumed by `RuntimeCore`, not by adapter. Preserved as-is. |
+| Runtime adapter | always enabled | Capability set is fixed | Roll back code with `git revert`. |
+| Default delivery | load-dispatch | Explicit constructor `primary_path=False` retains paste-buffer support | No environment toggle. |
+| Runtime core | always active | Initialization failure blocks CLI operations | Dispatcher and broker cutover cleanup follows in part b. |
 
 ### 7.3 Transport-Specific Extensions
 
@@ -402,7 +402,7 @@ Every `RuntimeAdapter` implementation must pass these conformance tests:
 2. **Profile integrity** — spawned session matches session_profile.json
 3. **Reheal accuracy** — pane remap by work_dir succeeds after simulated drift
 4. **Feature flag respect** — disabled adapter reports no capabilities
-5. **Legacy fallback** — `VNX_ADAPTER_PRIMARY=0` uses paste-buffer delivery
+5. **Legacy fallback** — explicit `primary_path=False` uses paste-buffer delivery
 
 ---
 

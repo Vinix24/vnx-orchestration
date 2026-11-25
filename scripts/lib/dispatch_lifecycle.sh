@@ -80,11 +80,11 @@ release_terminal_claim() {
 }
 
 # ===== RUNTIME CORE INTEGRATION (PR-5) =====
-# All functions are non-fatal: failures are logged but never block dispatch.
-# When VNX_RUNTIME_PRIMARY=0, functions return immediately without calling Python.
+# Registration, acquisition and delivery failures block dispatch.
+# Runtime coordination is mandatory.
 
 _rc_enabled() {
-    [[ "${VNX_RUNTIME_PRIMARY:-1}" == "1" ]]
+    return 0
 }
 
 _rc_python() {
@@ -96,7 +96,6 @@ _rc_python() {
 rc_register() {
     local dispatch_id="$1" terminal_id="$2" track="$3" skill_name="$4" gate="$5"
     local prompt_file="${6:-}"
-    _rc_enabled || return 0
 
     local args=(register
         --dispatch-id "$dispatch_id"
@@ -124,7 +123,6 @@ rc_register() {
 # Fail-closed: Python failure or parse error outputs BLOCK, not ALLOW.
 rc_check_terminal() {
     local terminal_id="$1" dispatch_id="$2"
-    _rc_enabled || { echo "ALLOW"; return 0; }
 
     local result
     result=$(_rc_python check-terminal --terminal "$terminal_id" --dispatch-id "$dispatch_id") || {
@@ -152,7 +150,6 @@ rc_check_terminal() {
 rc_acquire_lease() {
     local terminal_id="$1" dispatch_id="$2"
     local lease_seconds=600
-    _rc_enabled || { echo "0"; return 0; }
 
     local result
     result=$(_rc_python acquire-lease \
@@ -179,7 +176,6 @@ rc_acquire_lease() {
 # Record delivery start (broker: claimed -> delivering). Returns attempt_id.
 rc_delivery_start() {
     local dispatch_id="$1" terminal_id="$2"
-    _rc_enabled || { echo ""; return 0; }
 
     local result
     result=$(_rc_python delivery-start \
@@ -203,7 +199,6 @@ rc_delivery_start() {
 # dispatch active locally.
 rc_delivery_success() {
     local dispatch_id="$1" attempt_id="$2"
-    _rc_enabled || return 0
     # When RC is enabled but no attempt_id is supplied the broker has nothing
     # to transition — silently treating that as success would let
     # finalize_dispatch_delivery move the dispatch to active/ while the broker
@@ -269,7 +264,6 @@ rc_release_lease() {
     local terminal_id="$1" generation="$2"
     local dispatch_id="${3:-unknown}"
     local dispatch_exit_status="${4:-success}"
-    _rc_enabled || return 0
     [[ -n "$generation" && "$generation" != "0" ]] || return 0
 
     if ! _rc_python release-lease \
@@ -297,7 +291,6 @@ rc_release_lease() {
 rc_release_on_failure() {
     local dispatch_id="$1" attempt_id="$2" terminal_id="$3" generation="$4"
     local reason="${5:-delivery failed}"
-    _rc_enabled || return 0
     [[ -n "$generation" && "$generation" != "0" ]] || return 0
 
     local result

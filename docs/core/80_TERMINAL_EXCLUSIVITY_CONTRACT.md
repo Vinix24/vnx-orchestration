@@ -120,13 +120,13 @@ These rules define the contract that PR-1 must enforce in code. Each rule is lab
 
 ### 3.3 Runtime-Core Unavailability (FC-3)
 
-**Rule**: If `VNX_RUNTIME_PRIMARY=1` (runtime core is the active lease authority) and the runtime core Python module cannot be loaded or executed, dispatch is **blocked** for all terminals.
+**Rule**: If the runtime core Python module cannot be loaded or executed, dispatch is **blocked** for all terminals.
 
 **Current violation**: `_rc_enabled` returning false causes the canonical check to be skipped entirely, falling through to the legacy-only path. When the runtime core is the designated authority, its absence is a safety failure, not a graceful degradation.
 
-**Required behavior**: When `VNX_RUNTIME_PRIMARY=1`, canonical check failure is a hard block. The legacy path runs as defense-in-depth but cannot override a canonical block or substitute for a missing canonical check.
+**Required behavior**: Canonical check failure is a hard block. The legacy path runs as defense-in-depth but cannot override a canonical block or substitute for a missing canonical check.
 
-**Exception**: When `VNX_RUNTIME_PRIMARY=0` (explicit legacy mode), the canonical check is not required and the legacy path alone governs dispatch safety. This is the rollback path.
+**Rollback**: Runtime coordination is mandatory after Q1b-a. Use `git revert`; the runtime CLI and lifecycle helpers no longer accept an environment bypass. Dispatcher export cleanup follows in Q1b-b.
 
 ### 3.4 Active Worker Ownership (FC-4)
 
@@ -385,7 +385,7 @@ These are the specific code locations that PR-1 must fix.
 | File | Line | Violation | Required Fix |
 |------|------|-----------|-------------|
 | `dispatcher_minimal.sh` | 180-181 | `terminal_lock_allows_dispatch()` returns 0 (allow) when state file missing | Return 0 only when no lease row exists in canonical source (FC-5). Block on unreadable file. |
-| `dispatcher_minimal.sh` | 338 | `rc_check_terminal()` returns `ALLOW` when `_rc_enabled` is false | When `VNX_RUNTIME_PRIMARY=1`, absence of runtime core is a hard block (FC-3). |
+| `dispatcher_minimal.sh` | 338 | `rc_check_terminal()` in `scripts/lib/dispatch_lifecycle.sh` has no disabled bypass | Absence of runtime core is a hard block (FC-3). |
 | `dispatcher_minimal.sh` | 342-343 | `rc_check_terminal()` returns `ALLOW` on Python execution failure | Return `BLOCK:canonical_check_failed` (FC-1). |
 | `dispatcher_minimal.sh` | 347 | JSON parse of canonical check result defaults to `"yes"` on error | Default to `"no"` (blocked) on parse error (FC-1). |
 | `dispatcher_minimal.sh` | 210 | `terminal_lock_allows_dispatch()` returns allow when no record exists for terminal | Acceptable only after canonical check has passed (FC-5 + FC-6 conjunction). |
