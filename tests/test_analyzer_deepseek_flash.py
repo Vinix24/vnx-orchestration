@@ -272,8 +272,66 @@ def test_balance_endpoint_failure_skips_loudly(capsys):
         outcome = DeepAnalyzer._try_deepseek_harness("prompt")
 
     assert outcome.status == "balance_unavailable"
+    assert "connection refused" in outcome.cause
     run.assert_not_called()
     assert "[ERROR]" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("field", ["is_available", "balance_infos", "total_balance", "currency"])
+@pytest.mark.parametrize("value", ["missing", None, {}, "unknown"])
+def test_missing_or_invalid_balance_evidence_refuses_spawn(field, value):
+    body = _balance_body()
+    target = body["balance_infos"][0] if field in ("total_balance", "currency") else body
+    if value == "missing":
+        del target[field]
+    else:
+        target[field] = value
+    with patch.dict(os.environ, {"DEEPSEEK_API_KEY": SECRET}), \
+         patch.object(DeepAnalyzer, "_fetch_deepseek_balance", return_value=body), \
+         patch("subprocess.run") as run:
+        outcome = DeepAnalyzer._try_deepseek_harness("prompt")
+    assert outcome.status == "balance_unavailable"
+    assert outcome.cause.startswith("balance_unavailable:")
+    run.assert_not_called()
+
+
+@pytest.mark.parametrize("total", ["NaN", "Infinity", "-Infinity", True, 10 ** 500])
+def test_nonfinite_or_boolean_balance_never_authorizes_spawn(total):
+    with patch.dict(os.environ, {"DEEPSEEK_API_KEY": SECRET}), \
+         patch.object(DeepAnalyzer, "_fetch_deepseek_balance", return_value=_balance_body(total=total)), \
+         patch("subprocess.run") as run:
+        outcome = DeepAnalyzer._try_deepseek_harness("prompt")
+    assert outcome.status == "balance_unavailable"
+    assert "no readable USD total_balance" in outcome.cause
+    run.assert_not_called()
+
+
+@pytest.mark.parametrize("body", [None, [], {"is_available": True, "balance_infos": [None]},
+                                      _balance_body(available="false")])
+def test_malformed_balance_response_is_a_visible_failure(body):
+    with patch.dict(os.environ, {"DEEPSEEK_API_KEY": SECRET}), \
+         patch.object(DeepAnalyzer, "_fetch_deepseek_balance", return_value=body), \
+         patch("subprocess.run") as run:
+        outcome = DeepAnalyzer._try_deepseek_harness("prompt")
+    assert outcome.status == "balance_unavailable"
+    assert outcome.cause.startswith("balance_unavailable:")
+    run.assert_not_called()
+
+
+def test_unexplained_child_failure_keeps_cached_balance_context():
+    child = subprocess.CompletedProcess([], 1, "upstream disconnected", "")
+    with patch.dict(os.environ, {"DEEPSEEK_API_KEY": SECRET}), \
+         patch.object(DeepAnalyzer, "_fetch_deepseek_balance", return_value=_balance_body()) as fetch, \
+         patch.object(da_module, "build_harness_child_env", return_value={}), \
+         patch.object(da_module, "resolve_claude_cli", return_value="claude"), \
+         patch("subprocess.run", return_value=child):
+        outcome = DeepAnalyzer._try_deepseek_harness("prompt", project_id="vnx-dev")
+    assert outcome.status == "cli_failed"
+    assert "exit code 1" in outcome.cause
+    assert "upstream disconnected" in outcome.cause
+    assert "preflight=ok; balance_ok=5.00 USD (cached)" in outcome.cause
+    assert SECRET not in outcome.cause
+    assert fetch.call_count == 1
 
 
 def test_balance_is_checked_once_per_process():
@@ -305,6 +363,8 @@ def test_low_balance_is_a_failed_attempt_in_the_digest(tmp_path):
     assert analyzer.deep_failures == 1
     assert analyzer.deep_config_skips == 0
     assert analyzer.deep_failure_reasons == {"balance_low": 1}
+    assert len(analyzer.deep_failure_causes) == 1
+    assert "balance_low: DeepSeek balance 0.01 USD" in next(iter(analyzer.deep_failure_causes))
 
     stats = RunStats(deep_attempts=analyzer.deep_attempts,
                      deep_failures=analyzer.deep_failures,
@@ -333,6 +393,7 @@ def test_missing_key_is_a_failed_attempt_in_the_digest(tmp_path):
     assert result is None
     run.assert_not_called()
     assert analyzer.deep_failure_reasons == {"key_missing": 1}
+    assert "key_missing: DEEPSEEK_API_KEY not set" in next(iter(analyzer.deep_failure_causes))
     stats = RunStats(deep_attempts=analyzer.deep_attempts,
                      deep_failures=analyzer.deep_failures,
                      deep_failure_reasons=dict(analyzer.deep_failure_reasons))

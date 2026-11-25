@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -28,7 +29,7 @@ _import_env = {
 }
 with patch.dict(os.environ, _import_env):
     import conversation_analyzer.deep_analyzer as da_module
-    from conversation_analyzer import DeepAnalyzer, RunStats, deep_none_attempted
+    from conversation_analyzer import DeepAnalyzer, RunStats, SessionFlags, SessionMetrics, deep_none_attempted
     from conversation_analyzer.deep_analyzer import (
         CLI_CAUSE_LIMIT, CLI_STDERR_LOG_LIMIT, LLMOutcome, describe_cli_failure,
     )
@@ -87,6 +88,54 @@ def test_all_failed_stays_fail_and_carries_the_causes(tmp_path):
     assert beacon["details"]["failure_causes"] == {"API Error: 402 Insufficient Balance": 2}
 
 
+@pytest.mark.parametrize("failures,attempts,status", [
+    (34, 47, "degraded"), (23, 47, "ok"), (24, 48, "ok"), (25, 48, "degraded"),
+])
+def test_majority_deep_failures_degrade_beacon(tmp_path, failures, attempts, status):
+    causes = {"timeout": 1, "error_max_turns": failures - 1}
+    beacon = _beacon(tmp_path, RunStats(deep_attempts=attempts, deep_failures=failures,
+                                      deep_failure_causes=causes))
+    assert beacon["status"] == status
+    assert beacon["details"]["failure_causes"] == causes
+    if status == "degraded":
+        assert beacon["details"]["reason"] == "deep_failure_majority"
+        assert beacon["details"]["dominant_cause"] == "error_max_turns"
+    else:
+        assert "reason" not in beacon["details"]
+
+
+@pytest.mark.parametrize("field", ["deep_attempts", "deep_failures"])
+@pytest.mark.parametrize("value", ["missing", None, [], "unknown", -1, True])
+def test_invalid_deep_counts_cannot_report_ok(tmp_path, field, value):
+    values = vars(RunStats(deep_attempts=47, deep_failures=23)).copy()
+    if value == "missing":
+        del values[field]
+    else:
+        values[field] = value
+    beacon = _beacon(tmp_path, SimpleNamespace(**values))
+    assert beacon["status"] == "degraded"
+    assert beacon["details"]["reason"] == "deep_counts_invalid"
+
+
+def test_failures_cannot_exceed_attempts(tmp_path):
+    beacon = _beacon(tmp_path, RunStats(deep_attempts=0, deep_failures=1))
+    assert beacon["status"] == "degraded"
+    assert beacon["details"]["reason"] == "deep_counts_invalid"
+
+
+@pytest.mark.parametrize("causes", ["missing", None, [], "unknown", {}, {"timeout": None}])
+def test_majority_failure_without_readable_causes_stays_degraded(tmp_path, causes):
+    values = vars(RunStats(deep_attempts=47, deep_failures=34)).copy()
+    if causes == "missing":
+        del values["deep_failure_causes"]
+    else:
+        values["deep_failure_causes"] = causes
+    beacon = _beacon(tmp_path, SimpleNamespace(**values))
+    assert beacon["status"] == "degraded"
+    assert beacon["details"]["reason"] == "deep_failure_majority"
+    assert beacon["details"]["dominant_cause"] == "failure cause unavailable"
+
+
 def test_switched_off_keeps_its_own_reason(tmp_path):
     stats = RunStats(deep_disabled_skips=2, deep_open_sessions=2)
     assert _beacon(tmp_path, stats)["details"]["reason"] == "provider_switched_off"
@@ -110,7 +159,54 @@ def test_describe_skips_the_startup_notice_when_picking_the_stderr_cause():
     _, cause = describe_cli_failure(1, "", NOTICE + "\nauto mode enabled\nreal error")
     assert cause == "auto mode enabled"
     _, cause = describe_cli_failure(1, "", NOTICE)
-    assert cause == "exit code 1 without a message"
+    assert cause == "exit code 1; stdout=''"
+
+
+@pytest.mark.parametrize("stderr", ["", NOTICE])
+def test_non_json_stdout_is_kept_with_exit_code(stderr):
+    stdout = "paid lane daily budget exceeded\nmore detail"
+    detail, cause = describe_cli_failure(1, stdout, stderr)
+    assert "exit code 1" in cause
+    assert "paid lane daily budget exceeded" in cause
+    assert repr(stdout) in detail
+
+
+def test_measured_max_turns_failure_has_its_own_cause():
+    # Replay of the 21-Nov failed call: result is absent, errors names the stop.
+    stdout = json.dumps({"is_error": True, "subtype": "error_max_turns",
+                         "terminal_reason": "max_turns", "stop_reason": "tool_use",
+                         "errors": ["Reached maximum number of turns (1)"]})
+    detail, cause = describe_cli_failure(1, stdout, NOTICE)
+    assert cause == "error_max_turns: Reached maximum number of turns (1)"
+    assert "terminal_reason='max_turns'" in detail
+    assert "Reached maximum number of turns (1)" in detail
+
+
+@pytest.mark.parametrize("payload", [
+    {}, {"errors": None, "subtype": None}, {"errors": {}, "subtype": []},
+    {"errors": [None, 1], "subtype": "unknown"},
+])
+def test_unreadable_error_fields_never_clear_child_failure(payload):
+    outcome, _ = da_module._child_outcome(
+        subprocess.CompletedProcess([], 1, json.dumps(payload), ""), "DeepSeek harness")
+    assert outcome.status == "cli_failed"
+    assert "exit code 1" in outcome.cause
+
+
+@pytest.mark.parametrize("rc", ["missing", None, [], "unknown", False])
+def test_unreadable_exit_code_is_a_visible_failure(rc):
+    fields = {"stdout": '{"result":"usable"}', "stderr": ""}
+    if rc != "missing":
+        fields["returncode"] = rc
+    outcome, _ = da_module._child_outcome(SimpleNamespace(**fields), "Claude CLI")
+    assert outcome.status == "error"
+    assert "invalid child exit code" in outcome.cause
+
+
+def test_stdout_excerpt_is_bounded():
+    detail, cause = describe_cli_failure(1, "x" * 50000, "")
+    assert len(cause) <= CLI_CAUSE_LIMIT
+    assert len(detail) < CLI_STDERR_LOG_LIMIT + 200
 
 
 def test_describe_bounds_stderr_and_cause():
@@ -164,6 +260,26 @@ def test_failure_cause_reaches_the_run_counters(lane, monkeypatch):
     outcome = analyzer._launch_lane(analyzer._try_deepseek_harness, "p", "vnx-dev")
     analyzer._record_failure(outcome.status, outcome.cause)
     assert analyzer.deep_failure_causes == {"API Error: 402 Insufficient Balance": 1}
+
+
+def test_measured_failure_reaches_counters_and_beacon(lane, monkeypatch, tmp_path):
+    cause = "error_max_turns: Reached maximum number of turns (1)"
+    stdout = json.dumps({"is_error": True, "subtype": "error_max_turns",
+                         "errors": ["Reached maximum number of turns (1)"]})
+    monkeypatch.setattr(da_module.subprocess, "run",
+                        MagicMock(return_value=_fail_run(stdout, NOTICE)))
+    monkeypatch.setattr(da_module, "LLM_STRATEGY", "deepseek-harness")
+    session = tmp_path / "session.jsonl"
+    session.write_text('{"type":"user","message":{"content":"Analyze the test failure"}}\n')
+    analyzer = DeepAnalyzer()
+    metrics = SessionMetrics(session_id="session", total_output_tokens=5000, tool_calls_total=20)
+    assert analyzer.analyze_session(session, metrics, SessionFlags()) is None
+    assert analyzer.deep_attempts == analyzer.deep_failures == 1
+    assert analyzer.deep_failure_causes == {cause: 1}
+    beacon = _beacon(tmp_path, RunStats(deep_attempts=1, deep_failures=1,
+                                      deep_failure_causes=analyzer.deep_failure_causes))
+    assert beacon["status"] == "degraded"
+    assert beacon["details"]["dominant_cause"] == cause
 
 
 # --- one launch builder (OI-2061, cause 3) -------------------------------------------------
