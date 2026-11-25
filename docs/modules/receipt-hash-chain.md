@@ -20,4 +20,4 @@ Background: [epoch rotation](../governance/decisions/ADR-029-hashchain-epoch-rot
 
 `VNX_HASH_CHAIN_REQUIRED` — active append selector: override > project row > global config > env > default. The retired receipt-chain env flag has no effect (ADR-087 decision 9).
 
-The append writer and ledger-health reader bind `config_runtime` to the ledger directory explicitly, without git discovery. Config fallback diagnostics in the receipt writer use its structured JSON emitter.
+The append writer and ledger-health reader bind `config_runtime` to the ledger directory explicitly, without git discovery. An explicit store without a project id uses the normal config fallback; its debug diagnostic adds no line to receipt stderr, even with debug logging enabled. Config warnings and errors (including a known project's missing database) use the receipt writer's structured JSON emitter.

@@ -140,8 +140,10 @@ def _close_a_torn_tail(receipt_path: Path) -> bool:
 
 @contextmanager
 def _structured_config_logs():
-    """Keep config diagnostics visible through the receipt writer's JSON emitter."""
+    """Keep config warnings/errors visible through the receipt writer's JSON emitter."""
     def emit(record):
+        if record.levelno < logging.WARNING:
+            return False  # Routine fallback diagnostics must not change a caller's stderr.
         _emit("WARN" if record.levelname == "WARNING" else record.levelname,
               "receipt_config", message=record.getMessage(), logger=record.name)
         return False  # Already emitted; no plain-text handler may print it again.

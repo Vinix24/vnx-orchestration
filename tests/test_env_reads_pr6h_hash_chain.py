@@ -88,13 +88,31 @@ def test_retired_flag_has_no_environment_readers():
             assert "${VNX_CHAIN_RECEIPTS" not in path.read_text(), path
 
 
+@pytest.mark.parametrize("has_project", [False, True])
+def test_explicit_store_receipts_have_no_config_noise(store, tmp_path, monkeypatch, capsys, caplog, has_project):
+    monkeypatch.delenv("VNX_PROJECT_ID")
+    monkeypatch.setenv(KEY, "0")
+    if has_project:
+        (tmp_path / ".vnx-project-id").write_text("pr6h\n")
+        store(tmp_path, "1")
+    ledger = tmp_path / "t0_receipts.ndjson"
+    with caplog.at_level("DEBUG", logger="config_runtime"):
+        for n in range(2):
+            _append_one(ledger, {"event_type": "test_event", "dispatch_id": f"pr6h-{n}"})
+    assert runtime.wire_status().cause == (None if has_project else "no_project")
+    assert not any(e["code"] == "receipt_config" for e in _assert_all_structured(capsys.readouterr().err))
+    entries = [json.loads(line) for line in ledger.read_text().splitlines()]
+    assert len(entries) == 2
+    assert all(("prev_hash" in entry) is has_project for entry in entries)
+
+
 @pytest.mark.parametrize("global_content", [None, "invalid json"])
 def test_fallback_diagnostics_remain_json(tmp_path, global_content):
     config = tmp_path / "global.json"
     if global_content is not None:
         config.write_text(global_content)
     result = _run_append(tmp_path, '{"timestamp":"2026-11-25T00:00:00Z","event_type":"task_started","dispatch_id":"pr6h","terminal":"T1"}',
-                         ["--skip-enrichment"], {"VNX_GLOBAL_CONFIG_FILE": str(config)})
+                         ["--skip-enrichment"], {"VNX_GLOBAL_CONFIG_FILE": str(config), "VNX_PROJECT_ID": "pr6h"})
     assert result.returncode == 0, result.stderr
     lines = _assert_all_structured(result.stderr)
     assert any(e["code"] == "receipt_config" and "config_runtime" in e["message"] for e in lines)

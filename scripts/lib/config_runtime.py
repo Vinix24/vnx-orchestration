@@ -12,6 +12,7 @@ project's state dir + sets it as config_registry's default project, so read-site
 registry env-only — the runtime never breaks because the config DB is missing) — but fail-soft is
 LOUD (a WARNING naming the reason), not silent: a store that cannot be found reads identically to a
 flag the operator explicitly turned off unless the miss is logged (OI-1461).
+An explicit state dir with no project id is a normal pre-init/test-store fallback (DEBUG).
 """
 from __future__ import annotations
 
@@ -121,7 +122,8 @@ def autowire(state_dir: "str | Path | None" = None, project_id: Optional[str] = 
             return _failed(cause or ("store_missing" if pid else "no_project"), pid, None)
         pid = _resolve_project_id(sd, project_id)
         if not pid:
-            logger.warning(
+            logger.log(
+                logging.DEBUG if state_dir is not None else logging.WARNING,
                 "config_runtime: could not resolve a project_id for state_dir=%s; operator config "
                 "in project_config will NOT be read this process — reads fall back to env vars / "
                 "registry defaults only",
