@@ -1,8 +1,8 @@
 """The append-only proposal ledger (decision 26, open question 9).
 
 One file per project store, ``proposals.ndjson``, one JSON object per line,
-never rewritten and never truncated. It holds three events: ``proposed``,
-``approved`` and ``verdict``. The day files stay untouched by a verdict; they
+never rewritten and never truncated. It holds ``proposed``, ``approved``,
+``expired`` and ``verdict`` events. The day files stay untouched by a verdict; they
 only ever refer to proposal ids, so yesterday's measurement cannot change
 because today's verdict landed.
 
@@ -23,13 +23,14 @@ import hashlib
 import json
 import os
 from collections.abc import Iterable, Mapping, Sequence
-from datetime import date
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 from atomic_io import slot_lock
 
 from .proposal_rules import Candidate
+from .github_fetch import parse_timestamp
 
 LEDGER_NAME = "proposals.ndjson"
 
@@ -40,6 +41,7 @@ BLOCK_DAYS = 14
 
 PROPOSED = "proposed"
 APPROVED = "approved"
+EXPIRED = "expired"
 VERDICT = "verdict"
 UNDETERMINED = "undetermined"
 
@@ -98,12 +100,12 @@ def read_events(path: Path) -> list[dict[str, Any]]:
 
 
 def open_keys(events: Sequence[Mapping[str, Any]]) -> set[str]:
-    """Keys with a ``proposed`` event that no ``verdict`` event answers."""
-    answered = {event.get("proposal_id") for event in events if event.get("event") == VERDICT}
+    """Keys with a proposal that has neither a verdict nor an expiry."""
+    answered = {(e.get("project_id"), e.get("proposal_id")) for e in events if e.get("event") in (VERDICT, EXPIRED)}
     return {event["key"] for event in events
             if event.get("event") == PROPOSED
             and isinstance(event.get("key"), str)
-            and event.get("proposal_id") not in answered}
+            and (event.get("project_id"), event.get("proposal_id")) not in answered}
 
 
 def _parse_day(value: Any) -> date | None:
@@ -219,6 +221,35 @@ def _has_event(events: Sequence[Mapping[str, Any]], kind: str, proposal_id_value
                for event in events)
 
 
+def append_expiries(path: Path, *, now: datetime) -> None:
+    """Expire unanswered proposals after seven full days, checking and appending under one lock."""
+    if now.utcoffset() is None:
+        raise LedgerUnreadable("expiry now must have a timezone")
+    with slot_lock(path):
+        events = read_events(path)
+        for event in events:
+            if any(not isinstance(event.get(k), str) or not event[k] for k in ("project_id", "proposal_id")):
+                raise LedgerUnreadable(f"{path}: invalid proposal identity")
+        closed = {(e.get("project_id"), e.get("proposal_id")) for e in events
+                  if e.get("event") in (APPROVED, EXPIRED, VERDICT)}
+        fresh = []
+        for event in events:
+            if event.get("event") not in (PROPOSED, APPROVED, EXPIRED, VERDICT):
+                raise LedgerUnreadable(f"{path}: unknown proposal event")
+            identity = (event.get("project_id"), event.get("proposal_id"))
+            if event.get("event") != PROPOSED or identity in closed:
+                continue
+            stamp = parse_timestamp(event.get("recorded_at"))
+            if stamp is None:
+                raise LedgerUnreadable(f"{path}: {identity}: invalid recorded_at")
+            if now - stamp >= timedelta(days=7):
+                fresh.append({"event": EXPIRED, "project_id": identity[0],
+                              "proposal_id": identity[1], "recorded_at": now.isoformat()})
+                closed.add(identity)
+        if fresh:
+            _write(path, fresh)
+
+
 def approval_refusal(events: Sequence[Mapping[str, Any]], proposal_id_value: Any) -> str | None:
     """The reason an approval is refused, or ``None`` when the proposal is open.
 
@@ -226,6 +257,10 @@ def approval_refusal(events: Sequence[Mapping[str, Any]], proposal_id_value: Any
     """
     if not isinstance(proposal_id_value, str) or not _has_event(events, PROPOSED, proposal_id_value):
         return "unknown_proposal"
+    project = next(e.get("project_id") for e in events
+                   if e.get("event") == PROPOSED and e.get("proposal_id") == proposal_id_value)
+    if _has_event([e for e in events if e.get("project_id") == project], EXPIRED, proposal_id_value):
+        return "expired"
     if _has_event(events, VERDICT, proposal_id_value):
         return "already_judged"
     if _has_event(events, APPROVED, proposal_id_value):
