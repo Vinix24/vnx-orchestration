@@ -1,6 +1,6 @@
 # Dreaming: nightly memory consolidation
 
-**Status**: shipped, opt-in, off by default (`VNX_DREAM_SCHEDULER_ENABLED=0`). The liveness watch is on main and not yet released (`VERSION` says 1.8.0).
+**Status**: shipped, opt-in, off by default (`VNX_DREAM_SCHEDULER_ENABLED=0`). The liveness watch was released in 1.9.0 (`VERSION` says 1.10.0).
 **Decisions**: [ADR-019](../governance/decisions/ADR-019-auto-dream-memory-consolidation.md) (the cycle), [ADR-066](../governance/decisions/ADR-066-dream-liveness-watch.md) (the liveness watch).
 **Sources**: `scripts/dream/consolidator.py`, `scripts/dream/review_gate.py`, `scripts/dream/scheduler.py`, `scripts/lib/dream_liveness.py`.
 

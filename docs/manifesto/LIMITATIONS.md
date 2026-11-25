@@ -1,6 +1,6 @@
 # Known Limitations & Scope
 
-**Verified against `origin/main` at c41411fea on 2026-11-12.** `VERSION` says 1.8.0. Work merged after it is marked "on main, not yet released" (`CHANGELOG.md`, `changelog.d/`). Live per-feature status lives in the tracks database (`vnx objective list`, ADR-047), not in `ROADMAP.yaml`.
+**Verified against `origin/main` at c41411fea on 2026-11-12.** `VERSION` says 1.10.0. Work merged after it is marked "on main, not yet released" (`CHANGELOG.md`, `changelog.d/`). Live per-feature status lives in the tracks database (`vnx objective list`, ADR-047), not in `ROADMAP.yaml`.
 
 ## Tested
 
@@ -20,7 +20,7 @@
 
 ## Limits of learning and dreaming
 
-- **Proposal-only.** The learning loop is shadow by default and a queue at most (`VNX_LEARNING_LOOP_PERSIST`, `VNX_LEARNING_LOOP_QUEUE`). Nothing it finds becomes a rule without my decision (ADR-065). Operator steering and dream consolidation follow the same boundary (ADR-072, ADR-019). This work is on main, not yet released.
+- **Proposal-only.** The learning loop is shadow by default and a queue at most (`VNX_LEARNING_LOOP_PERSIST`, `VNX_LEARNING_LOOP_QUEUE`). Nothing it finds becomes a rule without my decision (ADR-065). Operator steering and dream consolidation follow the same boundary (ADR-072, ADR-019). This work was released in 1.9.0.
 - **The loop is dormant unless switched on.** The dream scheduler is off by default (`VNX_DREAM_SCHEDULER_ENABLED=0`). The dream-liveness probe reports whether a night produced output; it does not make one happen (ADR-066).
 - **The effect window is not closed.** The A/B instrument for intelligence injection exists (`VNX_INTEL_AB_TEST`, off by default, ADR-069). Until a window has run to its sample size, I have no measured effect of injection and make no claim about one.
 - **Failure classes are text rules.** The classifier matches prefixes and substrings that other modules write. A new wording falls into `failed` or `unclassified` and shows up as lower coverage (ADR-065).

@@ -7,7 +7,7 @@
 
 This document does not stamp a product version. The running version is `VERSION`
 (repo root); a number copied here would drift the day the repo cuts a release.
-Verified against `origin/main` at `c41411fea` on 2026-11-12. `VERSION` says 1.8.0, so
+Verified against `origin/main` at `c41411fea` on 2026-11-12. `VERSION` says 1.10.0, so
 work merged after that release is marked "on main, not yet released".
 
 ---
@@ -1057,7 +1057,7 @@ proposes and the operator decides (ADR-065, "leren is voorstellen").
 The mechanism, the operator CLI and the review ritual are in
 `docs/intelligence/SELF_LEARNING_LOOP.md`. Learning from operator steering (ADR-072,
 status Proposed) adds a bound transcript source, a closed class table and a proposal
-store with its own identity. Those first three parts are on main, not yet released
+store with its own identity. Those first three parts were released in 1.9.0
 (`scripts/lib/operator_steering_source.py`, `operator_steering_class.py`,
 `steering_proposal_store.py`). Its proposals follow the same rule: a human decides.
 

@@ -2,7 +2,7 @@
 
 **Author**: Vincent van Deth
 **Date**: February 2026
-**Status**: Reference Architecture, released to PyPI (`pip install vnx-orchestration`), last release 1.8.0. Work merged after 1.8.0 is marked "on main, not yet released".
+**Status**: Reference Architecture, released to PyPI (`pip install vnx-orchestration`), last release 1.10.0. Work merged after 1.10.0 is marked "on main, not yet released".
 **Verified against `origin/main` at c41411fea on 2026-11-12.**
 **Usage**: extended daily use on a local system · governed receipts accumulate in the audit trail · ephemeral per-dispatch workers (the fixed 4-terminal layout is only the rollback route)
 
@@ -117,19 +117,19 @@ Screenshot pointer: S5, Quality Advisory.
 
 ## The Components As Main Has Them
 
-Each line says whether it is shipped (in 1.8.0), on main and not yet released, or opt-in. The mechanism lives in the linked file.
+Each line says whether it is shipped (in 1.10.0), on main and not yet released, or opt-in. The mechanism lives in the linked file.
 
 - **The door and its lanes.** `vnx dispatch` is the single entry. A `claude` dispatch resolves to `claude_headless` (`resolve_claude_lane` in `scripts/lib/dispatch_plan.py`), kimi, glm and deepseek go through `provider_dispatch.py`. A CI audit fails a new file that starts a lane outside the door (`scripts/lib/dispatch_sidedoor_audit.py`). Shipped. `docs/core/DISPATCH_RULES.md`.
 - **Worktree isolation.** Every headless dispatch runs in its own git worktree, removed after the push and PR obligation is checked (`scripts/lib/dispatch_envelope.py`). Shipped.
-- **Review gates and the merge door.** Seats, takeover chain and `scripts/pr_merge.py` as described above. On main, not yet released: the sixth preflight `door`, a `vnx-gate/door` check that permits one exact head and pins the merge to it (`--match-head-commit`). It says "allowed by the door", not "executed by the door" (ADR-061).
+- **Review gates and the merge door.** Seats, takeover chain and `scripts/pr_merge.py` as described above. Released in 1.9.0: the sixth preflight `door`, a `vnx-gate/door` check that permits one exact head and pins the merge to it (`--match-head-commit`). It says "allowed by the door", not "executed by the door" (ADR-061).
 - **Receipts.** NDJSON with a start line and an end line per dispatch (`VNX_LEDGER_LIFECYCLE`, default on, ADR-045). The hash chain is opt-in per project and the main ledger is unchained (ADR-023).
 - **State fabric.** Past is the receipts, current is `runtime_coordination.db`, future is the tracks database. State is rebuilt from receipts and a per-project store, not hand-edited (`docs/core/STATE_FABRIC.md`, ADR-026).
 - **Horizon and tracks.** `vnx horizon` holds roadmap, tracks and deliverables. A track is born plan-gated (`docs/core/HORIZON_LIFECYCLE.md`, ADR-030, ADR-047). Shipped.
 - **Agents as folders.** `agents/<role>/` carries a role with its own `CLAUDE.md`. `vnx role sync --apply` mirrors the canonical orchestrator role into `AGENTS.md` and `GEMINI.md` as well (`tests/test_role_sync.py`). Whether a live T0 runs on another harness is not proven (see `LIMITATIONS.md`).
-- **The learning loop.** It reads receipts, classifies failures with a fixed table (`scripts/lib/learning_failure_class.py`) and proposes prevention rules. Shadow by default, a queue when `VNX_LEARNING_LOOP_QUEUE=1`, never an activation (ADR-065). On main, not yet released.
-- **Operator steering.** A bound reader classifies my own corrections in a session (`scripts/lib/operator_steering_class.py`) and a proposal store keeps the decision record (`scripts/lib/steering_proposal_store.py`, ADR-072). `approved` applies nothing. Not yet released.
+- **The learning loop.** It reads receipts, classifies failures with a fixed table (`scripts/lib/learning_failure_class.py`) and proposes prevention rules. Shadow by default, a queue when `VNX_LEARNING_LOOP_QUEUE=1`, never an activation (ADR-065). Released in 1.9.0.
+- **Operator steering.** A bound reader classifies my own corrections in a session (`scripts/lib/operator_steering_class.py`) and a proposal store keeps the decision record (`scripts/lib/steering_proposal_store.py`, ADR-072). `approved` applies nothing. Released in 1.9.0.
 - **Dreaming.** Nightly memory consolidation (`scripts/dream/`, ADR-019), off by default (`VNX_DREAM_SCHEDULER_ENABLED=0`). A read-only probe reports whether a night produced output (`scripts/dream_liveness_probe.py`, ADR-066). A consolidation is a proposal for review.
-- **Intelligence injection and its effect.** The dispatch gets context chosen from past receipts (`scripts/lib/intelligence_selector.py`). An A/B window assigns an arm by hash and compares outcomes (`scripts/lib/intel_effect_estimator.py`, ADR-069). Off by default (`VNX_INTEL_AB_TEST=0`). The instrument is on main, not yet released. I claim no effect size from it.
+- **Intelligence injection and its effect.** The dispatch gets context chosen from past receipts (`scripts/lib/intelligence_selector.py`). An A/B window assigns an arm by hash and compares outcomes (`scripts/lib/intel_effect_estimator.py`, ADR-069). Off by default (`VNX_INTEL_AB_TEST=0`). The instrument was released in 1.9.0. I claim no effect size from it.
 
 The diagram of these parts is `ARCHITECTURE_DIAGRAM.mermaid`.
 

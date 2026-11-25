@@ -2,7 +2,7 @@
 
 > **This file is the architecture-principles + wave-history roadmap.** Live, per-feature status lives in my tracks database (the `vnx objective` CLI), which is not public. The repo-root [`ROADMAP.yaml`](../../ROADMAP.yaml) is a generic example of the machine-readable roadmap format, not the live plan.
 
-**Status**: Public roadmap, checked against `origin/main` at c41411fea on 2026-11-12. `VERSION` is 1.8.0.  
+**Status**: Public roadmap, checked against `origin/main` at c41411fea on 2026-11-12. `VERSION` is 1.10.0.
 **Planning Horizon**: 2026 (rolling)  
 **Principle**: Governance-first, model-agnostic, local-first
 
@@ -138,8 +138,8 @@ Releases after 1.0.0 are listed in [`CHANGELOG.md`](../../CHANGELOG.md) and tagg
 
 pip-installable, 5-provider production, governance receipts, elastic pool, smart routing (opt-in), roadmap-autopilot gate hardening (RA-1..5 active, RA-6 dark), auto-dream self-learning loop runnable. See [1.0 Sprint section](#10-sprint--roadmap-autopilot-n-scaling-foundation-auto-dream) for full capability list.
 
-### 1.9: on main, not yet released
-**Status**: `On main`, not released. `CHANGELOG.md` `[Unreleased]` and `changelog.d/` list the work per PR.
+### 1.9.0: released
+**Status**: `Released in 1.9.0`. `CHANGELOG.md` lists the work per PR under `[1.9.0]`; the source is tagged `v1.9.0`.
 
 - The merge door permit: a sixth preflight, `door`, pins the merge to the head it permitted (ADR-061).
 - The learning wave: failure classes, a proposal queue and a signal attribution rule (ADR-065, ADR-068). Shadow by default and proposal-only.
@@ -333,7 +333,7 @@ Receipts carry `schema_version: 2` with `verdict{}`, `verification{}`, and `warn
 - Remove leftover legacy wrappers and dead paths where safe.
 - Keep CLI behavior stable while improving maintainability.
 
-A function-size ratchet runs in CI (`scripts/lib/function_size_gate.py`, #2036: on main, not yet released).
+A function-size ratchet runs in CI (`scripts/lib/function_size_gate.py`, #2036: released in 1.9.0).
 
 ## 10) Terminal Input-Ready Mode Guard
 **Status**: `Completed`

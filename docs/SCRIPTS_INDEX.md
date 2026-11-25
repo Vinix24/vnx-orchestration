@@ -134,7 +134,7 @@ Enforcement of the 500K T0 rotation, and the successor spawner. Contract and exi
 
 ## Packages
 
-- `packages/claude-code-toolkit/context-rotation/` — a Claude Code plugin that hands a long session over to a fresh one; on main, not yet released. Its own scripts and tests live inside the package (`packages/claude-code-toolkit/context-rotation/README.md`).
+- `packages/claude-code-toolkit/context-rotation/` — a Claude Code plugin that hands a long session over to a fresh one; released in 1.9.0. Its own scripts and tests live inside the package (`packages/claude-code-toolkit/context-rotation/README.md`).
 
 ## Libraries
 

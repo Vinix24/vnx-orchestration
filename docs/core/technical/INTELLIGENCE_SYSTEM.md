@@ -1,6 +1,6 @@
 # VNX Intelligence System - Technical Reference
 
-Verified against `origin/main` at f0c113253 on 2026-11-12. Work merged after the 1.8.0 release is marked "on main, not yet released" (see `CHANGELOG.md`).
+Verified against `origin/main` at f0c113253 on 2026-11-12. Work merged after the 1.10.0 release is marked "on main, not yet released" (see `CHANGELOG.md`).
 
 This page describes how a dispatch gets its intelligence, how the store is fed, and how the learning loop proposes changes that an operator decides on. Nothing on this page changes agent behaviour without an operator step.
 
@@ -798,7 +798,7 @@ The A/B window is opt-in (`VNX_INTEL_AB_TEST` and `VNX_INTEL_AB_WINDOW`, both of
 
 ### Operator steering ([ADR-072](../../governance/decisions/ADR-072-operator-bijsturing-leert.md))
 
-On main, not yet released, and not wired into the nightly run: `scripts/operator_steering.py bind` binds a transcript source to a project and `show --prompt` prints a prompt to the terminal. `scripts/lib/operator_steering_class.py` classifies a prompt deterministically with a closed class table. `scripts/lib/steering_proposal_store.py` keeps proposals as an append-only decision file with the projection `steering_proposals.json`. A rejected proposal reopens only on a prompt newer than the rejection, `approved` applies nothing, and `applied` needs an `applied_ref`. The root-cause step is not on main.
+Released in 1.9.0: `scripts/operator_steering.py bind` binds a transcript source to a project and `show --prompt` prints a prompt to the terminal. `scripts/lib/operator_steering_class.py` classifies a prompt deterministically with a closed class table. `scripts/lib/steering_proposal_store.py` keeps proposals as an append-only decision file with the projection `steering_proposals.json`. A rejected proposal reopens only on a prompt newer than the rejection, `approved` applies nothing, and `applied` needs an `applied_ref`. The root-cause step and nightly integration were released in 1.10.0.
 
 ### Dream
 
