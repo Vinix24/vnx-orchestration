@@ -1,4 +1,4 @@
-"""Tests for scripts/ci/check_docs_stale_refs.py (rule 1: paths and links)."""
+"""Tests for the ADR-079 path, link, version and symbol rules."""
 from __future__ import annotations
 
 import importlib.util
@@ -385,7 +385,7 @@ def test_cli_rule_selects_and_repeats(tmp_path):
 
 def test_cli_unknown_rule_is_refused(tmp_path):
     root = _repo(tmp_path, {})
-    r = _run(root, "--rule", "versions")
+    r = _run(root, "--rule", "unknown")
     assert r.returncode == 2 and r.stdout == ""
 
 
@@ -419,3 +419,173 @@ def test_symlinked_doc_pointing_outside_is_read_as_tracked_file(tmp_path):
     (root / "docs/core/link.md").symlink_to(root / "docs/core/other.md")
     subprocess.run(["git", "-C", str(root), "add", "-A"], check=True)
     assert mod.run_check(root, {"paths", "links"}) == []
+
+
+# ---- versions: closed grammar, exclusions and unreadable ground truth ----------
+
+@pytest.mark.parametrize("form", [
+    "{v} is {x}", "{v} says {x}", "{v} zegt {x}", "{v} staat op {x}", "{v} {x}",
+    "last release {x}", "latest release {x}", "latest release is {x}",
+    "laatste release {x}", "laatste release is {x}",
+])
+@pytest.mark.parametrize("v", ["VERSION", "`VERSION`", "[`VERSION`](VERSION)"])
+@pytest.mark.parametrize("x", ["1.8.0", "`1.8.0`"])
+def test_version_claim_forms(tmp_path, form, v, x):
+    body = form.format(v=v, x=x)
+    out = _findings(tmp_path, "intro\n" + body, rules=("versions",), extra={"VERSION": "1.9.0\n"})
+    assert [(f.line, f.rule, f.generated) for f in out] == [(2, "versions", False)]
+    assert body in out[0].text and "1.9.0" in out[0].text
+    assert _findings(tmp_path, body, rules=("versions",), extra={"VERSION": "1.8.0\n"}) == []
+
+
+@pytest.mark.parametrize("doc,line,body", [
+    ("docs/core/11_RECEIPT_FORMAT.md", 3, "**Version**: 2.1.0"),
+    ("docs/operations/install-central-runbook.md", 299, "Since release 1.8.0 (#2449, OI-2564)"),
+    ("docs/operations/install-central-runbook.md", 315, "Release 1.9.0 migrates one store"),
+    ("docs/operations/FORGE_GATE.md", 248, "Tot 1.8.0 eiste `vnx-gate/review` elke stoel."),
+])
+def test_version_named_historical_nonclaims(tmp_path, doc, line, body):
+    assert _findings(tmp_path, "\n" * (line - 1) + body, rules=("versions",), doc=doc,
+                     extra={"VERSION": "1.9.0"}) == []
+
+
+@pytest.mark.parametrize("body", [
+    "version is 1.8.0", "Version is 1.8.0", "VERSION said 1.8.0", "last release is 1.8.0",
+    "MY_VERSION is 1.8.0", "VERSION is v1.8.0", "VERSION is 1.8", "VERSION is 1.8.0.1",
+    "VERSION is 1.8.0-rc1", "VERSION is 1.8.0+build", "VERSION is `1.8.0",
+    "VERSION is 1.8.0-1.9.0", "VERSION is `1.8.0` – `1.9.0`",
+    "VERSION 1.8.0 to 1.9.0", "latest release 1.8.0 through 1.9.0",
+])
+def test_version_closed_grammar_nonclaims(tmp_path, body):
+    assert _findings(tmp_path, body, rules=("versions",), extra={"VERSION": "1.9.0"}) == []
+
+
+@pytest.mark.parametrize("prefix", ["since", "Since", "sinds", "vanaf", "tot", "Tot", "until", "in"])
+@pytest.mark.parametrize("form", ["`VERSION` is 1.8.0", "[`VERSION`](VERSION) 1.8.0", "latest release 1.8.0"])
+def test_version_precedence_is_immediate(tmp_path, prefix, form):
+    body = f"{prefix} {form}; {prefix} then {form}"
+    out = _findings(tmp_path, body, rules=("versions",), extra={"VERSION": "1.9.0"})
+    assert len(out) == 1 and form in out[0].text
+
+
+@pytest.mark.parametrize("doc,body", [
+    ("CHANGELOG.md", "VERSION 1.8.0"), ("docs/CHANGELOG.md", "VERSION 1.8.0"),
+    ("docs/core/old.md", "# Moved\nVERSION 1.8.0\n[Now here](other.md)"),
+    ("docs/core/doc.md", "```text\nVERSION 1.8.0\n```\n~~~\nlatest release 1.8.0\n~~~"),
+])
+def test_version_excluded_content(tmp_path, doc, body):
+    assert _findings(tmp_path, body, rules=("versions",), doc=doc, extra={"VERSION": "1.9.0"}) == []
+
+
+@pytest.mark.parametrize("tail", ["\n## More", "\none\ntwo\nthree", "\n[External](https://example.com)"])
+def test_version_not_a_redirect_stub(tmp_path, tail):
+    link = "" if "External" in tail else "\n[Here](other.md)"
+    body = "# Current\nVERSION 1.8.0" + link + tail
+    assert len(_findings(tmp_path, body, rules=("versions",), extra={"VERSION": "1.9.0"})) == 1
+
+
+@pytest.mark.parametrize("value", ["", "None", "null", "unknown", "1.9", "1.9.0\n2.0.0"])
+@pytest.mark.parametrize("report", [False, True])
+def test_version_invalid_truth_is_blocking(tmp_path, value, report):
+    root = _repo(tmp_path, {"VERSION": value, "README.md": "VERSION 1.8.0"})
+    result = _run(root, "--rule", "versions", *(["--report"] if report else []))
+    assert result.returncode == 2 and "VERSION" in result.stderr and "ERROR" in result.stderr
+
+
+# ---- symbols: real tracked sources, exact scopes and source failures ------------
+
+SYMBOL_SOURCE = (
+    "VALUE = 1\nTYPED: int = 2\nLEFT, RIGHT = (1, 2)\nALIAS = OTHER = 3\n"
+    "def run():\n    local = 1\n    return local\n"
+    "async def fetch():\n    return VALUE\n"
+    "class Worker:\n    def work(self):\n        return VALUE\n"
+    "    async def wait(self):\n        return VALUE\n"
+    "class Other:\n    def stop(self):\n        return VALUE\n"
+    "from pathlib import Path\nDECLARED: int\n"
+)
+
+
+@pytest.mark.parametrize("doc", ["docs/modules/worker.md", "docs/features/worker.md"])
+@pytest.mark.parametrize("name,valid", [
+    ("run", True), ("fetch", True), ("Worker", True), ("VALUE", True), ("TYPED", True),
+    ("LEFT", True), ("RIGHT", True), ("ALIAS", True), ("OTHER", True),
+    ("Worker.work", True), ("Worker.wait", True), ("Other.stop", True),
+    ("missing", False), ("local", False), ("Path", False), ("DECLARED", False),
+    ("work", False), ("Other.work", False), ("Worker.stop", False), ("Missing.work", False),
+])
+def test_symbol_definitions_and_class_scope(tmp_path, doc, name, valid):
+    token = f"scripts/worker.py::{name}"
+    out = _findings(tmp_path, f"`{token}`", rules=("symbols",), doc=doc,
+                    extra={"scripts/worker.py": SYMBOL_SOURCE})
+    assert len(out) == (0 if valid else 1)
+    if not valid:
+        assert out[0].rule == "symbols" and token in out[0].text
+
+
+@pytest.mark.parametrize("path", ["scripts/missing.py", "scripts/local.py", "scripts/../worker.py", "/worker.py"])
+@pytest.mark.parametrize("name", ["run", "Worker.work"])
+def test_symbol_unknown_untracked_and_unsafe_paths(tmp_path, path, name):
+    out = _findings(tmp_path, f"`{path}::{name}`", rules=("symbols",), doc="docs/modules/worker.md",
+                    untracked={"scripts/local.py": SYMBOL_SOURCE})
+    assert len(out) == 1 and path in out[0].text
+
+
+def test_symbol_near_identical_files_do_not_supply_each_others_names(tmp_path):
+    body = "`scripts/a/worker.py::Worker.work` `scripts/b/worker.py::Worker.work`"
+    out = _findings(tmp_path, body, rules=("symbols",), doc="docs/modules/worker.md",
+                    extra={"scripts/a/worker.py": SYMBOL_SOURCE, "scripts/b/worker.py": "class Worker: pass\n"})
+    assert len(out) == 1 and "scripts/b/worker.py::Worker.work" in out[0].text
+
+
+@pytest.mark.parametrize("doc,expected", [
+    ("docs/modules/worker.md", 1), ("docs/features/worker.md", 1),
+    ("docs/modules/nested/worker.md", 0), ("docs/features/nested/worker.md", 0),
+    ("docs/core/worker.md", 0), ("README.md", 0),
+])
+@pytest.mark.parametrize("token", ["scripts/lib/foo.py:1", "scripts/lib/foo.py::missing"])
+def test_symbol_scope_and_line_references(tmp_path, doc, expected, token):
+    out = _findings(tmp_path, f"```\n`{token}`\n```\n`{token}`", rules=("symbols",), doc=doc)
+    assert [(f.line, f.rule) for f in out] == [(4, "symbols")] * expected
+
+
+@pytest.mark.parametrize("rule,target", [("versions", "VERSION"), ("symbols", "scripts/worker.py")])
+@pytest.mark.parametrize("failure", ["missing", "directory", "encoding", "symlink", "syntax"])
+@pytest.mark.parametrize("report", [False, True])
+def test_new_rules_unreadable_truth_stays_visible(tmp_path, rule, target, failure, report):
+    root = _repo(tmp_path, {"VERSION": "1.9.0", "scripts/worker.py": SYMBOL_SOURCE,
+                            "docs/modules/worker.md": "VERSION 1.8.0\n`scripts/worker.py::run`"})
+    source = root / target
+    source.unlink()
+    if failure == "directory":
+        source.mkdir()
+    elif failure == "encoding":
+        source.write_bytes(b"\xff\xfe")
+    elif failure == "symlink":
+        source.symlink_to(root / "scripts/lib/foo.py")
+    elif failure == "syntax":
+        source.write_text("def broken(:\n", encoding="utf-8")
+    result = _run(root, "--rule", rule, *(["--report"] if report else []))
+    assert result.returncode == 2 and target in result.stderr and "ERROR" in result.stderr
+
+
+@pytest.mark.parametrize("rule,claim", [("versions", "VERSION 1.8.0"), ("symbols", "`scripts/lib/foo.py::missing`")])
+def test_new_rules_cli_report_generated_and_default(tmp_path, rule, claim):
+    body = f"<!-- BEGIN generated: test -->\n{claim}\n<!-- END generated: test -->\n{claim}"
+    root = _repo(tmp_path, {"VERSION": "1.9.0", "docs/modules/worker.md": body})
+    strict = _run(root, "--rule", rule)
+    report = _run(root, "--rule", rule, "--report")
+    assert strict.returncode == 1 and report.returncode == 0
+    assert strict.stdout == report.stdout and len(report.stdout.splitlines()) == 2
+    assert f":2 {rule} generated " in report.stdout and f":4 {rule} " in report.stdout
+    assert f"{rule}=2; generated=1" in report.stderr
+    default = _run(root)
+    assert default.returncode == 0 and default.stdout == ""
+    assert default.stderr == "0 finding(s): links=0, paths=0; generated=0\n"
+
+
+def test_version_generated_file_and_repeated_new_rules(tmp_path):
+    root = _repo(tmp_path, {"VERSION": "1.9.0", "docs/core/DAEMON_LIVENESS.md": "VERSION 1.8.0",
+                            "docs/features/worker.md": "`scripts/lib/foo.py::missing`"})
+    result = _run(root, "--report", "--rule", "versions", "--rule", "symbols")
+    assert result.returncode == 0 and len(result.stdout.splitlines()) == 2
+    assert "versions generated" in result.stdout and "symbols=1, versions=1" in result.stderr
