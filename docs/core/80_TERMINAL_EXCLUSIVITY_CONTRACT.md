@@ -166,7 +166,7 @@ When a dispatch is blocked by terminal exclusivity, one of three outcomes applie
 | Outcome | Condition | Dispatcher Behavior |
 |---------|-----------|-------------------|
 | **defer** | Terminal is busy with a known dispatch. The blocking lease is healthy. | Dispatch remains in `pending/`. Dispatcher retries on next loop iteration (2-second cycle). No state change. |
-| **requeue** | Terminal is expired or ambiguous. The blocking condition may resolve with operator intervention. | Dispatch remains in `pending/`. Dispatcher logs a structured warning with the block reason. T0 escalation emitted after configurable timeout (default: 15 minutes). |
+| **requeue** | Terminal is expired or ambiguous. The blocking condition may resolve with operator intervention. | Dispatch remains in `pending/`. Dispatcher logs the block; there is no timed escalation for this condition. |
 | **reject** | Dispatch metadata is invalid (no track, invalid skill, T0 target). | Dispatch moved to `rejected/`. Not retried. |
 
 ### 4.2 Defer Behavior
@@ -187,22 +187,11 @@ Future PRs may introduce a formal requeue with backoff, but this contract does n
 
 ### 4.4 Escalation
 
-When a dispatch has been blocked for longer than `VNX_DISPATCH_BLOCK_TIMEOUT` (default: 900 seconds / 15 minutes), the dispatcher emits a structured escalation:
-
-```json
-{
-  "event_type": "dispatch_blocked_escalation",
-  "entity_type": "dispatch",
-  "entity_id": "<dispatch_id>",
-  "terminal_id": "<terminal_id>",
-  "block_reason": "<reason from availability check>",
-  "blocked_since": "<ISO8601 timestamp>",
-  "blocked_seconds": 900,
-  "actor": "dispatcher"
-}
-```
-
-The escalation is advisory. It does not change dispatch state. The operator or T0 decides whether to:
+The dispatcher logs terminal-lock deferrals in `scripts/dispatcher_minimal.sh`
+(`_validate_dispatch_fields`). No code reads `VNX_DISPATCH_BLOCK_TIMEOUT` or emits
+`dispatch_blocked_escalation`; the previously described 900-second escalation is
+not implemented. Operators must inspect the block reason and lease state rather
+than wait for that event. The operator or T0 decides whether to:
 - Extend the blocking lease (if the worker is still active but slow).
 - Expire and recover the lease (if the worker is truly stuck).
 - Reassign the dispatch to a different track/terminal (manual operation).
@@ -359,7 +348,7 @@ A PR is out of scope for terminal exclusivity if it:
 | V-1 | Terminal states are defined | Section 2.1 defines idle, busy, ambiguous, expired |
 | V-2 | State derivation is deterministic | Section 2.2 provides a step-by-step algorithm |
 | V-3 | Fail-closed rules are explicit | Section 3 defines FC-1 through FC-6 with current violations and required behavior |
-| V-4 | Retry/requeue/escalation boundaries are defined | Section 4 defines defer, requeue, reject, and escalation with timeouts |
+| V-4 | Retry/requeue/escalation boundaries are defined | Section 4 defines defer, requeue, reject, and the absence of timed escalation |
 | V-5 | Dispatch safety sequence is complete | Section 5 defines the exact check order with no fallthrough paths |
 | V-6 | No delivery without proven availability | Section 5.1 states the invariant explicitly |
 | V-7 | Non-goals prevent scope creep | Section 7 lists nine explicit non-goals |

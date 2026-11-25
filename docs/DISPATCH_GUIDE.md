@@ -2,7 +2,7 @@
 
 > You don't annotate a plan and wait. You break work into dispatches and send them to separate terminals.
 
-This document explains how the VNX orchestration system manages work across multiple AI agents — from feature plan to parallel execution, without bottlenecks.
+This document explains how the VNX orchestration system manages work across multiple AI agents — from tracks and deliverables to parallel execution.
 
 ---
 
@@ -20,68 +20,51 @@ VNX solves this by separating **what to do** (the plan) from **who does it** (th
 
 ---
 
-## 1. Feature Plan Init
+## 1. Tracks and Deliverables
 
-Everything starts with a structured feature plan. T0 (the orchestrator) breaks a feature into numbered PRs with explicit dependencies:
+T0 records the plan in the tracks DB and breaks work into deliverables. Inspect
+the plan and its proposed dispatches with:
 
-```
-vnx init → T0 creates FEATURE_PLAN.md
-```
-
-```markdown
-## PR-1: AI Config & Model Registry (Track B)
-Gate: implementation | Priority: P1 | Dependencies: none
-
-## PR-2: Lead Scoring Engine (Track A)
-Gate: implementation | Priority: P1 | Dependencies: PR-1
-
-## PR-3: WebSocket Real-time Updates (Track C)
-Gate: implementation | Priority: P2 | Dependencies: PR-2
-
-## PR-4: Scoring Dashboard API (Track A)
-Gate: implementation | Priority: P2 | Dependencies: PR-2
-
-## PR-5: Multi-Provider Dispatch (Track B)
-Gate: implementation | Priority: P2 | Dependencies: PR-1
-
-## PR-6: Email Campaign Integration (Track C)
-Gate: planning | Priority: P3 | Dependencies: PR-2, PR-4
+```bash
+vnx objective list
+vnx deliverable list --objective <track-id>
 ```
 
-Each PR is scoped to 300–450 lines (hard cap 450) — small enough to fit in a single context window. The dependency graph ensures nothing runs out of order:
+`FEATURE_PLAN.md` is a retired generated view; any surviving copy is an example,
+not a live plan source. `vnx init` no longer creates it. The readers are
+`scripts/planning_cli.py::cmd_objective_list` and
+`scripts/planning_cli.py::cmd_deliverable_list`; see
+[ADR-047](governance/decisions/ADR-047-tracks-db-enige-planbron.md) and the
+[planning reference](core/HORIZON_PLANNING.md).
 
-```
-PR-1 ──→ PR-2 ──→ PR-3
-  │         │
-  │         └──→ PR-4 ──→ PR-6
-  │
-  └──→ PR-5
-```
-
-PRs without mutual dependencies can run in parallel on separate terminals.
+T0 scopes each delivery and records dependencies before promotion. Deliverables
+can carry explicit dependency edges (`vnx deliverable depend`); the implementation
+is `scripts/lib/deliverable_dependencies.py`. Independent work can run in parallel.
 
 ---
 
-## 2. Dispatching: Feature Plan vs Loose
+## 2. Dispatching: Deliverables and Manager Blocks
 
-T0 has two ways to assign work. Both go through the same queue.
+T0 can promote a planned deliverable or write a Manager Block for the dispatch pipeline.
 
-### Path A: Feature Plan Promotion
+### Path A: Deliverable Promotion
 
-When a feature plan exists, PRs are staged as dispatch templates. T0 reviews and promotes them:
+`vnx deliverable add` records a proposed dispatch for an objective. After review,
+the authorized caller promotes it:
 
-```
-dispatches/staging/   →  T0 reviews  →  dispatches/queue/  →  human approves  →  terminal
-```
-
-T0 promotes with:
 ```bash
-pr_queue_manager.py promote <dispatch-id>
+vnx deliverable promote <dispatch-id>
 ```
+
+`scripts/planning_cli.py::cmd_deliverable_promote` checks the track's blockers
+and promotion authority before changing `proposed` to `ready`. T0 promotion
+requires the track's opt-in and a verified grant; see the
+[horizon lifecycle](core/HORIZON_LIFECYCLE.md).
+The current queue is available through `vnx objective queue`.
 
 ### Path B: Loose Dispatch (Ad-hoc)
 
-No feature plan needed. T0 writes a Manager Block directly — a scoped instruction set for a specific terminal:
+T0 can also write a Manager Block directly — a scoped instruction set for a specific terminal:
 
 ```markdown
 [[TARGET:A]]
@@ -103,7 +86,9 @@ Instruction:
 [[DONE]]
 ```
 
-This is how you handle quick fixes, research tasks, or follow-ups that don't need a full feature plan. T0 writes it, the system queues it, a human approves it, and the terminal picks it up.
+This path handles quick fixes, research tasks, or follow-ups. T0 writes the block,
+then the dispatch pipeline validates and stages it for promotion; see the
+[dispatch rules](core/DISPATCH_RULES.md).
 
 **Key rule: everything flows through T0.** Workers (T1–T3) never dispatch to each other. T0 is the single source of truth for what's happening where.
 
@@ -163,7 +148,7 @@ blanket posture for a specific dispatch, set `VNX_WORKER_BLANKET_SKIP=1`.
 
 ## 4. Bringing Your Own Ideas
 
-You don't need to wait for a feature plan. If you have specific tasks in mind, tell T0 what you want and let it organize the work.
+If you have specific tasks in mind, tell T0 what you want and let it organize the work.
 
 ### How it works
 
@@ -173,7 +158,7 @@ You don't need to wait for a feature plan. If you have specific tasks in mind, t
 
 3. **T0 creates open items first**: For complex work, T0 registers open items (blockers, warnings, info) before dispatching. This creates a checklist that must be resolved before a PR is considered done.
 
-4. **Dispatches go to the queue**: Each dispatch enters the approval pipeline. You review and approve via the queue popup (Ctrl+G).
+4. **Dispatches enter the approval pipeline**: Proposed deliverables require promotion as described above; Manager Blocks follow the dispatch rules.
 
 5. **Terminals work in parallel**:
 ```
@@ -210,9 +195,9 @@ Here's what a typical session looks like:
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │  1. YOU describe the feature/task to T0                     │
-│  2. T0 creates FEATURE_PLAN.md (or loose dispatches)        │
-│  3. T0 promotes dispatches to the queue                     │
-│  4. YOU approve each dispatch (Ctrl+G popup)                │
+│  2. T0 records tracks and deliverables (or Manager Blocks) │
+│  3. T0 reviews the scope and dependencies                  │
+│  4. Authorized promotion makes a deliverable ready         │
 │  5. Dispatcher routes to terminal, locks it                 │
 │  6. Worker executes, writes report                          │
 │  7. Receipt processor captures report, releases lock        │
@@ -222,7 +207,8 @@ Here's what a typical session looks like:
 └─────────────────────────────────────────────────────────────┘
 ```
 
-The human stays in control at two points: approving dispatches (step 4) and the final decision is always T0's (step 9). Everything else is automated.
+Promotion authority is checked at step 4. T0 reviews the worker's evidence and
+decides the next step; a completion receipt alone does not close the work.
 
 ---
 

@@ -1360,7 +1360,7 @@ python3 scripts/gather_intelligence.py validate "problem-agent"
 ```
 
 **Solutions**:
-1. Verify `skills/skills.yaml` exists and lists the expected skill names (`load_agent_directory()` in `scripts/lib/agent_directory_loader.py` reads it first; a legacy `.claude/terminals/library/templates/agents/agent_template_directory.yaml` is only consulted as a fallback and is not present in this repo)
+1. Verify the selected skills registry lists the expected names. `scripts/lib/agent_directory_loader.py::load_agent_directory` checks the configured skills directory, then the VNX and project `skills/skills.yaml` files, before its legacy agent-directory fallback.
 2. Check agent name spelling (case-sensitive)
 3. Use suggested agent from validation output
 

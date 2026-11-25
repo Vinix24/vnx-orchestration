@@ -101,8 +101,10 @@ it out of `done` until its plan passes the plan gate
 The file shipped in the repository is an example of the format — not a plan
 source. No code reads it from a fixed or derived path: it is imported only when
 the operator names the file (ADR-047).
-`FEATURE_PLAN.md` and its generator (`scripts/build_feature_plan.py`) are gone
-(ADR-047). `PR_QUEUE.md` and its generator are gone too (ADR-047): the queue is
+`FEATURE_PLAN.md` was a generated view; its generator is retired and a surviving
+copy is only an example, not a plan source
+([ADR-047](../governance/decisions/ADR-047-tracks-db-enige-planbron.md)).
+`PR_QUEUE.md` and its generator are gone too (ADR-047): the queue is
 read from the dispatch state. A feature entry
 carries `feature_id`, `status`, `milestone`, `pr_queue[]`, and `depends_on[]`.
 

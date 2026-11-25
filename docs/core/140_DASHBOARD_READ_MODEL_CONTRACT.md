@@ -213,12 +213,18 @@ Every read-model field traces back to exactly one canonical source. The dashboar
 | Terminal lease state | `terminal_leases` table | TerminalView | ~~terminal_state.json~~ (projection, may lag) |
 | Worker execution state | `worker_states` table | TerminalView | ~~tmux pane output~~ |
 | Dispatch progress | `dispatches` table | SessionView | ~~dispatch filesystem scan~~ |
-| PR queue status | `pr_queue_state.json` | SessionView | ~~FEATURE_PLAN.md parsing~~ |
+| PR queue status | `pr_queue_state.json` | SessionView | Plan-file parsing |
 | Track gate progress | `progress_state.yaml` | SessionView | ~~receipt log scanning~~ |
 | Open items | `open_items.json` | OpenItemsView | ~~open_items.md~~ (rendered, not structured) |
 | Session layout | `session_profile.json` | ProjectsView | ~~tmux list-panes~~ |
 | Context pressure | `context_window_T{n}.json` | TerminalView | ~~conversation-index.db~~ |
 | Heartbeat freshness | `terminal_leases.last_heartbeat_at` | TerminalView | ~~process table scan~~ |
+
+The tracks DB is the planning source (`vnx objective list`, implemented by
+`scripts/planning_cli.py::cmd_objective_list`). `FEATURE_PLAN.md` is a retired
+generated view; a surviving example is not dashboard input. The queue builder
+`scripts/lib/pr_queue_state.py::build_pr_queue_state` reads dispatch-register
+events and GitHub PR data. See [ADR-047](../governance/decisions/ADR-047-tracks-db-enige-planbron.md).
 
 ### 3.4 Freshness Tracking
 

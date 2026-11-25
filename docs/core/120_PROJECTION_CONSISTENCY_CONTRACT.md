@@ -54,7 +54,7 @@ A **canonical surface** is a source of truth. It is written by a single authorit
 | **C-2** | `dispatches` table (SQLite) | `runtime_coordination.db` | Dispatch lifecycle state (queued→claimed→delivering→completed) | `dispatch_broker.py`, `runtime_core.py` | Schema: `runtime_coordination.sql` |
 | **C-3** | Dispatch filesystem directories | `.vnx-data/dispatches/{active,completed,pending,staging,rejected}/` | Runtime execution state — which PRs are active right now | Dispatcher (file moves) | Queue Truth (70) Rule P-2 |
 | **C-4** | Receipt trail | `.vnx-data/receipts/`, `t0_receipts.ndjson` | Completion confirmation, gate evidence | `receipt_processor.sh` | Queue Truth (70) Rule P-3 |
-| **C-5** | `FEATURE_PLAN.md` | Project root | PR existence, dependency graph, structural metadata | Human / planner | Queue Truth (70) Rule P-1 |
+| **C-5** | Tracks DB | `runtime_coordination.db` | Tracks, dependencies and deliverables | `scripts/lib/tracks.py`, `scripts/planning_cli.py` | Queue Truth (70) Rule P-1; ADR-047 |
 | **C-6** | `coordination_events` (SQLite) | `runtime_coordination.db` | Immutable audit trail of all state transitions | Runtime coordination layer | Schema: `runtime_coordination.sql` |
 
 ### 2.2 Projected Surfaces
@@ -64,7 +64,7 @@ A **projected surface** is a derived view. It is computed from one or more canon
 | ID | Surface | Storage | Derives From | Writer | Staleness Bound |
 |----|---------|---------|-------------|--------|-----------------|
 | **P-1** | `terminal_state.json` | `.vnx-data/state/` | C-1 (`terminal_leases`) | `terminal_state_shadow.py`, `lease_manager.py` | Must update within 2s of lease transition |
-| **P-2** | `pr_queue_state.json` | `.vnx-data/state/` | C-3 (dispatch filesystem), C-4 (receipts), C-5 (FEATURE_PLAN.md) | `pr_queue_manager.py`, `queue_reconciler.py` | Must update within 5s of dispatch directory change |
+| **P-2** | `pr_queue_state.json` | `.vnx-data/state/` | C-3 (dispatch filesystem), C-4 (receipts) for queue reconciliation | `pr_queue_manager.py`, `queue_reconciler.py` | Must update within 5s of dispatch directory change |
 | **P-3** | `progress_state.yaml` | `.vnx-data/state/` | C-4 (receipts), C-3 (dispatch filesystem) | `update_progress_state.py`, `receipt_processor` | Must update within 5s of receipt arrival |
 | **P-4** | *retired* (ADR-047) | — | `PR_QUEUE.md` is gone. The queue is read from the tracks DB and the dispatch register: `vnx horizon queue` (alias `vnx objective queue`) | none | Not a stored projection — a live read-only query |
 | **P-5** | `dashboard_status.json` | `.vnx-data/state/` | P-1, P-2, P-3 (all projections) | Dashboard generators | Advisory — no staleness contract |
@@ -73,9 +73,6 @@ A **projected surface** is a derived view. It is computed from one or more canon
 ### 2.3 Derivation Graph
 
 ```
-FEATURE_PLAN.md (C-5)
-        |
-        v
   [Queue Reconciler] <-- dispatch filesystem (C-3) + receipts (C-4)
         |
         v
@@ -91,6 +88,12 @@ dispatches (C-2) + receipts (C-4)           |
         v                                   |
   progress_state.yaml (P-3) ----------------+
 ```
+
+The tracks DB (C-5) is the plan source, inspectable with `vnx objective list`.
+`FEATURE_PLAN.md` is a retired generated view; any surviving copy is an example,
+not live planning input. `scripts/lib/queue_reconciler.py::QueueReconciler.reconcile`
+collects PR identities from dispatches and reads receipts, without reading a plan
+file or C-5. See [ADR-047](../governance/decisions/ADR-047-tracks-db-enige-planbron.md).
 
 P-4 (`PR_QUEUE.md`) is no longer in this graph (ADR-047): no file is rendered. The
 queue is read from the tracks DB and the dispatch register by `vnx horizon queue`
@@ -119,7 +122,7 @@ A **forbidden contradiction** is a state where a projected surface disagrees wit
 | **FC-Q1** | Dispatch for PR in `active/` (C-3) | pr_queue_state.json shows PR as `queued` or `blocked` | **Forbidden** | T0 may create duplicate dispatch for already-active PR |
 | **FC-Q2** | Dispatch for PR in `completed/` (C-3) | pr_queue_state.json shows PR as `active` | **Forbidden** | Dependent PRs remain blocked despite dependency being satisfied |
 | **FC-Q3** | No dispatch exists for PR | pr_queue_state.json shows PR as `active` or `completed` | **Forbidden** | Phantom progress — PR appears done but no evidence exists |
-| **FC-Q4** | PR not in FEATURE_PLAN.md (C-5) | pr_queue_state.json contains the PR | **Warning** | Stale entry from previous feature |
+| **FC-Q4** | Retired by ADR-047 | No plan-file membership check | — | A PR named by a dispatch is a queue row |
 | **FC-Q5** | All dependencies completed | pr_queue_state.json shows PR as `blocked` | **Warning** | PR is eligible but operator cannot see it |
 
 ### 3.3 Progress State Contradictions
@@ -158,7 +161,7 @@ When surfaces contradict, a deterministic rule resolves the conflict. These rule
 
 | Rule | Conflict | Winner | Action |
 |------|----------|--------|--------|
-| **TB-Q1** | C-3 vs P-2 (dispatch filesystem vs pr_queue_state.json) | **C-3 always wins** | Run queue reconciliation. Regenerate P-2 from C-3 + C-4 + C-5. |
+| **TB-Q1** | C-3 vs P-2 (dispatch filesystem vs pr_queue_state.json) | **C-3 always wins** | Run queue reconciliation. Regenerate P-2 from C-3 + C-4. |
 | **TB-Q2** | C-3 vs C-2 (filesystem vs SQLite dispatch state) | **C-3 wins for execution state** | Filesystem directory determines "is this active right now." DB state records the lifecycle. If DB says `completed` but file is in `active/`, trust the filesystem and flag the DB for reconciliation. |
 | **TB-Q3** | C-4 vs C-3 (receipt says complete, filesystem says active) | **C-3 wins (file is still in active/)** | The dispatch has not been moved yet. Receipt arrived early or file move failed. Do not treat as completed until file is in `completed/`. |
 
@@ -281,7 +284,7 @@ Mismatch reports are written to:
 
 ### 8.1 What Reconciliation Does
 
-Reconciliation reads all canonical surfaces (C-1 through C-5) and regenerates the stored projections (P-1, P-2, P-3, P-5); P-4 is retired and no file is rendered. It is:
+The protocol below describes reconciliation of the runtime projections from C-1 through C-4. C-5 supplies planning data, not plan-file membership for the queue; P-4 is retired and no file is rendered. Reconciliation is:
 - **Deterministic**: Same canonical state produces same projections.
 - **Idempotent**: Running twice with no intervening changes produces identical results.
 - **Non-destructive**: Reconciliation never modifies canonical surfaces. It only overwrites projections.
@@ -290,7 +293,7 @@ Reconciliation reads all canonical surfaces (C-1 through C-5) and regenerates th
 ### 8.2 Reconciliation Sequence
 
 ```
-1. Read C-5 (FEATURE_PLAN.md) → extract valid PR IDs and dependency graph
+1. Collect PR IDs from dispatch metadata (C-3); no plan file is read
 2. Scan C-3 (dispatch filesystem) → determine active/completed/pending state per PR
 3. Read C-4 (receipts) → confirm completions, extract gate evidence
 4. Read C-1 (terminal_leases) → determine terminal states
@@ -379,7 +382,7 @@ All contradictions from Section 3, sorted by severity:
 |------|-------------|
 | FC-T3 | Lease `expired` but projection shows `working` |
 | FC-T5 | Projection for non-existent terminal |
-| FC-Q4 | Queue contains PR not in FEATURE_PLAN.md |
+| FC-Q4 | Retired by ADR-047; no plan-file membership warning |
 | FC-Q5 | All dependencies met but queue shows `blocked` |
 | FC-P2 | No active dispatch but progress shows `working` |
 | FC-P3 | Receipt shows gate passed but progress is behind |
