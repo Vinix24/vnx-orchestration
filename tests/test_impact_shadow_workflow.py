@@ -1,6 +1,6 @@
 """The impact shadow in CI (ADR-074 besluit 15): the workflow wiring and the scripts that must never fail.
 
-The workflow tests read ``.github/workflows/vnx-ci.yml``. The behaviour tests run the real shell scripts
+The step tests read ``.github/workflows/vnx-ci.yml``, the job tests ``.github/workflows/impact-shadow.yml``. The behaviour tests run the real shell scripts
 on a small git repo in ``tmp_path``, with ``impact_select.py`` and ``impact_shadow.py`` replaced by stubs
 where a crash is the case under test.
 """
@@ -20,6 +20,8 @@ import ci_workflow_shape as shape
 REPO = Path(__file__).resolve().parents[1]
 CI_DIR = REPO / "scripts" / "ci"
 WORKFLOW = REPO / ".github" / "workflows" / "vnx-ci.yml"
+SHADOW_WORKFLOW = REPO / ".github" / "workflows" / "impact-shadow.yml"
+JOB_NAME = "Impact shadow (runs only S, never required)"
 SCRIPTS = ("impact_shadow_inputs.sh", "impact_shadow_step.sh", "impact_shadow_job.sh")
 STEP = "Impact shadow record (never fails the job)"
 COMPLETENESS = "Check the xdist completeness (required)"
@@ -33,6 +35,11 @@ C3_REWRITTEN = {"Run Profile A (scope-appropriate suite)", "Profile A serial pha
 @pytest.fixture(scope="module")
 def jobs() -> dict:
     return yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))["jobs"]
+
+
+@pytest.fixture(scope="module")
+def shadow_jobs() -> dict:
+    return yaml.safe_load(SHADOW_WORKFLOW.read_text(encoding="utf-8"))["jobs"]
 
 
 def names(job: dict) -> list:
@@ -75,32 +82,37 @@ def test_step_upload_is_non_fatal(jobs):
     assert upload["with"]["if-no-files-found"] == "warn" and upload["with"]["overwrite"] is True
 
 
-def test_shadow_job_cannot_turn_a_check_red(jobs):
-    job = jobs["impact-shadow"]
-    assert job["name"] == "Impact shadow (runs only S, never required)"
+def test_shadow_job_cannot_turn_a_check_red(shadow_jobs):
+    assert list(shadow_jobs) == ["impact-shadow"]
+    job = shadow_jobs["impact-shadow"]
+    assert job["name"] == JOB_NAME
     assert job["runs-on"] == "ubuntu-24.04"
     assert job["continue-on-error"] is True
     assert job["timeout-minutes"] == 38
+    assert job["permissions"] == {"contents": "read", "actions": "read"}
     assert "needs" not in job
+
+
+def test_shadow_workflow_runs_on_pull_requests_only_and_never_cancels():
+    """A cancelled shadow run would leave its VNX CI run without a pair, so no concurrency group either."""
+    document = yaml.safe_load(SHADOW_WORKFLOW.read_text(encoding="utf-8"))
+    assert document["name"] == "Impact shadow"
+    assert set(document[True]) == {"pull_request"}  # PyYAML reads the key `on` as True
+    assert "concurrency" not in document and "concurrency" not in document["jobs"]["impact-shadow"]
+
+
+def test_vnx_ci_no_longer_has_the_shadow_job_nor_a_job_that_needs_it(jobs):
+    assert "impact-shadow" not in jobs
     for other, body in jobs.items():
         needs = body.get("needs") or []
         assert "impact-shadow" not in ([needs] if isinstance(needs, str) else needs), other
 
 
-def test_shadow_job_runs_only_on_pull_requests(jobs):
-    """The conclusion of VNX CI on main paces the merge chain, so the shadow job must not run there."""
-    assert jobs["impact-shadow"]["if"] == "${{ github.event_name == 'pull_request' }}"
-
-
-def test_shadow_job_keeps_continue_on_error_no_needs_and_is_in_no_required_list(jobs):
-    job = jobs["impact-shadow"]
-    assert job["continue-on-error"] is True
-    assert "needs" not in job
-    for other, body in jobs.items():
-        needs = body.get("needs") or []
-        assert "impact-shadow" not in ([needs] if isinstance(needs, str) else needs), other
-    text = WORKFLOW.read_text(encoding="utf-8")
-    assert text.count("Impact shadow (runs only S, never required)") == 1
+def test_shadow_job_name_appears_once_across_both_workflows_and_in_no_required_list():
+    assert WORKFLOW.read_text(encoding="utf-8").count(JOB_NAME) == 0
+    assert SHADOW_WORKFLOW.read_text(encoding="utf-8").count(JOB_NAME) == 1
+    protection = (REPO / "scripts" / "forge" / "branch_protection.yaml").read_text(encoding="utf-8")
+    assert JOB_NAME not in protection and "impact-shadow" not in protection and "Impact shadow" not in protection
 
 
 def test_shadow_step_in_profile_a_has_no_event_condition(jobs):
@@ -110,8 +122,8 @@ def test_shadow_step_in_profile_a_has_no_event_condition(jobs):
     assert "github.event_name" not in upload["if"]
 
 
-def test_shadow_job_steps(jobs):
-    job = jobs["impact-shadow"]
+def test_shadow_job_steps(shadow_jobs):
+    job = shadow_jobs["impact-shadow"]
     assert job["steps"][0]["with"]["fetch-depth"] == 0
     assert job["steps"][1]["uses"] == "./.github/actions/profile-a-prelude"
     run = [s for s in job["steps"] if "impact_shadow_job.sh" in s.get("run", "")]
