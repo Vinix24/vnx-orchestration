@@ -1,6 +1,6 @@
 """``vnx daily-metrics`` — the owner command of ``scripts/daily_metrics.py`` (decision 28).
 
-``install`` manages one opt-in per-project launchd job (decision 29); every other
+``install`` manages one job required per project (ADR-063 amendment 2026-11-25); every other
 verb is passed through to the engine's script unchanged. The job's project
 checkout comes from the registry (``resolve_project_root``, decision 12).
 """
@@ -52,7 +52,8 @@ def vnx_daily_metrics(args: argparse.Namespace) -> int:
     argv = list(getattr(args, "daily_metrics_args", None) or [])
     if not argv:
         print("usage: vnx daily-metrics <verb> [args]\n"
-              "  install --project-id ID    install the opt-in per-project 04:10 launchd job\n"
+              "  install --project-id ID    install the 04:10 job, required per project "
+              "(ADR-063 amendment 2026-11-25)\n"
               "  collect | daily | propose | approve | verdict | report  "
               "passed to scripts/daily_metrics.py unchanged", file=sys.stderr)
         return 2

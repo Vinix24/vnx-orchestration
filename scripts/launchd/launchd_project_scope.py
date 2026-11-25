@@ -101,6 +101,7 @@ REQUIRED_PER_PROJECT_FAMILIES: tuple = (
     "com.vnx.receipt-processor",
     "com.vnx.cleanup-reviewed-worktrees",
     "com.vnx.ledger-health",
+    "com.vnx.daily-metrics",
 )
 
 # Templates that use ${VNX_PROJECT_ID} in their body but deliberately keep a bare
