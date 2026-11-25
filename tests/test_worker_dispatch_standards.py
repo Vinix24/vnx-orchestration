@@ -95,7 +95,7 @@ def test_junit_sidecar_rule_in_critical_rules():
 def test_commit_order_rule_in_critical_rules():
     """The critical rules must mandate the commit-before-push sequence.
 
-    The order rule is: targeted tests green → COMMIT → PUSH → anything slower.
+    The order rule is: COMMIT → `vnx pre-push-check` green (it runs the targeted tests) → PUSH → anything slower.
     Pins on ``targeted tests`` — a phrase unique to this rule within the
     section (no other critical rule uses the word "targeted").  If the rule
     is reworded but keeps the concept of running only the relevant tests
@@ -103,8 +103,8 @@ def test_commit_order_rule_in_critical_rules():
     entirely, the marker disappears and the test fails.
     """
     section = _worker_dispatch_standards_section()
-    assert "targeted tests" in section, (
-        "Critical rules lost the commit-order precondition 'targeted tests'. "
+    assert "targeted tests" in section and "pre-push-check" in section, (
+        "Critical rules lost the commit-order precondition 'targeted tests' / 'pre-push-check'. "
         "Without it, workers push before committing and uncommitted work is "
         "lost when the worktree is reaped mid-dispatch."
     )

@@ -1215,3 +1215,35 @@ class TestAcknowledgeCli:
 
         assert proc.returncode == lh.EXIT_FINDINGS
         assert json.loads(proc.stdout)["checks"]["receipt_coverage"]["missing_receipt_dispatch_ids"] == ["d-orphan"]
+
+
+class TestCrashExitAndClosingLine:
+    """OI-3079: a crash is exit 70, and a text run ends on one closing line."""
+
+    def test_crash_is_70_with_traceback(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from crash_runner_oi3079 import run_script_crashing
+        proc = run_script_crashing(SCRIPTS_DIR / "ledger_health.py")
+        assert proc.returncode == 70
+        assert "Traceback" in proc.stderr
+        assert proc.stdout.splitlines()[-1] == "ledger_health: crash (exit 70)"
+
+    def test_text_run_ends_on_the_closing_line_with_the_same_code(self, tmp_path, state_dir):
+        _write_ndjson(state_dir / lh.REGISTER_NAME, _register_entry("d-orphan"))
+        _write_ndjson(state_dir / lh.LEDGER_NAME, _receipt("d-001"))
+        proc = subprocess.run(
+            [sys.executable, str(SCRIPTS_DIR / "ledger_health.py"),
+             "--data-dir", str(tmp_path), "--state-dir", str(state_dir), "--no-write"],
+            capture_output=True, text=True, timeout=60,
+        )
+        assert proc.returncode == lh.EXIT_FINDINGS
+        assert proc.stdout.splitlines()[-1] == "ledger_health: finding (exit 1)"
+
+    def test_acknowledge_gets_no_closing_line(self, state_dir):
+        proc = subprocess.run(
+            [sys.executable, str(SCRIPTS_DIR / "ledger_health.py"), "acknowledge", "--state-dir", str(state_dir),
+             "--dispatch-id", "d-ok", "--reason", "echte reden"],
+            capture_output=True, text=True, timeout=60,
+        )
+        assert proc.returncode == 0
+        assert "ledger_health:" not in proc.stdout

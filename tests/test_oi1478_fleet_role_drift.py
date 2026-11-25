@@ -536,3 +536,40 @@ def test_reach_flag_writes_nothing(tmp_path, capsys):
     _reach_cli(repo / ".claude" / "terminals" / "T0", capsys)
 
     assert sorted(p.relative_to(tmp_path) for p in tmp_path.rglob("*")) == before
+
+
+def _run_frd(*args):
+    import subprocess
+    return subprocess.run(
+        [sys.executable, str(Path(frd.__file__)), *args],
+        capture_output=True, text=True, timeout=60,
+    )
+
+
+def test_crash_is_70_with_traceback():
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from crash_runner_oi3079 import run_script_crashing
+    proc = run_script_crashing(Path(frd.__file__))
+    assert proc.returncode == 70
+    assert "Traceback" in proc.stderr
+    assert proc.stdout.splitlines()[-1] == "fleet_role_drift: crash (exit 70)"
+
+
+def test_text_run_ends_on_the_closing_line_with_the_same_code(tmp_path):
+    canon = tmp_path / "canon.md"
+    canon.write_text(CANON)
+    proc = _run_frd("--canon", str(canon), "--registry", str(tmp_path / "missing.json"))
+    assert proc.returncode == 2
+    assert "fleet_role_drift:" in proc.stderr  # the reason stays on stderr
+    assert proc.stdout.splitlines()[-1] == "fleet_role_drift: config_error (exit 2)"
+
+
+def test_json_and_reach_stdout_stay_parseable(tmp_path):
+    repo = tmp_path / "repo"
+    _make_repo(repo)
+    canon = tmp_path / "canon.md"
+    canon.write_text(CANON)
+    as_json = _run_frd("--canon", str(canon), "--project-dir", str(repo), "--json")
+    assert isinstance(json.loads(as_json.stdout), dict)
+    reach = _run_frd("--reach", str(repo / ".claude" / "terminals" / "T0"))
+    assert "ok" in json.loads(reach.stdout)
