@@ -516,3 +516,67 @@ def test_no_instruction_search_rule_follows_the_block(gate_prompt, instruction):
     assert rule not in prompt[:prompt.index(gate_prompt.END_DIFF_MARKER)]
     for name in ("AGENTS.md", "CLAUDE.md", "working directory"):
         assert name in rule
+
+
+@pytest.mark.parametrize("agentic", [False, True])
+@pytest.mark.parametrize("instruction", [None, "Review only the changed lines."])
+def test_proportionality_rules_reach_the_reviewer(gate_prompt, agentic, instruction):
+    prompt = _build(gate_prompt, _CODE_SECTION, agentic=agentic, instruction=instruction)
+    tail = prompt.split(gate_prompt.END_DIFF_MARKER, 1)[1]
+    assert "skills/proportionality/SKILL.md" in tail
+    for code in [*(f"T{i}" for i in range(1, 9)), *(f"O{i}" for i in range(1, 7))]:
+        assert f"{code} — " in tail
+    assert 'T1-T8: a touched class without its minimum mechanism is blocking (severity "error")' in tail
+    assert 'message beginning exactly "missing_risk_class:"' in tail
+    assert "class, failure path, violated guarantee and consequence" in tail
+    assert "without a risk class or a current user" in tail
+    assert "O1-O6 improvement without a concrete violated guarantee" in tail
+    assert 'severity "info" and a message beginning exactly "unjustified_mechanism:"' in tail
+    assert "never a FAIL on its own" in tail
+    assert "return PASS with the info finding" in tail
+    assert "T0 opens an OI" in tail
+    assert "reproducible privacy or data-loss defect stays blocking regardless of its label" in tail
+
+
+def test_proportionality_names_are_read_at_each_build(gate_prompt, tmp_path, monkeypatch):
+    source = VNX_ROOT / "skills/proportionality/SKILL.md"
+    skill = tmp_path / "SKILL.md"
+    original = source.read_text(encoding="utf-8")
+    skill.write_text(original, encoding="utf-8")
+    monkeypatch.setattr(gate_prompt, "_PROPORTIONALITY_SKILL_PATH", skill)
+    before = _build(gate_prompt, "")
+    skill.write_text(original.replace("T1 — Double action", "T1 — Repeated external action"), encoding="utf-8")
+    after = _build(gate_prompt, "")
+    assert "T1 — Double action" in before
+    assert "T1 — Repeated external action" in after
+    assert "T1 — Double action" not in after
+    assert "Overlapping payment webhooks" not in after  # names only, no copied table
+
+
+@pytest.mark.parametrize("failure", ["missing", "directory", "invalid_utf8", "empty", "missing_class", "duplicate", "unknown"])
+def test_proportionality_unreadable_or_incomplete_skill_fails_closed(gate_prompt, tmp_path, monkeypatch, failure):
+    skill = tmp_path / "SKILL.md"
+    original = (VNX_ROOT / "skills/proportionality/SKILL.md").read_text(encoding="utf-8")
+    if failure == "directory":
+        skill.mkdir()
+    elif failure == "invalid_utf8":
+        skill.write_bytes(b"\xff")
+    elif failure == "empty":
+        skill.write_text("", encoding="utf-8")
+    elif failure == "missing_class":
+        skill.write_text(original.replace("T8 — Secrets", "Secrets"), encoding="utf-8")
+    elif failure == "duplicate":
+        skill.write_text(original + "\n| T1 — Double action | duplicate |\n", encoding="utf-8")
+    elif failure == "unknown":
+        skill.write_text(original.replace("T8 — Secrets", "T9 — Secrets"), encoding="utf-8")
+    monkeypatch.setattr(gate_prompt, "_PROPORTIONALITY_SKILL_PATH", skill)
+    with pytest.raises(gate_prompt.ProportionalityRubricError, match="proportionality_rubric_unavailable"):
+        _build(gate_prompt, _CODE_SECTION)
+
+
+def test_proportionality_skill_is_relative_to_the_module(gate_prompt, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("VNX_HOME", str(tmp_path))
+    prompt = _build(gate_prompt, "")
+    assert "T8 — Secrets" in prompt
+    assert "O6 — " in prompt
