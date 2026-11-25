@@ -8,7 +8,8 @@ seed fallback) and would trip on every probe run, forcing a ledger recommit
 for no reason. Wired via `make subsystems-check` and
 `.github/workflows/subsystems-drift.yml`.
 
-Exit codes: 0 = in sync, 1 = drift detected, 2 = internal error.
+Missing module pages are advisory in M5-a; they do not change the exit code.
+Exit codes: 0 = deterministic columns in sync, 1 = drift detected, 2 = internal error.
 """
 from __future__ import annotations
 
@@ -59,6 +60,9 @@ def main() -> int:
 
     rows = build_rows()
     for row in rows:
+        doc = row["doc"]
+        if doc not in {"geschrapt", "geen-module", "niet-gebouwd"} and not (_REPO_ROOT / doc).is_file():
+            print(f"MISSING DOC — {row['subsystem']}: {doc} (advisory)", file=sys.stderr)
         row["health"] = ""  # dynamic column — excluded from the drift comparison
     generated_rows = _deterministic_rows(_render_md(rows))
     committed_rows = _deterministic_rows(committed_text)
