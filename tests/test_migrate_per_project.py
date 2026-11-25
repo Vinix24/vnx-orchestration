@@ -107,6 +107,7 @@ def _build_fixture(
 
     Returns (registry_path, backup_base).
     """
+    (tmp_path / ".vnx-project-id").write_text("test-project\n")
     specs = []
     for pid in project_ids:
         proj_dir = tmp_path / pid
@@ -140,8 +141,6 @@ def _run_migrator(
     """
     if central_state is None:
         central_state = tmp_path / "central" / "state"
-    central_state.parent.mkdir(parents=True, exist_ok=True)
-    (central_state.parent / ".vnx-project-id").write_text("test-project\n")
 
     cmd = [
         "--apply",
