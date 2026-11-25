@@ -15,12 +15,15 @@ plan file: the tracks DB is the plan source (ADR-047), so
 ``vnx track new ...`` is the first planning step, not a scaffolded document.
 """
 
+import fcntl
+import json
 import os
 import plistlib
 import re
 import subprocess
 import sys
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 from xml.parsers.expat import ExpatError
 
@@ -738,7 +741,7 @@ def vnx_init(args) -> int:
         return _vnx_init_scaffold(
             project_dir, template, force, set_version, project_id
         )
-    except OSError as exc:
+    except (OSError, RuntimeError) as exc:
         print(f"\n  error: scaffold write refused: {exc}", file=sys.stderr)
         return 1
 
@@ -994,6 +997,52 @@ def _install_cleanup_reviewed_worktrees_runner(
     )
 
 
+def _seed_daily_metrics_beacon(data_root: Path, project_id: str) -> None:
+    """Create the M6 failure signal; preserve existing evidence under its writer's lock."""
+    path = data_root / "state/health/daily_metrics.json"
+    lock = path.with_suffix(".json.lock")
+    _assert_symlink_safe(path, data_root)
+    _assert_symlink_safe(lock, data_root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # Same lock as HealthBeacon. The existence check and atomic write stay inside it.
+    with lock.open("a") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        try:
+            path.stat()
+        except FileNotFoundError:
+            now = datetime.now(timezone.utc)
+            _atomic_write(path, json.dumps({
+                "component": "daily_metrics", "status": "fail",
+                "last_run_ts": int(now.timestamp()), "last_run_iso": now.isoformat(),
+                "expected_interval_seconds": 36 * 3600,
+                "details": {"project_id": project_id, "reason": "never_measured"},
+            }, allow_nan=False) + "\n", data_root)
+
+
+def _prepare_daily_metrics(vnx_home: str, project_id: str, project_dir: Path, data_root: Path) -> None:
+    """Prepare the required job without launchctl; rendering/I/O failures abort init."""
+    family = "com.vnx.daily-metrics"
+    template = Path(vnx_home) / "scripts/launchd" / f"{family}.plist"
+    content = _render_plist_template(
+        template.read_text(encoding="utf-8"), family, vnx_home, project_id, str(project_dir)
+    )
+    label = f"{family}.{project_id}"
+    definition = data_root / "launchd" / f"{label}.plist"
+    _atomic_write(definition, content, data_root)
+    _seed_daily_metrics_beacon(data_root, project_id)
+    print(f"  prepared {definition}")
+    print(
+        "\nOperating request — Vincent's operating session (~/Business/operating):\n"
+        f"  What: Install the daily-metrics job for {project_id}.\n"
+        "  Why: Required per project (ADR-063 amendment 2026-11-25); measure daily at 04:10.\n"
+        f"  Command: vnx daily-metrics install --project-id {project_id}\n"
+        f"  Way back: launchctl bootout gui/$(id -u)/{label}\n"
+        f"  Check after: launchctl list | grep {label}\n"
+        "  Class: reversible\n"
+        "  Secrets: none\n"
+    )
+
+
 def _vnx_init_scaffold(project_dir, template, force, set_version, project_id) -> int:
     """Scaffold body of vnx_init (split out so OSError refusals fail clean)."""
     # --- tracked, in-project config (tiny footprint) ----------------------
@@ -1106,8 +1155,9 @@ def _vnx_init_scaffold(project_dir, template, force, set_version, project_id) ->
     print("Provisioning attestation gate workflow...")
     _provision_github_workflow(project_dir)
 
+    _prepare_daily_metrics(str(_engine.engine_root()), project_id, project_dir, data_root)
+
     # --- OI-917: install gate-obligation-runner launchd agent -----------------
-    print()
     print("Installing launchd agents...")
     try:
         installed = _install_gate_obligation_runner(
