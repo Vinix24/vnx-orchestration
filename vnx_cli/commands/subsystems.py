@@ -14,7 +14,7 @@ Rowset is the union of three sources (framework-status-audit-and-cockpit PR-3):
       ``VNX_DATA_DIR/health``), NOT ``VNX_STATE_DIR``.
 
 ``--md`` emits the exact ``docs/core/SUBSYSTEMS.md`` ledger table. The
-deterministic columns (subsystem/what/flag/status) are always regenerated from
+deterministic columns (subsystem/what/flag/status/doc) are always regenerated from
 the registry; ``.github/workflows/subsystems-drift.yml`` diffs exactly those
 columns against the committed file — the dynamic ``health`` column is excluded
 so a live probe never forces a ledger recommit. Before a beacon exists for a
@@ -33,6 +33,7 @@ launchd job running ``vnx subsystems --probe`` can show that it failed. Without
 from __future__ import annotations
 
 import json
+import posixpath
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -299,9 +300,9 @@ def _parse_seed_health(engine_root: Path) -> Dict[str, str]:
         if not line.startswith("|") or not line.endswith("|"):
             continue
         cells = [c.strip() for c in line.strip("|").split("|")]
-        if len(cells) != 5:
+        if len(cells) != 6:
             continue
-        subsystem, _what, _flag, _status, health = cells
+        subsystem, _what, _flag, _status, health, _doc = cells
         if subsystem in ("subsystem", "") or set(subsystem) <= {"-"}:
             continue
         out[subsystem] = health
@@ -377,13 +378,16 @@ def _escape_cell(text: str) -> str:
 
 
 def _render_md(rows: List[Dict[str, Any]]) -> str:
-    lines = ["| subsystem | what | flag | status | health |",
-             "|-----------|------|------|--------|--------|"]
+    lines = ["| subsystem | what | flag | status | health | doc |",
+             "|-----------|------|------|--------|--------|-----|"]
     for row in rows:
         flag = f"`{row['flag']}`" if row["flag"] else "—"
+        doc = row["doc"]
+        if "/" in doc:
+            doc = f"[{doc}]({posixpath.relpath(doc, 'docs/core')})"
         lines.append(
             f"| {row['subsystem']} | {_escape_cell(row['what'])} | {flag} | "
-            f"{row['status_display']} | {_escape_cell(row['health'])} |"
+            f"{row['status_display']} | {_escape_cell(row['health'])} | {_escape_cell(doc)} |"
         )
     return "\n".join(lines)
 
