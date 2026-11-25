@@ -1569,6 +1569,28 @@ def _check_dream(project_dir: Path) -> list[Check]:
     return [_dream_check(name, doc) for name in _DREAM_NAMES]
 
 
+def _check_optional_features(project_dir: Path) -> list[Check]:
+    """Fresh state, not evidence of an earlier merge or dispatch."""
+    _engine.ensure_engine_on_path()
+    import optional_features
+
+    try:
+        project_id = _engine.derive_project_id(project_dir)
+        taken = optional_features.snapshot(project_id, project_root=project_dir)
+        rows = optional_features.waived_guarantees(project_id, snapshot=taken)
+    except optional_features.OptionalFeatureRefused as exc:
+        return [Check("optional_features", FAIL, f"OptionalFeatureRefused: {exc}")]
+    # Explicit, readable choices are informational; only refused state changes doctor health.
+    checks = [Check("optional_features", PASS,
+                    f"{r['feature']}: {r['key']}={r['value']} (source: {r['source']}); waived: {r['guarantee']}")
+              for r in rows]
+    if not rows:
+        checks.append(Check("optional_features", PASS, "nothing waived"))
+    if taken["ci"].conflict is not None:
+        checks.append(Check("optional_features:ci", PASS, taken["ci"].conflict))
+    return checks
+
+
 def vnx_doctor(args) -> int:
     project_dir = Path(args.project_dir).resolve()
     emit_json = getattr(args, "json", False)
@@ -1610,6 +1632,8 @@ def vnx_doctor(args) -> int:
     checks.extend(_check_t0_state_freshness(project_dir, data_root))
     checks.extend(_check_dream(project_dir))
     checks.append(_check_steering(data_root))
+    optional_checks = _check_optional_features(project_dir)
+    checks.extend(optional_checks)
 
     passed = sum(1 for c in checks if c.status == PASS)
     warned = sum(1 for c in checks if c.status == WARN)
@@ -1628,6 +1652,8 @@ def vnx_doctor(args) -> int:
         print(json.dumps(output, indent=2))
     else:
         for c in checks:
+            if c is optional_checks[0]:
+                print("\n  current state")
             marker = {"PASS": "[PASS]", "WARN": "[WARN]", "FAIL": "[FAIL]"}[c.status]
             print(f"  {marker}  {c.name:<28}  {c.detail}")
         print()

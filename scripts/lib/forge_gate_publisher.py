@@ -1829,7 +1829,23 @@ def _foreign_only_reason(head: DoorRuns, sha: str) -> str:
     )
 
 
-def _apply_door_permit(head: DoorRuns, sha: str, pr: int, project_root: Path) -> Tuple[int, str]:
+def _door_waiver_summary(evidence: Dict[str, Any]) -> str:
+    """Display the validated preflight's recorded list, without reading live configuration."""
+    record = next(r for r in evidence["preflight_gates"] if r["gate"] == "ci")
+    rows = record.get("waived_guarantees")
+    fields = ("feature", "key", "value", "source", "guarantee")
+    if not isinstance(rows, list) or any(
+        not isinstance(r, dict) or any(not isinstance(r.get(k), str) or not r[k].strip() for k in fields)
+        for r in rows
+    ):
+        # Legacy/malformed display data never claims an empty waiver list; permit rules stay unchanged.
+        return "waived guarantees unavailable: ci preflight list missing or malformed"
+    lines = [f"- {r['feature']}: {r['key']}={r['value']} (source: {r['source']}); waived: {r['guarantee']}"
+             for r in rows]
+    return "Waived guarantees:\n" + ("\n".join(lines) if rows else "nothing waived")
+
+
+def _apply_door_permit(head: DoorRuns, sha: str, pr: int, project_root: Path, waivers: str) -> Tuple[int, str]:
     """The GitHub step of ADR-061 §3: ``(check_run_id, action)``, ``create`` or ``re_permit``.
 
     The case split is the reader's (``ci_contexts.classify_contexts``). Foreign
@@ -1841,7 +1857,7 @@ def _apply_door_permit(head: DoorRuns, sha: str, pr: int, project_root: Path) ->
     """
     if head.foreign and not head.own:
         raise ForgeDoorRefused(_foreign_only_reason(head, sha))
-    title, summary = DOOR_CHECK_NAME, f"permit for PR #{pr} on {sha}"
+    title, summary = DOOR_CHECK_NAME, f"permit for PR #{pr} on {sha}\n\n{waivers}"
     if len(head.own) > 1:
         raise ForgeDoorRefused(
             f"{len(head.own)} deurruns van de eigen App op {sha[:12]}: een tweede run houdt de "
@@ -1901,7 +1917,7 @@ def publish_door_permit(
     heads: List[DoorRuns] = []
     try:
         heads.append(door_runs_on_head(sha, project_root=project_root))
-        run_id, action = _apply_door_permit(heads[0], sha, pr, project_root)
+        run_id, action = _apply_door_permit(heads[0], sha, pr, project_root, _door_waiver_summary(evidence))
         heads.append(door_runs_on_head(sha, project_root=project_root))
         run, readback_attempts = read_back_door_counted(
             sha, run_id, project_root=project_root, listed=heads[1]

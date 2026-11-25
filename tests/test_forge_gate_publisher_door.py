@@ -147,6 +147,17 @@ def test_valid_evidence_passes() -> None:
     fgp.validate_door_evidence(_evidence(), sha=SHA, pr=7, expected_gates=GATES)
 
 
+@pytest.mark.parametrize("rows", [[], None, "missing", "unknown", {}, [None], [{}], [{"feature": "ci"}]])
+def test_of8_summary_distinguishes_empty_from_unavailable(gh, rows):
+    evidence = _evidence()
+    if rows != "missing":
+        evidence["preflight_gates"][0]["waived_guarantees"] = rows
+    fgp.publish_door_permit(evidence, sha=SHA, pr=7, project_root=gh.root, receipts_file=gh.ledger)
+    summary = next(body["output"]["summary"] for method, _, body in gh.calls if method == "POST")
+    assert ("nothing waived" if rows == [] else "waived guarantees unavailable") in summary
+    assert ("nothing waived" in summary) is (rows == [])
+
+
 def test_default_expected_gates_are_preflight_order_without_door() -> None:
     assert fgp.door_evidence_gates() == [n for n in pr_merge.PREFLIGHT_ORDER if n != "door"]
 

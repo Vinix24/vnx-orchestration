@@ -78,6 +78,8 @@ CI runs only when the optional-feature snapshot's `ci_requirement(project_id)` r
 
 The door reads protection from one pinned main SHA through the existing lookup order and parser. The CI preflight and merge/refusal receipt carry the same `optional_features` snapshot and `waived_guarantees` list. Its `branch_protection.server_verified` is true only after the existing live comparison succeeds under `enforce`; `warn` carries the measured `drift_fields` (`branch_protection` when the server has no protection), and `off` stays unverified. A caller that never ran the door has no snapshot fields.
 
+The `vnx-gate/door` check-run summary lists those recorded waivers on both creation and re-permit, without reading configuration again. A recorded empty list says `nothing waived`; missing or malformed legacy display data says `waived guarantees unavailable` without changing permit/publication rules. `vnx doctor` reads fresh under `current state`: each waiver names its feature, key, value, source and guarantee. Waivers and a CI-off request overruled by another canonical CI source are informational; `OptionalFeatureRefused` is a failure naming its code. This current state is not evidence of an earlier action.
+
 | # | Preflight | Refuses when | Release |
 |---|---|---|---|
 | 1 | `ci` (`_run_ci_gate`) | the PR head cannot be resolved, the head SHA is not 40 characters, the project's CI workflow has no run for that SHA, a run is running or queued, or the latest completed run is not `success` | `--override-reason "<text>"`; one reason also covers preflight 2 |

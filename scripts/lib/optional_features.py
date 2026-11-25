@@ -63,6 +63,7 @@ class FeatureState:
     source: str
     waived: Tuple[Mapping[str, str], ...] = ()
     server_verified: Optional[bool] = None  # branch_protection: only the door sets it (OF-3)
+    conflict: Optional[str] = None  # an off request overruled by the canonical CI sources
 
 
 def _row(feature: str, key: str, value: str, source: str, guarantee: str) -> Mapping[str, str]:
@@ -137,11 +138,17 @@ def _ci_state(project_id, resolution, resolver, config_path, path: str, text: Op
             protection_yaml=(path, fpd.YamlFetchResult(text=text, not_found=text is None, error=None)))
     except ReviewGateConfigError as exc:
         raise OptionalFeatureRefused("ci_requirement_unreadable", str(exc)) from exc
-    if required:
-        return FeatureState(CI, True, "required", ",".join(sources))
-    # ci_requirement decided; this read only names value and source, and refuses a flag reading true.
+    # ci_requirement decided; this read names the request, never changes the requirement.
     raw, source = _resolve(gate_profile.CI_GATE_KEY, project_id, resolver)
-    if not isinstance(raw, str) or raw.strip().lower() not in _FALSY:
+    if source == "project_config_error" or not isinstance(raw, str) or raw.strip().lower() not in (
+        _FALSY | gate_profile._TRUTHY
+    ):
+        raise OptionalFeatureRefused("ci_requirement_unreadable", f"{gate_profile.CI_GATE_KEY}={raw!r} (source: {source})")
+    if required:
+        conflict = (f"{gate_profile.CI_GATE_KEY}={raw.strip()} (source: {source}) has no effect: "
+                    + ",".join(sources)) if raw.strip().lower() in _FALSY else None
+        return FeatureState(CI, True, "required", ",".join(sources), conflict=conflict)
+    if raw.strip().lower() not in _FALSY:
         raise OptionalFeatureRefused(
             "ci_requirement_unreadable", f"{gate_profile.CI_GATE_KEY}={raw!r} (source: {source}) yet not required")
     value = raw.strip()
