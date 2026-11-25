@@ -1,7 +1,7 @@
 # VNX Orchestration System - Complete Architecture
 
 **Status**: Active
-**Last Updated**: 2026-11-12
+**Last Updated**: 2026-11-25
 **Owner**: T-MANAGER
 **Purpose**: Single source of truth for VNX system architecture, components, and data flow.
 
@@ -9,6 +9,11 @@ This document does not stamp a product version. The running version is `VERSION`
 (repo root); a number copied here would drift the day the repo cuts a release.
 Verified against `origin/main` at `c41411fea` on 2026-11-12. `VERSION` says 1.10.0, so
 work merged after that release is marked "on main, not yet released".
+
+Layer A lives here. Dispatch flow, lanes and intelligence were rechecked against
+`origin/main` at `8dbd407f2` for the consolidation on 2026-11-25. Detailed operating
+rules remain in [Dispatch Rules](DISPATCH_RULES.md), lane configuration in
+[Provider Lanes](PROVIDER_LANES.md), and decisions in [the ADR directory](../governance/decisions/).
 
 ---
 
@@ -36,7 +41,10 @@ work merged after that release is marked "on main, not yet released".
 
 ## System Overview
 
-VNX is a file-based orchestration system enabling parallel development across multiple Claude Code terminals with centralized T0 orchestration brain.
+VNX coordinates provider CLI workers through a single dispatch door, with T0 reviewing
+their evidence. The door compiles the provider into a lane
+(`scripts/lib/dispatch_plan.py` (`compile_plan`)) and executes that plan
+(`scripts/lib/dispatch_cli.py` (`_run_lane`)).
 
 ### Core Principles
 - **File-Based Communication**: NDJSON receipts + Markdown dispatches
@@ -113,8 +121,9 @@ tracks DB is the plan source (ADR-047) (`scripts/commands/new_worktree.sh`).
 ```
 
 T1-T3 are role labels, not persistent panes: each build-worker dispatch is an
-ephemeral `claude -p` run in its own isolated worktree (see *Terminal
-Architecture* below), routed through the single-entry dispatch door. The
+ephemeral CLI run in its own isolated worktree (see *Terminal
+Architecture* below; `scripts/lib/dispatch_envelope.py`, `_isolated_worktree`),
+routed through the single-entry dispatch door. The
 legacy Dispatcher/Smart Tap process pair still exists for markdown dispatches
 placed by hand (Core Components §1) but is not the primary route.
 
@@ -127,7 +136,8 @@ placed by hand (Core Components §1) but is not the primary route.
 T0 is the one persistent terminal: an interactive orchestration session that plans
 work and reviews receipts, never writes code itself. T1-T3 are **role labels on
 dispatches, not persistent panes**: a build-worker dispatch is an ephemeral
-`claude -p` run in its own isolated worktree (`dispatch_envelope.run_envelope_headless_plan`),
+provider CLI run in its own isolated worktree
+(`scripts/lib/dispatch_envelope.py`, `_isolated_worktree`),
 torn down when the dispatch completes. There is no standing T1/T2/T3 process to
 inspect between dispatches.
 
@@ -316,54 +326,49 @@ are not present in the tree and are not wired into `.claude/settings.json`.
 
 ### Complete Orchestration Flow
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                       ORCHESTRATION LOOP                         │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                  │
-│  1. T0 Creates Dispatch                                         │
-│     └─► Stages a bundle in dispatches/pending/<id>/              │
-│                                                                  │
-│  2. Human Promotes Dispatch                                      │
-│     ├─► Operator reviews the staged bundle                      │
-│     └─► `vnx dispatch <id>` fires it (approval gate)             │
-│                                                                  │
-│  3. The Single-Entry Door Routes the Lane                       │
-│     ├─► validate → compile_plan → permit → execute               │
-│     ├─► Assembles: skill body + intelligence + instruction        │
-│     │    + report-contract footer                                │
-│     ├─► claude → claude-headless lane (ephemeral worktree)        │
-│     └─► kimi/glm/deepseek → provider_dispatch.py lane             │
-│                                                                  │
-│  4. Worker Executes Task                                        │
-│     ├─► Performs the requested work in its isolated worktree    │
-│     └─► Writes a markdown report in unified_reports/            │
-│                                                                  │
-│  5. Receipt Processor Handles Report                            │
-│     ├─► Detects new report in unified_reports/                 │
-│     ├─► Parses structured data via report_parser.py            │
-│     ├─► Attaches evidence to open items (does NOT close)       │
-│     └─► Appends to t0_receipts.ndjson                          │
-│                                                                  │
-│  6. Govern                                                      │
-│     └─► phantom-guard checks the receipt against the diff       │
-│                                                                  │
-│  7. Intelligence Aggregator Updates Context                     │
-│     └─► Consolidates system state into t0_intelligence.ndjson   │
-│                                                                  │
-│  8. T0 Reviews                                                  │
-│     ├─► Sees the dispatch in open_outcomes until it decides     │
-│     │    (DISPATCH_RULES §13)                                    │
-│     ├─► Reads review-gate evidence and advances gates           │
-│     └─► Creates the next dispatch [Loop Continues]              │
-│                                                                  │
-└─────────────────────────────────────────────────────────────────┘
+```text
+staged bundle → validate + snapshot → compile plan + permit
+              → assemble → isolated worker → report + receipt → govern → T0 decision
 ```
 
-The heartbeat ACK monitor (`heartbeat_ack_monitor.py`) is a supervised daemon that
-processes acknowledgement events and timeouts for lanes that emit them. The full
-end-to-end picture, with the governance step in detail, is
-`docs/core/DISPATCH_AND_INTELLIGENCE_ARCHITECTURE.md`.
+1. **Stage and fire.** The bundle holds the instruction and dispatch spec. The door
+   reads it, validates it, builds the runtime snapshot and compiles a plan before
+   executing a permitted lane (`scripts/lib/dispatch_cli.py` (`run_dispatch`),
+   `scripts/lib/dispatch_plan.py` (`compile_plan`)). See *Staging Workflow* for the entry commands.
+2. **Assemble.** The envelope adds the repo map and calls the shared role/skill and
+   intelligence seam (`scripts/lib/envelope_prepare.py` (`_prepare`)).
+   `scripts/lib/skill_context.py` (`_inject_skill_context`) builds the base worker,
+   role and dispatch layers through `scripts/lib/prompt_assembler.py` (`PromptAssembler.assemble`);
+   a skill named by the spec is prepended separately. Reviewer roles bypass this
+   enrichment (`scripts/lib/reviewer_roles.py` (`enrichment_allowed`)).
+   The report directive comes from `scripts/lib/report_body_contract.py` (`with_directive`).
+3. **Execute.** The door chooses the Claude headless envelope or the provider
+   envelope; both isolate the worker and run governance after execution
+   (`scripts/lib/dispatch_cli.py` (`_run_lane`),
+   `scripts/lib/dispatch_envelope.py` (`_work_then_govern`)). See *Multi-Provider Dispatch*.
+4. **Record.** The worker writes the report required by the directive. The envelope
+   validates and records its outcome (`scripts/lib/dispatch_govern.py` (`govern`),
+   `scripts/lib/envelope_govern.py` (`_govern`)); the report-monitor path also converts
+   reports into receipts (`scripts/receipt_processor.sh`, `scripts/report_parser.py`).
+   Report evidence, a receipt and a T0 acceptance are separate stages.
+5. **Govern and decide.** The phantom guard tests a delivery worker's completion
+   claim against the worktree or pushed branch diff
+   (`scripts/lib/phantom_guard.py` (`record_phantom_if_any`)). Review/read-only work
+   is exempt; an unresolvable ref abstains. A phantom adds a corrective failed
+   receipt while preserving the original; that correction wins receipt deduplication
+   (`scripts/lib/dispatch_govern.py` (`dedup_completion_receipts`)). T0 reads open
+   outcomes and records its decision (`scripts/receipt_query.py`;
+   [Dispatch Rules, section 13](DISPATCH_RULES.md)).
+
+### Evidence surfaces
+
+Reports live under `$VNX_DATA_DIR/unified_reports/`; the receipt ledger is
+`state/t0_receipts.ndjson` (`scripts/lib/dispatch_govern.py` (`ensure_receipt`)).
+The event store keeps a separate stream for each run on its per-run terminals,
+including harness review seats and the headless lane
+(`scripts/lib/event_store.py` (`PER_RUN_TERMINALS`), `scripts/lib/event_store.py` (`EventStore`)).
+See [Receipt Format](11_RECEIPT_FORMAT.md) and [Event Streams](../operations/EVENT_STREAMS.md)
+for their schemas and lifecycle.
 
 ---
 
@@ -464,10 +469,10 @@ what ships and where the evidence for "it actually runs" lives.
   `scripts/gather_intelligence.py` (`record_pattern_offer`,
   `record_adoption_from_receipt`). Verify liveness directly rather than trust a
   checkmark here: `sqlite3 "$VNX_STATE_DIR/quality_intelligence.db" "SELECT COUNT(*) FROM pattern_usage; SELECT COUNT(*) FROM tag_combinations;"`.
-- **Intelligence Injection**: happens at dispatch assembly in the lane, not in a hook:
-  `docs/core/DISPATCH_AND_INTELLIGENCE_ARCHITECTURE.md` sections 4 and 7. Reviewer roles
-  are not enriched. `userpromptsubmit_worker_intelligence_inject.sh` exists on disk but no
-  hook references it (see below).
+- **Intelligence Injection**: the assembly seam calls
+  `scripts/lib/intelligence_injection.py` (`fetch_intelligence_section`), which selects
+  and renders context from the project store. Reviewer roles are not enriched
+  (`scripts/lib/skill_context.py` (`_inject_skill_context`)).
 - **Quality Digest** (`build_t0_quality_digest.py`): 3-section append-only
   NDJSON to `state/` (G-L6): Operational Defects, Prompt/Config Tuning,
   Governance Health, each recommendation carrying `evidence_ids` (G-L2).
@@ -497,6 +502,49 @@ what ships and where the evidence for "it actually runs" lives.
   success criteria in the dispatch) → lightweight verification (`verify_claims.py`,
   post-receipt) → pre-merge gate (`vnx gate-check --pr <PR-ID>`, pytest/AST/artifact/shell-syntax).
   Results in `.vnx-data/state/gate_results/<PR-ID>.json`, per-check GO/HOLD.
+
+### Injection, measurement and learning boundaries
+
+The read path decides the experiment arm before selecting patterns
+(`scripts/lib/intelligence_injection.py` (`_arm_result`),
+`scripts/lib/intelligence_selector.py` (`arm_for_dispatch`)). A control dispatch gets
+no pattern selection; treatment selects normally. With no valid active window,
+`ab_arm` and `ab_window` remain unset. The assignment includes the project and
+dispatch identity. The ledger decision precedes the injection row, offers and
+source stamps (`scripts/lib/intelligence_injection.py` (`_emit_then_record`)).
+Prior-round findings retain their review contract hash for redispatch context
+(`scripts/lib/prior_round_injector.py` (`fetch_prior_findings`)).
+
+Selection and measurement are separate. `scripts/intel_injection_join.py` (`_run_ab`)
+routes `cohort`, `effect` and `secondary` to their readers. The effect estimator
+refuses a verdict when cohort evidence fails its checks, including the floor of
+200 resolved dispatches per arm (`scripts/lib/intel_effect_cohort.py` (`MIN_PER_ARM`),
+`scripts/lib/intel_effect_estimator.py` (`run_effect`)). Secondary metrics retain a
+`not_evaluable` reason when evidence is unavailable
+(`scripts/lib/intel_effect_secondary.py` (`run_secondary`)). These are measurement
+mechanisms; their presence is not evidence of an improvement in outcomes.
+
+The write path and its operator decisions are described under *Learning Loop* and
+*Governed Memory and Key Decisions*. Corpus maintenance is separate:
+`scripts/vnx_intelligence_corpus_quarantine.py` (`main`) exposes baseline, quarantine,
+rehearse, verify, restore and purge. Quarantine seals an artifact without removing
+source rows (`scripts/lib/intelligence_corpus_quarantine/store.py` (`quarantine`)).
+Pattern imports merge by `(project_id, pattern_type, title)` and retain local row
+identity (`scripts/intelligence_import.py` (`_import_pattern_table`)). Cross-project
+reattribution computes ownership votes (`scripts/lib/pattern_reattribution.py`);
+transfers have a journal and an undo (`scripts/lib/qi_transfer_apply.py` (`run`)).
+
+The provider switch also guards intelligence model calls; the conversation analyzer
+and dream consolidation additionally read the operator content boundary
+(`scripts/conversation_analyzer/deep_analyzer.py`, `scripts/dream/consolidator.py`).
+A missing or unreadable boundary is explicitly `unconfigured`
+(`scripts/lib/content_class.py` (`load_boundary`)). The analyzer treats that as restricted;
+its routing policy is in `scripts/conversation_analyzer/deep_analyzer.py`.
+The receipt classifier, tagger and scout pre-pass do not read that boundary file;
+the provider switch alone does not imply content classification in those paths
+(`scripts/lib/receipt_classifier.py`, `scripts/lib/vnx_tagger.py`, `scripts/lib/scout_prepass.py`).
+See [Provider Switch](PROVIDER_SWITCH.md) and
+[Intelligence System](technical/INTELLIGENCE_SYSTEM.md) for the caller boundaries.
 
 ---
 
@@ -855,9 +903,9 @@ staged bundle from the central data dir, not from the repo:
 The staged bundle is the staging gate (ADR-006). `vnx dispatch stage ...`
 writes it and never fires. `vnx dispatch <dispatch-id> --dry-run` prints the
 compiled plan and permit and spawns nothing. `vnx dispatch <dispatch-id>`
-fires. The door then picks the lane: `claude_headless` for claude,
-`provider_dispatch.py` for kimi, glm and deepseek, `subprocess_dispatch.py` for
-a terminal-pinned single-worker PR. No popup sits in this path.
+fires. The door compiles `claude_headless` for Claude and `provider` for the other
+providers (`scripts/lib/dispatch_plan.py` (`compile_plan`)); its executor runs the
+matching envelope (`scripts/lib/dispatch_cli.py` (`_run_lane`)). No popup sits in this path.
 
 The ruleset lives in one place, `docs/core/DISPATCH_RULES.md`: lane selection
 in §5, provider routing in §8, the staging flow in §12. This document does not
@@ -939,34 +987,26 @@ VNX drives every provider as a CLI subprocess and never imports a vendor SDK
 which provider may serve which lane live in one machine-readable SSOT:
 `scripts/lib/providers/provider_constraints.yaml`.
 
-Claude runs on one lane, with a terminal-pinned variant:
+The door has two execution lanes (`scripts/lib/dispatch_plan.py` (`compile_plan`)):
 
-- **claude-headless** (`dispatch_envelope.run_envelope_headless_plan`): the only
-  Claude worker lane since the tmux-spawn lane was removed on 2026-09-18.
-  `claude -p` in an isolated worktree, on the subscription.
-- **claude-subprocess** (`scripts/lib/subprocess_dispatch.py`): the
-  terminal-pinned `claude -p` lane. The worker terminals T1-T3 always take it
-  (`scripts/lib/terminal_lane.py`); only T0 opts in, with `VNX_ADAPTER_T0=subprocess`.
+| Provider | Compiled lane | Executor |
+|---|---|---|
+| `claude` | `claude_headless` | `scripts/lib/dispatch_envelope.py` (`run_envelope_headless_plan`), running `claude -p` |
+| Non-Claude providers, including codex, gemini, kimi and the GLM/DeepSeek harnesses | `provider` | `scripts/lib/dispatch_envelope.py` (`run_envelope_plan`), through `scripts/lib/provider_dispatch.py` |
 
-Non-Claude providers (codex, gemini, kimi, deepseek-harness, litellm sub-providers,
-local-gemma) route through `scripts/lib/provider_dispatch.py`. Kimi is CLI-OAuth
-only (`kimi-via-cli-only`); GLM (glm-5.2 default, plus glm-5.3/glm-5.3-flash, see
-`deprecated-glm-models` in `provider_constraints.yaml`) routes via OpenRouter (`zai-via-openrouter-only`);
-DeepSeek runs through the Claude harness with an own key (`deepseek-harness-subscription-blocked`
-gates the subscription variant). A provider switch (`vnx providers`) turns a family on or off for
-every project, and every launch function calls `provider_switch.require` first
-(`docs/core/PROVIDER_SWITCH.md`, ADR-044). Full lane map, takeover chain and
-the switch summary ("Provider switch"):
-`docs/core/PROVIDER_LANES.md`; dispatch decision rules: `docs/core/DISPATCH_RULES.md`.
+The terminal-bound subprocess transport is a separate compatibility surface:
+`scripts/lib/terminal_lane.py` (`is_headless_terminal`) always selects headless for
+T1-T3; their old adapter selectors cannot opt them back into tmux. Other terminals
+require the explicit subprocess selector. It is not a third lane of the door
+(`scripts/lib/dispatch_cli.py` (`_run_lane`)).
 
-**Single-entry door (merged, default-ON).** Lane selection runs behind
-one entry point (`scripts/lib/dispatch_cli.py`): validate → snapshot →
-compile_plan → permit → execute. It is the default lane as of 2026-06-24
-(ADR-024; `VNX_SINGLE_ENTRY_DISPATCH` resolves on via
-`scripts/lib/dispatch_flags.py` `_DEFAULT_ENABLED = True`; `VNX_DISPATCH_LEGACY=1`
-is the absolute per-terminal rollback). The door normalizes GLM to the harness
-lane, applies the single-source routing predicate, and runs a phantom-guard that
-rejects evidence-free GATE-GREEN receipts. All of it is on `main`.
+Billing is resolved from provider and authentication, not inferred from headless
+execution (`scripts/lib/dispatch_plan.py` (`_resolve_billing`)). The routing constraints
+are in `scripts/lib/providers/provider_constraints.yaml`; the full transport,
+authentication and billing reference is [Provider Lanes](PROVIDER_LANES.md).
+The operator's provider-family switch is enforced before the door fires
+(`scripts/lib/dispatch_cli.py` (`_provider_switch_verdict`);
+[Provider Switch](PROVIDER_SWITCH.md), ADR-044).
 
 ### Provider lane map
 
@@ -1054,10 +1094,20 @@ files: prevention rules, archival candidates and skill-body refinement diffs. No
 those files changes an agent until an operator runs the approve step. The system
 proposes and the operator decides (ADR-065, "leren is voorstellen").
 
+Confidence reconciliation runs only in persist mode
+(`scripts/learning_loop.py` (`LearningLoop._cycle_reconcile_confidence`)); writing
+learned patterns also needs an approval bound to the proposed changes
+(`scripts/lib/qi_learning_approval.py` (`claim_approval`)). Queue and persist cycles
+check the ledger before extraction and return a named refusal when it cannot be
+used (`scripts/learning_loop.py` (`LearningLoop._ledger_gate`)). The receipt filter
+keeps a failure with an unknown provider if it has a usable model or report path
+(`scripts/learning_loop.py` (`LearningLoop.extract_failure_patterns`)).
+
 The mechanism, the operator CLI and the review ritual are in
 `docs/intelligence/SELF_LEARNING_LOOP.md`. Learning from operator steering (ADR-072,
 status Proposed) adds a bound transcript source, a closed class table and a proposal
-store with its own identity. Those first three parts were released in 1.9.0
+store with its own identity. An approval records a decision but applies nothing
+(`scripts/lib/steering_proposal_store.py` (`decide`)). Those first three parts were released in 1.9.0
 (`scripts/lib/operator_steering_source.py`, `operator_steering_class.py`,
 `steering_proposal_store.py`). Its proposals follow the same rule: a human decides.
 

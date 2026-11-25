@@ -10,7 +10,7 @@
 | Billing | `docs/core/BILLING.md` | Why billing follows the auth method and not the lane, and what I measured |
 | Onboarding Guide | `docs/onboarding/ONBOARDING_GUIDE.md` | Pip install, the repo-local operator path (`./bin/vnx`), feature worktrees, troubleshooting. The first-dispatch walkthrough is `docs/QUICKSTART.md` |
 | Getting Started | `docs/core/00_GETTING_STARTED.md` | Orientation, the CLI quick reference, and the T0 context guard and rotation spawner |
-| Architecture | `docs/manifesto/ARCHITECTURE.md` | Glass Box Governance architecture story |
+| Architecture (layer A) | `docs/core/00_VNX_ARCHITECTURE.md` | The system architecture: dispatch flow, provider lanes, intelligence, governance and state |
 | Roadmap | `docs/manifesto/ROADMAP.md` | Architecture principles and wave history (live state: `vnx horizon queue`) |
 | Dispatch Guide | `docs/DISPATCH_GUIDE.md` | How dispatches work |
 | Operations | `docs/operations/README.md` | Entry point for monitoring and runtime operations |
@@ -27,8 +27,7 @@
 
 | Document | Path | Description |
 |----------|------|-------------|
-| Core Architecture | `docs/core/00_VNX_ARCHITECTURE.md` | System architecture and data flow, incl. *Future-State Reconciliation* (open-item → track → dispatch lifecycle, the autopilot loop, and the `derived_status` rule), review seats, and short sections on the learning loop, dreaming and harness portability |
-| Dispatch & Intelligence Architecture | `docs/core/DISPATCH_AND_INTELLIGENCE_ARCHITECTURE.md` | Current end-to-end flow: stage → single door → assembly (skill + intelligence injection + report-contract) → claude-headless / provider-envelope lane delivery → govern (phantom-guard) → intelligence injection + self-learning loop |
+| Core Architecture | `docs/core/00_VNX_ARCHITECTURE.md` | The same layer-A architecture page: end-to-end dispatch and evidence, provider routing, intelligence boundaries, and *Future-State Reconciliation* (open-item → track → dispatch lifecycle, the autopilot loop, and the `derived_status` rule), review seats, and short sections on the learning loop, dreaming and harness portability |
 | Dispatch Rules | `docs/core/DISPATCH_RULES.md` | Canonical, machine-checkable lane/provider/gate decision rules: `claude_headless` vs `subprocess_dispatch` vs `provider_dispatch`, concurrency, failure modes, the merge door, open outcomes |
 | Enforcement Chain | `docs/core/ENFORCEMENT_CHAIN.md` | What stops an agent from merging its own unreviewed change, link by link: the dispatch door, review seats per risk class and the takeover chain, the merge door's five preflights, the `vnx-gate/review` check, the 15 required contexts on `main` (quoted from the live protection), `Red on base` as a check that is not required, and which document explains each required check |
 | Locks and Releases | `docs/core/LOCKS_AND_RELEASES.md` | Register of every lock between a dispatch and a merge (eight stages), the flags, variables, attests and human steps that open each one, who may use them, the trail they leave and the test that holds the lock shut |
