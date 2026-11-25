@@ -119,3 +119,28 @@ Er is **geen schemawijziging**: geen migratie, geen nieuwe tabel, geen prune, ge
 ## Wat dit ADR niet doet
 
 Het lost de realtime stiltewacht niet op (die blijft in `scripts/headless_trigger.py:307`), het reconstrueert `work_ready` niet, het levert de kostenjoin en de grootboeklezer niet, en het repareert of plant de nachtelijke pipeline niet. Het bevat geen code en geen model: de veertien rijen van het plan bouwen ertegen.
+
+## Amendment 2026-11-25 (ADR-097)
+
+This amendment accompanies [ADR-097: the per-project CI run record](ADR-097-ci-run-record.md), M1 of `ci-measurement-every-project`, under the cleared version-2 plan of 2026-11-24. It preserves the earlier text as the historical decision and replaces only the policies explicitly identified below. The named later deliverables implement the changes; this amendment does not claim they are deployed.
+
+### (a) Amendment: the nightly job is required per project
+
+This replaces **§8, "Opt-in per project (besluit 29)"**. The plan calls the opt-in **decision 14**; that is the plan's numbering, not this ADR's decision number. The nightly daily-metrics job is now required for every registered project, not an optional installation.
+
+M7a adds the daily-metrics family to the existing `REQUIRED_PER_PROJECT_FAMILIES` in `scripts/launchd/launchd_project_scope.py`. The existing `vnx init` command will write the job definition and beacon and print an operating request; loading launchd remains operator work. A missing required job is reported per project with a reason. M6 changes the existing `daily_metrics` beacon to fail after more than **36 hours without a measurement**, with the project named at T0 session start. This supersedes §8's event-driven expectation and three-day threshold. A loaded job alone is still not evidence of fresh measurements.
+
+M2 rolls out the existing job to seocrawler-v2 and sales-copilot through operating, and to mission-control after its move to 1.10.0. M10 supplies seven consecutive fresh, final day files per registered project as closeout evidence. The old opt-in installation consequence no longer governs this rollout.
+
+### (b) Amendment: the proposal flow
+
+This extends **§5, "Voorstellen en oordelen (besluit 26)"**, replacing its approval-based verdict clock, and preserves the authority in **§6, "De goedkeuringspoort is structureel, geen beveiligingsgrens (besluit 27)"**. The following six steps are the version-2 plan's layer-3 route to the operator:
+
+1. **Notify (M5b).** A new proposal opens one inbox point with the existing ledger field `bron` set to `besluit` and ref `proposal:<id>`. The morning round groups these points per project. This introduces proposal-specific inbox routing, not a new approval authority.
+2. **Show the approval command (M5b).** The point's copy block carries the exact command for that proposal. The plan's `daily_metrics approve <id>` means the existing daily-metrics approval command: `vnx daily-metrics approve <id> --action "<intervention>"`, with the intended intervention filled in. Vincent runs it in his own terminal and retypes the full proposal id.
+3. **Preserve decision 27 (M5a).** Approval remains `daily_metrics approve` under §6: stdin and stdout must both be TTYs, `VNX_AGENT_ID` must be absent, the id must be retyped, and the action and approval evidence remain mandatory. The existing `vnx inbox answer` command on a proposal point **never writes an `approved` event**, even with `--by vincent` from an agent environment. At most it closes the point as rejected or later. M5a must prove that case and the agent/TTY refusals with tests; the inbox cannot delegate approval to T0.
+4. **Close or expire (M5b).** The inbox point closes on the proposal ledger's `approved` event. With no response within seven days of proposal creation, the proposal becomes `expired` and its point closes as expired. Repeated processing must not duplicate points or turn rejection, deferral or expiry into approval.
+5. **Create the work (M5b).** An approved proposal creates a deliverable with status `proposed` in the track named by the proposal. Promotion remains the ordinary operator step; approval does not fire or implement the work.
+6. **Judge application (M5c).** Introduce `applied` when the PR of that proposal's deliverable merges, linked to that deliverable and its merge evidence. No `applied` means no verdict. The verdict clock starts at this merge, never at approval. Using ADR-063 §3's UTC settled-day rule, the observation window is the seven full days after the UTC application day; verdict waits until the seventh day is settled. It compares the same metric with the baseline **frozen at approval**, retaining §5's data sufficiency and schema checks, and records `helped`, `not_helped` or `undetermined`. That verdict returns as an inbox point. Unknown evidence cannot become `not_helped` or a successful measurement.
+
+M5a changes the existing `scripts/lib/daily_metrics/commands/approve.py` and `scripts/lib/operator_queue_ask.py` seams; M5b extends `scripts/lib/daily_metrics/commands/propose.py`, `scripts/lib/daily_metrics/proposal_ledger.py` and the inbox seam. M5c extends `scripts/lib/daily_metrics/commands/verdict.py` and the ledger with application linkage and the new clock. The baseline remains frozen in the `approved` event: moving the observation window never recomputes it.
