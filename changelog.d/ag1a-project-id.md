@@ -1,0 +1,1 @@
+- Refuse stores without a project-id source instead of stamping `vnx-dev`; run `vnx init` in the project. QI initialization now fails when tenant reconciliation fails.

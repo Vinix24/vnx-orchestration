@@ -172,12 +172,7 @@ a31cf1138573bd69	scripts/lib/migrations/apply_0031.py	vnx-dev	1	frozen_migration
 775cb30658c03167	scripts/lib/morning_round_routing.py	vnx-dev	1	te_repareren	FLEET_PROJECT constant names the fabric ledger by the operator project id; the fleet ledger id belongs in the registry	AG-5
 53ccc8dcb6f37c81	scripts/lib/orphan_sweep.py	vnx-dev	1	te_repareren	Library signature default project_id='vnx-dev' for the sweep	AG-1
 243ebead13135458	scripts/lib/pattern_dedup.py	vnx-dev	1	legacy_tenant_reader	Comment on the table default 'vnx-dev' of migration 0010 that a tenant-blind write would hit; prose	
-3e40a3ce39b27014	scripts/lib/project_id_migration.py	vnx-dev	1	te_repareren	resolve_init_project_id(strict=False) returns the vnx-dev sentinel when no source resolves (apply_0015, runtime_coordination_init, quality_db_init and the 0010 runners call it non-strict)	AG-1
-7dfa1f528ffb5de1	scripts/lib/project_id_migration.py	vnx-dev	1	te_repareren	resolve_init_project_id(strict=False) returns the vnx-dev sentinel when no source resolves (apply_0015, runtime_coordination_init, quality_db_init and the 0010 runners call it non-strict)	AG-1
 bf9402960b1521da	scripts/lib/project_id_migration.py	vnx-dev	1	legacy_tenant_reader	Comment or docstring stating that this path refuses to default to vnx-dev (ADR-007); prose, no behaviour	
-d8d7268931e179a0	scripts/lib/project_id_migration.py	vnx-dev	1	te_repareren	resolve_init_project_id(strict=False) returns the vnx-dev sentinel when no source resolves (apply_0015, runtime_coordination_init, quality_db_init and the 0010 runners call it non-strict)	AG-1
-def1b820e88207af	scripts/lib/project_id_migration.py	vnx-dev	1	legacy_tenant_reader	Comment or docstring stating that this path refuses to default to vnx-dev (ADR-007); prose, no behaviour	
-e4bded0d36c920aa	scripts/lib/project_id_migration.py	vnx-dev	1	te_repareren	resolve_init_project_id(strict=False) returns the vnx-dev sentinel when no source resolves (apply_0015, runtime_coordination_init, quality_db_init and the 0010 runners call it non-strict)	AG-1
 ebd617fc17ba1e2e	scripts/lib/project_id_migration.py	vnx-dev	1	legacy_tenant_reader	Comment or docstring stating that this path refuses to default to vnx-dev (ADR-007); prose, no behaviour	
 544bfe4f836bbeae	scripts/lib/project_scope.py	vnx-dev	1	te_repareren	Docstring documents the 'vnx-dev' default of current_project_id(); reword with the fix	AG-1
 68a0519421a3db82	scripts/lib/project_scope.py	vnx-dev	1	te_repareren	Docstring contrasts resolve_stamp_project_id with the vnx-dev-degrading current_project_id(); reword with the fix	AG-1
@@ -247,7 +242,6 @@ dfc0c06e249950dd	scripts/planning_cli.py	vnx-dev	1	te_repareren	planning_cli arg
 44ce326188e087b4	scripts/quality_db_init.py	vnx-dev	1	frozen_migration	Python-embedded QI migration step (v10-v29) that stamps the vnx-dev sentinel; for a non-vnx-dev pid run_qi_three_phase_migration re-stamps and drops it at the end of bootstrap	
 48d9fa2649576685	scripts/quality_db_init.py	vnx-dev	1	legacy_tenant_reader	QI bootstrap reconcile: runs the three-phase tenant migration only when the owning pid is not the vnx-dev sentinel	
 640fa2917d8e10db	scripts/quality_db_init.py	vnx-dev	1	frozen_migration	Python-embedded QI migration step (v10-v29) that stamps the vnx-dev sentinel; for a non-vnx-dev pid run_qi_three_phase_migration re-stamps and drops it at the end of bootstrap	
-815d7138f2cef0e8	scripts/quality_db_init.py	vnx-dev	1	legacy_tenant_reader	QI bootstrap reconcile: runs the three-phase tenant migration only when the owning pid is not the vnx-dev sentinel	
 a41a800cd1e53f7c	scripts/quality_db_init.py	vnx-dev	1	frozen_migration	Python-embedded QI migration step (v10-v29) that stamps the vnx-dev sentinel; for a non-vnx-dev pid run_qi_three_phase_migration re-stamps and drops it at the end of bootstrap	
 c43e3f9fb39d41a1	scripts/receipt_query.py	vnx-dev	1	te_repareren	COHORT_PROJECTS lists the operator's own five projects as the default cohort	AG-5
 00edc6fedfc34f4d	scripts/runtime_coordination_init.py	vnx-dev	1	legacy_tenant_reader	Comment or docstring stating that this path refuses to default to vnx-dev (ADR-007); prose, no behaviour	
@@ -362,7 +356,6 @@ f983240e5d2a61d3	scripts/lib/harness_run_cost.py	vnx-dev	1	te_repareren	Docstrin
 179943baf5316da7	scripts/lib/operator_steering_source.py	salesminds	1	legacy_tenant_reader	Deny-list of project slug parts the steering source never reads; the operator account name is the pattern it excludes	
 823bdbfb1cd4980e	scripts/lib/plan_gate_panel.py	vnx-dev	1	te_repareren	Docstring of a cost or ledger project resolver whose last fallback is the vnx-dev project id	AG-1
 22cf1a54c136a06b	scripts/lib/project_id_migration.py	vnx-dev	1	legacy_tenant_reader	Comment or docstring that mentions the vnx-dev project in prose (measurement, ADR-007 note or history); no behaviour	
-a9a58738dd0e7257	scripts/lib/project_id_migration.py	vnx-dev	1	legacy_tenant_reader	Comment or docstring that mentions the vnx-dev project in prose (measurement, ADR-007 note or history); no behaviour	
 137c566c663863e4	scripts/lib/project_scope.py	vnx-dev	1	legacy_tenant_reader	Comment or docstring that mentions the vnx-dev project in prose (measurement, ADR-007 note or history); no behaviour	
 9a82b091f668cf21	scripts/lib/project_scope.py	vnx-dev	1	legacy_tenant_reader	Comment or docstring that mentions the vnx-dev project in prose (measurement, ADR-007 note or history); no behaviour	
 f1a53801c6172a31	scripts/lib/project_scope.py	vnx-dev	1	legacy_tenant_reader	Comment or docstring that mentions the vnx-dev project in prose (measurement, ADR-007 note or history); no behaviour	
@@ -408,3 +401,4 @@ c3ed482ca6010d3c	scripts/setup/install_local_gemma.sh	vnx-dev	1	te_repareren	Ins
 be2cc2e702bae232	vnx_cli/commands/dispatch_agent.py	vnx-dev	1	legacy_tenant_reader	Comment or docstring that mentions the vnx-dev project in prose (measurement, ADR-007 note or history); no behaviour	
 88062b870a416144	vnx_cli/commands/init_cmd.py	vnx-dev	1	legacy_tenant_reader	Comment or docstring that mentions the vnx-dev project in prose (measurement, ADR-007 note or history); no behaviour	
 ea29be4f9eee8380	vnx_cli/commands/init_cmd.py	vnx-dev	1	legacy_tenant_reader	Comment or docstring that mentions the vnx-dev project in prose (measurement, ADR-007 note or history); no behaviour	
+ff556a5ae7b65a75	scripts/quality_db_init.py	vnx-dev	1	legacy_tenant_reader	QI bootstrap reconcile: runs the three-phase tenant migration only when the owning pid is not the vnx-dev sentinel	

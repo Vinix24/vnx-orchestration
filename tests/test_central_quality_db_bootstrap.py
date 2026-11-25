@@ -462,3 +462,9 @@ def test_doctor_check_database_pass_on_bootstrapped_db(tmp_path):
         f"check_database must not warn about version for a fully bootstrapped DB; "
         f"issues: {under_ver_issues}"
     )
+
+
+@pytest.fixture(autouse=True)
+def ag1a_legacy_store_identity(tmp_path):
+    """Schema tests use an explicitly owned legacy store."""
+    (tmp_path / ".vnx-project-id").write_text("vnx-dev\n")

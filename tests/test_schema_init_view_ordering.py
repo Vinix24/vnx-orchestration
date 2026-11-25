@@ -456,3 +456,9 @@ class TestAlreadyCurrentDbBootstrap:
                 conn.execute(f"SELECT * FROM {view}").fetchall()
         finally:
             conn.close()
+
+
+@pytest.fixture(autouse=True)
+def ag1a_legacy_store_identity(tmp_path):
+    """Schema tests use an explicitly owned legacy store."""
+    (tmp_path / ".vnx-project-id").write_text("vnx-dev\n")

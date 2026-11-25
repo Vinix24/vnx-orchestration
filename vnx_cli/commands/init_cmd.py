@@ -548,7 +548,7 @@ def _bootstrap_runtime_dbs(data_root: Path, project_id: str | None = None) -> No
     for that project so vnx pool status works immediately after migrate.
 
     Raises RuntimeError (or the original exception) if any core step fails.
-    quality_intelligence.db is advisory and warns instead of raising.
+    An attempted quality_intelligence.db bootstrap must also succeed.
     """
     print()
     print("Bootstrapping runtime databases...")
@@ -566,12 +566,12 @@ def _bootstrap_runtime_dbs(data_root: Path, project_id: str | None = None) -> No
     # the column is absent on a fresh DB. run_runtime_coordination_migration
     # adds it idempotently; auto_apply 0022 then safely SELECTs project_id.
     from project_id_migration import run_runtime_coordination_migration  # type: ignore
+    if project_id:
+        _anchor_tenant_marker(data_root, project_id)
     run_runtime_coordination_migration(db_path)
 
     # Step 3: numbered migrations 0015+ — CORE. The 0031 tenant/FK repair refuses
     # to guess a tenant, so anchor it on disk before the walk reaches it.
-    if project_id:
-        _anchor_tenant_marker(data_root, project_id)
     from migrations.auto_apply import auto_apply  # type: ignore
     auto_apply(db_path)
 
@@ -606,7 +606,7 @@ def _bootstrap_runtime_dbs(data_root: Path, project_id: str | None = None) -> No
     except Exception:
         pass  # advisory — never block bootstrap for an audit event
 
-    # quality_intelligence.db — dream_cycles, code_snippets, etc. (advisory).
+    # quality_intelligence.db — refuse an unsuccessful tenant bootstrap.
     try:
         engine_root = _engine.engine_root()
         schema_file = engine_root / "schemas" / "quality_intelligence.sql"
@@ -615,13 +615,14 @@ def _bootstrap_runtime_dbs(data_root: Path, project_id: str | None = None) -> No
             import io
             from quality_db_init import bootstrap_qi_db  # type: ignore
             qi_db = state_dir / "quality_intelligence.db"
-            with contextlib.redirect_stdout(io.StringIO()):
-                bootstrap_qi_db(qi_db, schema_file)
+            with contextlib.redirect_stdout(io.StringIO()) as output:
+                if not bootstrap_qi_db(qi_db, schema_file):
+                    raise RuntimeError(output.getvalue())
             print("  bootstrapped quality_intelligence.db")
         else:
             print("  skipped quality_intelligence.db (schema file not found)", file=sys.stderr)
     except Exception as exc:
-        print(f"  warning: quality_intelligence.db bootstrap failed: {exc}", file=sys.stderr)
+        raise RuntimeError(f"quality_intelligence.db bootstrap failed: {exc}") from exc
 
 
 def _provision_attest_trust_root(project_dir: Path, force: bool) -> None:

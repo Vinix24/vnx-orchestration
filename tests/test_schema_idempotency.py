@@ -307,3 +307,9 @@ def test_split_sql_statements_quote_and_comment_safe():
     assert len(stmts) == 2, f"expected 2 statements, got {len(stmts)}: {stmts}"
     assert "CREATE TABLE" in stmts[0]
     assert "INSERT INTO" in stmts[1]
+
+
+@pytest.fixture(autouse=True)
+def ag1a_legacy_store_identity(tmp_path):
+    """Schema tests use an explicitly owned legacy store."""
+    (tmp_path / ".vnx-project-id").write_text("vnx-dev\n")

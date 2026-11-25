@@ -376,3 +376,9 @@ class TestRestoreSnapshotSafe:
             assert val is not None and val[0] == 42, (
                 f"Expected restored row (42) in {path.name}; got {val}"
             )
+
+
+@pytest.fixture(autouse=True)
+def ag1a_legacy_store_identity(tmp_path):
+    """Schema tests use an explicitly owned legacy store."""
+    (tmp_path / ".vnx-project-id").write_text("vnx-dev\n")

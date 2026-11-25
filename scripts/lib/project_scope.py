@@ -147,7 +147,7 @@ def scoped_query(base_sql: str, project_id: str | None = None) -> str:
 
     The base SQL must already contain a ``WHERE`` clause (caller responsibility).
     """
-    pid = _validate(project_id) if project_id else current_project_id()
+    pid = _validate(project_id) if project_id else resolve_stamp_project_id()
     return base_sql + f" AND project_id = '{pid}'"
 
 

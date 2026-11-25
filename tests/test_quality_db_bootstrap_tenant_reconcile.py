@@ -64,17 +64,22 @@ def test_vnx_dev_store_is_left_untouched(tmp_path, monkeypatch):
     assert any(_has_vnx_dev_default(db, t) for t in _TENANT_TABLES)
 
 
-def test_bootstrap_never_fails_on_reconciliation_error(tmp_path, monkeypatch):
-    """A reconciliation failure must never break init (idempotent + retryable)."""
-    monkeypatch.setenv("VNX_PROJECT_ID", "some-other-project")
+def test_ag1a_bootstrap_refuses_reconciliation_error(tmp_path, monkeypatch, capsys):
+    """An owned store with failed reconciliation must not report success."""
+    monkeypatch.delenv("VNX_PROJECT_ID", raising=False)
 
     def _boom(*_a, **_k):
         raise RuntimeError("simulated reconciliation failure")
 
     monkeypatch.setattr(quality_db_init, "run_qi_three_phase_migration", _boom)
-    db = tmp_path / "quality_intelligence.db"
-    # init still succeeds despite the reconciliation raising
-    assert quality_db_init.bootstrap_qi_db(db) is True
+    db = tmp_path / ".vnx-data" / "other" / "state" / "quality_intelligence.db"
+    assert quality_db_init.bootstrap_qi_db(db) is False
+    output = capsys.readouterr().out
+    assert "ERROR" in output and "simulated reconciliation failure" in output
+    assert "[SUCCESS]" not in output
+    from vnx_cli.commands.init_cmd import _bootstrap_runtime_dbs
+    with pytest.raises(RuntimeError, match="simulated reconciliation failure"):
+        _bootstrap_runtime_dbs(db.parent.parent, project_id="other")
 
 
 if __name__ == "__main__":

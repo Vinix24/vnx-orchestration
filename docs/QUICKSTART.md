@@ -51,7 +51,11 @@ vnx doctor
 ```
 
 `vnx init` creates the tracked project scaffold (`.vnx/`, `.vnx-project-id`,
-and `agents/`) and a resolved runtime state directory.
+and `agents/`) and a resolved runtime state directory. Store initialization
+requires a project id from the database layout, a `.vnx-project-id` marker, or
+`VNX_PROJECT_ID`; present sources must agree. Without a source it refuses and
+asks you to run `vnx init` in the project. A failed QI tenant reconciliation
+also fails initialization; correct the reported error before retrying.
 
 ## Step 3: Prepare the Project and Dispatch
 

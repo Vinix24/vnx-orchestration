@@ -111,27 +111,23 @@ class TestResolveInitProjectId:
         with pytest.raises(RuntimeError, match="conflict"):
             pim.resolve_init_project_id(db)
 
-    def test_defaults_to_vnx_dev_when_no_source(self, tmp_path, monkeypatch):
-        """No marker, no env, no .vnx-data path → defaults to 'vnx-dev' with a warning."""
+    def test_ag1a_refuses_when_no_source(self, tmp_path, monkeypatch):
+        """No marker, env or store layout must refuse with an operator remedy."""
         monkeypatch.delenv("VNX_PROJECT_ID", raising=False)
         db = _make_db(tmp_path)
-        with self._capture_log(pim) as records:
-            pid = pim.resolve_init_project_id(db)
-        assert pid == "vnx-dev"
-        assert any("vnx-dev" in r.getMessage() for r in records), (
-            "Expected a warning mentioning 'vnx-dev' fallback in the log records"
-        )
+        with pytest.raises(RuntimeError, match="vnx init"):
+            pim.resolve_init_project_id(db)
 
-    def test_resolves_from_db_path_layout(self, tmp_path, monkeypatch):
+    @pytest.mark.parametrize("pid", ["seocrawler-v2", "vnx-dev"])
+    def test_resolves_from_db_path_layout(self, tmp_path, monkeypatch, pid):
         """DB at <root>/.vnx-data/<pid>/state/<db> resolves pid from path alone."""
         monkeypatch.delenv("VNX_PROJECT_ID", raising=False)
         # Build the canonical central-store layout in tmp_path
-        state_dir = tmp_path / ".vnx-data" / "seocrawler-v2" / "state"
+        state_dir = tmp_path / ".vnx-data" / pid / "state"
         state_dir.mkdir(parents=True)
         db = _make_db(state_dir, filename="runtime_coordination.db")
         # No marker, no env — path layout is the only source
-        pid = pim.resolve_init_project_id(db)
-        assert pid == "seocrawler-v2"
+        assert pim.resolve_init_project_id(db) == pid
 
     @staticmethod
     def _capture_log(module):
@@ -242,10 +238,13 @@ class TestRunRuntimeCoordinationMigration:
         )
         assert result["status"] == "skipped_no_db"
 
-    def test_defaults_to_vnx_dev_when_no_pid_resolvable(self, tmp_path, monkeypatch):
-        """No marker, no env, no .vnx-data path → defaults to 'vnx-dev' (backward-compat)."""
+    def test_ag1a_no_source_refuses_then_marker_stamps(self, tmp_path, monkeypatch):
+        """Refusal stays visible; adding an authoritative marker permits a retry."""
         monkeypatch.delenv("VNX_PROJECT_ID", raising=False)
         db = self._make_rc_db(tmp_path)
+        with pytest.raises(RuntimeError, match="vnx init"):
+            pim.run_runtime_coordination_migration(db)
+        _write_marker(tmp_path, "other")
         result = pim.run_runtime_coordination_migration(db)
         assert result["status"] == "ok"
 
@@ -254,7 +253,7 @@ class TestRunRuntimeCoordinationMigration:
             "SELECT project_id FROM dispatches WHERE id='d1'"
         ).fetchone()
         conn.close()
-        assert row[0] == "vnx-dev"
+        assert row[0] == "other"
 
 
 # ---------------------------------------------------------------------------
@@ -311,10 +310,13 @@ class TestRunQualityIntelligenceMigration:
         conn.close()
         assert row[0] == "test-qi-pid"
 
-    def test_defaults_to_vnx_dev_when_no_pid_resolvable(self, tmp_path, monkeypatch):
-        """No marker, no env, no .vnx-data path → defaults to 'vnx-dev' (backward-compat)."""
+    def test_ag1a_no_source_refuses_then_marker_stamps(self, tmp_path, monkeypatch):
+        """Refusal stays visible; adding an authoritative marker permits a retry."""
         monkeypatch.delenv("VNX_PROJECT_ID", raising=False)
         db = self._make_qi_db(tmp_path)
+        with pytest.raises(RuntimeError, match="vnx init"):
+            pim.run_quality_intelligence_migration(db)
+        _write_marker(tmp_path, "other")
         result = pim.run_quality_intelligence_migration(db)
         assert result["status"] == "ok"
 
@@ -323,7 +325,7 @@ class TestRunQualityIntelligenceMigration:
             "SELECT project_id FROM success_patterns WHERE id=1"
         ).fetchone()
         conn.close()
-        assert row[0] == "vnx-dev"
+        assert row[0] == "other"
 
 
 # ---------------------------------------------------------------------------
