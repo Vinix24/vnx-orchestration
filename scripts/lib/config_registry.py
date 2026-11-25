@@ -198,27 +198,27 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
     "VNX_T0_PROVIDER": _e(
         "VNX_T0_PROVIDER", "string", "claude_code", "dispatch",
         "Provider of terminal T0.",
-        subsystem="headless-dispatch-routing", status="ACTIVATE", read_site_wired=False),
+        subsystem="headless-dispatch-routing", status="ACTIVATE", read_site_wired=True),
     "VNX_T0_SKIP_PERMISSIONS": _e(
         "VNX_T0_SKIP_PERMISSIONS", "bool", "0", "dispatch",
         "Launch terminal T0 with the CLI permission prompts skipped. Setting 1 waives the permission prompts "
         "(--dangerously-skip-permissions) for that terminal.",
-        approval=True, subsystem="headless-dispatch-routing", status="ACTIVATE", read_site_wired=False),
+        approval=True, subsystem="headless-dispatch-routing", status="ACTIVATE", read_site_wired=True),
     "VNX_T1_SKIP_PERMISSIONS": _e(
         "VNX_T1_SKIP_PERMISSIONS", "bool", "0", "dispatch",
         "Launch terminal T1 with the CLI permission prompts skipped. Setting 1 waives the permission prompts "
         "(--dangerously-skip-permissions) for that terminal.",
-        approval=True, subsystem="headless-dispatch-routing", status="ACTIVATE", read_site_wired=False),
+        approval=True, subsystem="headless-dispatch-routing", status="ACTIVATE", read_site_wired=True),
     "VNX_T2_SKIP_PERMISSIONS": _e(
         "VNX_T2_SKIP_PERMISSIONS", "bool", "0", "dispatch",
         "Launch terminal T2 with the CLI permission prompts skipped. Setting 1 waives the permission prompts "
         "(--dangerously-skip-permissions) for that terminal.",
-        approval=True, subsystem="headless-dispatch-routing", status="ACTIVATE", read_site_wired=False),
+        approval=True, subsystem="headless-dispatch-routing", status="ACTIVATE", read_site_wired=True),
     "VNX_T3_SKIP_PERMISSIONS": _e(
         "VNX_T3_SKIP_PERMISSIONS", "bool", "0", "dispatch",
         "Launch terminal T3 with the CLI permission prompts skipped. Setting 1 waives the permission prompts "
         "(--dangerously-skip-permissions) for that terminal.",
-        approval=True, subsystem="headless-dispatch-routing", status="ACTIVATE", read_site_wired=False),
+        approval=True, subsystem="headless-dispatch-routing", status="ACTIVATE", read_site_wired=True),
     "VNX_PAID_LANE_DAILY_BUDGET_USD": _e(
         "VNX_PAID_LANE_DAILY_BUDGET_USD", "float", "5.00", "dispatch",
         "Daily USD cap of the paid provider lanes. Raising it waives the 5 USD/day paid-lane cost cap.",

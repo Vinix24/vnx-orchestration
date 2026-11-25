@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import ast
 import re
+from collections import Counter
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -70,6 +71,17 @@ def _all_reads() -> list[str]:
 
 def test_deleted_names_have_zero_reads():
     assert _all_reads() == []
+
+
+def test_start_runtime_literal_env_read_pin():
+    tree = ast.parse((REPO / START_FILES[0]).read_text(encoding="utf-8"))
+    keys = [n.args[0] for n in ast.walk(tree) if isinstance(n, ast.Call)
+            and ast.unparse(n.func) in {"os.environ.get", "os.getenv"}]
+    assert all(isinstance(key, ast.Constant) for key in keys)
+    assert Counter(key.value for key in keys) == {
+        "PROJECT_ROOT": 2, "VNX_HOME": 2, "VNX_DATA_DIR": 2, "VNX_SKILLS_DIR": 2,
+        "VNX_CODEX_MODEL": 1,
+    }
 
 
 def test_scan_sees_a_read(tmp_path):
