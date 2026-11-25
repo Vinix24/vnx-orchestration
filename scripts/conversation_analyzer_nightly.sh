@@ -38,7 +38,7 @@ source "$SCRIPT_DIR/lib/vnx_paths.sh"
 # ── Interpreter resolution (measured 2026-07-30) ──────────────────────────
 # This script runs under launchd (com.vnx.conversation-analyzer), a pure
 # background context with no interactive shell alias to mask a broken
-# /opt/homebrew/bin/python3 (relinked to a dependency-less 3.14 at 09:32
+# Homebrew's unversioned python3 (relinked to a dependency-less 3.14 at 09:32
 # today). Resolve one interpreter here and use it at every call site below.
 # Precedence: repo venv (uv-managed, has deps) > pinned homebrew 3.12
 # (no deps, but a stable interpreter) > bare `python3` (last resort).
@@ -207,8 +207,19 @@ lock_age() {
 # loader above keeps only `export VNX_` lines, so this one variable is read from the
 # provider env file by a parser that never sources it and never prints the value.
 # Missing key = loud line here; the analyzer then records the failure in the digest.
+source "$SCRIPT_DIR/lib/vnx_resolve_root.sh"
+vnx_resolve_project_root "${BASH_SOURCE[0]:-$0}"
+VNX_ROOT="$VNX_PROJECT_ROOT"
+# Config snapshot (one CLI call for both settings).
+if ! ANALYZER_CONFIG="$("$VNX_ROOT/bin/vnx" config get --raw VNX_ANALYZER_LLM VNX_DIGEST_EMAIL)"; then
+    echo "WARNING: VNX_ANALYZER_LLM/VNX_DIGEST_EMAIL unavailable; using ollama-only/empty" >&2
+    ANALYZER_CONFIG=$'ollama-only\n'
+fi
+ANALYZER_LLM="${ANALYZER_CONFIG%%$'\n'*}"
+DIGEST_EMAIL="$(printf '%s\n' "$ANALYZER_CONFIG" | sed -n '2p')"
+# End config snapshot.
 source "$SCRIPT_DIR/lib/load_deepseek_key.sh"
-if [ "${VNX_ANALYZER_LLM:-}" = "deepseek-harness" ]; then
+if [ "$ANALYZER_LLM" = "deepseek-harness" ]; then
     if ! vnx_load_deepseek_key; then
         log_msg "ERROR: VNX_ANALYZER_LLM=deepseek-harness but DEEPSEEK_API_KEY was not found in ${VNX_PROVIDER_ENV_FILE:-$HOME/.config/vnx/provider-usage.env}; deep analysis will be recorded as failed"
     fi
@@ -341,8 +352,8 @@ fi
 # comes from VNX_SMTP_PASS or, when unset, the macOS keychain — the shell
 # doesn't know which source will resolve, so send_digest_email.py judges
 # availability itself and reports failure via its own exit code + log line).
-if [ -n "${VNX_DIGEST_EMAIL:-}" ]; then
-    log_msg "Phase 4: Sending digest email to $VNX_DIGEST_EMAIL..."
+if [ -n "$DIGEST_EMAIL" ]; then
+    log_msg "Phase 4: Sending digest email to $DIGEST_EMAIL..."
     if run_phase "Phase 4" "$PHASE_TIMEOUT" send_digest_email.py; then
         log_msg "Phase 4 complete: digest email sent"
     else

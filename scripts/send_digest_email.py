@@ -5,13 +5,12 @@ VNX Nightly Digest — Email Sender.
 Reads t0_session_brief.json and pending_edits.json, formats a digest email,
 and sends via SMTP (default: Gmail).
 
-Configuration via environment variables:
+Configuration via vnx config (password stays in env/keychain):
   VNX_DIGEST_EMAIL  — recipient email address (required)
   VNX_SMTP_PASS     — SMTP password / Gmail App Password (falls back to the
                       macOS keychain item "vnx-smtp-pass" when unset)
-  VNX_SMTP_USER     — SMTP username (defaults to VNX_DIGEST_EMAIL)
   VNX_SMTP_HOST     — SMTP server (default: smtp.gmail.com)
-  VNX_SMTP_PORT     — SMTP port (default: 587)
+  SMTP uses port 587 and the recipient as username.
 
 Usage:
   python3 scripts/send_digest_email.py           # send digest
@@ -272,11 +271,12 @@ def send_email(subject: str, body: str, dry_run: bool = False) -> bool:
     Returns:
         True if sent successfully, False otherwise.
     """
-    recipient = os.environ.get("VNX_DIGEST_EMAIL", "")
+    import config_runtime
+    recipient = config_runtime.get("VNX_DIGEST_EMAIL")
     smtp_pass = os.environ.get("VNX_SMTP_PASS", "") or _read_smtp_pass_from_keychain()
-    smtp_user = os.environ.get("VNX_SMTP_USER", "") or recipient
-    smtp_host = os.environ.get("VNX_SMTP_HOST", "smtp.gmail.com")
-    smtp_port = int(os.environ.get("VNX_SMTP_PORT", "587"))
+    smtp_user = recipient
+    smtp_host = config_runtime.get("VNX_SMTP_HOST")
+    smtp_port = 587
 
     if not recipient:
         print("ERROR: VNX_DIGEST_EMAIL not set", file=sys.stderr)

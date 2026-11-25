@@ -165,11 +165,11 @@ class TestOllamaTimeoutHandling:
             _, call_kwargs = mock_urlopen.call_args
             assert call_kwargs.get("timeout") == 42
 
-    def test_execute_uses_env_var_timeout_when_context_missing(self):
+    def test_execute_uses_constant_timeout_when_context_missing(self):
         adapter = OllamaAdapter("T1")
         body = _ollama_json_response("hello")
         fake_resp = _FakeHTTPResponse(body)
-        with mock.patch.dict(os.environ, {"VNX_OLLAMA_TIMEOUT": "99"}):
+        with mock.patch("adapters.ollama_adapter._DEFAULT_TIMEOUT", 99):
             with mock.patch("urllib.request.urlopen", return_value=fake_resp) as mock_urlopen:
                 adapter.execute("prompt", {})
                 _, call_kwargs = mock_urlopen.call_args
