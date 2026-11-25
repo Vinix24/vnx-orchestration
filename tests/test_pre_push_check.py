@@ -21,7 +21,7 @@ needs_py311 = pytest.mark.skipif(not HAS_PY311, reason="python3.11 not installed
 # --- selection: the six tests the shadow missed ---------------------------------------------------
 
 @pytest.mark.parametrize("touched, test", [
-    ("scripts/ci/operator_names.py", "tests/test_no_operator_defaults.py"),
+    ("tests/fixtures/operator_names/findings.tsv", "tests/test_no_operator_defaults.py"),
     ("scripts/ci/some_new_gate.py", "tests/test_ci_red_on_base_selection.py"),
     ("CLAUDE.md", "tests/test_project_claude_md_build_rules.py"),
     ("schemas/migrations/0099_new.sql", "tests/test_oi_track_bridge.py"),

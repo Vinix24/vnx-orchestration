@@ -43,7 +43,7 @@ NO_COMMAND = "pre-push check: no command configured (.vnx/config.yml pre_push_co
 NO_PY311 = "python3.11 not found: CI compiles on 3.11"
 LINT_SCRIPT = "scripts/ci_lint_patterns.py"
 RATCHET_SCRIPT = "scripts/ci/check_function_size_ratchet.py"
-GLOB_RE = re.compile(r"\.r?glob\(|os\.walk|ls-files")
+CODE_DIRS = ("scripts/", "dashboard/", "bin/", "hooks/", "vnx_cli/")
 GENERIC_NAMES = {"__init__.py", "conftest.py"}
 
 
@@ -104,15 +104,54 @@ def _flatten_div(node: ast.AST) -> list:
     return [None]
 
 
+def _is_sys_path_call(node: ast.AST) -> bool:
+    func = getattr(node, "func", None)
+    return (isinstance(node, ast.Call) and isinstance(func, ast.Attribute) and func.attr in {"insert", "append"}
+            and isinstance(func.value, ast.Attribute) and func.value.attr == "path")
+
+
+def _receiver_chains(node: ast.AST, names: dict[str, list[str]]) -> list[str]:
+    """Path chains a glob/walk/copytree receiver resolves to (a name, a chain, str(x), Path(x))."""
+    if isinstance(node, ast.Name):
+        return names.get(node.id, [])
+    if isinstance(node, ast.BinOp):
+        return _const_runs(_flatten_div(node))
+    if isinstance(node, ast.Call):
+        return [c for a in node.args for c in _receiver_chains(a, names)]
+    return []
+
+
+def _globbed_chains(tree: ast.AST) -> list[str]:
+    names: dict[str, list[str]] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign) and isinstance(node.value, ast.BinOp):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    names[target.id] = _const_runs(_flatten_div(node.value))
+    out: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+            continue
+        attr = node.func.attr
+        if attr in {"rglob", "glob", "iterdir"}:
+            out.extend(_receiver_chains(node.func.value, names))
+        elif attr in {"walk", "copytree"} and node.args:
+            out.extend(_receiver_chains(node.args[0], names))
+    return out
+
+
 def test_facts(text: str) -> dict:
     """Static facts about one test file: literals, imports, path chains, glob use."""
-    facts = {"literals": [], "imports": set(), "chains": [], "glob": bool(GLOB_RE.search(text))}
+    facts = {"literals": [], "imports": set(), "chains": [], "path_chains": [], "globbed": []}
     try:
         tree = ast.parse(text)
     except (SyntaxError, ValueError):
         facts["literals"] = [text]  # unparseable: fall back to plain text, never skip it
         return facts
+    facts["globbed"] = _globbed_chains(tree)
     inner = {id(n.left) for n in ast.walk(tree) if isinstance(n, ast.BinOp) and isinstance(n.op, ast.Div)}
+    # A chain only put on sys.path is an import root, not a read: kept apart, used with a glob.
+    on_path = {id(sub) for n in ast.walk(tree) if _is_sys_path_call(n) for a in n.args for sub in ast.walk(a)}
     for node in ast.walk(tree):
         if isinstance(node, ast.Constant) and isinstance(node.value, str):
             facts["literals"].append(node.value)
@@ -121,7 +160,8 @@ def test_facts(text: str) -> dict:
         elif isinstance(node, ast.ImportFrom):
             facts["imports"].update([(node.module or "").split(".")[-1]] + [a.name for a in node.names])
         elif isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div) and id(node) not in inner:
-            facts["chains"].extend(_const_runs(_flatten_div(node)))
+            runs = _const_runs(_flatten_div(node))
+            facts["path_chains" if id(node) in on_path else "chains"].extend(runs)
         elif isinstance(node, ast.Call) and getattr(node.func, "attr", "") == "join":
             args = [a.value if isinstance(a, ast.Constant) and isinstance(a.value, str) else None for a in node.args]
             facts["chains"].extend(_const_runs(args))
@@ -134,12 +174,18 @@ def _name_in(literal: str, name: str) -> bool:
 
 def _reason_d(facts: dict, path: str) -> str | None:
     base = path.rsplit("/", 1)[-1]
+    named = "." in base and base not in GENERIC_NAMES  # a bare name like `vnx` is too common a word
     for lit in facts["literals"]:
-        if path in lit or (base not in GENERIC_NAMES and _name_in(lit, base)):
+        if path in lit or (named and _name_in(lit, base)):
             return f"d: names {base}"
-    for chain in facts["chains"]:
+    # `git ls-files` scans the whole repo: every chain the test builds counts as scanned.
+    scans_repo = "ls-files" in "".join(facts["literals"])
+    chains = facts["chains"] + (facts["path_chains"] if scans_repo else [])
+    for chain in chains:
         if path == chain or path.startswith(chain + "/"):
-            if "/" in chain or facts["glob"]:
+            # A code dir is on sys.path or imported all the time: it only counts when the
+            # test globs, walks or copies that very dir. A data dir (schemas/migrations) counts alone.
+            if scans_repo or chain in facts["globbed"] or ("/" in chain and not (chain + "/").startswith(CODE_DIRS)):
                 return f"d: reads {chain}/"
     return None
 
