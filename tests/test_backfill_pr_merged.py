@@ -327,6 +327,24 @@ class TestCrashExitAndClosingLine:
 
     SCRIPT = VNX_ROOT / "scripts" / "backfill_pr_merged_receipts.py"
 
+    @staticmethod
+    def _env_with_fake_launchctl(tmp_path):
+        """An env whose PATH starts with a `launchctl` that lists one ledger-health label.
+
+        `--all-projects` runs `launchctl list`; the Linux CI runner has no such binary. With an
+        empty registry and an empty list the run is "no projects enumerated" and prints a text
+        line, so the stand-in lists one label: the run then reaches its per-project output.
+        """
+        import os
+        bin_dir = tmp_path / "fakebin"
+        bin_dir.mkdir()
+        fake = bin_dir / "launchctl"
+        fake.write_text("#!/bin/sh\necho '- 0 com.vnx.ledger-health.zz-test'\n")
+        fake.chmod(0o755)
+        env = dict(os.environ)
+        env["PATH"] = f"{bin_dir}{os.pathsep}{env.get('PATH', '')}"
+        return env
+
     def test_crash_is_70_with_traceback(self):
         sys.path.insert(0, str(Path(__file__).resolve().parent))
         from crash_runner_oi3079 import run_script_crashing
@@ -342,6 +360,7 @@ class TestCrashExitAndClosingLine:
         proc = subprocess.run(
             [sys.executable, str(self.SCRIPT), "--all-projects", "--registry", str(registry)],
             capture_output=True, text=True, timeout=120,
+            env=self._env_with_fake_launchctl(tmp_path),
         )
         lines = proc.stdout.splitlines()
         assert proc.returncode in (0, 1, 2)
@@ -356,5 +375,9 @@ class TestCrashExitAndClosingLine:
         proc = subprocess.run(
             [sys.executable, str(self.SCRIPT), "--all-projects", "--json", "--registry", str(registry)],
             capture_output=True, text=True, timeout=120,
+            env=self._env_with_fake_launchctl(tmp_path),
         )
-        assert isinstance(json.loads(proc.stdout), dict)
+        assert proc.returncode in (0, 1, 2), proc.stderr
+        out = json.loads(proc.stdout)
+        assert isinstance(out, dict)
+        assert [r["project_id"] for r in out["rows"]] == ["zz-test"]
