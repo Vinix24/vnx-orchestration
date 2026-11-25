@@ -38,7 +38,7 @@ source "$SCRIPT_DIR/lib/vnx_paths.sh"
 # ── Interpreter resolution (measured 2026-07-30) ──────────────────────────
 # This script runs under launchd (com.vnx.conversation-analyzer), a pure
 # background context with no interactive shell alias to mask a broken
-# /opt/homebrew/bin/python3 (relinked to a dependency-less 3.14 at 09:32
+# Homebrew's unversioned python3 (relinked to a dependency-less 3.14 at 09:32
 # today). Resolve one interpreter here and use it at every call site below.
 # Precedence: repo venv (uv-managed, has deps) > pinned homebrew 3.12
 # (no deps, but a stable interpreter) > bare `python3` (last resort).
