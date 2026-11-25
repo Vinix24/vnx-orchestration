@@ -149,6 +149,8 @@ def _run_fresh_central(
     """
     central_state = tmp_path / "central" / "state"
     # Do NOT pre-create central_state — the migrator must handle a missing dir.
+    central_state.parent.mkdir(exist_ok=True)
+    (central_state.parent / ".vnx-project-id").write_text("test-project\n")
 
     cmd = [
         "--apply",

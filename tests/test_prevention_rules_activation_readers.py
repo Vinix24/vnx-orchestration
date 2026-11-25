@@ -63,12 +63,12 @@ def _verdict(state: Path, status: str = "ok", *, project: str = PID_A, hours_ago
 def state(tmp_path, monkeypatch):
     state = tmp_path / "state"
     state.mkdir()
+    monkeypatch.setenv("VNX_PROJECT_ID", PID_A)
     assert qdi.bootstrap_qi_db(_db(state)) is True
     _sql(state, "ALTER TABLE prevention_rules ADD COLUMN project_id TEXT NOT NULL DEFAULT ''")
     _sql(state, "ALTER TABLE prevention_rules ADD COLUMN source TEXT")
     for i in range(20):
         _rule(state, f"legacy flaky rule {i:02d}", "behavior_analysis", PID_A, 0.5 + i / 100)
-    monkeypatch.setenv("VNX_PROJECT_ID", PID_A)
     monkeypatch.setenv("VNX_STATE_DIR", str(state))
     return state
 

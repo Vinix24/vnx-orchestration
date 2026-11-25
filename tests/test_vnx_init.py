@@ -589,6 +589,14 @@ class TestInitDb:
         db_path = Path(vnx_env["VNX_STATE_DIR"]) / "quality_intelligence.db"
         assert db_path.exists()
 
+    def test_corrupt_database_is_a_failure(self, vnx_env):
+        ensure_runtime_layout(vnx_env)
+        db_path = Path(vnx_env["VNX_STATE_DIR"]) / "quality_intelligence.db"
+        db_path.write_bytes(b"not a sqlite database")
+        result = init_db(vnx_env)
+        assert result.status == FAIL
+        assert "not a database" in result.message
+
     def test_skips_missing_schema(self, vnx_env):
         ensure_runtime_layout(vnx_env)
         schema = Path(vnx_env["VNX_HOME"]) / "schemas" / "quality_intelligence.sql"
@@ -631,6 +639,13 @@ class TestRunInit:
         assert (project_root / ".claude" / "skills" / "test-skill" / "SKILL.md").exists()
         assert (project_root / ".claude" / "terminals" / "T0" / "CLAUDE.md").exists()
         assert Path(vnx_env["VNX_STATE_DIR"]).is_dir()
+
+    def test_invalid_identity_stops_before_intelligence_import(self, vnx_env):
+        ensure_runtime_layout(vnx_env)
+        (Path(vnx_env["VNX_DATA_DIR"]) / ".vnx-project-id").write_text("../invalid\n")
+        results = run_init(vnx_env, skip_hooks=True)
+        assert results[-1].name == "init-db" and results[-1].status == FAIL
+        assert all(result.name != "intelligence-import" for result in results)
 
     def test_full_init_idempotent(self, vnx_env):
         run_init(vnx_env, skip_hooks=True)

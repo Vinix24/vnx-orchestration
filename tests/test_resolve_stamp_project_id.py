@@ -111,8 +111,9 @@ def test_strict_true_no_source_raises(tmp_path, monkeypatch):
         pim.resolve_init_project_id(bare, strict=True)
 
 
-def test_strict_false_no_source_keeps_vnx_dev(tmp_path, monkeypatch):
+def test_ag1a_strict_false_no_source_refuses(tmp_path, monkeypatch):
     monkeypatch.delenv("VNX_PROJECT_ID", raising=False)
     bare = tmp_path / "loose" / "quality_intelligence.db"
     bare.parent.mkdir(parents=True, exist_ok=True)
-    assert pim.resolve_init_project_id(bare, strict=False) == "vnx-dev"
+    with pytest.raises(project_scope.TenantUnresolved, match="vnx init"):
+        pim.resolve_init_project_id(bare, strict=False)

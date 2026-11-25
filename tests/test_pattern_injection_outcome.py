@@ -115,6 +115,10 @@ def _db_with_outcome_table() -> sqlite3.Connection:
 # ---------------------------------------------------------------------------
 
 class TestMigration:
+    @pytest.fixture(autouse=True)
+    def store_identity(self, tmp_path):
+        (tmp_path / ".vnx-project-id").write_text("test-project\n")
+
     def test_table_created_with_adr007_composite_unique(self, tmp_path):
         db_path = tmp_path / "qi.db"
         assert bootstrap_qi_db(db_path, schema_file=_SCHEMA_FILE) is True

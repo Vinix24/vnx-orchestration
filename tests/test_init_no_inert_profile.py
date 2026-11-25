@@ -130,7 +130,8 @@ def test_existing_profile_file_is_byte_equal_after_init(tmp_path):
     assert profile.read_bytes() == original
 
 
-def test_every_other_written_file_matches_origin_main(tmp_path):
+def test_every_other_written_file_matches_origin_main(tmp_path, monkeypatch):
+    monkeypatch.setenv("VNX_PROJECT_ID", "project")
     project = tmp_path / "project"
     project.mkdir()
 

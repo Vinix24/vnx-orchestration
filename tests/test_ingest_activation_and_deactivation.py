@@ -55,8 +55,8 @@ def _fresh_store(tmp_path: Path, monkeypatch) -> tuple:
     state = tmp_path / "state"
     state.mkdir()
     db = state / "quality_intelligence.db"
-    assert qdi.bootstrap_qi_db(db) is True
     monkeypatch.setenv("VNX_PROJECT_ID", PID)
+    assert qdi.bootstrap_qi_db(db) is True
     conn = sqlite3.connect(db)
     conn.execute("DROP TABLE prevention_rules")
     conn.execute(LIVE_PREVENTION_RULES)

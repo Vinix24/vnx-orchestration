@@ -456,3 +456,9 @@ class TestAlreadyCurrentDbBootstrap:
                 conn.execute(f"SELECT * FROM {view}").fetchall()
         finally:
             conn.close()
+
+
+@pytest.fixture(autouse=True)
+def ag1a_store_identity(tmp_path):
+    """Schema tests use an explicitly owned temporary store."""
+    (tmp_path / ".vnx-project-id").write_text("test-project\n")

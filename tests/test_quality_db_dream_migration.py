@@ -27,6 +27,7 @@ _SCHEMA_FILE = REPO_ROOT / "schemas" / "quality_intelligence.sql"
 # ---------------------------------------------------------------------------
 
 def _bootstrap(db_path: Path) -> bool:
+    (db_path.parent / ".vnx-project-id").write_text("test-project\n")
     return quality_db_init.bootstrap_qi_db(db_path, _SCHEMA_FILE)
 
 

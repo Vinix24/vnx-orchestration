@@ -31,6 +31,11 @@ sys.path.insert(0, str(ROOT / "scripts" / "lib"))
 from scripts import migrate_to_central_vnx as M  # noqa: E402
 
 
+@pytest.fixture(autouse=True)
+def store_identity(monkeypatch):
+    monkeypatch.setenv("VNX_PROJECT_ID", "test-project")
+
+
 # ---------------------------------------------------------------------------
 # Fixture builders (mirrors per-project test pattern)
 # ---------------------------------------------------------------------------

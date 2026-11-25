@@ -197,6 +197,7 @@ def tcc_fixture_env(tmp_path, monkeypatch):
 
     central_state = tmp_path / "central" / "state"
     central_state.mkdir(parents=True)
+    (central_state / ".vnx-project-id").write_text("test-project\n")
 
     # Build 2-project registry: one accessible, one will be mocked inaccessible
     specs = []

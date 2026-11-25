@@ -18,6 +18,7 @@ Governance: G-R2 (receipts and runtime state even in simplified flows).
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import shutil
@@ -33,6 +34,8 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR / "lib"))
 
 from mcp_server_config import write_terminal_mcp_configs
+from project_id_derivation import PROJECT_FILE_NAME, derive_project_id
+from project_id_migration import resolve_init_project_id, run_quality_intelligence_migration
 from vnx_paths import ensure_env
 from vnx_skills import is_opted_out, iter_skill_dirs
 
@@ -516,8 +519,48 @@ def bootstrap_hooks(paths: Dict[str, str]) -> StepResult:
 # Step: init-db
 # ---------------------------------------------------------------------------
 
+def _read_init_marker(root: Path) -> Optional[str]:
+    """Missing markers allow derivation; invalid/unreadable markers refuse init."""
+    marker = root / PROJECT_FILE_NAME
+    if marker.is_symlink():
+        raise ValueError(f"Refusing symlink project marker: {marker}")
+    if not marker.exists():
+        return None
+    return derive_project_id(root, explicit=marker.read_text(encoding="utf-8").split("\n", 1)[0].strip())
+
+
+def anchor_init_project_id(paths: Dict[str, str]) -> str:
+    """Anchor source-init identity; preserve markers and refuse conflicting stores."""
+    data = Path(paths["VNX_DATA_DIR"])
+    data.mkdir(parents=True, exist_ok=True)
+    marker = data / PROJECT_FILE_NAME
+    # Check and publish under one persistent lock; concurrent init cannot overwrite.
+    with (data / f"{PROJECT_FILE_NAME}.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        existing = _read_init_marker(data)
+        project_marker = _read_init_marker(Path(paths["PROJECT_ROOT"]))
+        if existing and project_marker and existing != project_marker:
+            raise ValueError("project_id conflict between project and data markers")
+        pid = existing or project_marker
+        if pid is None:
+            explicit = paths.get("VNX_PROJECT_ID", os.environ.get("VNX_PROJECT_ID"))
+            pid = derive_project_id(paths["PROJECT_ROOT"], explicit=explicit)
+        if existing is None:
+            temporary = marker.with_name(marker.name + ".tmp")
+            with temporary.open("x", encoding="utf-8") as output:
+                output.write(pid + "\n")
+            os.replace(temporary, marker)
+        resolved = resolve_init_project_id(
+            Path(paths["VNX_STATE_DIR"]) / "quality_intelligence.db"
+        )
+        if resolved != pid:
+            raise ValueError(f"project_id conflict: marker={pid!r}, store={resolved!r}")
+        paths["VNX_PROJECT_ID"] = pid
+        return pid
+
+
 def init_db(paths: Dict[str, str]) -> StepResult:
-    """Initialize quality intelligence database from schema."""
+    """Initialize and stamp the quality store with the anchored project identity."""
     vnx_home = Path(paths["VNX_HOME"])
     state_dir = Path(paths["VNX_STATE_DIR"])
     schema_file = vnx_home / "schemas" / "quality_intelligence.sql"
@@ -527,28 +570,26 @@ def init_db(paths: Dict[str, str]) -> StepResult:
     if not schema_file.exists():
         return StepResult("init-db", SKIP, "Schema file not found (skipping)")
 
-    state_dir.mkdir(parents=True, exist_ok=True)
-
-    if db_init_script.exists():
-        try:
+    try:
+        project_id = anchor_init_project_id(paths)
+        state_dir.mkdir(parents=True, exist_ok=True)
+        if db_init_script.exists():
             subprocess.run(
                 [sys.executable, str(db_init_script)],
                 capture_output=True, timeout=30, check=True,
-                env={**os.environ, **{k: v for k, v in paths.items()}},
+                env={**os.environ, **paths},
             )
-            return StepResult("init-db", PASS, "Quality intelligence database ready")
-        except subprocess.CalledProcessError as e:
-            return StepResult("init-db", FAIL,
-                              f"quality_db_init.py failed: {e.stderr.decode()[:200]}")
-
-    # Fallback: apply schema directly
-    try:
-        conn = sqlite3.connect(str(db_path))
-        conn.executescript(schema_file.read_text())
-        conn.close()
-        return StepResult("init-db", PASS, f"Database initialized via sqlite3: {db_path}")
-    except sqlite3.Error as e:
-        return StepResult("init-db", FAIL, f"SQLite error: {e}")
+        else:
+            # Legacy source layouts still apply their schema with the same identity.
+            with sqlite3.connect(str(db_path)) as conn:
+                conn.executescript(schema_file.read_text())
+        run_quality_intelligence_migration(db_path, default_project_id=project_id)
+        return StepResult("init-db", PASS, "Quality intelligence database ready")
+    except subprocess.CalledProcessError as e:
+        return StepResult("init-db", FAIL,
+                          f"quality_db_init.py failed: {(e.stderr + e.stdout).decode()[:500]}")
+    except (OSError, ValueError, RuntimeError, sqlite3.Error) as e:
+        return StepResult("init-db", FAIL, str(e))
 
 
 # ---------------------------------------------------------------------------
@@ -689,6 +730,8 @@ def run_init(paths: Dict[str, str], skip_hooks: bool = False,
     results.append(generate_tri_files(paths))
     results.append(patch_agent_files(paths))
     results.append(init_db(paths))
+    if results[-1].status == FAIL:
+        return results
     results.append(intelligence_import(paths))
 
     return results

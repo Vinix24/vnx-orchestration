@@ -27,6 +27,7 @@ except Exception as exc:
 import pattern_natural_key
 import pattern_upsert
 import schema_migration
+from project_id_migration import resolve_init_project_id
 from db_backup_rotation import parse_backup_keep, rotate_backups_safe
 
 # Highest PRAGMA user_version stamped by bootstrap_qi_db.
@@ -1894,6 +1895,7 @@ def bootstrap_qi_db(db_path: Path, schema_file: Path | None = None) -> bool:
     log('INFO', f'Initializing quality intelligence database at {db_path}...')
 
     try:
+        _pid = resolve_init_project_id(Path(db_path))
         with open(schema_file, 'r') as f:
             schema_sql = f.read()
 
@@ -1913,7 +1915,6 @@ def bootstrap_qi_db(db_path: Path, schema_file: Path | None = None) -> bool:
         for version in sorted(MIGRATIONS):
             schema_migration.apply_if_below(conn, version, MIGRATIONS[version])
 
-        log('SUCCESS', 'Database schema initialized successfully')
         conn.close()
 
         # WS2 / ADR-007: the V19/V20/V22 migrations stamp project_id with a literal
@@ -1925,18 +1926,14 @@ def bootstrap_qi_db(db_path: Path, schema_file: Path | None = None) -> bool:
         # Wire it here so bootstrap self-heals. Idempotent (phase guards skip correct
         # tables); only runs for non-vnx-dev pids (vnx-dev IS the correct legacy default).
         try:
-            import sys as _sys  # noqa: PLC0415
-            _lib = Path(__file__).resolve().parent / "lib"
-            if str(_lib) not in _sys.path:
-                _sys.path.insert(0, str(_lib))
-            from project_id_migration import resolve_init_project_id  # noqa: PLC0415
-            _pid = resolve_init_project_id(Path(db_path))
-            if _pid and _pid != 'vnx-dev':
+            if _pid != 'vnx-dev':
                 run_qi_three_phase_migration(Path(db_path), _pid)
                 log('INFO', f'QI tenant-stamping reconciled to project_id={_pid!r}')
-        except Exception as _exc:  # never fail init on reconciliation (idempotent + retryable)
-            log('WARNING', f'QI tenant-stamping reconciliation skipped: {_exc}')
+        except Exception as _exc:
+            log('ERROR', f'QI tenant-stamping reconciliation failed: {_exc}')
+            return False
 
+        log('SUCCESS', 'Database schema initialized successfully')
         return True
 
     except Exception as e:
