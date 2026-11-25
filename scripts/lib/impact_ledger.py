@@ -273,8 +273,10 @@ def _shadow_run(runner: Runner, run: dict, shadow: Optional[dict], now: datetime
     side the first run whose job record has the same base_sha and candidate_sha wins (main may have moved between
     two runs on one head sha); without one the newest run wins.  Raises ShadowRunPending when the newest run is
     not completed, or when nothing pairs and the VNX CI run is under SHADOW_RUN_GRACE old (or its age cannot be
-    read: no positive evidence that it is old).  After the grace a candidate that never matched gives the
-    download problem ``candidate_mismatch``.
+    read: no positive evidence that it is old).  This includes candidates whose job artifacts are all unreadable:
+    they stay pending during that grace or with an unreadable age, then return no pair and the download problem
+    ``candidate_unreadable``.  If at least one readable record mismatched, the problem after the grace is
+    ``candidate_mismatch`` instead.
     """
     argv = ["gh", "run", "list", "--workflow", SHADOW_WORKFLOW, "--commit", str(run.get("headSha")),
             "--event", "pull_request", "--json", SHADOW_RUN_FIELDS]
@@ -303,11 +305,9 @@ def _shadow_run(runner: Runner, run: dict, shadow: Optional[dict], now: datetime
         if _same_candidate(shadow, download[0]):
             return candidate, download
         mismatched = True
-    if not mismatched:
-        return runs[0], None
     if too_young:
         raise ShadowRunPending("shadow_run_pending")
-    return None, (None, "candidate_mismatch")
+    return None, (None, "candidate_mismatch" if mismatched else "candidate_unreadable")
 
 
 def _job_evidence(runner: Runner, repo: str, run: dict, jobs: list, shadow: Optional[dict], now: datetime) -> dict:

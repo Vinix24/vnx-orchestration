@@ -20,6 +20,7 @@ The job `Impact shadow (runs only S, never required)` lives in `.github/workflow
 - then the merge candidate: both records carry `base_sha` and `candidate_sha` (`record.json` of artifact `impact-shadow` on the VNX CI run, `job.json` of artifact `impact-shadow-job` on the shadow run). Among the shadow runs for the head sha, newest first, the first completed run whose job record has the same `base_sha` and `candidate_sha` wins. Two shadow runs on one head sha can test different candidates when main moved between them, so the head sha alone is not an identity.
 - A VNX CI run without a shadow record (light profile, missing artifact) has no candidate to compare: the newest run wins.
 - No run matches while at least one record was read: it counts as "no shadow run" and the line carries `artifact:impact-shadow-job:candidate_mismatch`.
+- The VNX CI shadow record identifies a candidate but no candidate job artifact is readable: the attempt stays pending under 2 h or with an unreadable age. After 2 h the line carries `artifact:impact-shadow-job:candidate_unreadable`, with no `shadow_run_id` or `shadow_run_attempt`.
 
 The pair is stamped on the line as `shadow_run_id` and `shadow_run_attempt`. The old shape (the VNX CI run's own jobs contain the shadow job) is read as before, so the collector can ship before the workflow moves.
 

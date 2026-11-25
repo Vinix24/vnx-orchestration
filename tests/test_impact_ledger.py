@@ -557,3 +557,48 @@ def test_pairing_without_a_shadow_record_takes_the_newest_run(tmp_path):
     (entry,) = _lines(tmp_path)
     assert entry["shadow_run_id"] == 12 and "artifact:impact-shadow" in entry["missing"]
     assert entry["job"]["wall_seconds"] == 222
+
+
+@pytest.mark.parametrize("created", ["2026-11-13T09:10:00Z", "missing", None, "", "not-a-time", 42])
+@pytest.mark.parametrize("record", [None, {}, {"schema": None}, {"schema": "unknown"}])
+def test_unreadable_candidates_stay_pending_until_a_matching_record_arrives(tmp_path, created, record):
+    shadow = _identified(_shadow(1))
+    artifacts = {(1, "impact-shadow"): shadow, (9, "impact-shadow-job"): record, (12, "impact-shadow-job"): record}
+    run = {**_run(1), "event": "pull_request", "createdAt": created}
+    if created == "missing":
+        del run["createdAt"]
+    gh = _new_shape([_pair(9), _pair(12)], artifacts, run=run)
+    result = ledger.collect(tmp_path, gh, now=NOW)
+    assert result == {"added": [], "skipped": [], "failed": [{"attempt": "1/1", "error": "shadow_run_pending"}]}
+    assert not ledger.ledger_path(tmp_path).exists()
+    with pytest.raises(ledger.ShadowRunPending, match="^shadow_run_pending$"):
+        ledger._shadow_run(gh, run, shadow, NOW)
+    artifacts[(9, "impact-shadow-job")] = _identified(_job(9))
+    assert ledger.collect(tmp_path, gh, now=NOW)["added"] == ["1/1"]
+    assert _lines(tmp_path)[0]["shadow_run_id"] == 9
+
+
+@pytest.mark.parametrize("created", ["2026-11-13T06:40:00Z", "2026-11-13T07:40:00Z"])
+@pytest.mark.parametrize("record", [None, {}, {"schema": None}, {"schema": "unknown"}])
+def test_unreadable_candidates_after_grace_leave_a_named_unpaired_hole(tmp_path, created, record):
+    artifacts = {(1, "impact-shadow"): _identified(_shadow(1)),
+                 (9, "impact-shadow-job"): record, (12, "impact-shadow-job"): record}
+    gh = _new_shape([_pair(9), _pair(12)], artifacts,
+                    run={**_run(1), "event": "pull_request", "createdAt": created})
+    assert ledger.collect(tmp_path, gh, now=NOW) == {"added": ["1/1"], "skipped": [], "failed": []}
+    (entry,) = _lines(tmp_path)
+    assert entry["missing"] == ["artifact:impact-shadow-job:candidate_unreadable", "job:impact-shadow"]
+    assert entry["job"] is None and entry["shadow_job"] is None
+    assert entry["shadow_run_id"] is None and entry["shadow_run_attempt"] is None
+
+
+@pytest.mark.parametrize("record", [None, {}, {"schema": None}, {"schema": "unknown"}])
+def test_pairing_skips_an_unreadable_candidate_for_a_readable_match(tmp_path, record):
+    artifacts = {(1, "impact-shadow"): _identified(_shadow(1)), (12, "impact-shadow-job"): record,
+                 (9, "impact-shadow-job"): _identified(_job(9, wall=111))}
+    gh = _new_shape([_pair(9), _pair(12)], artifacts)
+    assert ledger.collect(tmp_path, gh, now=NOW) == {"added": ["1/1"], "skipped": [], "failed": []}
+    (entry,) = _lines(tmp_path)
+    assert entry["shadow_run_id"] == 9 and entry["shadow_run_attempt"] == 1 and entry["missing"] == []
+    assert entry["job"]["wall_seconds"] == 111 and entry["shadow_job"]["seconds"] == 1020
+    assert [c[3] for c in gh.calls if c[:3] == ["gh", "run", "download"] and c[5] == "impact-shadow-job"] == ["12", "9"]
