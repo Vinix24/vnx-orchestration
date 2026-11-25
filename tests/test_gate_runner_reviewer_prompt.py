@@ -356,9 +356,9 @@ def test_the_full_codex_prompt_is_unchanged_by_the_shared_assembly(monkeypatch):
     monkeypatch.setattr(gate_runner, "resolve_review_interpreter_with_rule", lambda **kw: ("/usr/bin/python3", 3))
     monkeypatch.setattr(gate_runner, "_project_config_value", lambda key, project_id: "")
     full = GateRunner._build_codex_prompt({"branch": "feat/x", "risk_class": "medium", "pr_number": 7})
-    # sha256 of the prompt taken on origin/main cb5bf8ac8, before the helper; a deliberate change of the reviewer policy refreshes it
-    # (refreshed by OI-2785: the tests block gained the never-blocking sentence)
-    assert hashlib.sha256(full.encode()).hexdigest() == "3e428f2a0ff9074e643bdd6a2c936cd3df2bc39801f7a25aa8a7b565ead63886"
+    # sha256 of the prompt taken on fd05fd1efd91869701f47a6802decd0323fcbf0a for R4c (ADR-099);
+    # a deliberate change of the reviewer policy refreshes it.
+    assert hashlib.sha256(full.encode()).hexdigest() == "60c9c019484c975219bf14d60f963fe5b5ccd7d631008fddaf928b8e8456c7a7"
 
 
 def test_the_shadow_delta_prompt_keeps_the_reviewer_policy_and_wraps_the_delta_as_untrusted(monkeypatch):
