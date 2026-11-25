@@ -548,7 +548,7 @@ def _run_frd(*args):
 
 def test_crash_is_70_with_traceback():
     sys.path.insert(0, str(Path(__file__).resolve().parent))
-    from test_job_exit import run_script_crashing
+    from crash_runner_oi3079 import run_script_crashing
     proc = run_script_crashing(Path(frd.__file__))
     assert proc.returncode == 70
     assert "Traceback" in proc.stderr

@@ -329,7 +329,7 @@ class TestCrashExitAndClosingLine:
 
     def test_crash_is_70_with_traceback(self):
         sys.path.insert(0, str(Path(__file__).resolve().parent))
-        from test_job_exit import run_script_crashing
+        from crash_runner_oi3079 import run_script_crashing
         proc = run_script_crashing(self.SCRIPT, "--all-projects")
         assert proc.returncode == 70
         assert "Traceback" in proc.stderr
