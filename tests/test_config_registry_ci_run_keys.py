@@ -97,11 +97,11 @@ def test_unreadable_budget_source_does_not_fall_back(source, monkeypatch, tmp_pa
         monkeypatch.setattr(cr, "_db_resolver", cs.make_db_resolver(lambda _: tmp_path, raise_on_error=True))
     with pytest.raises(ValueError, match=f"{BUDGET}.*{source}_error"):
         cr.get(BUDGET, "project-a")
+    assert cr.resolve_with_source(BUDGET, "project-a") == (None, f"{source}_error")
 
 
-def test_missing_selected_layer_is_not_a_valid_budget():
-    with pytest.raises(ValueError, match=f"{BUDGET}.*unset"):
-        cr.resolve_with_source(BUDGET, layers=("env",))
+def test_missing_selected_layer_remains_explicitly_unset():
+    assert cr.resolve_with_source(BUDGET, layers=("env",)) == (None, "unset")
 
 
 def test_legacy_unconstrained_integer_keeps_its_behavior(monkeypatch):
@@ -131,3 +131,23 @@ def test_inventory_and_bool_view_do_not_hide_invalid_budget(monkeypatch):
         cr.all_effective()
     with pytest.raises(ValueError, match=BUDGET):
         cr.get_bool(BUDGET)
+
+
+@pytest.mark.parametrize("verb", ("get", "explain", "list"))
+def test_cli_reports_unreadable_budget_without_losing_diagnostics(verb, tmp_path):
+    from scripts import config_cli
+
+    (tmp_path / "runtime_coordination.db").mkdir()
+    output = []
+    args = [verb] if verb == "list" else [verb, BUDGET]
+    assert config_cli.main(args, project_id="project-a", state_dir=tmp_path, out=output.append) == 3
+    assert "project_config_error" in "\n".join(output)
+
+
+def test_cli_can_explain_default_budget(tmp_path):
+    from scripts import config_cli
+
+    output = []
+    assert config_cli.main(["explain", BUDGET], project_id="project-a", state_dir=tmp_path,
+                           out=output.append) == 0
+    assert "default: 1000" in output[0] and "winner: default" in output[0]

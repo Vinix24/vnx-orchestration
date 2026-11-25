@@ -1098,9 +1098,10 @@ def resolve_with_source(
     in chain order whatever order they are given in. A reader that must tell the approved
     floor apart from a loose override (ADR-088 besluit 3) resolves once with the floor layers
     and once with the full chain. An empty ``layers`` or a name outside :data:`CHAIN_LAYERS`
-    raises ``ValueError``. Entries with a ``minimum`` validate the selected value and raise
-    ``ValueError`` on invalid values or unavailable sources; their resolver is always strict.
-    Unconstrained entries retain the existing resolution behavior.
+    raises ``ValueError``. Entries with a ``minimum`` raise ``ValueError`` on invalid selected
+    values; their resolver is always strict. Unavailable sources retain their explicit
+    ``(None, error_source)`` result for diagnostic callers; direct getters reject that result.
+    An unset layer remains ``(None, "unset")`` so callers can explain the precedence chain.
     """
     walked = _checked_layers(layers)
     entry = CONFIG_REGISTRY.get(key)
@@ -1127,7 +1128,7 @@ def resolve_with_source(
                     logging.getLogger(__name__).warning(
                         "config_registry: project_config resolver failed for %s (%s: %s)",
                         key, type(exc).__name__, exc)
-                    return checked(None, "project_config_error"), "project_config_error"
+                    return None, "project_config_error"
                 db_val = None
             if db_val is not None:
                 return checked(db_val, "project_config"), "project_config"
@@ -1138,7 +1139,7 @@ def resolve_with_source(
         except config_global.GlobalConfigUnreadable as exc:
             if strict_resolver:
                 logging.getLogger(__name__).warning("config_registry: %s", exc)
-                return checked(None, "global_config_error"), "global_config_error"
+                return None, "global_config_error"
             if (str(exc.path), exc.reason) not in _WARNED_GLOBAL_UNREADABLE:
                 _WARNED_GLOBAL_UNREADABLE.add((str(exc.path), exc.reason))
                 logging.getLogger(__name__).warning(
@@ -1151,7 +1152,7 @@ def resolve_with_source(
         return checked(env_val, "env"), "env"
     if "default" in walked and entry is not None:
         return checked(entry.default, "default"), "default"
-    return checked(None, "unset"), "unset"
+    return None, "unset"
 
 
 def _warn_ignored_project_row(key: str, project_id: Optional[str], resolver: DbResolver) -> None:
@@ -1181,7 +1182,10 @@ def _resolve(key: str, project_id: Optional[str], resolver: Optional[DbResolver]
     five sources cannot drift between them. The order lives in
     :func:`resolve_with_source`; this returns its value.
     """
-    return resolve_with_source(key, project_id, resolver, use_default_resolver=False)[0]
+    value, source = resolve_with_source(key, project_id, resolver, use_default_resolver=False)
+    entry = CONFIG_REGISTRY.get(key)
+    # Diagnostic readers keep explicit unknown sources; direct getters must not use them as a budget.
+    return entry.validate(value, source=source) if entry is not None else value
 
 
 def get(key: str, project_id: Optional[str] = None) -> Optional[str]:
