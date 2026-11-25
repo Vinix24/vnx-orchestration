@@ -494,6 +494,49 @@ _WORKING_DIRECTORY_CHECK_RULE = (
 )
 
 
+_PROPORTIONALITY_SKILL_PATH = Path(__file__).resolve().parents[2] / "skills/proportionality/SKILL.md"
+
+
+class ProportionalityRubricError(RuntimeError):
+    """The required rubric cannot be read completely; no review prompt is built."""
+
+
+def _proportionality_rule() -> str:
+    """Read class/trigger names from the installed skill, never duplicate its tables.
+
+    Raises ProportionalityRubricError on unreadable or incomplete source. The
+    module-relative path works in the fabric checkout, installed tree and worktrees.
+    """
+    path = _PROPORTIONALITY_SKILL_PATH
+    try:
+        source = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        raise ProportionalityRubricError(f"proportionality_rubric_unavailable: {path}: {exc}") from exc
+    names = re.findall(r"^\| ([TO]\d+) — ([^|\r\n]+) \|", source, re.MULTILINE)
+    expected = [*(f"T{i}" for i in range(1, 9)), *(f"O{i}" for i in range(1, 7))]
+    if [code for code, _ in names] != expected or any(not name.strip() for _, name in names):
+        raise ProportionalityRubricError(
+            f"proportionality_rubric_unavailable: {path}: expected unique T1-T8 and O1-O6 names in order"
+        )
+    classes = "; ".join(f"{code} — {name.strip()}" for code, name in names[:8])
+    triggers = "; ".join(f"{code} — {name.strip()}" for code, name in names[8:])
+    return (
+        "Proportionality rubric (skills/proportionality/SKILL.md, code review gate):\n"
+        f"Risk classes: {classes}.\nRemoval-list triggers: {triggers}\n"
+        'T1-T8: a touched class without its minimum mechanism is blocking (severity "error"). '
+        'Use a message beginning exactly "missing_risk_class:" and name the '
+        "class, failure path, violated guarantee and consequence. Inspect all touched paths, "
+        "including risks absent from the plan; T7 applies to every feature.\n"
+        "A mechanism without a risk class or a current user, or an O1-O6 improvement without "
+        'a concrete violated guarantee, gets severity "info" and a message beginning exactly '
+        '"unjustified_mechanism:". Name the mechanism and missing justification. This is '
+        "never a FAIL on its own: if these are the only findings, return PASS with the info "
+        "finding; T0 opens an OI from it. A sold guarantee has a current user.\n"
+        "A reproducible privacy or data-loss defect stays blocking regardless of its label: "
+        'report severity "error" and the concrete defect, even if it was called a warning.\n'
+    )
+
+
 def default_review_instruction(gate_name: str, pr: str) -> str:
     """The instruction glm_gate and kimi_gate share.
 
@@ -545,7 +588,7 @@ def build_review_prompt(
     Order: instruction, verdict contract, the OI-1662 fence notice (only when
     warranted), the block, then the untrusted-data rule, the OI-2287 no-search
     rule, the R12 working-directory rule (only when ``agentic``), the
-    content-claim rule, the pre-scan result, the OI-2242 release
+    content-claim rule, the proportionality rubric, the pre-scan result, the OI-2242 release
     task (only for a release PR), and the instruction and contract RESTATED.
     The restatement is the point — whatever the diff ends with, the gate's own
     instruction is what the model reads last. The release task sits after the
@@ -570,7 +613,11 @@ def build_review_prompt(
     for a seat that reviews with tools in a checkout of the PR head (codex_gate,
     the harness-lane gates of ``gate_lane_contract.reviews_with_tools``), False
     for a single-shot lane. This builder never works it out from the gate name.
+
+    Raises ProportionalityRubricError if the required skill cannot be read or
+    lacks the complete class/trigger names. No rubric-free fallback is allowed.
     """
+    proportionality_rule = _proportionality_rule()
     lead = instruction if instruction is not None else default_review_instruction(gate_name, pr)
     block, fence_replacements = _wrap_untrusted_diff_with_fence_count(
         diff_text, max_chars=max_chars
@@ -589,6 +636,7 @@ def build_review_prompt(
         f"{_NO_INSTRUCTION_SEARCH_RULE}\n"
         f"{look_rule}"
         f"{_CONTENT_CLAIM_RULE}\n"
+        f"{proportionality_rule}\n"
         f"{_scan_section(scan_findings)}\n"
         f"{release_task}"
         f"{lead}\n\n"
