@@ -14,8 +14,8 @@ produced as a scalar unknown record with ``source "daily_metrics.collect"``.
 An id outside ``REQUIRED`` is dropped and listed in ``details.unexpected_ids``.
 
 The run lock is an exclusive non-blocking ``fcntl.flock`` on
-``<store root>/.lock`` held for the whole run (decision 20). The beacon is
-event-driven: ``HealthBeacon(state_dir, "daily_metrics", None)`` (decision 29).
+``<store root>/.lock`` held for the whole run (decision 20). ADR-097 replaces
+decision 29: the per-project beacon owes a measurement at least every 36 h.
 """
 
 from __future__ import annotations
@@ -41,6 +41,7 @@ COLLECTOR_SOURCE = "daily_metrics.collect"
 BEACON_DETAILS_FINAL = "final_count"
 BEACON_DETAILS_DAYS = "counted_days"
 BEACON_SETTLED_WINDOW = 3
+BEACON_MAX_AGE_SECONDS = 36 * 3600
 
 
 @dataclass(frozen=True)
@@ -232,12 +233,12 @@ def run_lock(store_root: Path) -> Iterator[bool]:
 
 
 def write_beacon(state_dir: Path, store: DayStore, now: datetime) -> None:
-    """Write the event-driven ``daily_metrics`` beacon (decision 29).
+    """Write the periodic ``daily_metrics`` beacon (ADR-097).
 
     ``fail`` when none of the last three settled days has a ``final`` file,
     else ``ok``; the counted days are carried in ``details``.
     """
-    beacon = HealthBeacon(state_dir, "daily_metrics", None)
+    beacon = HealthBeacon(state_dir, "daily_metrics", BEACON_MAX_AGE_SECONDS)
     counted = days.completed_days(now)[-BEACON_SETTLED_WINDOW:]
     final_days = [day for day in counted if store.is_final(day.isoformat())]
     beacon.heartbeat(
@@ -245,5 +246,7 @@ def write_beacon(state_dir: Path, store: DayStore, now: datetime) -> None:
         {
             BEACON_DETAILS_DAYS: [day.isoformat() for day in counted],
             BEACON_DETAILS_FINAL: len(final_days),
+            "project_id": store.project_id,
+            "reason": None if final_days else "no_final_settled_day",
         },
     )

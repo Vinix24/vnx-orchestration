@@ -2,7 +2,7 @@
 
 Everything here imports ``daily_metrics.collect`` directly and drives it in
 process: discovery of the source modules, the day document, the store run
-lock and the event-driven beacon. The CLI and its subprocess tests live in
+lock and the periodic beacon. The CLI and its subprocess tests live in
 ``daily_metrics`` PR-3b. Every clock is fixed and injected; no test reads
 ``datetime.now()``, and the sources directory is always pinned under
 ``tmp_path``, never the real package sources.
@@ -10,7 +10,6 @@ lock and the event-driven beacon. The CLI and its subprocess tests live in
 
 from __future__ import annotations
 
-import ast
 import importlib.util
 import json
 import sys
@@ -19,9 +18,6 @@ from pathlib import Path
 
 from daily_metrics import metric
 from daily_metrics.store import DayStore
-
-REPO_ROOT = Path(__file__).resolve().parents[2]
-COLLECT_PATH = REPO_ROOT / "scripts" / "lib" / "daily_metrics" / "collect.py"
 
 HEALTHY_SOURCE = '''\
 from daily_metrics.metric import KeyedMetric, REQUIRED, ScalarMetric
@@ -187,7 +183,7 @@ def test_write_beacon_ok_and_fail(tmp_path: Path):
     payload = json.loads((state / "health" / "daily_metrics.json").read_text(encoding="utf-8"))
     assert payload["component"] == "daily_metrics"
     assert payload["status"] == "ok"
-    assert payload["expected_interval_seconds"] is None
+    assert payload["expected_interval_seconds"] == collect_mod.BEACON_MAX_AGE_SECONDS
     assert payload["details"]["final_count"] == 3
 
     empty_state = tmp_path / "tmp_state_empty"
@@ -198,19 +194,7 @@ def test_write_beacon_ok_and_fail(tmp_path: Path):
     assert payload["status"] == "fail"
 
 
-def test_beacon_call_declares_a_literal_none_interval():
-    tree = ast.parse(COLLECT_PATH.read_text(encoding="utf-8"), filename=str(COLLECT_PATH))
-    event_driven = []
-    for node in ast.walk(tree):
-        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
-                and node.func.id == "HealthBeacon"):
-            continue
-        interval = None
-        for keyword in node.keywords:
-            if keyword.arg == "expected_interval_seconds":
-                interval = keyword.value
-        if interval is None and len(node.args) >= 3:
-            interval = node.args[2]
-        if isinstance(interval, ast.Constant) and interval.value is None:
-            event_driven.append(node)
-    assert event_driven, "the daily_metrics beacon must pass a literal None interval"
+def test_beacon_register_keeps_daily_metrics_opt_in():
+    from beacon_register import expected_component_names
+
+    assert "daily_metrics" not in expected_component_names()

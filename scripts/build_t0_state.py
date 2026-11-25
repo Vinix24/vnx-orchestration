@@ -3052,6 +3052,14 @@ def _slim_health_for_index(system_health: Dict[str, Any]) -> Dict[str, Any]:
         name for name, b in beacons.items()
         if (b or {}).get("health") not in ("ok", "parked")
     )
+    if "daily_metrics" in failing:
+        measurement = beacons["daily_metrics"]
+        reason = measurement.get("reason") or "measurement health unknown"
+        if reason == "no_measurement_36h":
+            reason = f"no measurement for {measurement['age_hours']:g} h ({reason})"
+        failing.remove("daily_metrics")
+        # Keep the measurement visible even when the bounded list is full.
+        failing.insert(0, f"daily_metrics ({measurement.get('project_id') or 'unknown'}): {reason}")
     if failing:
         slim["beacon_health"]["failing"] = failing[:_INDEX_FAILING_BEACONS_MAX]
         slim["beacon_health"]["failing_total"] = len(failing)
