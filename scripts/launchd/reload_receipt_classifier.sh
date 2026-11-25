@@ -55,6 +55,14 @@ fi
 
 echo "Logs: /tmp/vnx-receipt-classifier-batch.log / /tmp/vnx-receipt-classifier-batch.err"
 echo
-echo "NOTE: the plist ships with VNX_RECEIPT_CLASSIFIER_ENABLED=0."
-echo "      Edit \$HOME/Library/LaunchAgents/${PLIST_LABEL}.plist and re-run this"
-echo "      script to enable. Or export the env var in your shell when invoking ad-hoc."
+source "$SCRIPT_DIR/../lib/vnx_resolve_root.sh"
+vnx_resolve_project_root "${BASH_SOURCE[0]:-$0}"
+VNX_ROOT="$VNX_PROJECT_ROOT"
+# Config snapshot.
+if ! CLASSIFIER_ENABLED="$("$VNX_ROOT/bin/vnx" config get --raw VNX_RECEIPT_CLASSIFIER_ENABLED)"; then
+    echo "WARNING: VNX_RECEIPT_CLASSIFIER_ENABLED unavailable; using 0" >&2
+    CLASSIFIER_ENABLED=0
+fi
+# End config snapshot.
+echo "VNX_RECEIPT_CLASSIFIER_ENABLED=$CLASSIFIER_ENABLED (effective configuration)"
+echo "Enable with: $VNX_ROOT/bin/vnx config set VNX_RECEIPT_CLASSIFIER_ENABLED 1"

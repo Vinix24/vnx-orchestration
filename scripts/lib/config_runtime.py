@@ -180,6 +180,12 @@ def get(key: str) -> Optional[str]:
     return config_registry.get(key)
 
 
+def get_with_source(key: str) -> tuple[Optional[str], str]:
+    """Resolve once, retaining the source for readers with legacy per-consumer defaults."""
+    autowire()
+    return config_registry.resolve_with_source(key)
+
+
 def get_bool(key: str) -> bool:
     """Bool view of get() — true for any truthy spelling (1/true/yes/on), via config_registry.get_bool."""
     autowire()

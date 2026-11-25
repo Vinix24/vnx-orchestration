@@ -34,7 +34,10 @@ def _extract_phase_11_block() -> str:
     text = _PIPELINE_SCRIPT.read_text(encoding="utf-8")
     start = text.index(_START_MARKER)
     end = text.index(_END_MARKER, start)
-    return text[start:end]
+    block = text[start:end]
+    # Root resolution is covered separately; retain the real config read and phase body.
+    return "\n".join(line for line in block.splitlines()
+                     if not line.startswith(('source ', 'vnx_resolve_project_root ', 'VNX_ROOT=')))
 
 
 def _run_phase_11_block(env_overrides: dict) -> tuple[str, bool]:
@@ -59,6 +62,7 @@ def _run_phase_11_block(env_overrides: dict) -> tuple[str, bool]:
         harness = f"""
 set -uo pipefail
 SCRIPT_DIR={str(tmp_path)!r}
+VNX_ROOT={str(_REPO_ROOT)!r}
 log_msg() {{ echo "LOG: $*"; }}
 run_phase() {{
     local phase_name="$1"; shift

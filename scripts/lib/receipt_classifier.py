@@ -84,7 +84,8 @@ _FAILURE_STATUSES = {"failed", "failure", "error", "blocked", "timeout", "contra
 
 
 def is_enabled() -> bool:
-    return os.environ.get(ENV_ENABLED, "0") == "1"
+    import config_runtime
+    return config_runtime.get_bool(ENV_ENABLED)
 
 
 def get_mode() -> str:

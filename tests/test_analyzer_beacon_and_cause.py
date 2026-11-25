@@ -255,7 +255,7 @@ def test_claude_max_failure_keeps_stdout_result(monkeypatch):
 def test_failure_cause_reaches_the_run_counters(lane, monkeypatch):
     stdout = json.dumps({"is_error": True, "result": "API Error: 402 Insufficient Balance"})
     monkeypatch.setattr(da_module.subprocess, "run", MagicMock(return_value=_fail_run(stdout)))
-    monkeypatch.setattr(da_module, "LLM_STRATEGY", "deepseek-harness")
+    monkeypatch.setattr(da_module, 'llm_strategy', lambda: 'deepseek-harness')
     analyzer = DeepAnalyzer()
     outcome = analyzer._launch_lane(analyzer._try_deepseek_harness, "p", "vnx-dev")
     analyzer._record_failure(outcome.status, outcome.cause)
@@ -268,7 +268,7 @@ def test_measured_failure_reaches_counters_and_beacon(lane, monkeypatch, tmp_pat
                          "errors": ["Reached maximum number of turns (1)"]})
     monkeypatch.setattr(da_module.subprocess, "run",
                         MagicMock(return_value=_fail_run(stdout, NOTICE)))
-    monkeypatch.setattr(da_module, "LLM_STRATEGY", "deepseek-harness")
+    monkeypatch.setattr(da_module, 'llm_strategy', lambda: 'deepseek-harness')
     session = tmp_path / "session.jsonl"
     session.write_text('{"type":"user","message":{"content":"Analyze the test failure"}}\n')
     analyzer = DeepAnalyzer()

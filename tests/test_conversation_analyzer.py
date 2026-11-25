@@ -521,7 +521,7 @@ class TestDeepAnalyzerCounter:
             with patch.object(DeepAnalyzer, '_build_session_summary',
                               return_value='test summary'), \
                  patch.object(DeepAnalyzer, '_try_claude_max', return_value=outcome), \
-                 patch.object(da_module, 'LLM_STRATEGY', 'claude-only'):
+                 patch.object(da_module, 'llm_strategy', return_value='claude-only'):
                 return analyzer, analyzer.analyze_session(jsonl_path, metrics, flags)
         finally:
             os.unlink(jsonl_path)
@@ -591,7 +591,7 @@ class TestDeepAnalyzerCounter:
         try:
             with patch.object(DeepAnalyzer, '_build_session_summary',
                               return_value='test summary'), \
-                 patch.object(da_module, 'LLM_STRATEGY', 'deepseek-harness'), \
+                 patch.object(da_module, 'llm_strategy', return_value='deepseek-harness'), \
                  patch.object(DeepAnalyzer, '_deepseek_preflight_cache', None), \
                  patch.dict(da_module.os.environ, _store_pins(), clear=True):
                 result = analyzer.analyze_session(jsonl_path, metrics, flags)
@@ -626,7 +626,7 @@ class TestDeepAnalyzerCounter:
         try:
             with patch.object(DeepAnalyzer, '_build_session_summary',
                               return_value='test summary'), \
-                 patch.object(da_module, 'LLM_STRATEGY', 'ollama-only'), \
+                 patch.object(da_module, 'llm_strategy', return_value='ollama-only'), \
                  patch.object(DeepAnalyzer, '_probe_ollama', return_value=False):
                 result = analyzer.analyze_session(jsonl_path, metrics, flags)
         finally:
@@ -661,7 +661,7 @@ class TestDeepAnalyzerCounter:
         try:
             with patch.object(DeepAnalyzer, '_build_session_summary',
                               return_value='test summary'), \
-                 patch.object(da_module, 'LLM_STRATEGY', 'deepseek-harness'), \
+                 patch.object(da_module, 'llm_strategy', return_value='deepseek-harness'), \
                  patch.object(DeepAnalyzer, '_deepseek_preflight_cache', None), \
                  patch.dict(da_module.os.environ, _store_pins(), clear=True):
                 analyzer.analyze_session(jsonl_path, metrics, flags)
@@ -709,7 +709,7 @@ class TestDeepAnalyzerStrategy:
                               return_value=LLMOutcome("ok", text=mock_result)) as mock_harness, \
                  patch.object(DeepAnalyzer, '_try_claude_max') as mock_claude, \
                  patch.object(DeepAnalyzer, '_try_ollama') as mock_ollama, \
-                 patch.object(da_module, 'LLM_STRATEGY', 'deepseek-harness'):
+                 patch.object(da_module, 'llm_strategy', return_value='deepseek-harness'):
 
                 result = analyzer.analyze_session(jsonl_path, metrics, flags)
 
@@ -769,7 +769,7 @@ class TestDeepAnalyzerStrategy:
                               return_value=LLMOutcome("ok", text='{"suggestions":[]}')) as mock_ollama, \
                  patch.object(DeepAnalyzer, '_try_claude_max') as mock_claude, \
                  patch.object(DeepAnalyzer, '_try_deepseek_harness') as mock_harness, \
-                 patch.object(da_module, 'LLM_STRATEGY', 'ollama-only'):
+                 patch.object(da_module, 'llm_strategy', return_value='ollama-only'):
 
                 result = analyzer.analyze_session(jsonl_path, metrics, flags)
 

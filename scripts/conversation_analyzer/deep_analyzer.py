@@ -21,7 +21,7 @@ from typing import Dict, List, Optional
 
 from .models import (
     SessionMetrics, SessionFlags,
-    LLM_STRATEGY, OLLAMA_MODEL, DEEPSEEK_HARNESS_MODEL, DEEPSEEK_MIN_BALANCE_USD,
+    llm_strategy, ollama_model, DEEPSEEK_HARNESS_MODEL, DEEPSEEK_MIN_BALANCE_USD,
     DEEPSEEK_MIN_BALANCE_CNY, CLAUDE_MAX_MODEL,
     AUTO_CLAUSE_MAX_SESSIONS,
     DEEP_THRESHOLD_TOKENS, DEEP_THRESHOLD_TOOLS,
@@ -488,7 +488,8 @@ Respond with valid JSON:
         # Anthropic-compatible endpoint.  Fails closed when DEEPSEEK_API_KEY is
         # unset, never falls back to the OAuth subscription (constraint
         # deepseek-harness-subscription-blocked).
-        if LLM_STRATEGY == "deepseek-harness":
+        strategy = llm_strategy()
+        if strategy == "deepseek-harness":
             outcome = self._launch_lane(self._try_deepseek_harness, prompt, project_id)
             if outcome.status == STATUS_SWITCHED_OFF:
                 disabled_lanes.append("deepseek-harness")
@@ -496,9 +497,9 @@ Respond with valid JSON:
         # Billing guard: in "auto" mode, refuse the claude path when the
         # session backlog exceeds the threshold. "claude-only" bypasses
         # the guard: the operator explicitly opted in to metered spend.
-        elif LLM_STRATEGY == "claude-only":
+        elif strategy == "claude-only":
             absorb(self._try_claude_max(prompt, project_id=project_id), "claude-max")
-        elif LLM_STRATEGY == "auto":
+        elif strategy == "auto":
             if self._session_backlog <= AUTO_CLAUSE_MAX_SESSIONS:
                 absorb(self._try_claude_max(prompt, project_id=project_id), "claude-max")
             elif self._session_backlog > 0:
@@ -508,11 +509,11 @@ Respond with valid JSON:
                     f"({AUTO_CLAUSE_MAX_SESSIONS}). "
                     f"Use VNX_ANALYZER_LLM=claude-only to override.")
 
-        if state["text"] is None and LLM_STRATEGY in ("auto", "ollama-only"):
+        if state["text"] is None and strategy in ("auto", "ollama-only"):
             outcome = self._launch_lane(self._try_ollama, prompt, project_id)
             if outcome.status == STATUS_SWITCHED_OFF:
                 disabled_lanes.append("ollama")
-            absorb(outcome, f"ollama:{OLLAMA_MODEL}")
+            absorb(outcome, f"ollama:{ollama_model()}")
 
         return (state["text"], state["lane"], state["attempted"],
                 state["status"], state["cause"], disabled_lanes)
@@ -631,15 +632,16 @@ Respond with valid JSON:
                     cls._ollama_probed = False
                     return False
                 model_names = {m.get("name", "") for m in models}
-                if OLLAMA_MODEL not in model_names:
+                model = ollama_model()
+                if model not in model_names:
                     log("WARNING",
-                        f"Ollama model '{OLLAMA_MODEL}' not found in installed models "
+                        f"Ollama model '{model}' not found in installed models "
                         f"({', '.join(sorted(model_names)[:5])}"
                         f"{'...' if len(model_names) > 5 else ''}); "
                         f"deep analysis will be skipped for this run")
                     cls._ollama_probed = False
                     return False
-                log("INFO", f"Ollama probe OK: model '{OLLAMA_MODEL}' available "
+                log("INFO", f"Ollama probe OK: model '{model}' available "
                             f"({len(models)} model(s) installed)")
                 cls._ollama_probed = True
                 return True
@@ -992,7 +994,7 @@ Respond with valid JSON:
         try:
             import urllib.request
             payload = json.dumps({
-                "model": OLLAMA_MODEL,
+                "model": ollama_model(),
                 "prompt": prompt,
                 "stream": False,
                 "options": {"temperature": 0.3, "num_predict": 2048},

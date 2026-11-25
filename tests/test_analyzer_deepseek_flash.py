@@ -353,7 +353,7 @@ def test_low_balance_is_a_failed_attempt_in_the_digest(tmp_path):
     with patch.dict(os.environ, {"DEEPSEEK_API_KEY": SECRET}), \
          patch.object(DeepAnalyzer, "_fetch_deepseek_balance",
                       return_value=_balance_body(total="0.01"), create=True), \
-         patch.object(da_module, "LLM_STRATEGY", "deepseek-harness"), \
+         patch.object(da_module, 'llm_strategy', return_value='deepseek-harness'), \
          patch("subprocess.run") as run:
         result = analyzer.analyze_session(jsonl, metrics, SessionFlags())
 
@@ -386,7 +386,7 @@ def test_missing_key_is_a_failed_attempt_in_the_digest(tmp_path):
     store_pins = {key: os.environ[key] for key in
                   ("VNX_DATA_DIR", "VNX_DATA_DIR_EXPLICIT", "VNX_STATE_DIR") if key in os.environ}
     with patch.dict(os.environ, store_pins, clear=True), \
-         patch.object(da_module, "LLM_STRATEGY", "deepseek-harness"), \
+         patch.object(da_module, 'llm_strategy', return_value='deepseek-harness'), \
          patch("subprocess.run") as run:
         result = analyzer.analyze_session(jsonl, metrics, SessionFlags())
 
