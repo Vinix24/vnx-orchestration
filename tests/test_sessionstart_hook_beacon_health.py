@@ -83,6 +83,7 @@ from pathlib import Path
 
 import pytest
 
+import wheel_build_lock as wbl
 from conftest import RepoPythonCensus, repo_python_census
 
 REPO = Path(__file__).resolve().parent.parent
@@ -501,23 +502,21 @@ class TestCallSiteCountDoesNotGrow:
         under `build/` must not move the count, because `build/` is never
         git-tracked.
         """
-        build_dir = REPO / "build"
-        pre_existing = build_dir.exists()
-        marker = build_dir / "oi1597_build_artifact_marker.py"
-        build_dir.mkdir(exist_ok=True)
-        try:
-            marker.write_text(
-                "from health_beacon import all_beacons\nall_beacons(x)\n", encoding="utf-8",
-            )
-            matched = _find_call_sites(REPO, census=repo_python_census)
-            assert matched == self._BASELINE, (
-                f"a build/ artifact changed the caller set: "
-                f"added={matched - self._BASELINE}, removed={self._BASELINE - matched}"
-            )
-        finally:
-            marker.unlink(missing_ok=True)
-            if not pre_existing:
-                _rmdir_naming_foreign_entries(build_dir)
+        # Serialize the entire artifact window with wheel builds. The lock creates
+        # build/ and owns its persistent lock file; only our marker is ours to remove.
+        with wbl.wheel_build_lock():
+            marker = REPO / "build" / "oi1597_build_artifact_marker.py"
+            try:
+                marker.write_text(
+                    "from health_beacon import all_beacons\nall_beacons(x)\n", encoding="utf-8",
+                )
+                matched = _find_call_sites(REPO, census=repo_python_census)
+                assert matched == self._BASELINE, (
+                    f"a build/ artifact changed the caller set: "
+                    f"added={matched - self._BASELINE}, removed={self._BASELINE - matched}"
+                )
+            finally:
+                marker.unlink(missing_ok=True)
 
 
 def _rmdir_naming_foreign_entries(directory: Path) -> None:
@@ -538,6 +537,65 @@ def _rmdir_naming_foreign_entries(directory: Path) -> None:
         ) from exc
 
 
+class TestBuildArtifactWheelLock:
+    @pytest.mark.parametrize("pre_existing", [False, True])
+    @pytest.mark.parametrize("count_matches", [True, False])
+    def test_lock_file_arriving_during_the_scan_is_kept(
+        self, tmp_path, monkeypatch, pre_existing, count_matches,
+    ):
+        """Reproduce the mkdir/scan/rmdir interleaving without timing sleeps."""
+        _git_init(tmp_path)
+        caller = tmp_path / "caller.py"
+        caller.write_text("all_beacons(x)\n", encoding="utf-8")
+        _git_add(tmp_path, caller.name)
+        census = repo_python_census(tmp_path)
+        lock_path = tmp_path / "build" / ".wheel-build.lock"
+        foreign = lock_path.parent / "bdist.linux-x86_64"
+        if pre_existing:
+            foreign.mkdir(parents=True)
+            (foreign / "caller.py").write_bytes(caller.read_bytes())
+        original_scan = _find_call_sites
+        lock_inodes = []
+        probes = []
+
+        def scan_with_lock_file(root, *, census):
+            assert (root / "build" / "oi1597_build_artifact_marker.py").is_file()
+            # A wheel worker opens this file before trying to acquire its flock.
+            with lock_path.open("a+"):
+                lock_inodes.append(lock_path.stat().st_ino)
+                probes.append(subprocess.run(
+                    [sys.executable, "-c",
+                     "import fcntl, sys; "
+                     "handle = open(sys.argv[1], 'a+'); "
+                     "fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)",
+                     str(lock_path)],
+                    capture_output=True, text=True, timeout=15,
+                ))
+                return original_scan(root, census=census)
+
+        monkeypatch.setattr(sys.modules[__name__], "REPO", tmp_path)
+        monkeypatch.setattr(sys.modules[__name__], "_find_call_sites", scan_with_lock_file)
+        monkeypatch.setattr(wbl, "DEFAULT_LOCK_PATH", lock_path)
+        guard = TestCallSiteCountDoesNotGrow()
+        monkeypatch.setattr(guard, "_BASELINE", {"./caller.py"} if count_matches else set())
+        if count_matches:
+            guard.test_call_site_count_is_unchanged_with_a_build_artifact_present(census)
+        else:
+            with pytest.raises(AssertionError, match="a build/ artifact changed the caller set"):
+                guard.test_call_site_count_is_unchanged_with_a_build_artifact_present(census)
+
+        assert lock_inodes == [lock_path.stat().st_ino]
+        assert len(probes) == 1
+        assert probes[0].returncode == 1, probes[0].stdout + probes[0].stderr
+        assert "BlockingIOError" in probes[0].stderr
+        expected = {lock_path, foreign} if pre_existing else {lock_path}
+        assert set(lock_path.parent.iterdir()) == expected
+        if pre_existing:
+            assert (foreign / "caller.py").read_bytes() == caller.read_bytes()
+        with wbl.wheel_build_lock(lock_path, timeout=0):
+            assert lock_path.stat().st_ino == lock_inodes[0]
+
+
 class TestRmdirNamingForeignEntries:
     def test_an_empty_directory_is_removed(self, tmp_path):
         target = tmp_path / "build"
@@ -556,6 +614,15 @@ class TestRmdirNamingForeignEntries:
     def test_a_missing_directory_stays_a_failure(self, tmp_path):
         with pytest.raises(AssertionError, match=r"could not remove"):
             _rmdir_naming_foreign_entries(tmp_path / "absent")
+
+    def test_the_lock_file_does_not_hide_a_foreign_entry(self, tmp_path):
+        target = tmp_path / "build"
+        with wbl.wheel_build_lock(target / ".wheel-build.lock") as lock_path:
+            foreign = target / "bdist.linux-x86_64"
+            foreign.mkdir()
+            with pytest.raises(AssertionError, match=r"bdist\.linux-x86_64"):
+                _rmdir_naming_foreign_entries(target)
+            assert set(target.iterdir()) == {lock_path, foreign}
 
 
 def _git_init(root: Path) -> None:
