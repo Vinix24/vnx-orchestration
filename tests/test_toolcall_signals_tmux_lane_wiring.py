@@ -26,6 +26,10 @@ subprocess/claude-adapter lane).
 
 from __future__ import annotations
 
+import pytest
+
+pytestmark = pytest.mark.usefixtures("receipt_project")
+
 import json
 import os
 import subprocess

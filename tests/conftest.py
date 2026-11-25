@@ -447,6 +447,12 @@ def _no_ambient_vnx_project_id(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("VNX_PROJECT_ID", raising=False)
 
 
+@pytest.fixture
+def receipt_project(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Opt-in attribution for receipt fixtures that previously relied on the default."""
+    monkeypatch.setenv("VNX_PROJECT_ID", "vnx-dev")
+
+
 @pytest.fixture(autouse=True)
 def _besluiten_register_isolation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # No test reads the checkout's real daily-log/besluiten.ndjson: build_t0_state resolves the folder from here.

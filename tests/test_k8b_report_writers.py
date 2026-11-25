@@ -333,7 +333,8 @@ def test_a_legacy_dispatch_books_the_same_task_complete_line(tmp_path):
     assert line["receipt_kind"] == "dispatch"
     assert line["dispatch_id"] == DISPATCH
     assert line["status"] == core["status"]
-    for lifecycle_key in ("attempt", "end_pending", "end_outcome_id", "project_id"):
+    assert line["project_id"] == PROJECT
+    for lifecycle_key in ("attempt", "end_pending", "end_outcome_id"):
         assert lifecycle_key not in line
 
 
@@ -837,7 +838,8 @@ def test_a_legacy_report_naming_attempt_and_project_id_keeps_the_k8a_line(
     assert line["event_type"] == "task_complete"
     assert line["dispatch_id"] == DISPATCH
     assert line["status"] == core["status"]
-    for lifecycle_key in ("attempt", "end_pending", "end_outcome_id", "project_id"):
+    assert line["project_id"] == PROJECT
+    for lifecycle_key in ("attempt", "end_pending", "end_outcome_id"):
         assert lifecycle_key not in line
 
 

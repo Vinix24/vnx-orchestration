@@ -20,6 +20,10 @@ Fix, exercised through the REAL append path here (never a mocked
 """
 from __future__ import annotations
 
+import pytest
+
+pytestmark = pytest.mark.usefixtures("receipt_project")
+
 import json
 import sys
 from pathlib import Path
