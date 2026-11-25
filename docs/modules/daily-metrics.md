@@ -25,6 +25,9 @@ identified completed attempts. Observations are immutable: recollection does not
 replace unknowns or append duplicates. Ledger readers must hold a shared `flock`;
 writers hold its exclusive lock across validation, deduplication and append, including
 short writes. A corrupt/partial existing line blocks further appends visibly.
+When GitHub omits a PR association, `pr_id` is null with `pr_id_unknown_reason`
+(`source_missing` or `source_invalid`). The observation's four-part identity remains
+usable; the unresolved PR association is named in the beacon and blocks coverage.
 
 ## Entry points
 

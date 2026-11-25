@@ -24,14 +24,11 @@ STATUSES = {"completed", "queued", "in_progress", "requested", "waiting", "pendi
 EVENTS = {"pull_request", "push", "schedule", "workflow_dispatch"}
 REPOSITORY = r"[A-Za-z0-9][\w.-]*/[A-Za-z0-9_][\w.-]*"
 
-
 def positive(value):
     return type(value) is int and value > 0
 
-
 def identity(record):
     return tuple(record[k] for k in ("repository", "project_id", "run_id", "run_attempt"))
-
 
 def validate_record(record):
     """Strict ci_run/1 validation, including every wrapper; raises ValueError."""
@@ -40,8 +37,13 @@ def validate_record(record):
     resolve_central_data_dir(record.get("project_id"))
     if not re.fullmatch(REPOSITORY, str(record.get("repository", ""))):
         raise ValueError("invalid repository")
-    if not all(positive(record.get(k)) for k in ("pr_id", "run_id", "run_attempt")):
-        raise ValueError("unresolved attempt/PR identity")
+    if not all(positive(record.get(k)) for k in ("run_id", "run_attempt")):
+        raise ValueError("unresolved attempt identity")
+    if record.get("pr_id") is None:
+        if record.get("pr_id_unknown_reason") not in {"source_missing", "source_invalid"}:
+            raise ValueError("unexplained missing PR identity")
+    elif not positive(record["pr_id"]) or record.get("pr_id_unknown_reason") is not None:
+        raise ValueError("invalid PR identity")
     if not re.fullmatch(r"[0-9a-f]{40}", str(record.get("head_sha", ""))):
         raise ValueError("invalid head_sha")
     start = parse_timestamp(record.get("run_started_at"))
@@ -76,7 +78,6 @@ def validate_record(record):
             raise ValueError(f"invalid field: {name}")
     json.dumps(record, allow_nan=False)
 
-
 def append_records(path, records):
     """Idempotent under the ledger flock; unreadable/corrupt state raises."""
     for record in records:
@@ -107,7 +108,6 @@ def append_records(path, records):
     finally:
         os.close(fd)
 
-
 def append_line(fd, data):
     """Roll back only this uncommitted tail on I/O failure, while holding EX."""
     offset = os.lseek(fd, 0, os.SEEK_END)
@@ -122,7 +122,6 @@ def append_line(fd, data):
         os.ftruncate(fd, offset)
         os.fsync(fd)
         raise
-
 
 def existing_records(path):
     """Validated snapshot for avoiding repeated API reads, never written back."""
@@ -141,10 +140,8 @@ def existing_records(path):
             records[identity(record)] = record
         return records
 
-
 def wrapper(source, value=None, reason=None):
     return {"value": value, "source": source, "unknown_reason": reason}
-
 
 def elapsed(start, end):
     if start in (None, "") or end in (None, ""):
@@ -153,7 +150,6 @@ def elapsed(start, end):
     if first is None or last is None or last < first:
         return None, "source_invalid"
     return (last - first).total_seconds(), None
-
 
 def job_fields(row, jobs, source, error):
     starts, terminal, qerror, cerror = [], [], error, error
@@ -186,14 +182,14 @@ def job_fields(row, jobs, source, error):
         critical["value"] = {"id": chosen["id"], "name": chosen["name"]}
     return queue, critical
 
-
 def make_record(project, repo, row, now, source, jobs, error, artifact):
     prs = row.get("pull_requests")
-    if not isinstance(prs, list) or len(prs) != 1 or not isinstance(prs[0], dict):
-        raise ValueError("unresolved PR identity")
+    pr = prs[0].get("number") if isinstance(prs, list) and len(prs) == 1 and isinstance(prs[0], dict) else None
+    pr_reason = None if positive(pr) else "source_missing" if prs in (None, []) else "source_invalid"
     start = parse_timestamp(row.get("run_started_at"))
     record = dict(schema="ci_run/1", project_id=project, repository=repo,
-                  pr_id=prs[0].get("number"), head_sha=row.get("head_sha"), run_id=row.get("id"),
+                  pr_id=pr if positive(pr) else None, pr_id_unknown_reason=pr_reason,
+                  head_sha=row.get("head_sha"), run_id=row.get("id"),
                   run_attempt=row.get("run_attempt"), event=row.get("event"), status=row.get("status"),
                   run_started_at=row.get("run_started_at"), day=start.date().isoformat() if start else None,
                   collected_at=now.isoformat())
@@ -212,7 +208,6 @@ def make_record(project, repo, row, now, source, jobs, error, artifact):
             record[name] = wrapper(record[name]["source"], reason=error)
     validate_record(record)
     return record
-
 
 def discover_attempts(reader, project, repo, rows, first, last, workflows, issues, skipped, existing):
     attempts = []
@@ -238,6 +233,8 @@ def discover_attempts(reader, project, repo, rows, first, last, workflows, issue
         for number in range(1, count + 1):
             saved = existing.get((repo, project, row["id"], number))
             if saved is not None:
+                if saved["pr_id"] is None:
+                    issues.append(f"{saved['pr_id_unknown_reason']}: stored run {row['id']} has unresolved PR identity")
                 if saved["head_sha"] != row.get("head_sha"):
                     issues.append(f"source_invalid: stored head contradicts run {row['id']}")
                 elif first.isoformat() <= saved["day"] <= last.isoformat():
@@ -271,7 +268,6 @@ def discover_attempts(reader, project, repo, rows, first, last, workflows, issue
                 attempts.append((attempt, source, read_error))
     return attempts
 
-
 def write_runs(project_id, from_day, to_day, *, now, project_root, state_dir=None,
                max_calls=1000, workflows="", artifact="", runner=None):
     """Collect a settled window with one budget. Return coverage and persist its beacon."""
@@ -302,6 +298,8 @@ def write_runs(project_id, from_day, to_day, *, now, project_root, state_dir=Non
             skipped.append({"run_id": row["id"], "run_attempt": row["run_attempt"], "reason": error})
         try:
             record = make_record(project_id, repo, row, now, source, jobs, read_error or error, artifact)
+            if record["pr_id"] is None:
+                issues.append(f"{record['pr_id_unknown_reason']}: {source}: unresolved PR identity")
             if read_error:
                 for name in FIELDS[:4]:
                     record[name] = wrapper(record[name]["source"], reason=read_error)

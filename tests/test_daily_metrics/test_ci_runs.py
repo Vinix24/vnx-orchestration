@@ -261,7 +261,8 @@ def test_contradictory_or_missing_identity_is_incomplete(writer, tmp_path, field
             row[field] = None
             return 0, json.dumps(row), ""
     result, records, _ = execute(writer, tmp_path, override=override)
-    assert result["coverage"] == "incomplete" and not records
+    assert result["coverage"] == "incomplete"
+    assert records[0]["pr_id"] is None if field == "pull_requests" else not records
 
 def test_job_pagination_and_empty_jobs_remain_unknown(writer, tmp_path):
     def override(args, count):
@@ -288,12 +289,18 @@ def test_ledger_concurrency_exact_identity_and_symlink_refusal(writer, tmp_path)
         writer.append_records(link, records)
 
 @pytest.mark.parametrize("change", [{"schema": "ci_run/2"}, {"conclusion": {}},
-                                    {"event": None}, {"day": "2026-11-24"}])
+                                    {"event": None}, {"day": "2026-11-24"}, {"pr_id": None}])
 def test_strict_envelope_validation(writer, tmp_path, change):
     record = execute(writer, tmp_path)[1][0]
     record.update(change)
     with pytest.raises(ValueError):
         writer.append_records(tmp_path / "invalid.ndjson", [record])
+
+def test_empty_pr_association_retains_unknown_observation(writer, tmp_path):
+    result, records, _ = execute(writer, tmp_path, [dict(run_row(), pull_requests=[])], max_calls=2)
+    assert result["coverage"] == "incomplete" and len(records) == 1
+    assert records[0]["pr_id"] is None and records[0]["pr_id_unknown_reason"] == "source_missing"
+    assert execute(writer, tmp_path)[0]["coverage"] == "incomplete"
 
 def test_filtered_search_limit_is_partitioned_without_losing_identified_rows(tmp_path):
     from daily_metrics.github_fetch import RunReader, parse_timestamp
