@@ -38,6 +38,11 @@ another App is reported (`foreign_door_check`) and never touched. Exit 0 = nothi
 revoked; 1 = a revocation failed or a foreign door check exists; 2 = unreadable. --dry-run patches
 nothing. The --all-projects child runs it after --report-only in the same process.
 
+Exit 70 (EX_SOFTWARE) is an uncaught exception in any mode, never 1. A text run of --report-only
+or --all-projects (not --json) ends on one closing line as its last stdout line,
+`door_audit: <clean|gaps|unmeasurable|crash> (exit N)`, after the `Door audit fleet: ...` line
+(scripts/lib/job_exit.py).
+
 BILLING SAFETY: No Anthropic SDK. No direct API calls.
 """
 
@@ -1138,4 +1143,12 @@ def main(argv: Optional[List[str]] = None) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    from job_exit import argv_has_flag, run_job
+
+    # Exit 1 means "gaps" only for the door audit; the backfill and permit modes use it for an error.
+    _args = sys.argv[1:]
+    raise SystemExit(run_job(
+        "door_audit", main, {0: "clean", 1: "gaps", 2: "unmeasurable"},
+        closing_line=argv_has_flag(_args, "--report-only", "--all-projects")
+        and not argv_has_flag(_args, "--json"),
+    ))

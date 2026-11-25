@@ -2,7 +2,13 @@
 
 ``collect`` reads the completed runs of workflow ``VNX CI`` through ONE injectable
 ``gh`` runner and appends one ``impact_ledger/1`` line per run attempt to
-``state/impact_shadow.ndjson``.  GitHub deletes artifacts after 90 days; the ledger
+``state/impact_shadow.ndjson``.  The ``impact-shadow`` artifact and the Profile A timing come from
+that run.  The ``impact-shadow-job`` artifact and the job timing come from the same run when its job
+list holds the shadow job (the shape before the job moved) or when the run is not a pull_request run (written
+at once), otherwise from the newest run of workflow ``Impact shadow`` on the same head sha whose job record has
+the same base_sha and candidate_sha as the shadow record (``shadow_run_id`` and ``shadow_run_attempt`` stamp the
+pair; ADR-098).  A shadow run that is not completed, or absent while the VNX CI run is under two hours old, writes no
+line: the attempt is reported as ``shadow_run_pending`` and collected again next time.  GitHub deletes artifacts after 90 days; the ledger
 is the evidence, the artifact only the way in.  ``report`` is pure over the ledger
 lines: what counted, what did not (by name), the reduced share, the misses of the
 reduced attempts, the red runs and the wall clock.
@@ -37,6 +43,10 @@ def _record_schemas() -> tuple:
 SCHEMA = "impact_ledger/1"
 LEDGER_NAME = "impact_shadow.ndjson"
 WORKFLOW = "VNX CI"
+SHADOW_WORKFLOW = "Impact shadow"
+# A VNX CI run without any shadow run is pending this long; after that the hole is written down.
+SHADOW_RUN_GRACE = timedelta(hours=2)
+SHADOW_RUN_FIELDS = "databaseId,attempt,status,conclusion,createdAt"
 PROFILE_A_JOB = "Profile A (doctor + core tests)"
 # Since C3 the job above is only the aggregator: these five are what it waits for
 # (pinned to its `needs` in .github/workflows/vnx-ci.yml by a test).
@@ -246,16 +256,90 @@ def _attributed(downloaded, attempt, label: str, missing: list):
     return record
 
 
+class ShadowRunPending(RuntimeError):
+    """The shadow run of this attempt may still arrive or finish: no ledger line yet."""
+
+
+def _same_candidate(shadow: Optional[dict], job: Optional[dict]) -> bool:
+    """True when the job record tested the merge candidate the VNX CI shadow record names (base and candidate sha)."""
+    return all(isinstance(shadow.get(k), str) and shadow.get(k) and shadow.get(k) == job.get(k)
+               for k in ("base_sha", "candidate_sha"))
+
+
+def _shadow_run(runner: Runner, run: dict, shadow: Optional[dict], now: datetime) -> tuple:
+    """``(shadow run, its job download)`` for ``run``; ``(None, None)`` when there is none and it is time to give up.
+
+    The runs are the ``Impact shadow`` runs on the head sha, newest first.  With a shadow record on the VNX CI
+    side the first run whose job record has the same base_sha and candidate_sha wins (main may have moved between
+    two runs on one head sha); without one the newest run wins.  Raises ShadowRunPending when the newest run is
+    not completed, or when nothing pairs and the VNX CI run is under SHADOW_RUN_GRACE old (or its age cannot be
+    read: no positive evidence that it is old).  This includes candidates whose job artifacts are all unreadable:
+    they stay pending during that grace or with an unreadable age, then return no pair and the download problem
+    ``candidate_unreadable``.  If at least one readable record mismatched, the problem after the grace is
+    ``candidate_mismatch`` instead.
+    """
+    argv = ["gh", "run", "list", "--workflow", SHADOW_WORKFLOW, "--commit", str(run.get("headSha")),
+            "--event", "pull_request", "--json", SHADOW_RUN_FIELDS]
+    found = json.loads(runner(argv))
+    if not isinstance(found, list):
+        raise ValueError("gh run list did not return a list")
+    runs = sorted((r for r in found if isinstance(r, dict) and isinstance(r.get("databaseId"), int) and isinstance(r.get("attempt"), int)),
+                  key=lambda r: (r["databaseId"], r["attempt"]), reverse=True)
+    created = parse_time(run.get("createdAt"))
+    too_young = created is None or now - created < SHADOW_RUN_GRACE
+    if not runs:
+        if too_young:
+            raise ShadowRunPending("shadow_run_pending")
+        return None, None
+    if runs[0].get("status") != "completed":
+        raise ShadowRunPending("shadow_run_pending")
+    if not (isinstance(shadow, dict) and shadow.get("base_sha") and shadow.get("candidate_sha")):
+        return runs[0], None
+    mismatched = False
+    for candidate in runs:
+        if candidate.get("status") != "completed":
+            continue
+        download = _download(runner, candidate["databaseId"], JOB_ARTIFACT)
+        if download[0] is None:
+            continue
+        if _same_candidate(shadow, download[0]):
+            return candidate, download
+        mismatched = True
+    if too_young:
+        raise ShadowRunPending("shadow_run_pending")
+    return None, (None, "candidate_mismatch" if mismatched else "candidate_unreadable")
+
+
+def _job_evidence(runner: Runner, repo: str, run: dict, jobs: list, shadow: Optional[dict], now: datetime) -> dict:
+    """Where the job artifact and the job timing of this attempt come from, and what they are.
+
+    The old shape (the VNX CI jobs hold the shadow job) reads the run itself.  So does a run whose event is
+    not ``pull_request`` (a push on main): it has no shadow job and never gets a paired run, so no lookup.
+    Otherwise the job comes from the paired shadow run.
+    """
+    event = run.get("event")
+    unpaired = isinstance(event, str) and event != "pull_request"  # an unreadable event is not positive evidence
+    if timing(jobs, SHADOW_JOB) is not None or unpaired:
+        source, source_jobs, paired, download = (run["databaseId"], run["attempt"]), jobs, (None, None), None
+    else:
+        found, download = _shadow_run(runner, run, shadow, now)
+        if found is None:
+            return {"download": download or (None, "missing"), "attempt": run["attempt"], "timing": None, "pair": (None, None)}
+        source = (found["databaseId"], found["attempt"])
+        source_jobs, paired = fetch_jobs(runner, repo, *source), source
+    return {"download": download or _download(runner, source[0], JOB_ARTIFACT), "attempt": source[1],
+            "timing": timing(source_jobs, SHADOW_JOB), "pair": paired}
+
+
 def _entry(runner: Runner, repo: str, run: dict, now: datetime) -> dict:
     run_id, attempt = run["databaseId"], run["attempt"]
-    shadow = _download(runner, run_id, SHADOW_ARTIFACT)
-    job = _download(runner, run_id, JOB_ARTIFACT)
     jobs = fetch_jobs(runner, repo, run_id, attempt)
     missing = []
-    shadow = _attributed(shadow, attempt, "impact-shadow", missing)
-    job = _attributed(job, attempt, "impact-shadow-job", missing)
+    shadow = _attributed(_download(runner, run_id, SHADOW_ARTIFACT), attempt, "impact-shadow", missing)
+    evidence = _job_evidence(runner, repo, run, jobs, shadow, now)
+    job = _attributed(evidence["download"], evidence["attempt"], "impact-shadow-job", missing)
     profile_a, profile_a_problem = profile_a_timing(jobs)
-    shadow_job = timing(jobs, SHADOW_JOB)
+    shadow_job = evidence["timing"]
     if profile_a is None:
         missing.append(profile_a_problem)
     if shadow_job is None:
@@ -265,6 +349,7 @@ def _entry(runner: Runner, repo: str, run: dict, now: datetime) -> dict:
         "branch": run.get("headBranch"), "event": run.get("event"), "run_conclusion": run.get("conclusion"),
         "created_at": run.get("createdAt"), "collected_at": now.isoformat(),
         "shadow": shadow, "job": job, "profile_a_job": profile_a, "shadow_job": shadow_job, "missing": missing,
+        "shadow_run_id": evidence["pair"][0], "shadow_run_attempt": evidence["pair"][1],
     }
 
 
@@ -291,6 +376,9 @@ def collect(state_dir: Path, runner: Runner = default_runner, since: Optional[da
             continue
         try:
             written = append_entry(path, _entry(runner, repo, run, now))
+        except ShadowRunPending as exc:
+            result["failed"].append({"attempt": name, "error": str(exc)})
+            continue
         except (RunnerError, ValueError, KeyError, TypeError) as exc:
             result["failed"].append({"attempt": name, "error": str(exc)})
             continue

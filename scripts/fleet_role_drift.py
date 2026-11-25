@@ -71,6 +71,10 @@ Exit codes:
     0  every measured project is current on every axis
     1  at least one project is behind on at least one axis
     2  the meter could not measure (canon absent, registry unreadable)
+    70 an uncaught exception (EX_SOFTWARE; never 1, which means "behind")
+
+A text run (not ``--json``, not ``--reach``) ends on one closing stdout line
+``fleet_role_drift: <ok|behind|config_error|crash> (exit N)`` (``scripts/lib/job_exit.py``).
 
 ``--reach T0_DIR`` is the same reach axis for ONE T0 directory, with no canon
 and no registry. ``hooks/sessionstart.sh`` calls it at the start of every T0
@@ -636,4 +640,9 @@ def main(argv: Optional[List[str]] = None) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    from job_exit import argv_has_flag, run_job
+
+    sys.exit(run_job(
+        "fleet_role_drift", main, {0: "ok", 1: "behind", 2: "config_error"},
+        closing_line=not argv_has_flag(sys.argv[1:], "--json", "--reach"),
+    ))
