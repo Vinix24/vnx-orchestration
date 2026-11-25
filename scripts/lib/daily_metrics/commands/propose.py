@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import sys
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -113,9 +114,13 @@ def run(args: Any) -> int:
     path = proposal_ledger.ledger_path(store.root)
     try:
         proposal_ledger.append_expiries(path, now=now)
-    except (proposal_ledger.LedgerUnreadable, OSError, ValueError, TypeError) as exc:
+        deliveries = proposal_ledger.create_deliverables(path, project_id=project_id,
+            state_dir=getattr(args, "state_dir", None), now=now)
+    except (proposal_ledger.LedgerUnreadable, OSError, ValueError, TypeError, sqlite3.Error) as exc:
         print(f"error: unreadable ledger {path}: {exc}", file=sys.stderr)
         return EXIT_FAILURE
+    if deliveries:
+        _emit({"deliverables": deliveries})
     day = days.latest_settled_day(now)
     if store.base_status(day.isoformat()) != days.FINAL_STATUS:
         _emit({"metric_day": day.isoformat(), "proposed": [], "reason": proposal_rules.DAY_NOT_FINAL})
