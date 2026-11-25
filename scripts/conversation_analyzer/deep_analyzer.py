@@ -37,10 +37,15 @@ from provider_spawns.deepseek_harness_spawn import (
     build_harness_argv,
     build_harness_child_env,
     DEEPSEEK_API_KEY_ENV,
+    MCP_OFF_CONFIG,
 )
 from provider_spawns.harness_config_dir import HarnessConfigDirError
 
 DEEPSEEK_BALANCE_URL = "https://api.deepseek.com/user/balance"
+
+# Deep analysis needs one JSON text answer, never a built-in tool call that would
+# consume its only turn. Both claude-CLI lanes use these exact print flags.
+DEEP_ANALYSIS_PRINT_FLAGS = ("--max-turns", "1", "--tools", "")
 
 STATUS_SWITCHED_OFF = provider_switch.REASON_SWITCHED_OFF
 
@@ -768,7 +773,8 @@ Respond with valid JSON:
         started = datetime.now(timezone.utc)
         try:
             result = subprocess.run(
-                [claude_bin, "-p", "--output-format", "json", "--max-turns", "1",
+                [claude_bin, "-p", "--output-format", "json", *DEEP_ANALYSIS_PRINT_FLAGS,
+                 "--mcp-config", MCP_OFF_CONFIG, "--strict-mcp-config",
                  "--session-id", session_id],
                 input=prompt,
                 capture_output=True,
@@ -944,7 +950,7 @@ Respond with valid JSON:
             claude_bin = resolve_claude_cli() or "claude"
             cli_args = build_harness_argv(
                 claude_bin, DEEPSEEK_HARNESS_MODEL, output_format="json",
-                print_flags=["--max-turns", "1"], session_id=session_id)
+                print_flags=list(DEEP_ANALYSIS_PRINT_FLAGS), session_id=session_id)
             try:
                 child_env = build_harness_child_env(api_key)
             except HarnessConfigDirError as exc:

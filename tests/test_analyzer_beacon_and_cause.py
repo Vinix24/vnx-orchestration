@@ -284,6 +284,40 @@ def test_measured_failure_reaches_counters_and_beacon(lane, monkeypatch, tmp_pat
 
 # --- one launch builder (OI-2061, cause 3) -------------------------------------------------
 
+@pytest.mark.parametrize("method", ["_try_claude_max", "_try_deepseek_harness"])
+def test_deep_argv_disables_tools_with_one_turn(method, lane, monkeypatch):
+    run = MagicMock(return_value=subprocess.CompletedProcess(
+        [], 0, json.dumps({"result": "{}"}), ""))
+    monkeypatch.setattr(da_module.subprocess, "run", run)
+    monkeypatch.setattr(da_module, "_book_analysis_call", lambda **kwargs: None)
+    assert getattr(DeepAnalyzer, method)("prompt", project_id="vnx-dev").status == "ok"
+    run.assert_called_once()
+    argv = run.call_args.args[0]
+    assert argv.count("--tools") == 1
+    assert argv[argv.index("--tools") + 1] == ""
+    assert argv.count("--max-turns") == 1
+    assert argv[argv.index("--max-turns") + 1] == "1"
+    assert "--strict-mcp-config" in argv
+    assert json.loads(argv[argv.index("--mcp-config") + 1]) == {"mcpServers": {}}
+
+
+@pytest.mark.parametrize("method", ["_try_claude_max", "_try_deepseek_harness"])
+def test_deep_argv_uses_shared_print_flags(method, lane, monkeypatch):
+    flags = da_module.DEEP_ANALYSIS_PRINT_FLAGS
+    assert flags == ("--max-turns", "1", "--tools", "")
+    extended = (*flags, "--disable-slash-commands")
+    monkeypatch.setattr(da_module, "DEEP_ANALYSIS_PRINT_FLAGS", extended)
+    run = MagicMock(return_value=subprocess.CompletedProcess(
+        [], 0, json.dumps({"result": "{}"}), ""))
+    monkeypatch.setattr(da_module.subprocess, "run", run)
+    monkeypatch.setattr(da_module, "_book_analysis_call", lambda **kwargs: None)
+    assert getattr(DeepAnalyzer, method)("prompt", project_id="vnx-dev").status == "ok"
+    run.assert_called_once()
+    argv = run.call_args.args[0]
+    start = argv.index("--max-turns")
+    assert tuple(argv[start:start + len(extended)]) == extended
+
+
 def test_analyzer_argv_comes_from_the_shared_builder(lane, monkeypatch):
     run = MagicMock(return_value=MagicMock(returncode=0, stdout=json.dumps({"result": "{}"}), stderr=""))
     monkeypatch.setattr(da_module.subprocess, "run", run)
@@ -296,7 +330,8 @@ def test_analyzer_argv_comes_from_the_shared_builder(lane, monkeypatch):
     # transcript of the call is findable for its cost-ledger line.
     session_id = argv[argv.index("--session-id") + 1]
     assert argv == build_harness_argv("claude", da_module.DEEPSEEK_HARNESS_MODEL, output_format="json",
-                                      print_flags=["--max-turns", "1"], session_id=session_id)
+                                      print_flags=list(da_module.DEEP_ANALYSIS_PRINT_FLAGS),
+                                      session_id=session_id)
     assert argv[-len(build_harness_cli_args()):] == build_harness_cli_args()
     assert argv[argv.index("--model") + 1] == "deepseek-flash"
 

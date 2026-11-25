@@ -43,7 +43,15 @@ There was no `result` field, and stderr held only the unrecognized-model startup
 notice. Ignoring `errors` and `subtype` hid the actual stop. The cause now reads
 `error_max_turns: Reached maximum number of turns (1)`.
 
+The cause is fixed by offering no tools: deep analysis needs one JSON text answer.
+Both Claude-Max and DeepSeek-harness calls use `DEEP_ANALYSIS_PRINT_FLAGS` in
+`deep_analyzer.py`: `--max-turns 1 --tools ""`. The empty argument disables all
+built-in tools without increasing the turn limit. Both lanes also pass
+`--mcp-config '{"mcpServers":{}}' --strict-mcp-config`, excluding inherited MCP
+tools. The DeepSeek builder already supplied these MCP flags (including in the
+failed replay); the Claude-Max call now supplies them too.
+
 The analyzer's direct CLI path does not call `enforce_daily_budget`; that guard
 lives in provider dispatch. No budget, balance threshold, turn limit, model,
-provider, or schedule is changed by this diagnostic fix. Choosing how analysis
-should handle model tool requests is separate work.
+provider, or schedule is changed. Failure diagnostics and degraded health remain
+in place for other failed calls.
