@@ -288,6 +288,9 @@ Commands:
   bootstrap-skills   Create/link ./\.claude/skills from shipped dist skills
   role sync          Refresh ./\.claude/terminals/T0/role-orchestrator.md (canonical
                      fleet-identical role) from the installed VNX; project CLAUDE.md untouched
+  pre-push-check     Run what CI would run on the touched files (compile, lint, ratchet,
+                     targeted tests); a project plugs in .vnx/config.yml pre_push_command
+                     (exit 0 green, 1 red, 2 usage)
   skills sync        Refresh ./\.claude/skills from the installed VNX (canonical),
                      with a timestamped backup. Default --dry-run; --apply to update.
   bootstrap-terminals  Create ./\.claude/terminals (default: T0..T3)
@@ -2792,6 +2795,9 @@ main() {
       ;;
     impact)
       "$VNX_PYTHON" "$VNX_HOME/scripts/impact_cli.py" "$@"
+      ;;
+    pre-push-check)
+      "$VNX_PYTHON" "$VNX_HOME/scripts/ci/pre_push_check.py" --repo "$PWD" "$@"
       ;;
     dispatch)
       cmd_dispatch "$@"

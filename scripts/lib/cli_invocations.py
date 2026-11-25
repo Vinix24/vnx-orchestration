@@ -32,7 +32,7 @@ gate-check gate-profile gate-reanchor grounding-shadow guard handoff help histor
 insights install install-check install-git-hooks install-scheduler install-shell-helper install-validate
 intelligence-export intelligence-import issue jump learning link-pr list list-projects main-window mandate mark-ready
 memory merge-preflight migrate missing-reasons morning-round new new-worktree objective observe oi-close override package-check park
-patch-agent-files pause plan-gate plan-scope pool pr-ready preflight promote providers ps publish queue queue-status
+patch-agent-files pause plan-gate plan-scope pool pr-ready pre-push-check preflight promote providers ps publish queue queue-status
 quiesce-check reblock reconcile reconcile-review reconcile-streak recover regen-settings regen-worker-permissions
 register release remove-dependency reopen replay report restart restore resume retarget review revoke
 rework-attribution roadmap role run seed set set-autonomous-promotion set-goal set-horizon set-lane-hint
