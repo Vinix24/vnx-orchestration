@@ -25,6 +25,18 @@ from conversation_analyzer import (  # noqa: E402 (path insert above)
 
 REASON_SWITCHED_OFF = "provider_switched_off"
 REASON_NONE_ANALYSED = "sessions_due_none_analysed"
+REASON_DEEP_FAILURE_MAJORITY = "deep_failure_majority"
+REASON_INVALID_DEEP_COUNTS = "deep_counts_invalid"
+
+
+def _dominant_failure_cause(causes):
+    """Missing or malformed cause evidence stays explicitly unknown."""
+    if (not isinstance(causes, dict) or not causes
+            or any(not isinstance(cause, str) or not cause.strip()
+                   or type(count) is not int or count <= 0
+                   for cause, count in causes.items())):
+        return "failure cause unavailable"
+    return min(causes, key=lambda cause: (-causes[cause], cause))
 
 
 def _write_heartbeat(args, stats, run_status, run_error):
@@ -32,15 +44,21 @@ def _write_heartbeat(args, stats, run_status, run_error):
         from health_beacon import HealthBeacon
         details = {"max_sessions": args.max_sessions, "dry_run": args.dry_run}
         if stats is not None:
-            details["deep_attempts"] = stats.deep_attempts
-            details["deep_failures"] = stats.deep_failures
+            attempts = details["deep_attempts"] = getattr(stats, "deep_attempts", None)
+            failures = details["deep_failures"] = getattr(stats, "deep_failures", None)
             details["sessions_by_origin"] = dict(stats.sessions_by_origin)
             details["deep_restricted_claude"] = stats.deep_restricted_claude
             details["deep_restricted_deferred"] = stats.deep_restricted_deferred
             details["deep_disabled_skips"] = stats.deep_disabled_skips
             details["deep_config_skips"] = stats.deep_config_skips
-            if stats.deep_failure_causes:
-                details["failure_causes"] = dict(stats.deep_failure_causes)
+            causes = getattr(stats, "deep_failure_causes", None)
+            if causes:
+                details["failure_causes"] = causes
+            if (run_status == "ok" and
+                    (type(attempts) is not int or type(failures) is not int
+                     or not 0 <= failures <= attempts)):
+                run_status = "degraded"
+                details["reason"] = REASON_INVALID_DEEP_COUNTS
             if run_status == "ok" and deep_all_skipped_by_switch(stats):
                 # Nothing was analysed because the operator switched the provider off: the
                 # beacon must not say ok. (OI-2043, the general case, stays its own item.)
@@ -51,6 +69,10 @@ def _write_heartbeat(args, stats, run_status, run_error):
                 # none of them. 2026-10-10: 51 deferred, 0 attempts, beacon said ok.
                 run_status = "degraded"
                 details["reason"] = REASON_NONE_ANALYSED
+            elif run_status == "ok" and attempts > 0 and failures * 2 > attempts:
+                run_status = "degraded"
+                details["reason"] = REASON_DEEP_FAILURE_MAJORITY
+                details["dominant_cause"] = _dominant_failure_cause(causes)
         if run_error:
             details["error"] = run_error
         HealthBeacon(

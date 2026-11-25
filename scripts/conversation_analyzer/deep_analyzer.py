@@ -9,11 +9,12 @@ analysis's to fail: the outcome stands and the refusal is logged.
 """
 
 import json
+import math
 import os
 import re
 import subprocess
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -36,10 +37,15 @@ from provider_spawns.deepseek_harness_spawn import (
     build_harness_argv,
     build_harness_child_env,
     DEEPSEEK_API_KEY_ENV,
+    MCP_OFF_CONFIG,
 )
 from provider_spawns.harness_config_dir import HarnessConfigDirError
 
 DEEPSEEK_BALANCE_URL = "https://api.deepseek.com/user/balance"
+
+# Deep analysis needs one JSON text answer, never a built-in tool call that would
+# consume its only turn. Both claude-CLI lanes use these exact print flags.
+DEEP_ANALYSIS_PRINT_FLAGS = ("--max-turns", "1", "--tools", "")
 
 STATUS_SWITCHED_OFF = provider_switch.REASON_SWITCHED_OFF
 
@@ -53,36 +59,56 @@ CLI_CAUSE_LIMIT = 200
 _NON_CAUSE_PREFIXES = ("[claude-code:unrecognized_model]",)
 
 
-def describe_cli_failure(returncode: int, stdout: str, stderr: str) -> "tuple[str, str]":
+def describe_cli_failure(returncode: int, stdout: str, stderr: str,
+                         failure_context: str = "") -> "tuple[str, str]":
     """Return ``(log_detail, cause)`` for a claude call that exited non-zero.
 
     ``log_detail`` carries the stderr (bounded at ``CLI_STDERR_LOG_LIMIT``) and, when the
-    stdout JSON parses, its ``is_error`` and ``result``. ``cause`` is one line for the
-    beacon: the first line of ``result`` when the JSON names one, else the first stderr line
-    that is not a known start-up notice.
+    stdout JSON parses, its result and termination fields. ``cause`` prefers the result,
+    then structured errors/subtype, then meaningful stderr. Otherwise it records the
+    exit code, the beginning of stdout and the lane's measured preflight context.
     """
     err = (stderr or "").strip()
     parts = [f"stderr={err[:CLI_STDERR_LOG_LIMIT]!r}"]
     result_text = ""
-    try:
-        payload = json.loads(stdout or "")
-    except (json.JSONDecodeError, TypeError):
-        payload = None
-    if isinstance(payload, dict):
+    structured_cause = ""
+    payload = _json_payload(stdout)
+    if payload is not None:
         raw = payload.get("result")
         result_text = raw.strip() if isinstance(raw, str) else ""
         parts.append(f"is_error={payload.get('is_error')!r}")
         parts.append(f"result={result_text[:CLI_STDERR_LOG_LIMIT]!r}")
+        errors = payload.get("errors")
+        error_text = next((e.strip().splitlines()[0] for e in errors
+                           if isinstance(e, str) and e.strip()), "") if isinstance(errors, list) else ""
+        subtype = payload.get("subtype")
+        if isinstance(subtype, str) and subtype.startswith("error_"):
+            structured_cause = subtype + (f": {error_text}" if error_text else "")
+        else:
+            structured_cause = error_text
+        for field in ("subtype", "terminal_reason", "errors"):
+            parts.append(f"{field}={str(payload.get(field))[:CLI_STDERR_LOG_LIMIT]!r}")
+    else:
+        parts.append(f"stdout={(stdout or '')[:CLI_STDERR_LOG_LIMIT]!r}")
+    if failure_context:
+        parts.append(failure_context)
     cause = ""
     if result_text:
         cause = result_text.splitlines()[0]
+    elif structured_cause:
+        cause = structured_cause
     else:
         for line in err.splitlines():
             line = line.strip()
             if line and not line.startswith(_NON_CAUSE_PREFIXES):
                 cause = line
                 break
-    cause = (cause or f"exit code {returncode} without a message")[:CLI_CAUSE_LIMIT]
+    if not cause:
+        cause = f"exit code {returncode}"
+        if failure_context:
+            cause += f"; {failure_context}"
+        cause += f"; stdout={(stdout or '')[:80]!r}"
+    cause = cause[:CLI_CAUSE_LIMIT]
     return "; ".join(parts), cause
 
 
@@ -199,7 +225,7 @@ class LLMOutcome:
         return self.status not in ("config_skip", STATUS_SWITCHED_OFF)
 
 
-def _child_outcome(result, label: str) -> "tuple[LLMOutcome, Optional[dict]]":
+def _child_outcome(result, label: str, failure_context: str = "") -> "tuple[LLMOutcome, Optional[dict]]":
     """Read a finished claude child: its parsed JSON and the outcome it names.
 
     One reader for both claude lanes, so they never drift on what a non-zero
@@ -207,8 +233,13 @@ def _child_outcome(result, label: str) -> "tuple[LLMOutcome, Optional[dict]]":
     lane in the ERROR line (``Claude CLI`` / ``DeepSeek harness``).
     """
     payload = _json_payload(result.stdout)
-    if result.returncode != 0:
-        detail, cause = describe_cli_failure(result.returncode, result.stdout, result.stderr)
+    returncode = getattr(result, "returncode", None)
+    if type(returncode) is not int:
+        cause = f"invalid child exit code: {returncode!r}"
+        log("ERROR", f"{label} failed: {cause}")
+        return LLMOutcome("error", cause=cause), payload
+    if returncode != 0:
+        detail, cause = describe_cli_failure(returncode, result.stdout, result.stderr, failure_context)
         log("ERROR", f"{label} failed (rc={result.returncode}): {detail}")
         return LLMOutcome("cli_failed", returncode=result.returncode,
                           stderr=(result.stderr or "").strip()[:CLI_STDERR_LOG_LIMIT],
@@ -742,7 +773,8 @@ Respond with valid JSON:
         started = datetime.now(timezone.utc)
         try:
             result = subprocess.run(
-                [claude_bin, "-p", "--output-format", "json", "--max-turns", "1",
+                [claude_bin, "-p", "--output-format", "json", *DEEP_ANALYSIS_PRINT_FLAGS,
+                 "--mcp-config", MCP_OFF_CONFIG, "--strict-mcp-config",
                  "--session-id", session_id],
                 input=prompt,
                 capture_output=True,
@@ -823,12 +855,21 @@ Respond with valid JSON:
             log("ERROR", msg)
             return LLMOutcome("balance_unavailable", stderr=msg)
 
-        infos = [info for info in (body.get("balance_infos") or []) if info]
-        if not body.get("is_available"):
+        if not isinstance(body, dict) or type(body.get("is_available")) is not bool:
+            msg = "DeepSeek balance response has no boolean is_available; deep analysis is skipped"
+            log("ERROR", msg)
+            return LLMOutcome("balance_unavailable", stderr=msg)
+        if body["is_available"] is False:
             msg = (f"DeepSeek account reports is_available={body.get('is_available')}; "
                    f"deep analysis is skipped for this run (top up the account)")
             log("ERROR", msg)
             return LLMOutcome("balance_low", stderr=msg)
+
+        infos = body.get("balance_infos")
+        if not isinstance(infos, list) or any(not isinstance(info, dict) for info in infos):
+            msg = "DeepSeek balance response has invalid balance_infos; deep analysis is skipped"
+            log("ERROR", msg)
+            return LLMOutcome("balance_unavailable", stderr=msg)
 
         minimums = {"USD": DEEPSEEK_MIN_BALANCE_USD, "CNY": DEEPSEEK_MIN_BALANCE_CNY}
         row = next((i for cur in minimums for i in infos if i.get("currency") == cur), None)
@@ -841,8 +882,13 @@ Respond with valid JSON:
 
         currency = row["currency"]
         try:
-            balance = float(row.get("total_balance"))
-        except (TypeError, ValueError):
+            raw_balance = row.get("total_balance")
+            if isinstance(raw_balance, bool):
+                raise ValueError("boolean balance")
+            balance = float(raw_balance)
+            if not math.isfinite(balance):
+                raise ValueError("non-finite balance")
+        except (TypeError, ValueError, OverflowError):
             msg = (f"DeepSeek balance response has no readable {currency} total_balance; "
                    f"deep analysis is skipped for this run")
             log("ERROR", msg)
@@ -856,7 +902,7 @@ Respond with valid JSON:
             return LLMOutcome("balance_low", stderr=msg)
 
         log("INFO", f"DeepSeek balance OK: {balance:.2f} {currency}")
-        return LLMOutcome("ok")
+        return LLMOutcome("ok", text=f"balance_ok={balance:.2f} {currency}")
 
     @classmethod
     def _try_deepseek_harness(cls, prompt: str, project_id: Optional[str] = None) -> LLMOutcome:
@@ -895,16 +941,16 @@ Respond with valid JSON:
         started = datetime.now(timezone.utc)
         spawn_refused: Optional[str] = None
         try:
-            refused = cls._deepseek_spawn_refusal(api_key)
-            if refused is not None:
-                spawn_refused = refused[2]
-                return refused[0]
+            preflight = cls._deepseek_preflight(api_key)
+            if preflight.status != "ok":
+                spawn_refused = preflight.status
+                return replace(preflight, cause=f"{preflight.status}: {preflight.stderr}"[:CLI_CAUSE_LIMIT])
             # The launch stays in this method's body on purpose: a helper that opened the
             # process would be a launch function the provider-switch census cannot see.
             claude_bin = resolve_claude_cli() or "claude"
             cli_args = build_harness_argv(
                 claude_bin, DEEPSEEK_HARNESS_MODEL, output_format="json",
-                print_flags=["--max-turns", "1"], session_id=session_id)
+                print_flags=list(DEEP_ANALYSIS_PRINT_FLAGS), session_id=session_id)
             try:
                 child_env = build_harness_child_env(api_key)
             except HarnessConfigDirError as exc:
@@ -924,7 +970,8 @@ Respond with valid JSON:
             except Exception as e:
                 log("ERROR", f"DeepSeek harness error: {e}")
                 return LLMOutcome("error", stderr=str(e))
-            return _child_outcome(result, "DeepSeek harness")[0]
+            context = f"preflight={preflight.status}; {preflight.text or 'balance unknown'} (cached)"
+            return _child_outcome(result, "DeepSeek harness", context)[0]
         finally:
             _book_analysis_call(
                 provider="deepseek-harness",
@@ -932,19 +979,6 @@ Respond with valid JSON:
                 session_id=session_id, started=started, project_id=project_id,
                 spawn_refused=spawn_refused,
             )
-
-    @classmethod
-    def _deepseek_spawn_refusal(cls, api_key: str) -> "Optional[tuple[LLMOutcome, None, str]]":
-        """The pre-spawn refusal that books ``spawn_refused``, or ``None`` when the call may start.
-
-        The own key and the ``/user/balance`` are checked once per process. A
-        refusal here starts no subprocess, so its ledger line carries five zeros
-        and the status that refused it, never unknown tokens.
-        """
-        preflight = cls._deepseek_preflight(api_key)
-        if preflight.status == "ok":
-            return None
-        return preflight, None, preflight.status
 
     @classmethod
     def _try_ollama(cls, prompt: str, project_id: Optional[str] = None) -> LLMOutcome:
