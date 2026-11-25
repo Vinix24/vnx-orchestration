@@ -22,6 +22,12 @@ The first run collects missing final days from the last 14 settled days, oldest 
 
 The day files live in `~/.vnx-data/<id>/state/daily_metrics/<id>/`: one `<YYYY-MM-DD>.json` per UTC day, `<YYYY-MM-DD>.r<N>.json` per revision, and `proposals.ndjson` as the append-only proposal ledger.
 
+## Proposal inbox lifecycle
+
+`propose` opens one `besluit` point per proposal, with ref `proposal:<id>`, the project, metric, value, baseline and metric day. Its copy block is `vnx daily-metrics approve <id> --action "<intervention>"`; the operator fills in the intervention and runs it in their own terminal. Inbox answers never approve. Notification failures leave proposals in the ledger, report an inbox error on stderr and exit 1; rerunning retries open proposals without duplicate points.
+
+Before proposing, even when the newest day is not final, `propose` appends one `expired` event for each proposal at least seven full days past `recorded_at`, unless already approved, expired or judged. Expired proposals cannot be approved and release their metric key for future proposals. The inbox reads the project's ledger: `approved` closes as `beantwoord`, `expired` as `vervallen`, using `recorded_at` as evidence. Missing, unreadable or invalid timestamp evidence keeps the point open. Existing `afgewezen` and `later` answers still close their points. Approval now records `recorded_at`; older approvals without that field remain open with a reason. Deliverable creation and application-based verdicts are later M5b/M5c steps (ADR-063 amendment).
+
 ## What `report --check` checks
 
 Exit 0 only when every condition holds. Otherwise exit 1, and `unmet` names each failed condition. The window is the last seven settled UTC days, ending at the newest settled day (`now >= day + 1 day + 2 h`).

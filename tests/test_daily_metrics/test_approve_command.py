@@ -140,6 +140,7 @@ def test_right_id_writes_one_approved_event(tmp_path):
     assert event["evidence"]["tty"] is True
     assert event["action"] == "tune the gate"
     assert event["approval_day"] == "2026-11-09"
+    assert event["recorded_at"] == event["approved_at"]
     assert event["schema"] == 3
     from daily_metrics.baseline import baseline
 

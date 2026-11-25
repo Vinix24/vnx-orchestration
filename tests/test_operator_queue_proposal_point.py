@@ -121,7 +121,7 @@ def test_missing_or_bad_quote_never_closes(env, fault):
 @pytest.mark.parametrize("filename", ["operator_queue_ask.py", "operator_queue.py"])
 def test_inbox_imports_no_approval_command_or_proposal_writers(filename):
     tree = ast.parse((Path(qa.__file__).parent / filename).read_text())
-    forbidden = {"append_approval", "append_proposals", "append_verdict", "_write", "*"}
+    forbidden = {"append_approval", "append_proposals", "append_verdict", "append_expiries", "_write", "*"}
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             assert all(not a.name.endswith(("commands.approve", "proposal_ledger")) for a in node.names)
@@ -134,3 +134,64 @@ def test_inbox_imports_no_approval_command_or_proposal_writers(filename):
                 assert not {"proposal_ledger", "*"}.intersection(a.name for a in node.names)
             if module.endswith("daily_metrics.commands"):
                 assert not {"approve", "*"}.intersection(a.name for a in node.names)
+
+
+@pytest.mark.parametrize("event,outcome", [("approved", "beantwoord"), ("expired", "vervallen")])
+def test_ledger_terminal_event_closes_only_its_point_once(env, event, outcome):
+    pid = ask(env)["point_id"]
+    other = ask(env, "proposal:000000000000")["point_id"]
+    with env[2].open("a") as handle:
+        handle.write(json.dumps({"event": event, "project_id": PROJECT,
+            "proposal_id": env[3].split(":")[1], "recorded_at": "2026-11-25T10:00:00Z"}) + "\n")
+    before = env[2].read_bytes()
+    assert read(env)["closed"] == [pid]
+    points = oq.read_state(PROJECT, state_dir=env[1])["points"]
+    assert points[pid]["state"] == outcome and points[other]["state"] == "open"
+    assert "2026-11-25T10:00:00Z" in points[pid]["bewijs"]
+    assert read(env)["closed"] == [] and env[2].read_bytes() == before
+
+
+@pytest.mark.parametrize("fault", ["missing", "unreadable", "corrupt", "empty"])
+def test_missing_or_unreadable_proposal_ledger_stays_open(env, fault):
+    pid = ask(env)["point_id"]
+    env[2].rename(env[2].with_suffix(".saved"))
+    if fault == "unreadable":
+        env[2].mkdir()
+    elif fault in ("corrupt", "empty"):
+        env[2].write_text("not json\n" if fault == "corrupt" else "")
+    result = read(env)
+    assert result["closed"] == [] and result["unknown"] == [pid] and result["reden"]
+
+
+@pytest.mark.parametrize("kind", ["approved", "expired"])
+@pytest.mark.parametrize("field", ["project_id", "proposal_id", "event", "recorded_at"])
+@pytest.mark.parametrize("fault", ["missing", None, {}, "unknown"])
+def test_bad_terminal_evidence_never_closes(env, kind, field, fault):
+    pid = ask(env)["point_id"]
+    event = {"event": kind, "project_id": PROJECT, "proposal_id": env[3].split(":")[1],
+             "recorded_at": "2026-11-25T10:00:00Z"}
+    if fault == "missing":
+        event.pop(field)
+    else:
+        event[field] = fault
+    with env[2].open("a") as handle:
+        handle.write(json.dumps(event) + "\n")
+    assert read(env)["closed"] == []
+    assert oq.read_state(PROJECT, state_dir=env[1])["points"][pid]["state"] == "open"
+
+
+@pytest.mark.parametrize("project", ["..", "/outside", "../outside"])
+def test_proposal_store_rejects_unsafe_project_ids(env, project):
+    pid = qa.ask(project, bron="besluit", ref=env[3], vraag="Apply?", sluit_bij="approved",
+                 opened_by="lezer", state_dir=env[1])["point_id"]
+    result = qa.read_asked(project, data_root=env[0], state_dir=env[1])[1]
+    assert result["unknown"] == [pid] and "invalid proposal project id" in result["reden"]
+
+
+def test_proposal_ledger_symlink_cannot_supply_closure_evidence(env):
+    pid = ask(env)["point_id"]
+    target = env[0] / "other.ndjson"
+    env[2].rename(target)
+    env[2].symlink_to(target)
+    result = read(env)
+    assert result["unknown"] == [pid] and "escapes project store" in result["reden"]
