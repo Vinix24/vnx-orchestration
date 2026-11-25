@@ -5,21 +5,20 @@
 **Owner**: track `doorloop-en-effectiviteit-dagelijks`
 **Purpose**: Install, read and check the daily lead-time measurement of one project.
 
-The contract (ten metric ids, unknown is never 0, the settled day, proven coverage, the approval gate, opt-in) is [ADR-063](../governance/decisions/ADR-063-dagelijkse-doorloopmeting.md). This page is the runbook. The verbs run as `python3 scripts/daily_metrics.py <verb>`. The `vnx daily-metrics <verb>` wrapper, `install` and `uninstall` come with PR-13 of the track and are not merged yet. The commands below use the script form, except where marked PR-13.
+The contract (ten metric ids, unknown is never 0, the settled day, proven coverage, the approval gate, opt-in) is [ADR-063](../governance/decisions/ADR-063-dagelijkse-doorloopmeting.md). This page is the runbook. `vnx daily-metrics install` installs the job; other verbs pass through to `python3 scripts/daily_metrics.py <verb>`. The reporting examples below use that script form.
 
 ## Install (opt-in per project)
 
 ```
-# PR-13, not merged yet:
 vnx daily-metrics install --project-id <id>
-# on main:
+# Optional manual collection through the project's pin:
 bash scripts/launchd/vnx_pinned_launcher.sh <id> scripts/daily_metrics.py daily
 python3 scripts/daily_metrics.py report --check --project-id <id>; echo "exit=$?"
 ```
 
-`install` (PR-13) writes the job `com.vnx.daily-metrics.<id>` (04:10 local, through the pinned launcher) for that one project. `vnx init` never installs it and `vnx doctor` does not expect it. Until PR-13 merges there is no `install`: the job `com.vnx.daily-metrics.<id>` does not exist and `report --check` cannot report `stale`.
+`install` writes and loads `~/Library/LaunchAgents/com.vnx.daily-metrics.<id>.plist` for that one registered project. The job runs on load and at 04:10 local through the pinned launcher. `vnx init` does not install it, and it is not a universally required launchd job. `report --check` can report `stale` when the job is loaded but the newest settled day has no fresh file.
 
-The `bash` line is the first manual run. It fills the last 14 settled days, oldest first. Those days are `backfilled`: they count in the baseline, never in freshness. The check therefore turns green only after seven nights of real runs.
+The first run collects missing final days from the last 14 settled days, oldest first. Collections later than `day end + 30 h` are `backfilled`: they count in the baseline, never in freshness. `report --check` needs seven consecutive fresh days and all the checks below; a catch-up run alone does not prove that.
 
 The day files live in `~/.vnx-data/<id>/state/daily_metrics/<id>/`: one `<YYYY-MM-DD>.json` per UTC day, `<YYYY-MM-DD>.r<N>.json` per revision, and `proposals.ndjson` as the append-only proposal ledger.
 
@@ -86,9 +85,10 @@ It reads every day file and every revision. Exit 0 needs `violations: 0`, no `un
 
 ## Rollback
 
+There is no `vnx daily-metrics uninstall` verb. To stop the installed job manually, substitute the project id and unload its plist:
+
 ```
-# PR-13, not merged yet:
-vnx daily-metrics uninstall --project-id <id>
+launchctl unload -w "$HOME/Library/LaunchAgents/com.vnx.daily-metrics.<id>.plist"
 ```
 
-`uninstall` (PR-13) removes only that project's job. The day files and the ledger stay: a `final` day is never overwritten and nothing in the measurement deletes data. There is no schema change and no migration to undo. Removing the store itself is deleting data, and that waits for the operator's approval.
+This leaves the plist, day files, ledger and health beacon in place. The beacon's age rule still applies; stopping the job does not clear its health signal. There is no schema change or migration to undo. Removing the store itself is deleting data, and that waits for the operator's approval.

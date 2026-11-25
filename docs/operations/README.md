@@ -1,7 +1,7 @@
 # Operations
 
 **Status**: Active
-**Last Updated**: 2026-09-27
+**Last Updated**: 2026-11-25
 **Owner**: T-MANAGER
 **Purpose**: Entry point for running, monitoring, and troubleshooting the VNX system.
 
@@ -22,6 +22,7 @@
 - T0 handoff contract (`handoff.md` file, `vnx handoff` CLI): `CONTEXT_ROTATION.md`
 - T0 context rotation enforced at 500K (guard hook, spawner, handoff contract): `T0_CONTEXT_ROTATION.md`
 - Worker permissions (scoped worker-mode default, `VNX_WORKER_BLANKET_SKIP=1` opt-out): `WORKER_PERMISSIONS.md`
+- Worker stash posture by lane: [WORKER_LANE_STASH_POSTURE.md](WORKER_LANE_STASH_POSTURE.md).
 - Control Centre (one interactive session supervises N per-project T0s): `CONTROL_CENTRE.md`
 - Unified supervisor (auto-respawn, lease sweep, runtime supervision): `UNIFIED_SUPERVISOR.md`
 - Elastic worker pool management (`vnx pool`): `POOL_OPERATIONS.md`
@@ -32,6 +33,9 @@
 - State aggregator (write-path for multi-project state, per-project facet files): `STATE_AGGREGATOR.md`
 - Objective reconcile (`vnx objective reconcile`, batch git-grounded auto-close loop): `OBJECTIVE_RECONCILE.md`
 - Daily metrics (opt-in daily lead-time measurement, `report --check`, the zero-for-unknown scanner, ADR-063): `DAILY_METRICS.md`
+- Dream scheduling, review and liveness: [DREAMING.md](../intelligence/DREAMING.md).
+- Claude CLI measurement inventory: [CLAUDE_CLI_MEASUREMENTS.md](CLAUDE_CLI_MEASUREMENTS.md).
+- Deltareview shadow-round measurement and thresholds: [DELTAREVIEW_METING.md](DELTAREVIEW_METING.md).
 
 **Install, build, and migration**
 - Central install runbook (multi-project shared system install): `install-central-runbook.md`
