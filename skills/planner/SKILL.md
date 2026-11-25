@@ -23,6 +23,17 @@ Generate structured FEATURE_PLAN.md documents with PR-based breakdown for T0 orc
 - **Write quality gates that become trackable deliverables** (see Governance Model)
 
 ## Planning Process
+
+When planning a feature, load `skills/proportionality/SKILL.md` and apply its
+three questions. It is the sole source for the T1-T8 classes, their minimum
+mechanisms and the O1-O6 removal triggers; do not duplicate the rubric here.
+State the smallest version that delivers the whole user flow, with deliverable
+1 proving that flow end to end. For every deliverable, write its touched T1-T8
+classes and their minimum mechanisms, current users, acceptance evidence and
+smaller alternative. Include an explicit removal list per deliverable: an
+explained "None" counts; an omitted section does not. Keep this alongside the
+existing order, paths, task class and size limit.
+
 1. **Analyze Requirements**: Break down into testable requirements
 2. **PR Decomposition**: Split into 300-450 line PRs with clear scope; above 450 split, bundle serially dependent changes on the same files into one PR
 3. **Skill Assignment**: Map appropriate @skill to each PR
@@ -93,6 +104,13 @@ Track `<track_id>`
 ### Success Criteria
 - Criterion 1
 - Criterion 2
+
+### Proportionality
+[Touched classes and minimum mechanisms from skills/proportionality/SKILL.md,
+current users, acceptance evidence, and the smaller alternative]
+
+### Removal list
+[Candidates and dispositions, or "None" with the reason]
 
 ### Quality Gate
 `gate_pr1_descriptive_name`:

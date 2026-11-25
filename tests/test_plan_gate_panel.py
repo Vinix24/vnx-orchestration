@@ -760,6 +760,27 @@ def test_resolve_when_no_blocker_returns_false(tmp_path):
         state_dir, "feat-n", "p1", reason="plan gate passed", resolver="test") is False
 
 
+def test_cmd_plan_gate_missing_rubric_keeps_track_blocked(tmp_path, monkeypatch, capsys):
+    import argparse
+
+    monkeypatch.setattr(pgp, "_PROPORTIONALITY_SKILL_PATH", tmp_path / "missing-skill.md")
+    state_dir = _bootstrap(tmp_path)
+    tracks.create_track(state_dir, "feat-rubric", "p1", "t", "shipped", phase="queued")
+    assert planning_cli._seed_plan_blocker(state_dir, "feat-rubric", "p1")
+    doc = tmp_path / "plan.md"
+    doc.write_text("## Approach\nReview the plan.\n", encoding="utf-8")
+    rc = planning_cli.cmd_plan_gate_run(argparse.Namespace(
+        track_id="feat-rubric", project_id="p1", state_dir=str(state_dir),
+        doc=str(doc), json=False, panel_seats=None, repo_root=str(tmp_path),
+        dispatch_paths="scripts/lib/plan_gate_panel.py",
+    ))
+    output = capsys.readouterr()
+    assert rc == 1
+    assert "proportionality_rubric_unavailable:" in output.out
+    assert _derived(state_dir, "feat-rubric", "p1") == "blocked"
+    assert not (tmp_path / ".vnx-attest" / "plan-gates.ndjson").exists()
+
+
 def test_seed_is_tenant_scoped(tmp_path):
     state_dir = _bootstrap(tmp_path)
     tracks.create_track(state_dir, "feat-s", "p1", "t", "shipped", phase="queued")

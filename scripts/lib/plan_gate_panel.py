@@ -837,6 +837,58 @@ _VALID_VERDICTS = {"pass", "revise", "block"}
 # panelist's report text. Injectable so the panel logic is testable without a live model.
 DispatcherFn = Callable[[str, str, str, str], str]
 
+_PROPORTIONALITY_SKILL_PATH = HERE.parent.parent / "skills/proportionality/SKILL.md"
+_FINDING_PREFIXES = ("missing_risk_class", "unjustified_mechanism", "no_removal_list")
+
+
+class ProportionalityRubricError(ValueError):
+    """The required proportionality rubric could not be loaded for review."""
+
+
+def load_proportionality_rubric(skill_path: Optional[Path] = None) -> str:
+    """Read the plan-gate sections afresh; raise ProportionalityRubricError on failure.
+
+    Resolve beside this module, so a worktree or installed checkout uses its own
+    skill, independent of the caller's cwd and ambient VNX_HOME.
+    """
+    path = skill_path if skill_path is not None else _PROPORTIONALITY_SKILL_PATH
+    try:
+        source = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        raise ProportionalityRubricError(
+            f"proportionality_rubric_unavailable: cannot read {path}: {exc}"
+        ) from exc
+    sections = []
+    for heading in (
+        "## Three questions", "## Too thin: risk classes",
+        "## Overbuilt: removal-list triggers", "### 2. Plan-gate: the plan reviewer",
+    ):
+        depth = len(heading.split(" ", 1)[0])
+        match = re.search(
+            rf"^{re.escape(heading)}\n(.*?)(?=^#{{1,{depth}}} |\Z)",
+            source, re.MULTILINE | re.DOTALL,
+        )
+        if match is None or not match.group(1).strip():
+            raise ProportionalityRubricError(
+                f"proportionality_rubric_invalid: {path}: missing or empty {heading}"
+            )
+        sections.append(match.group(0).strip())
+    return "\n\n".join(sections) + "\n"
+
+
+def count_blocking_findings(blocking_findings: List[str]) -> Dict[str, int]:
+    """Count exact rubric prefixes plus other; raise ValueError on malformed input."""
+    if not isinstance(blocking_findings, list) or any(
+        not isinstance(finding, str) for finding in blocking_findings
+    ):
+        raise ValueError("blocking_findings must be a list of strings")
+    counts = dict.fromkeys((*_FINDING_PREFIXES, "other"), 0)
+    for finding in blocking_findings:
+        prefix = next((p for p in _FINDING_PREFIXES if finding.startswith(p + ":")), "other")
+        counts[prefix] += 1
+    return counts
+
+
 _VERDICT_CONTRACT = (
     "When your review is done, append EXACTLY ONE fenced block and nothing after it:\n"
     f"```{VERDICT_FENCE}\n"
@@ -949,6 +1001,7 @@ def build_plan_review_instruction(doc_text: str, track_id: str) -> str:
         f"You are an independent plan reviewer for track {track_id}. Review the "
         "IMPLEMENTATION PLAN below. The plan only — no code exists yet.\n\n"
         + _RUBRIC
+        + "\n" + load_proportionality_rubric()
         + "\n----- PLAN UNDER REVIEW -----\n"
         f"{doc_text}\n"
         "----- END PLAN -----\n\n"
@@ -977,6 +1030,7 @@ def build_plan_review_instruction_fileref(
         f"  {doc_path}\n\n"
         "Review the plan only — no code exists yet.\n\n"
         + _RUBRIC
+        + "\n" + load_proportionality_rubric()
         + "\n"
         + _VERDICT_CONTRACT
         + f"\n\nREPORT FILE (MANDATORY): Write your complete review — including the "
@@ -2288,6 +2342,31 @@ def _with_switched_off_note(summary: Dict[str, Any], left_out: List[Dict[str, st
     return {**summary, "rationale": f"{summary['rationale']}; {note}"}
 
 
+def _panel_outcome(
+    summary: Dict[str, Any], results: List[PanelistResult], *,
+    track_id: str, project_id: str, doc_truncation: Dict[str, Any],
+    switched_off_seats: Optional[List[Dict[str, str]]],
+) -> Dict[str, Any]:
+    """Render findings counts in the existing rationale, without a stored count field."""
+    counts = count_blocking_findings([f for r in results for f in r.blocking_findings])
+    summary = {
+        **summary,
+        "rationale": summary["rationale"] + "; blocking findings: " + ", ".join(
+            f"{prefix}={count}" for prefix, count in counts.items()
+        ),
+    }
+    summary = _with_truncation_note(summary, doc_truncation)
+    summary = _with_switched_off_note(summary, switched_off_seats or [])
+    outcome = {
+        "track_id": track_id, "project_id": project_id,
+        "decision": summary["decision"], "summary": summary,
+        "panelists": [r.__dict__ for r in results], "doc_truncation": doc_truncation,
+    }
+    if switched_off_seats:
+        outcome["switched_off_seats"] = list(switched_off_seats)
+    return outcome
+
+
 def _run_seat(
     member: Dict[str, str],
     *,
@@ -2442,6 +2521,9 @@ def run_panel(
     ``project_id`` (K3-1b): the tenant the round's cost lines and seat records
     belong to. Omitted means the STORE's own tenant (ADR-007), resolved from
     ``data_dir``'s path, never the ambient ``VNX_PROJECT_ID``.
+
+    An unavailable or invalid proportionality skill returns INFRA_FAIL with
+    the named rubric error in the summary, before any seat is dispatched.
     """
     panel = panel or default_panel()
     # ADR-007 / K3-1b: an unnamed project is the STORE's tenant, resolved once
@@ -2472,7 +2554,14 @@ def run_panel(
             raise ValueError("run_panel: a plan source is required — pass doc_path or doc_text")
         doc_text = Path(doc_path).read_text(encoding="utf-8")
     doc_truncation = _doc_truncation_info(doc_text)
-    instruction = build_plan_review_instruction(doc_text, track_id)
+    try:
+        instruction = build_plan_review_instruction(doc_text, track_id)
+    except ProportionalityRubricError as exc:
+        return _panel_outcome(
+            _decision("INFRA_FAIL", 0, 0, 0, str(exc)), [],
+            track_id=track_id, project_id=project_id, doc_truncation=doc_truncation,
+            switched_off_seats=switched_off_seats,
+        )
 
     retries = _panel_retry_count()
     # R6 (OI-2039): the data dir the seats' lanes write their event archives under.
@@ -2497,19 +2586,10 @@ def run_panel(
     _emit_seat_records(
         results, track_id=track_id, project_id=project_id, seat_ledger_path=seat_ledger_path,
     )
-    summary = _with_truncation_note(summary, doc_truncation)
-    summary = _with_switched_off_note(summary, switched_off_seats or [])
-    outcome = {
-        "track_id": track_id,
-        "project_id": project_id,
-        "decision": summary["decision"],
-        "summary": summary,
-        "panelists": [r.__dict__ for r in results],
-        "doc_truncation": doc_truncation,
-    }
-    if switched_off_seats:
-        outcome["switched_off_seats"] = list(switched_off_seats)
-    return outcome
+    return _panel_outcome(
+        summary, results, track_id=track_id, project_id=project_id,
+        doc_truncation=doc_truncation, switched_off_seats=switched_off_seats,
+    )
 
 
 def build_decision_ref(
