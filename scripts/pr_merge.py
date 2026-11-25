@@ -746,6 +746,22 @@ def _check_dispatch_base_ref(
     return _door_gate("GO", f"dispatch {dispatch_id}: PR base agrees with {actual!r}")
 
 
+def _apply_dispatch_base_ref(
+    args: argparse.Namespace, gate: Dict[str, Any], pr_data: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """After CI GO, apply the dispatch base check and emit any non-application warning."""
+    if gate["verdict"] == "GO":
+        base_gate = _check_dispatch_base_ref(
+            args.pr, (pr_data or {}).get("baseRefName"), args.dispatch_id,
+            data_dir=Path(ensure_env()["VNX_DATA_DIR"]),
+        )
+        if base_gate["verdict"] != "GO":
+            return base_gate
+        if base_gate.get("reason_code") == "base_ref_not_applied":
+            print(base_gate["message"], file=sys.stderr)
+    return gate
+
+
 def _norm_pr_id(pr_id: str) -> str:
     """Deprecated alias for ``gate_obligations.normalise_pr_id``.
 
@@ -3509,15 +3525,7 @@ def _run_door(args: argparse.Namespace) -> int:
 
     # ── Merge gate: VNX CI conclusion=success for the exact PR head ──────
     gate, pr_data = _run_ci_gate(args.pr, override_reason=args.override_reason)
-    if gate["verdict"] == "GO":
-        base_gate = _check_dispatch_base_ref(
-            args.pr, (pr_data or {}).get("baseRefName"), args.dispatch_id,
-            data_dir=Path(ensure_env()["VNX_DATA_DIR"]),
-        )
-        if base_gate["verdict"] != "GO":
-            gate = base_gate
-        elif base_gate.get("reason_code") == "base_ref_not_applied":
-            print(base_gate["message"], file=sys.stderr)
+    gate = _apply_dispatch_base_ref(args, gate, pr_data)
     # The head SHA the gates approve is established once, here: the merge is
     # pinned to it (--match-head-commit) and every preflight record names it.
     head_sha = (pr_data or {}).get("headRefOid") or ""
@@ -3577,8 +3585,7 @@ def _run_door(args: argparse.Namespace) -> int:
     # weaken that YAML relative to main. Only --allow-weaken overrides a
     # weakening; drift between live and main's own YAML has no override.
     protection_gate = _run_branch_protection_gate(
-        args.pr, pr_data=pr_data, allow_weaken_reason=args.allow_weaken,
-    )
+        args.pr, pr_data=pr_data, allow_weaken_reason=args.allow_weaken)
     evaluated.append(_preflight_record("branch_protection", protection_gate, head_sha))
     if protection_gate["verdict"] != "GO":
         return refuse("branch_protection", protection_gate, "branch_protection_gate")
