@@ -108,6 +108,7 @@ def gate_dirs(tmp_path, monkeypatch, isolated_config):
     # OI-1887: the harness lane fetches origin/<branch> first; the payload's
     # branch exists on no remote, so keep the run hermetic.
     monkeypatch.setattr(gate_runner, "fetch_branch", lambda *a, **kw: None)
+    monkeypatch.setattr("gate_worktree.fetch_branch", lambda *a, **kw: None)
     monkeypatch.delenv("VNX_KIMI_GATE_MODEL", raising=False)
     monkeypatch.delenv("VNX_GLM_GATE_MODEL", raising=False)
     return {"state": state, "reports": reports, "results": state / "review_gates" / "results"}

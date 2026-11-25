@@ -474,3 +474,41 @@ class TestMissingBranchNeverDispatches:
         assert result["reason"] == "harness_lane_branch_unavailable"
         assert len(calls) == 0, "the dispatcher must never run against an unfetchable branch"
         assert _run_git(["rev-parse", "--abbrev-ref", "HEAD"], checkout).strip() == head_before
+
+
+@pytest.mark.parametrize("branch", ["feature/pr-1950", "absent", "", None, "--upload-pack=bad", "../bad"])
+def test_standalone_glm_fetches_head_before_dispatch(orchestrator_repo, tmp_path, monkeypatch, branch):
+    import glm_gate
+    import governed_lane
+    import gate_worktree
+    import plan_gate_panel
+    from types import SimpleNamespace
+
+    checkout = orchestrator_repo["checkout"]
+    seen = {}
+    original = glm_gate._make_default_dispatcher
+    def factory(*args, **kwargs):
+        seen["base_ref"] = kwargs["base_ref"]
+        return original(*args, **kwargs)
+    def child(cmd, **kwargs):
+        seen["cmd"] = cmd
+        assert _run_git(["show", "origin/feature/pr-1950:marker.txt"], checkout) == "PR_BRANCH_CONTENT\n"
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+    monkeypatch.setattr(glm_gate, "_make_default_dispatcher", factory)
+    monkeypatch.setattr(glm_gate, "get_pr_head_branch", lambda n: branch)
+    monkeypatch.setattr(glm_gate, "get_pr_head_sha", lambda n: "a" * 40)
+    monkeypatch.setattr(glm_gate, "_get_diff", lambda *a: "diff --git a/marker.txt b/marker.txt\n+PR_BRANCH_CONTENT\n")
+    monkeypatch.setattr(gate_worktree, "_resolve_project_root", lambda root: checkout)
+    monkeypatch.setattr(plan_gate_panel, "_run_provider_lane_child", child)
+    monkeypatch.setattr(plan_gate_panel, "_read_report", lambda *a: _pass_report_text())
+    rc, state = governed_lane.run_gate_head("glm", ["--pr", "1950", "--data-dir", str(tmp_path / "data")], seams=glm_gate._gate_seams())
+    assert rc is None
+    if branch == "feature/pr-1950":
+        assert state.dispatch_error == ""
+        assert seen["base_ref"] == "origin/feature/pr-1950"
+        assert seen["cmd"][seen["cmd"].index("--base-ref") + 1] == seen["base_ref"]
+    else:
+        assert state.dispatch_error
+        assert "cmd" not in seen
+    assert _run_git(["branch", "--show-current"], checkout).strip() == "main"
+    assert (checkout / "marker.txt").read_text() == "BASE\n"

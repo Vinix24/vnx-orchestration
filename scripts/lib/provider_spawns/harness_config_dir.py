@@ -319,6 +319,14 @@ def bare_harness_cli_args(cwd: Optional[Any] = None) -> List[str]:
     return [BARE_FLAG, *deny, *project_instructions_args(cwd)]
 
 
+def review_scope_kwargs(kwargs: dict, env: dict) -> dict:
+    """Reuse the Claude seat's scope for review gates; preserve worker kwargs."""
+    if (kwargs.get("role") or env.get("VNX_WORKER_ROLE")) == "review-gate":
+        from claude_gate_lane import seat_scope_args
+        return {**kwargs, "scope_args": seat_scope_args()}
+    return kwargs
+
+
 def require_harness_credential(env: Dict[str, str]) -> None:
     """Refuse a spawn whose child env carries no credential ``--bare`` can use.
 

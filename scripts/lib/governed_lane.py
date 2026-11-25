@@ -296,6 +296,15 @@ def read_report(base: Optional[Path], dispatch_id: str, stderr: str) -> Optional
     return None
 
 
+def _review_child_env(base: Path, deadline: Optional[int], role: str, base_ref: Optional[str], dispatch_id: str) -> dict:
+    """Fetch a review's validated head before launch; other roles keep their env."""
+    if role == "review-gate":
+        from gate_worktree import fetch_branch
+        branch = base_ref[len("origin/"):] if isinstance(base_ref, str) and base_ref.startswith("origin/") else ""
+        fetch_branch(branch, gate="review-gate", identifier=dispatch_id)
+    return _panel()._seat_child_env(base, deadline)
+
+
 def _make_default_dispatcher(
     data_dir: Optional[str], timeout_seconds: int,
     *, role: str = "plan-reviewer", base_ref: Optional[str] = None,
@@ -351,7 +360,7 @@ def _make_default_dispatcher(
         # never found. The claude branch pins the same two keys — see
         # _run_claude_headless_seat, which sets them on os.environ because on that
         # lane they must bind in this process as well as in the child.
-        env = _panel()._seat_child_env(base, total_deadline_seconds)
+        env = _review_child_env(base, total_deadline_seconds, role, base_ref, dispatch_id)
         _tmp_doc_path: Optional[str] = None
         try:
             if provider in _panel()._CLAUDE_PROVIDERS:
@@ -822,7 +831,7 @@ def _live_inputs(
     provider: str, row: ProviderRow, args: argparse.Namespace, base_data_dir: Path, dispatch_id: str,
     branch: str, seams: GateSeams,
 ) -> "Tuple[Optional[GateRunInputs], Optional[int]]":
-    """A live run: the diff, the single-shot investigation depth, the governed dispatch and its report.
+    """A live run: the diff, prompt coverage, the governed dispatch and its report.
 
     ``role="review-gate"`` (dispatch-20260823-beta2-j): the factory's default "plan-reviewer" carries
     agents/plan-reviewer/CLAUDE.md, written for a plan-gate PANEL SEAT, and gives the model three
@@ -843,6 +852,8 @@ def _live_inputs(
     # floor), the cap and the cut files are the depth.
     diff_cap = seams.max_diff_chars(row.gate)
     coverage = gate_depth.diff_coverage(diff, diff_cap)
+    # This legacy metric measures the prompt, not GLM's tool activity. Retain
+    # its empty/truncated-diff guards; never infer file reads from a verdict.
     execution_depth = gate_depth.single_shot_depth(
         coverage["diff_chars"], coverage["diff_truncated"],
         diff_limit=coverage["diff_limit"],

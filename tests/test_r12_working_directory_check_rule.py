@@ -110,12 +110,12 @@ def _script_prompt(module, gate: str):
 SEATS_WITH_TOOLS = {
     "codex_gate": _codex_prompt,
     "deepseek_gate (harness lane)": _harness_lane_prompt("deepseek_gate"),
+    "glm_gate script": _script_prompt(glm_gate, "glm_gate"),
+    "glm_gate (harness lane)": _harness_lane_prompt("glm_gate"),
 }
 
 SEATS_WITHOUT_THE_RULE = {
-    "glm_gate script": _script_prompt(glm_gate, "glm_gate"),
     "kimi_gate script": _script_prompt(kimi_gate, "kimi_gate"),
-    "glm_gate (harness lane)": _harness_lane_prompt("glm_gate"),
     "kimi_gate (harness lane)": _harness_lane_prompt("kimi_gate"),
     "gemini_review": _gemini_prompt,
 }
@@ -221,9 +221,9 @@ def test_the_degenerate_floor_is_unchanged() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_single_shot_gates_are_glm_and_kimi() -> None:
-    assert gate_lane_contract.SINGLE_SHOT_GATES == frozenset({"glm_gate", "kimi_gate"})
-    assert gate_lane_contract.reviews_with_tools("glm_gate") is False
+def test_only_kimi_remains_single_shot() -> None:
+    assert gate_lane_contract.SINGLE_SHOT_GATES == frozenset({"kimi_gate"})
+    assert gate_lane_contract.reviews_with_tools("glm_gate") is True
     assert gate_lane_contract.reviews_with_tools("kimi_gate") is False
 
 

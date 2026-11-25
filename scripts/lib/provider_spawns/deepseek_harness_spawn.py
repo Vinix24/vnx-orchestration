@@ -55,6 +55,7 @@ from provider_spawns.harness_config_dir import (
     bare_harness_cli_args,
     harness_config_env,
     require_harness_credential,
+    review_scope_kwargs,
 )
 
 HARNESS_LANE = "deepseek-harness"
@@ -343,7 +344,7 @@ def spawn_deepseek_harness(
         cwd=cwd,
         scrub_env_keys=_HARNESS_SCRUB_KEYS,
         base_url_family=provider_switch.DEEPSEEK,
-        **kwargs,
+        **review_scope_kwargs(kwargs, merged_env),
     )
 
     # Harden the harness lane: an rc=0 spawn with no assistant text is an

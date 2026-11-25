@@ -140,6 +140,7 @@ def test_read_report_accepts_only_the_exact_dispatch_id_and_falls_back(tmp_path)
 
 def test_the_moved_dispatcher_still_builds_the_provider_lane_command(monkeypatch, tmp_path):
     seen = {}
+    monkeypatch.setattr("gate_worktree.fetch_branch", lambda branch, **kw: seen.update(branch=branch))
 
     def fake_child(cmd, *, env, timeout_seconds, dispatch_id, data_dir):
         seen.update(cmd=list(cmd), dispatch_id=dispatch_id, data_dir=data_dir)
@@ -163,6 +164,7 @@ def test_the_moved_dispatcher_still_builds_the_provider_lane_command(monkeypatch
     assert "--no-auto-commit" in cmd
     assert seen["dispatch_id"] == "kimi-gate-pr-1"
     assert seen["data_dir"] == tmp_path
+    assert seen["branch"] == "pr-branch"
 
 
 def test_the_moved_dispatcher_reads_the_report_through_the_panel_seam(monkeypatch, tmp_path):

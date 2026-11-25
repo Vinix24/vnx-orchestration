@@ -58,11 +58,7 @@ def gate_model(gate: str) -> Optional[str]:
     return None
 
 
-# R12: the review gates measured as one shot (the `single_shot` column of the
-# rows). glm_gate.py and kimi_gate.py
-# book their depth with gate_depth.single_shot_depth: the diff in the prompt is
-# what the run is held to, and there is no working directory it is asked to
-# check. Every other gate on gate_runner's harness lane (deepseek_gate today)
+# R12/OI-3084: only Kimi reviews the prompt alone. Every other harness gate
 # reviews with tools in an isolated checkout of the PR head (OI-1887).
 SINGLE_SHOT_GATES = gate_lane_rows.single_shot_gates(gate_lane_rows.GATE_LANE_ROWS)
 

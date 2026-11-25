@@ -62,7 +62,7 @@ def _row(**over) -> GateLaneRow:
 
 def test_views_are_byte_equal_to_the_hand_written_tables():
     assert gate_lane_contract.MODEL_DEFAULTS == EXPECTED_MODEL_DEFAULTS
-    assert gate_lane_contract.SINGLE_SHOT_GATES == frozenset({"glm_gate", "kimi_gate"})
+    assert gate_lane_contract.SINGLE_SHOT_GATES == frozenset({"kimi_gate"})
     assert isinstance(gate_lane_contract.SINGLE_SHOT_GATES, frozenset)
     assert gate_lane_contract.TIMEOUT_CONFIG == EXPECTED_TIMEOUT_CONFIG
     assert gate_lane_contract.DIFF_CHAR_CONFIG == EXPECTED_DIFF_CHAR_CONFIG
