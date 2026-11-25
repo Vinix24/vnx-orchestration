@@ -20,6 +20,10 @@ python3 scripts/daily_metrics.py report --check --project-id <id>; echo "exit=$?
 
 The first run collects missing final days from the last 14 settled days, oldest first. Collections later than `day end + 30 h` are `backfilled`: they count in the baseline, never in freshness. `report --check` needs seven consecutive fresh days and all the checks below; a catch-up run alone does not prove that.
 
+The repository's launchd template guard checks XML and interpreter compatibility.
+Its shell scanner ignores full-line comments when selecting an interpreter:
+historical interpreter paths in comments are not executable commands.
+
 The day files live in `~/.vnx-data/<id>/state/daily_metrics/<id>/`: one `<YYYY-MM-DD>.json` per UTC day, `<YYYY-MM-DD>.r<N>.json` per revision, and `proposals.ndjson` as the append-only proposal ledger.
 
 ## What `report --check` checks
