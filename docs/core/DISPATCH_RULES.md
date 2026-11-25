@@ -74,6 +74,10 @@ The `dispatch_register.ndjson` register event is **best-effort**, not binding. I
 
 The preflights run in the order of `PREFLIGHT_ORDER` (the table lists five; `pr_size`, `main`, `morning_pause` and `door` are described below it and in 2.2.1). The door stops at the first refusal, writes a `pr_merge_refused` receipt (status `blocked`, the later preflights marked `not_evaluated`; nothing under `--dry-run`) and exits non-zero. The first output line names the target repo (`doelrepo: owner/name`).
 
+CI runs only when the optional-feature snapshot's `ci_requirement(project_id)` requires it (ADR-092): the flag, enforcement dial, declared CI checks and review stack each count. When none requires CI, its preflight keeps verdict GO for the permit contract but explicitly records `status: waived`, `reason_code: ci_not_required` and the reason. A waiver still requires a valid PR head and branch. Unknown or unreadable feature configuration refuses with `OptionalFeatureRefused` and its named cause.
+
+The door reads protection from one pinned main SHA through the existing lookup order and parser. The CI preflight and merge/refusal receipt carry the same `optional_features` snapshot and `waived_guarantees` list. Its `branch_protection.server_verified` is true only after the existing live comparison succeeds under `enforce`; `warn` carries the measured `drift_fields` (`branch_protection` when the server has no protection), and `off` stays unverified. A caller that never ran the door has no snapshot fields.
+
 | # | Preflight | Refuses when | Release |
 |---|---|---|---|
 | 1 | `ci` (`_run_ci_gate`) | the PR head cannot be resolved, the head SHA is not 40 characters, the project's CI workflow has no run for that SHA, a run is running or queued, or the latest completed run is not `success` | `--override-reason "<text>"`; one reason also covers preflight 2 |

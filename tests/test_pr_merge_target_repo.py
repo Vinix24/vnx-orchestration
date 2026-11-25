@@ -425,8 +425,8 @@ class TestEnforcement:
         assert door.gh.calls_with("branches/main/protection") == []
         asked = [c["argv"][1] for c in door.gh.calls_with("contents/") if "ref=main" in " ".join(c["argv"])]
         paths = [a.split("/contents/")[1].split("?")[0] for a in asked]
-        # In reading order, once for the CI gate's workflow name and once for the protection gate.
-        assert paths == [MAIN_YAML_PATH, FABRIC_STYLE_YAML_PATH] * 2
+        # In reading order, once: CI and protection share the same main read (ADR-092).
+        assert paths == [MAIN_YAML_PATH, FABRIC_STYLE_YAML_PATH]
 
     def test_the_fabric_style_path_is_read_when_the_project_has_no_dot_vnx_copy(self, tmp_path, monkeypatch, capsys):
         rules = _rules(main_yaml=None, first=[{
