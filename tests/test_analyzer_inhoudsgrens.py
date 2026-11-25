@@ -128,7 +128,7 @@ def world(tmp_path, monkeypatch):
     projects = tmp_path / "projects"
     projects.mkdir()
     monkeypatch.setattr(ca_pkg, "CLAUDE_PROJECTS_DIR", projects)
-    monkeypatch.setattr(da_module, "LLM_STRATEGY", "deepseek-harness")
+    monkeypatch.setattr(da_module, 'llm_strategy', lambda: 'deepseek-harness')
     monkeypatch.setattr(DeepAnalyzer, "_ollama_probed", False)
     monkeypatch.setattr(runner_module, "resolve_stamp_project_id",
                         lambda *a, **k: TENANT)

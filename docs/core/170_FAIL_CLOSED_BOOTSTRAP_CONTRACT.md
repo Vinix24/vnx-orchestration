@@ -125,7 +125,7 @@ Required order:
 
 ### 3.2 Fail-Closed Behavior
 
-**BOOT-7 (Registration Fail-Closed)**: When `VNX_RUNTIME_PRIMARY=1`, `rc_register()` MUST be fail-closed: if registration fails, the dispatch MUST NOT proceed to lease acquisition. The function MUST return a non-zero exit code, and the caller MUST treat this as a blocking failure.
+**BOOT-7 (Registration Fail-Closed)**: `rc_register()` MUST be fail-closed: if registration fails, the dispatch MUST NOT proceed to lease acquisition. The function MUST return a non-zero exit code, and the caller MUST treat this as a blocking failure.
 
 Required behavior:
 
@@ -314,7 +314,7 @@ Every fail-closed abort MUST produce an error message that includes:
 - Suppress the error message (redirect to `/dev/null`).
 - Substitute default values that mask the missing configuration.
 
-The only acceptable fallback is `VNX_RUNTIME_PRIMARY=0`, which explicitly disables the runtime core and reverts to legacy-only mode. This is a deliberate operator decision, not a silent degradation.
+Q1b-a makes runtime coordination mandatory in the CLI and lifecycle helpers. Rollback is `git revert`; dispatcher bootstrap/export cleanup follows in Q1b-b.
 
 ---
 
@@ -373,7 +373,7 @@ The only acceptable fallback is `VNX_RUNTIME_PRIMARY=0`, which explicitly disabl
 | BOOT-4 | Dispatcher verifies DB exists or initializes it at startup |
 | BOOT-5 | `.env_override` paths must be within project tree |
 | BOOT-6 | Registration BEFORE lease acquisition (FK invariant) |
-| BOOT-7 | Registration is fail-closed when VNX_RUNTIME_PRIMARY=1 |
+| BOOT-7 | Registration is always fail-closed |
 | BOOT-8 | FK constraint `terminal_leases.dispatch_id → dispatches.dispatch_id` preserved |
 | BOOT-9 | Chain closeout releases ALL terminal leases to idle |
 | BOOT-10 | Closeout procedure: verify → release → audit → confirm |

@@ -206,7 +206,7 @@ class TestFailurePropagation:
 class TestCapabilityGating:
 
     def test_unsupported_op_returns_error(self, facade: RuntimeFacade) -> None:
-        with patch.dict("os.environ", {"VNX_TMUX_ADAPTER_ENABLED": "0"}):
+        with patch.object(TmuxAdapter, "capabilities", return_value=frozenset()):
             outcome = facade.launch("T0", {})
             assert outcome.success is False
             assert "not supported" in outcome.error
@@ -219,7 +219,7 @@ class TestCapabilityGating:
         assert facade.adapter_type == "tmux"
 
     def test_session_health_unsupported(self, facade: RuntimeFacade) -> None:
-        with patch.dict("os.environ", {"VNX_TMUX_ADAPTER_ENABLED": "0"}):
+        with patch.object(TmuxAdapter, "capabilities", return_value=frozenset()):
             result = facade.session_health()
             assert result.ok is False
             assert result.error_code == "unsupported"

@@ -7,7 +7,10 @@ and worktree path handling.
 """
 
 import json
+import argparse
 import os
+import plistlib
+import subprocess
 import sys
 from pathlib import Path
 from unittest.mock import patch, MagicMock
@@ -32,6 +35,143 @@ from vnx_init import (
     _refresh_registry_files,
     RegistryCopyError,
 )
+
+
+@pytest.fixture
+def daily_metrics_init(tmp_path, monkeypatch):
+    from vnx_cli.commands import init_cmd
+    from launchd_test_support import make_central_engine
+
+    project = tmp_path / "project"
+    project.mkdir()
+    store = tmp_path / "project-store"
+    home = tmp_path / "home"
+    home.mkdir()
+    engine = make_central_engine(tmp_path / "engine", real_scripts=SCRIPT_DIR)
+    for name in ("templates", "schemas"):
+        (engine / name).symlink_to(SCRIPT_DIR.parent / name, target_is_directory=True)
+    monkeypatch.setattr(init_cmd._engine, "engine_root", lambda: engine)
+    monkeypatch.setattr(Path, "home", lambda: home)
+    monkeypatch.setattr(init_cmd._engine, "resolve_data_root", lambda _: store)
+    calls = []
+    real_run = subprocess.run
+
+    def run(cmd, **kwargs):
+        if cmd[0] == "launchctl":
+            calls.append(cmd)
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        return real_run(cmd, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", run)
+    args = argparse.Namespace(project_dir=str(project), project_id="new-project", force=True)
+    return init_cmd, args, store, home, calls
+
+
+def test_init_prepares_daily_metrics_definition(daily_metrics_init):
+    init_cmd, args, store, home, calls = daily_metrics_init
+    assert init_cmd.vnx_init(args) == 0
+    definition = store / "launchd/com.vnx.daily-metrics.new-project.plist"
+    assert definition.is_file(), "init did not prepare the required job"
+    text = definition.read_text()
+    assert "${" not in text
+    assert plistlib.loads(text.encode())["Label"] == "com.vnx.daily-metrics.new-project"
+    assert not list((home / "Library/LaunchAgents").glob("com.vnx.daily-metrics*"))
+    assert not any("daily-metrics" in str(cmd) for cmd in calls)
+    assert len([cmd for cmd in calls if cmd[1] == "load"]) == 4
+
+
+def test_init_seeds_daily_metrics_never_measured(daily_metrics_init):
+    init_cmd, args, store, _, _ = daily_metrics_init
+    assert init_cmd.vnx_init(args) == 0
+    beacon = store / "state/health/daily_metrics.json"
+    assert beacon.is_file(), "init did not seed the required beacon"
+    data = json.loads(beacon.read_text())
+    assert data["status"] == "fail"
+    assert data["details"] == {"project_id": "new-project", "reason": "never_measured"}
+    assert data["expected_interval_seconds"] == 36 * 3600
+    from health_beacon import beacon_summary
+    row = beacon_summary(store)["beacons"]["daily_metrics"]
+    assert row["health"] == "fail" and row["reason"] == "never_measured"
+    assert row["project_id"] == "new-project"
+
+
+def test_init_prints_daily_metrics_operating_request(daily_metrics_init, capsys):
+    init_cmd, args, _, _, _ = daily_metrics_init
+    assert init_cmd.vnx_init(args) == 0
+    out = capsys.readouterr().out
+    assert out.count("Operating request") == 1
+    assert "vnx daily-metrics install --project-id new-project" in out
+    assert "launchctl bootout gui/$(id -u)/com.vnx.daily-metrics.new-project" in out
+    assert "launchctl list | grep com.vnx.daily-metrics.new-project" in out
+    assert "Why:" in out and "What:" in out and "Class: reversible" in out
+
+
+@pytest.mark.parametrize("existing", ["measured", "corrupt"])
+def test_init_preserves_daily_metrics_evidence(daily_metrics_init, existing):
+    init_cmd, args, store, _, _ = daily_metrics_init
+    assert init_cmd.vnx_init(args) == 0
+    path = store / "state/health/daily_metrics.json"
+    if existing == "measured":
+        from health_beacon import HealthBeacon
+        HealthBeacon(store / "state", "daily_metrics").heartbeat_strict("ok")
+    else:
+        path.write_text("{")
+    original = path.read_bytes()
+    assert init_cmd.vnx_init(args) == 0
+    assert path.read_bytes() == original
+
+
+@pytest.mark.parametrize("project_id", ["..", "/absolute", "bad/id", ""])
+def test_daily_metrics_preparation_refuses_invalid_id(daily_metrics_init, project_id):
+    init_cmd, args, store, _, calls = daily_metrics_init
+    with pytest.raises(RuntimeError, match="project id"):
+        init_cmd._prepare_daily_metrics(
+            str(init_cmd._engine.engine_root()), project_id, Path(args.project_dir), store
+        )
+    assert not store.exists() and not calls
+
+
+@pytest.mark.parametrize("failure", ["missing_template", "placeholder", "beacon_stat", "write"])
+def test_daily_metrics_preparation_failure_aborts_init(daily_metrics_init, monkeypatch, capsys, failure):
+    init_cmd, args, store, _, _ = daily_metrics_init
+    read_text, stat, atomic_write = Path.read_text, Path.stat, init_cmd._atomic_write
+
+    def read(path, *a, **kw):
+        if path.name == "com.vnx.daily-metrics.plist":
+            if failure == "missing_template":
+                raise FileNotFoundError("missing daily-metrics template")
+            if failure == "placeholder":
+                return read_text(path, *a, **kw) + "${UNKNOWN}"
+        return read_text(path, *a, **kw)
+
+    def probe(path, *a, **kw):
+        if failure == "beacon_stat" and path.name == "daily_metrics.json":
+            raise PermissionError("cannot inspect beacon")
+        return stat(path, *a, **kw)
+
+    def write(path, *a, **kw):
+        if failure == "write" and path.name == "daily_metrics.json":
+            raise PermissionError("cannot write beacon")
+        return atomic_write(path, *a, **kw)
+
+    monkeypatch.setattr(Path, "read_text", read)
+    monkeypatch.setattr(Path, "stat", probe)
+    monkeypatch.setattr(init_cmd, "_atomic_write", write)
+    assert init_cmd.vnx_init(args) == 1
+    captured = capsys.readouterr()
+    assert "scaffold write refused" in captured.err
+    assert "Operating request" not in captured.out
+
+
+@pytest.mark.parametrize("relative", ["launchd", "state/health/daily_metrics.json", "state/health/daily_metrics.json.lock"])
+def test_daily_metrics_preparation_refuses_symlink(daily_metrics_init, relative, capsys):
+    init_cmd, args, store, home, _ = daily_metrics_init
+    target = store / relative
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.symlink_to(home)
+    assert init_cmd.vnx_init(args) == 1
+    assert "symlink" in capsys.readouterr().err
+    assert not list(home.iterdir())
 
 
 # ---------------------------------------------------------------------------

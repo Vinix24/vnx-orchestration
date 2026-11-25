@@ -1,0 +1,1 @@
+- The Python start runtime reads per-terminal skip-permissions and the T0 provider through the config registry. A stored project row now wins over preset env; permission-skip writes still require an approval id. Defaults remain prompts enabled and T0 on Claude Code; the separate `start.sh` env reader is unchanged.

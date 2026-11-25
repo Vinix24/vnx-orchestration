@@ -2,12 +2,12 @@
 # VNX Command: recover
 # Recovers a VNX session from unclean shutdown or stale state.
 #
-# PR-5: When runtime core is active (VNX_RUNTIME_PRIMARY=1), recovery uses
+# Recovery uses
 # the canonical runtime recovery engine (vnx_recover_runtime.py) which
 # reconciles leases, incidents, and tmux bindings from canonical state.
 #
 # Legacy recovery (lock/PID/dispatch-file cleanup) runs as fallback when
-# runtime core is inactive or as a complement to runtime recovery.
+# --legacy is requested or as a complement to runtime recovery.
 #
 # This file is sourced by bin/vnx's command loader. All functions and variables
 # from the main script (log, err, PROJECT_ROOT, VNX_HOME, etc.)
@@ -69,7 +69,7 @@ HELP
   local runtime_exit=0
 
   # ── Runtime recovery (canonical state) ──────────────────────────────────
-  if [ "$legacy_only" != true ] && [ "${VNX_RUNTIME_PRIMARY:-1}" = "1" ]; then
+  if [ "$legacy_only" != true ]; then
     local state_dir="${VNX_STATE_DIR:-$VNX_DATA_DIR/state}"
     local scripts_lib="$VNX_HOME/scripts/lib"
 
@@ -96,11 +96,7 @@ HELP
       log "[recover] Runtime recovery engine not available — falling back to legacy"
     fi
   else
-    if [ "$legacy_only" = true ]; then
-      log "[recover] Legacy-only mode (--legacy)"
-    else
-      log "[recover] Runtime core inactive — using legacy recovery"
-    fi
+    log "[recover] Legacy-only mode (--legacy)"
   fi
 
   # ── Legacy recovery (file-based cleanup) ─────────────────────────────────
@@ -124,7 +120,7 @@ HELP
     )
     [ "$dry_run" = true ] && legacy_args+=("--dry-run")
     [ "$legacy_only" = true ] && legacy_args+=("--legacy-only")
-    [ "${VNX_RUNTIME_PRIMARY:-1}" = "1" ] && legacy_args+=("--runtime-primary")
+    legacy_args+=("--runtime-primary")
 
     PYTHONPATH="$scripts_lib${PYTHONPATH:+:$PYTHONPATH}" \
       python3 "$scripts_lib/vnx_recover_legacy.py" "${legacy_args[@]}" || _legacy_exit=$?
@@ -161,7 +157,7 @@ HELP
   log ""
   log "════════════════════════════════════════════════════════════════"
 
-  if [ "${VNX_RUNTIME_PRIMARY:-1}" = "1" ] && [ "$legacy_only" != true ]; then
+  if [ "$legacy_only" != true ]; then
     log ""
     log " Runtime core: ACTIVE — canonical recovery ran above"
   fi

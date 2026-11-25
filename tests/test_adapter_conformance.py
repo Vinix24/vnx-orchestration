@@ -189,9 +189,9 @@ class TestCapabilityDeclarationAccuracy:
         result = headless_adapter.inspect("T0")
         assert result.exists is False  # no process tracked
 
-    def test_disabled_tmux_has_no_capabilities(self, tmux_adapter: TmuxAdapter) -> None:
+    def test_retired_flag_cannot_disable_tmux(self, tmux_adapter: TmuxAdapter) -> None:
         with patch.dict("os.environ", {"VNX_TMUX_ADAPTER_ENABLED": "0"}):
-            assert len(tmux_adapter.capabilities()) == 0
+            assert tmux_adapter.capabilities() == TMUX_CAPABILITIES
 
 
 # ---------------------------------------------------------------------------

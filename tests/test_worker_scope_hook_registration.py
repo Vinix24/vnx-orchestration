@@ -117,8 +117,10 @@ def test_flag_off_allows_without_touching_the_filesystem(monkeypatch, flag, payl
     monkeypatch.setattr(Path, "resolve", _refuse)
     monkeypatch.setattr(os, "stat", _refuse)
 
-    assert hook.evaluate(payload) == ("allow", None)
-    monkeypatch.undo()
+    try:
+        assert hook.evaluate(payload) == ("allow", None)
+    finally:
+        monkeypatch.undo()  # Restore filesystem calls before the launchctl audit teardown.
 
 
 def test_explicit_skip_beats_an_enabled_flag(monkeypatch):

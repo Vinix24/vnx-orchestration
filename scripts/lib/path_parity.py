@@ -566,6 +566,8 @@ def resolve_consumer_interpreter(
         if early is not None:
             return early
 
+    # Full-line shell comments cannot select an interpreter or its resolver.
+    text = "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("#"))
     if launcher:
         return _resolver_pick(repo_root, search_path, script_desc)
     resolver_root = _inline_resolver_root(text, repo_root)

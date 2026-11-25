@@ -23,6 +23,18 @@ a fresh balance measurement at failure time. A refused preflight records its
 `key_missing`, `balance_low`, or `balance_unavailable` reason in the cause counters.
 Unavailable, malformed, and non-finite balances refuse the spawn.
 
+## Configuration
+
+Analyzer, digest, receipt-classifier and Ollama settings resolve through `config_runtime`:
+override > project (for project-scoped keys) > global > environment > default.
+The analyzer strategy remains `ollama-only`; its plist still selects `deepseek-harness`
+unless a stored global value or override wins. Registered values are read when used.
+The nightly scripts use the repository's `vnx config get --raw`; an unavailable command
+logs a warning and uses `ollama-only`, an empty digest recipient or classifier off.
+SMTP stays on port 587 with the recipient as username; the password stays in env/keychain.
+Ollama model defaults remain consumer-specific: analyzer `qwen2.5-coder:14b`, adapter/router
+`gemma3:27b`, classifier `llama3.1:8b`. A configured model applies to all consumers.
+
 ## Measured incident: 21 November 2026
 
 The 01:00–01:09 UTC run's first three DeepSeek calls failed; successes and failures

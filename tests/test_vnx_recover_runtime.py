@@ -483,20 +483,19 @@ class TestCutoverCheck:
 
     def test_runtime_primary_active(self, state_dir):
         report = RecoveryReport(run_at=_now_utc(), dry_run=False)
-        with patch.dict(os.environ, {"VNX_RUNTIME_PRIMARY": "1"}):
-            _phase_cutover_check(state_dir, report)
+        _phase_cutover_check(state_dir, report)
 
         cutover_actions = [a for a in report.actions if a.phase == "cutover"]
         assert any("ACTIVE" in a.detail for a in cutover_actions)
         assert not any(a.action == "rollback_guidance" for a in cutover_actions)
 
-    def test_runtime_primary_inactive(self, state_dir):
+    def test_retired_flag_cannot_disable_runtime(self, state_dir):
         report = RecoveryReport(run_at=_now_utc(), dry_run=False)
         with patch.dict(os.environ, {"VNX_RUNTIME_PRIMARY": "0"}):
             _phase_cutover_check(state_dir, report)
 
         cutover_actions = [a for a in report.actions if a.phase == "cutover"]
-        assert any("INACTIVE" in a.detail for a in cutover_actions)
+        assert all(a.target == "runtime_core" and a.detail == "Runtime core ACTIVE" for a in cutover_actions)
 
 
 # ---------------------------------------------------------------------------

@@ -9,7 +9,6 @@ returns the completion verbatim in a clean envelope, so parsing is reliable.
 from __future__ import annotations
 
 import json
-import os
 import shutil
 import time
 import urllib.error
@@ -25,7 +24,8 @@ _DEFAULT_TIMEOUT = 120
 
 
 def _api_host() -> str:
-    host = os.environ.get("OLLAMA_HOST", "http://localhost:11434").strip()
+    import config_runtime
+    host = config_runtime.get("VNX_OLLAMA_HOST").strip()
     if not host.startswith("http"):
         host = "http://" + host
     return host.rstrip("/")
@@ -41,11 +41,13 @@ class OllamaProvider(ClassifierProvider):
         model: Optional[str] = None,
         timeout_seconds: Optional[int] = None,
     ) -> None:
-        self.model = model or os.environ.get("VNX_OLLAMA_MODEL", _DEFAULT_MODEL)
+        import config_runtime
+        configured, source = config_runtime.get_with_source("VNX_OLLAMA_MODEL")
+        self.model = model or (_DEFAULT_MODEL if source == "default" else configured)
         self.timeout_seconds = int(
             timeout_seconds
             if timeout_seconds is not None
-            else os.environ.get("VNX_OLLAMA_TIMEOUT", _DEFAULT_TIMEOUT)
+            else _DEFAULT_TIMEOUT
         )
 
     def is_present(self) -> bool:

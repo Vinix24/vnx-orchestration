@@ -835,10 +835,11 @@ def _trigger_receipt_classifier(receipt: Dict[str, Any]) -> None:
     raises — the receipt writer must remain on its happy path even if the
     classifier import or subprocess spawn fails.
     """
-    if os.environ.get("VNX_RECEIPT_CLASSIFIER_ENABLED", "0") != "1":
-        return
     try:
         sys.path.insert(0, str(SCRIPTS_DIR / "lib"))
+        import config_runtime
+        if not config_runtime.get_bool("VNX_RECEIPT_CLASSIFIER_ENABLED"):
+            return
         from receipt_classifier import trigger_receipt_classifier_async
         action = trigger_receipt_classifier_async(receipt)
         if action:

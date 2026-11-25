@@ -373,35 +373,34 @@ class TestAdapterFeatureFlags(unittest.TestCase):
             os.environ.pop("VNX_TMUX_ADAPTER_ENABLED", None)
             self.assertTrue(adapter_enabled())
 
-    def test_adapter_disabled_when_flag_zero(self):
+    def test_adapter_enabled_ignores_flag_zero(self):
         with patch.dict(os.environ, {"VNX_TMUX_ADAPTER_ENABLED": "0"}):
-            self.assertFalse(adapter_enabled())
+            self.assertTrue(adapter_enabled())
 
     def test_primary_path_active_by_default(self):
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop("VNX_ADAPTER_PRIMARY", None)
             self.assertTrue(primary_path_active())
 
-    def test_primary_path_disabled_when_flag_zero(self):
+    def test_primary_path_ignores_flag_zero(self):
         with patch.dict(os.environ, {"VNX_ADAPTER_PRIMARY": "0"}):
-            self.assertFalse(primary_path_active())
+            self.assertTrue(primary_path_active())
 
-    def test_load_adapter_returns_none_when_disabled(self):
+    def test_load_adapter_ignores_disabled_flag(self):
         with patch.dict(os.environ, {"VNX_TMUX_ADAPTER_ENABLED": "0"}):
             adapter = load_adapter("/tmp")
-            self.assertIsNone(adapter)
+            self.assertIsInstance(adapter, TmuxAdapter)
 
     def test_load_adapter_returns_instance_when_enabled(self):
         with tempfile.TemporaryDirectory() as tmp:
-            with patch.dict(os.environ, {"VNX_TMUX_ADAPTER_ENABLED": "1"}):
-                adapter = load_adapter(tmp)
-                self.assertIsInstance(adapter, TmuxAdapter)
+            adapter = load_adapter(tmp)
+            self.assertIsInstance(adapter, TmuxAdapter)
 
-    def test_config_from_env_structure(self):
+    def test_config_ignores_retired_flags(self):
         with patch.dict(os.environ, {"VNX_TMUX_ADAPTER_ENABLED": "1", "VNX_ADAPTER_PRIMARY": "0"}):
             cfg = adapter_config_from_env()
             self.assertTrue(cfg["enabled"])
-            self.assertFalse(cfg["primary_path"])
+            self.assertTrue(cfg["primary_path"])
 
 
 # ---------------------------------------------------------------------------

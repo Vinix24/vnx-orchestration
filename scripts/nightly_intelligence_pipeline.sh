@@ -260,7 +260,16 @@ run_phase "10-recommendations" python3 "$SCRIPT_DIR/generate_t0_recommendations.
 # The sender resolves its own credential (VNX_SMTP_PASS, else the macOS
 # keychain item "vnx-smtp-pass") and fails loudly if both are empty — that
 # failure must reach run_phase as a failed phase, not be pre-empted here.
-if [ -n "${VNX_DIGEST_EMAIL:-}" ]; then
+source "$SCRIPT_DIR/lib/vnx_resolve_root.sh"
+vnx_resolve_project_root "${BASH_SOURCE[0]:-$0}"
+VNX_ROOT="$VNX_PROJECT_ROOT"
+# Config snapshot.
+if ! DIGEST_EMAIL="$("$VNX_ROOT/bin/vnx" config get --raw VNX_DIGEST_EMAIL)"; then
+    echo "WARNING: VNX_DIGEST_EMAIL unavailable; using empty recipient" >&2
+    DIGEST_EMAIL=""
+fi
+# End config snapshot.
+if [ -n "$DIGEST_EMAIL" ]; then
     run_phase "11-email-digest" python3 "$SCRIPT_DIR/send_digest_email.py"
 else
     log_msg "Phase 11 (email): skipped — VNX_DIGEST_EMAIL not set"

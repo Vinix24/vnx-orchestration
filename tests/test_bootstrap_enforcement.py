@@ -251,7 +251,6 @@ class TestRcRegisterFailClosed(unittest.TestCase):
         env = {k: v for k, v in os.environ.items()}
         env["VNX_STATE_DIR"] = "/does/not/exist"
         env["VNX_DATA_DIR"] = "/does/not/exist"
-        env.pop("VNX_RUNTIME_PRIMARY", None)
         result = subprocess.run(
             [
                 sys.executable,
@@ -267,9 +266,10 @@ class TestRcRegisterFailClosed(unittest.TestCase):
         )
         self.assertNotEqual(result.returncode, 0)
 
-    def test_register_disabled_exits_0_when_runtime_primary_0(self):
-        """register subcommand exits 0 when VNX_RUNTIME_PRIMARY=0 (legacy mode)."""
+    def test_register_ignores_retired_runtime_primary_zero(self):
+        """register still registers when the removed rollback variable is set."""
         with tempfile.TemporaryDirectory() as tmp:
+            init_schema(tmp)
             dispatch_dir = os.path.join(tmp, "dispatches")
             os.makedirs(dispatch_dir)
             env = {k: v for k, v in os.environ.items()}
@@ -291,8 +291,7 @@ class TestRcRegisterFailClosed(unittest.TestCase):
             )
             self.assertEqual(result.returncode, 0)
             data = json.loads(result.stdout)
-            self.assertFalse(data["registered"])
-            self.assertEqual(data["reason"], "runtime_core_disabled")
+            self.assertTrue(data["registered"])
 
 
 # ---------------------------------------------------------------------------
@@ -407,7 +406,6 @@ class TestChainCloseout(_BaseCase):
             env = {k: v for k, v in os.environ.items()}
             env["VNX_STATE_DIR"] = tmp
             env["VNX_DATA_DIR"] = tmp
-            env["VNX_RUNTIME_PRIMARY"] = "1"
             result = subprocess.run(
                 [
                     sys.executable,
@@ -438,7 +436,6 @@ class TestChainCloseout(_BaseCase):
             env = {k: v for k, v in os.environ.items()}
             env["VNX_STATE_DIR"] = tmp
             env["VNX_DATA_DIR"] = tmp
-            env["VNX_RUNTIME_PRIMARY"] = "1"
             result = subprocess.run(
                 [
                     sys.executable,

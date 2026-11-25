@@ -11,7 +11,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import multiprocessing
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -232,3 +232,71 @@ def test_two_processes_never_exceed_three_events(tmp_path):
     events = ledger.read_events(path)
     assert len(events) == 3
     assert sorted(event["key"] for event in events) == [candidate.key for candidate in CANDIDATES[:3]]
+
+
+@pytest.mark.parametrize("age,terminal,expected", [(7, None, 1), (6, None, 0),
+    (7 - 1 / 86400, None, 0), (7, "approved", 0), (7, "verdict", 0)])
+def test_expiries_are_once_only_and_block_approval(tmp_path, age, terminal, expected):
+    ledger, path = _ledger(), tmp_path / "proposals.ndjson"
+    pid = _append(path, CANDIDATES[:1])[0]
+    if terminal:
+        _append_event(path, {"event": terminal, "project_id": "p", "proposal_id": pid})
+    now = datetime.fromisoformat(RECORDED_AT.replace("Z", "+00:00")) + timedelta(days=age)
+    for _ in range(2):
+        if hasattr(ledger, "append_expiries"):  # Old code must fail on missing expiry evidence, not an import.
+            ledger.append_expiries(path, now=now)
+        events = ledger.read_events(path)
+        expired = [e for e in events if e["event"] == "expired"]
+        assert len(expired) == expected
+        if expected:
+            assert expired[0]["recorded_at"] == now.isoformat()
+            assert ledger.approval_refusal(events, pid) == "expired"
+            with pytest.raises(ledger.ApprovalRefused, match="expired"):
+                ledger.append_approval(path, {"event": "approved", "proposal_id": pid})
+            assert CANDIDATES[0].key not in ledger.open_keys(events)
+
+
+@pytest.mark.parametrize("stamp", [None, 42, "", "unknown", "2026-11-01", "2026-11-01T00:00:00"])
+def test_bad_creation_time_blocks_expiry_without_writes(tmp_path, stamp):
+    ledger, path = _ledger(), tmp_path / "proposals.ndjson"
+    _append_event(path, {"event": "proposed", "project_id": "p", "proposal_id": "a" * 12, "recorded_at": stamp})
+    before = path.read_bytes()
+    with pytest.raises(ledger.LedgerUnreadable, match="recorded_at"):
+        ledger.append_expiries(path, now=datetime.fromisoformat("2026-11-25T00:00:00+00:00"))
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("fault", [None, {}, "unknown"])
+def test_unknown_event_blocks_expiry_without_writes(tmp_path, fault):
+    ledger, path = _ledger(), tmp_path / "proposals.ndjson"
+    pid = _append(path, CANDIDATES[:1])[0]
+    _append_event(path, {"event": fault, "project_id": "p", "proposal_id": pid})
+    before = path.read_bytes()
+    with pytest.raises(ledger.LedgerUnreadable, match="unknown proposal event"):
+        ledger.append_expiries(path, now=datetime.fromisoformat("2026-11-25T00:00:00+00:00"))
+    assert path.read_bytes() == before
+
+
+def test_expiry_matches_project_and_id_and_requires_aware_now(tmp_path):
+    ledger, path = _ledger(), tmp_path / "proposals.ndjson"
+    pid = _append(path, CANDIDATES[:1])[0]
+    _append_event(path, {"event": "expired", "project_id": "other", "proposal_id": pid})
+    assert ledger.approval_refusal(ledger.read_events(path), pid) is None
+    assert CANDIDATES[0].key in ledger.open_keys(ledger.read_events(path))
+    with pytest.raises(ledger.LedgerUnreadable, match="timezone"):
+        ledger.append_expiries(path, now=datetime(2026, 11, 25))
+    ledger.append_expiries(path, now=datetime.fromisoformat("2026-11-25T00:00:00+00:00"))
+    assert ledger.approval_refusal(ledger.read_events(path), pid) == "expired"
+
+
+@pytest.mark.parametrize("field", ["project_id", "proposal_id"])
+@pytest.mark.parametrize("fault", [None, "", {}, 42])
+def test_bad_identity_never_expires(tmp_path, field, fault):
+    ledger, path = _ledger(), tmp_path / "proposals.ndjson"
+    event = {"event": "proposed", "project_id": "p", "proposal_id": "a" * 12, "recorded_at": RECORDED_AT}
+    event[field] = fault
+    _append_event(path, event)
+    before = path.read_bytes()
+    with pytest.raises(ledger.LedgerUnreadable, match="identity"):
+        ledger.append_expiries(path, now=datetime.fromisoformat("2026-11-25T00:00:00+00:00"))
+    assert path.read_bytes() == before
