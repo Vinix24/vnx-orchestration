@@ -55,12 +55,13 @@ from __future__ import annotations
 import errno
 import fcntl
 import json
+import math
 import os
 import time
 from pathlib import Path
 from typing import Any, Dict, Optional, Sequence
 
-from vnx_paths import refuse_real_central_store_write_under_test_runner
+from vnx_paths import project_id_from_state_dir, refuse_real_central_store_write_under_test_runner
 
 # D3a: an event-driven beacon (expected_interval_seconds=None) has no
 # interval to measure staleness against, but that must not mean "never
@@ -120,7 +121,7 @@ def _status_to_health(status: Any) -> str:
     missing/None status) falls to ``"fail"`` — the unfavorable side, never
     ``"ok"``.
     """
-    if status in _KNOWN_SELF_REPORTED_STATUSES:
+    if isinstance(status, str) and status in _KNOWN_SELF_REPORTED_STATUSES:
         return status
     return "fail"
 
@@ -204,12 +205,49 @@ class HealthBeacon:
             os.close(lock_fd)
 
 
+def _expected_interval(data: Dict[str, Any], component: str) -> Any:
+    """Apply ADR-097 to legacy measurement beacons too; other writers keep their cadence."""
+    if component == "daily_metrics":
+        from daily_metrics.collect import BEACON_MAX_AGE_SECONDS
+        return BEACON_MAX_AGE_SECONDS
+    return data.get("expected_interval_seconds")
+
+
+def _last_run_timestamp(value: Any, component: str, now: float) -> float:
+    """Parse the signal; invalid evidence raises TypeError, ValueError or OverflowError."""
+    timestamp = float(value)
+    if component == "daily_metrics" and (
+        isinstance(value, bool) or not math.isfinite(timestamp) or timestamp > now
+    ):
+        raise ValueError("invalid measurement timestamp")
+    return timestamp
+
+
+def _with_measurement_details(beacons: Dict[str, Dict[str, Any]], state_dir: Path) -> Dict[str, Dict[str, Any]]:
+    """Project-scoped presentation and absence reason; age was judged by the shared reader."""
+    if "daily_metrics" in beacons:
+        measurement = beacons["daily_metrics"]
+        measurement["project_id"] = (
+            project_id_from_state_dir(state_dir) or project_id_from_state_dir(state_dir / "state") or "unknown"
+        )
+        age = measurement.get("age_seconds") if measurement["health"] != "corrupt" else None
+        measurement["age_hours"] = round(age / 3600, 1) if age is not None else None
+        if measurement["health"] == "absent":
+            measurement.update(health="fail", reason="never_measured")
+    return beacons
+
+
 def all_beacons(
     state_dir: Path,
     expected: Optional[Sequence[str]] = None,
     parked: Optional[Sequence[str]] = None,
 ) -> Dict[str, Dict[str, Any]]:
     """Read all beacons under ``state_dir/health`` and classify each.
+
+    Daily metrics also lives under ``state/health`` below a data root; that
+    canonical file wins over a root-level copy. ADR-097 applies the 36 h
+    interval even to legacy event-driven files, using this same age check.
+    Its overdue/absent verdict is ``fail``, with project, reason and hours.
 
     Classification rules (in order):
       * unreadable JSON                              -> ``health = "corrupt"``
@@ -254,17 +292,19 @@ def all_beacons(
     out: Dict[str, Dict[str, Any]] = {}
     now = time.time()
 
-    if health_dir.exists():
-        for path in sorted(health_dir.glob("*.json")):
-            # Skip tmp / lock siblings.
-            if path.suffix != ".json":
-                continue
+    paths = sorted(health_dir.glob("*.json"))
+    daily_path = state_dir / "state" / "health" / "daily_metrics.json"
+    paths.append(daily_path)
+    if paths:
+        for path in paths:
             try:
                 with open(path, "r", encoding="utf-8") as fh:
                     data = json.load(fh)
                 if not isinstance(data, dict):
                     raise ValueError("beacon payload not a JSON object")
             except (OSError, ValueError, json.JSONDecodeError) as exc:
+                if path == daily_path and isinstance(exc, FileNotFoundError):
+                    continue  # Truly absent; the expected-component pass below names it.
                 out[path.stem] = {
                     "component": path.stem,
                     "health": "corrupt",
@@ -272,22 +312,20 @@ def all_beacons(
                 }
                 continue
 
-            component = data.get("component", path.stem)
-            last_ts = data.get("last_run_ts")
+            component = "daily_metrics" if path.stem == "daily_metrics" else data.get("component", path.stem)
+            if component == "daily_metrics":
+                data["component"] = component
             try:
-                last_ts_f = float(last_ts) if last_ts is not None else None
-            except (TypeError, ValueError):
-                last_ts_f = None
-
-            if last_ts_f is None:
-                out[component] = {**data, "health": "corrupt", "error": "missing last_run_ts"}
+                last_ts_f = _last_run_timestamp(data.get("last_run_ts"), component, now)
+            except (TypeError, ValueError, OverflowError):
+                out[component] = {**data, "health": "corrupt", "error": "missing or invalid last_run_ts"}
                 continue
 
             age = now - last_ts_f
             data["age_seconds"] = round(age, 1)
 
             status = data.get("status")
-            interval = data.get("expected_interval_seconds")
+            interval = _expected_interval(data, component)
 
             if interval is None:
                 # Event-driven component: no expected cadence to measure
@@ -311,6 +349,8 @@ def all_beacons(
                     # regardless of the status it recorded at write time.
                     # A reading older than its interval is untrustworthy.
                     data["health"] = "stale"
+                    if component == "daily_metrics":
+                        data.update(health="fail", reason="no_measurement_36h")
                 else:
                     data["health"] = _status_to_health(status)
 
@@ -327,7 +367,7 @@ def all_beacons(
                 else:
                     out[name] = {"component": name, "health": "absent"}
 
-    return out
+    return _with_measurement_details(out, state_dir)
 
 
 _REASON_MAX_CHARS = 200
@@ -362,6 +402,8 @@ def _beacon_reason(beacon: Dict[str, Any]) -> Optional[str]:
         return "parked by operator decision"
     if health == "corrupt":
         return _truncate(beacon.get("error") or "beacon unreadable")
+    if beacon.get("reason"):
+        return _truncate(beacon["reason"])
     details = beacon.get("details")
     if isinstance(details, dict):
         for key in _REASON_DETAIL_KEYS:
@@ -388,6 +430,8 @@ def _compact_beacon(beacon: Dict[str, Any]) -> Dict[str, Any]:
         "age_seconds": beacon.get("age_seconds"),
         "reason": _beacon_reason(beacon),
         "details_counts": _details_counts(beacon.get("details")),
+        **({key: beacon.get(key) for key in ("project_id", "age_hours")}
+           if beacon.get("component") == "daily_metrics" else {}),
     }
 
 

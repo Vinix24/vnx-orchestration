@@ -1,7 +1,7 @@
 # Daily Metrics
 
 **Status**: Active
-**Last Updated**: 2026-11-12
+**Last Updated**: 2026-11-25
 **Owner**: track `doorloop-en-effectiviteit-dagelijks`
 **Purpose**: Install, read and check the daily lead-time measurement of one project.
 
@@ -42,6 +42,17 @@ Exit 0 only when every condition holds. Otherwise exit 1, and `unmet` names each
 | `approval_without_tty` | An `approved` event whose `evidence.tty` is not exactly `true`. The names are in `approvals_without_tty`. |
 
 ## Reading `stale` and `unknown`
+
+The `daily_metrics` health beacon has a separate 36-hour deadline (ADR-097).
+Readers measure the age of its last completed collection run (`last_run_ts`,
+the epoch form of `last_run_iso`), including legacy beacons with a null interval.
+After 36 hours it reads `fail`, reason `no_measurement_36h`, with `age_hours`.
+An expected beacon never written reads `fail` with `never_measured`.
+The existing content rule is unchanged: no final file in the last three settled
+days gives `fail` (`no_final_settled_day`), even with a fresh heartbeat.
+Readers include `state/health/daily_metrics.json` under the supplied project data
+root. The T0 index keeps a failing `daily_metrics (<project-id>): <reason>` row
+visible in its bounded list; project identity comes from that root, not the shell.
 
 `status` is `ok`, `unmet` or `stale`. `stale` means `launchctl print gui/<uid>/com.vnx.daily-metrics.<id>` reports the job as loaded while the newest settled day has no fresh file: the job is installed but not measuring. Read the job log and the newest day file first. `job.loaded` is `false` when launchd does not know the label and `null` when `launchctl` could not be asked. A loaded job is supporting evidence only; freshness always comes from the day files.
 

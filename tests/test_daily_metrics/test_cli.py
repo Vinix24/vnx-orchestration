@@ -217,6 +217,8 @@ def test_beacon_file_exists_after_daily(healthy_sources, tmp_path):
     assert beacon.exists()
     payload = json.loads(beacon.read_text(encoding="utf-8"))
     assert payload["component"] == "daily_metrics"
-    assert payload["expected_interval_seconds"] is None
+    from daily_metrics.collect import BEACON_MAX_AGE_SECONDS
+
+    assert payload["expected_interval_seconds"] == BEACON_MAX_AGE_SECONDS
     assert payload["status"] == "ok"
     assert payload["details"]["final_count"] == 3
