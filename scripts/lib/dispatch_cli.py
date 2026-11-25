@@ -1284,7 +1284,7 @@ def _dispatch_feature_mode(spec, waived_guarantees):
     import plan_gate_enforcement as pge
     if waived_guarantees is None:
         return pge.enforce_mode()
-    taken = of.snapshot(spec.project_id)
+    taken = of.snapshot(spec.project_id, project_root=Path(os.environ.get("PROJECT_ROOT") or _resolve_repo_root()))
     waived_guarantees.extend(of.waived_guarantees(spec.project_id, snapshot=taken))
     return taken[of.PLAN_GATE].value
 
