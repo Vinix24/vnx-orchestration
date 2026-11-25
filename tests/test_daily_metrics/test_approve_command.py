@@ -106,6 +106,24 @@ def test_refuses_when_an_agent_id_is_set(tmp_path):
     assert _events(root, "approved") == []
 
 
+@pytest.mark.parametrize("terminal_stream", ["stdin", "stdout"])
+def test_refuses_when_only_one_stream_is_a_terminal(tmp_path, terminal_stream):
+    root = _store(tmp_path)
+    before = (root / LEDGER).read_bytes()
+    master, slave = pty.openpty()
+    try:
+        streams = {"stdin": subprocess.PIPE, "stdout": subprocess.PIPE}
+        streams[terminal_stream] = slave
+        with subprocess.Popen(_args(root), **streams, stderr=subprocess.PIPE,
+                              text=True, env=_env()) as proc:
+            _, err = proc.communicate(input=PID + "\n" if terminal_stream == "stdout" else None, timeout=15)
+        assert proc.returncode == 2 and "stdin and stdout must both be a terminal" in err
+        assert (root / LEDGER).read_bytes() == before
+    finally:
+        os.close(slave)
+        os.close(master)
+
+
 def test_wrong_typed_id_is_refused(tmp_path):
     root = _store(tmp_path)
     code, _ = _pty_run(_args(root), "not-the-id")
