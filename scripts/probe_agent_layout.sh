@@ -56,7 +56,7 @@ emit_cell() {
 run_in_probe() {
   local cwd="$1" raw="$2"; shift 2
   ( cd "$cwd" || exit 125
-    export VNX_DATA_DIR="$PROBE_DIR/data" VNX_DATA_DIR_EXPLICIT=1 VNX_ENFORCE_WORKER_PERMISSIONS="$CELL_ENFORCE"
+    export VNX_DATA_DIR="$PROBE_DIR/data" VNX_DATA_DIR_EXPLICIT=1 VNX_OVERRIDE_ENFORCE_WORKER_PERMISSIONS="$CELL_ENFORCE"
     if [ -n "$CELL_DISPATCH_PATHS" ]; then export VNX_DISPATCH_PATHS="$CELL_DISPATCH_PATHS"; fi
     set +e
     local -a launch=("$CLAUDE_BIN") var

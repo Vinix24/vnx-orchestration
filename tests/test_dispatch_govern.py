@@ -1205,9 +1205,8 @@ def test_ensure_receipt_not_fired_when_worker_receipt_exists(tmp_data, tmp_state
     assert not receipts_file.exists() or receipts_file.read_text().strip() == ""
 
 
-def test_ensure_receipt_disabled_by_flag(tmp_data, tmp_state, monkeypatch):
-    """VNX_RECEIPT_FALLBACK=0 disables ensure_receipt entirely."""
-    monkeypatch.setenv("VNX_RECEIPT_FALLBACK", "0")
+def test_ensure_receipt_fallback_always_enabled(tmp_data, tmp_state, monkeypatch):
+    """The default receipt fallback is unconditional."""
     spec = _make_spec(tmp_data, tmp_state)
     raw = GovernRaw(receipt=None, duration_seconds=60.0)
     receipts_file = tmp_state / "t0_receipts.ndjson"
@@ -1215,7 +1214,7 @@ def test_ensure_receipt_disabled_by_flag(tmp_data, tmp_state, monkeypatch):
     ensure_receipt(spec, raw, lane="tmux_interactive", report_path=None,
                    contract_status="synthesized", permission_enforcement="soft")
 
-    assert not receipts_file.exists() or receipts_file.read_text().strip() == ""
+    assert json.loads(receipts_file.read_text().splitlines()[0])["source"] == "tmux_interactive_lane_synthesized"
 
 
 def test_ensure_receipt_idempotent(tmp_data, tmp_state):
@@ -1347,7 +1346,6 @@ def test_ensure_receipt_fake_default_spec_role_falls_through(tmp_data, tmp_state
 def test_govern_synthesized_frontmatter_role_from_metadata(tmp_data, tmp_state, monkeypatch):
     """The govern-emitted report frontmatter stamps the resolved role, not the
     hardcoded backend-developer default."""
-    monkeypatch.setenv("VNX_RECEIPT_FALLBACK", "1")
     monkeypatch.setenv("VNX_PROJECT_ID", "vnx-dev")
     _make_metadata_db(tmp_state, [("test-govern-001", "vnx-dev", "debugger")])
 
@@ -1370,7 +1368,6 @@ def test_govern_synthesized_frontmatter_role_from_metadata(tmp_data, tmp_state, 
 def test_govern_synthesized_frontmatter_identity_unresolved(tmp_data, tmp_state, monkeypatch):
     """Unresolved identity stamps identity_unresolved in frontmatter — never the
     fake backend-developer hardcode."""
-    monkeypatch.setenv("VNX_RECEIPT_FALLBACK", "1")
     monkeypatch.setenv("VNX_PROJECT_ID", "vnx-dev")
     monkeypatch.delenv("VNX_STATE_DIR", raising=False)
 
@@ -1396,7 +1393,6 @@ def test_govern_synthesized_frontmatter_identity_unresolved(tmp_data, tmp_state,
 
 def test_govern_timeout_appends_synthesized_receipt(tmp_data, tmp_state, monkeypatch):
     """govern() with receipt=None must append a lane-synthesized receipt to t0_receipts.ndjson."""
-    monkeypatch.setenv("VNX_RECEIPT_FALLBACK", "1")
 
     spec = _make_spec(tmp_data, tmp_state)
     raw = GovernRaw(receipt=None, duration_seconds=3600.0)
@@ -1421,7 +1417,6 @@ def test_govern_authored_report_no_receipt_status_done(tmp_data, tmp_state, monk
     """OI-1202: a successful tmux dispatch whose worker receipt never landed (but
     whose valid 4-heading report did) must NOT leave a 'failed' receipt. The
     lane-synthesized fallback derives status='done' from the authored report."""
-    monkeypatch.setenv("VNX_RECEIPT_FALLBACK", "1")
 
     reports_dir = tmp_data / "unified_reports"
     reports_dir.mkdir(parents=True)
@@ -1446,7 +1441,6 @@ def test_govern_authored_failure_report_no_receipt_status_failed(tmp_data, tmp_s
     """OI-1202: a worker report that passes the 4-heading contract but DECLARES
     failure (**Status**: failed, the heartbeat-kill shape) must stay 'failed' —
     the fallback must not dress a declared failure as success."""
-    monkeypatch.setenv("VNX_RECEIPT_FALLBACK", "1")
 
     reports_dir = tmp_data / "unified_reports"
     reports_dir.mkdir(parents=True)
@@ -1475,7 +1469,6 @@ def test_govern_authored_failure_report_no_receipt_status_failed(tmp_data, tmp_s
 
 def test_govern_normal_path_no_synthesized_receipt(tmp_data, tmp_state, monkeypatch):
     """govern() with a worker receipt must NOT append a synthesized one."""
-    monkeypatch.setenv("VNX_RECEIPT_FALLBACK", "1")
 
     spec = _make_spec(tmp_data, tmp_state)
     raw = GovernRaw(receipt={"status": "done", "source": "tmux_interactive"}, duration_seconds=5.0)
@@ -1493,9 +1486,8 @@ def test_govern_normal_path_no_synthesized_receipt(tmp_data, tmp_state, monkeypa
         assert synthesized == [], "No synthesized receipt expected when worker emitted its own"
 
 
-def test_govern_fallback_disabled_no_receipt_appended(tmp_data, tmp_state, monkeypatch):
-    """VNX_RECEIPT_FALLBACK=0: timeout path must NOT append a synthesized receipt."""
-    monkeypatch.setenv("VNX_RECEIPT_FALLBACK", "0")
+def test_govern_fallback_always_appends_missing_receipt(tmp_data, tmp_state, monkeypatch):
+    """The timeout path always appends a synthesized receipt when none exists."""
 
     spec = _make_spec(tmp_data, tmp_state)
     raw = GovernRaw(receipt=None, duration_seconds=3600.0)
@@ -1505,11 +1497,8 @@ def test_govern_fallback_disabled_no_receipt_appended(tmp_data, tmp_state, monke
          patch("dispatch_govern._git_changes", return_value="No git diff available"):
         govern(spec, raw, lane="tmux_interactive")
 
-    if receipts_file.exists():
-        lines = [l for l in receipts_file.read_text().splitlines() if l.strip()]
-        synthesized = [json.loads(l) for l in lines
-                       if json.loads(l).get("source") == "tmux_interactive_lane_synthesized"]
-        assert synthesized == [], "VNX_RECEIPT_FALLBACK=0 must suppress synthesized receipt"
+    receipts = [json.loads(line) for line in receipts_file.read_text().splitlines()]
+    assert any(r.get("source") == "tmux_interactive_lane_synthesized" for r in receipts)
 
 
 # ---------------------------------------------------------------------------

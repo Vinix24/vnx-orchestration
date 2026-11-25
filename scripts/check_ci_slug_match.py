@@ -31,8 +31,7 @@ Environment (GitHub Actions compatible)
   GITHUB_REF_NAME      ref name for ``push`` events (e.g. ``main``)
   GITHUB_BASE_REF      target/base branch name
   VNX_SLUG_ENFORCEMENT "1" = block on failure (default shadow/warn)
-  VNX_DEFAULT_BRANCHES comma-separated list of default branches to skip on
-                       push events (default: ``main,master``)
+  Push events on ``main`` and ``master`` are skipped.
 """
 from __future__ import annotations
 
@@ -368,6 +367,7 @@ def run_gate(
 
 def _build_parser() -> argparse.ArgumentParser:
     import os
+    import config_runtime
 
     parser = argparse.ArgumentParser(
         description="CI gate: Dispatch-ID present + slug-match in branch commits"
@@ -385,7 +385,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--enforce",
         action="store_true",
-        default=os.environ.get("VNX_SLUG_ENFORCEMENT", "0") == "1",
+        default=config_runtime.get_bool("VNX_SLUG_ENFORCEMENT"),
         help="Exit 1 on failure instead of warning (also: VNX_SLUG_ENFORCEMENT=1)",
     )
     return parser
@@ -395,11 +395,7 @@ DEFAULT_BRANCH_NAMES = ("main", "master")
 
 
 def _default_branches() -> tuple[str, ...]:
-    import os
-    raw = os.environ.get("VNX_DEFAULT_BRANCHES", "")
-    if not raw.strip():
-        return DEFAULT_BRANCH_NAMES
-    return tuple(b.strip() for b in raw.split(",") if b.strip())
+    return DEFAULT_BRANCH_NAMES
 
 
 def resolve_branch_name(args_branch_name: str | None) -> tuple[str, bool]:

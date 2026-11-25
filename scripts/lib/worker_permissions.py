@@ -461,12 +461,17 @@ def worker_permission_enforcement_enabled() -> bool:
         "on",
     ):
         return False
-    return os.environ.get("VNX_ENFORCE_WORKER_PERMISSIONS", "0").strip().lower() in (
-        "1",
-        "true",
-        "yes",
-        "on",
-    )
+    import config_runtime
+    import config_registry
+    from enforcement_profile import enforced_storeless
+    key = "VNX_ENFORCE_WORKER_PERMISSIONS"
+    strict = config_runtime.strict_resolver() if config_runtime.autowire() else None
+    value, source = (config_registry.resolve_with_source(key, strict[1], strict[0], strict_resolver=True)
+                     if strict else enforced_storeless(key))
+    if source in config_registry.ERROR_SOURCES:
+        logging.getLogger(__name__).error("%s: %s; retaining enforcement", key, source)
+        return True
+    return value.strip().lower() in ("1", "true", "yes", "on")
 
 
 def default_code_worker_profile() -> PermissionProfile:
