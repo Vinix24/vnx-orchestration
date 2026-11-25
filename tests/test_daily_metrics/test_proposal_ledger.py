@@ -287,3 +287,16 @@ def test_expiry_matches_project_and_id_and_requires_aware_now(tmp_path):
         ledger.append_expiries(path, now=datetime(2026, 11, 25))
     ledger.append_expiries(path, now=datetime.fromisoformat("2026-11-25T00:00:00+00:00"))
     assert ledger.approval_refusal(ledger.read_events(path), pid) == "expired"
+
+
+@pytest.mark.parametrize("field", ["project_id", "proposal_id"])
+@pytest.mark.parametrize("fault", [None, "", {}, 42])
+def test_bad_identity_never_expires(tmp_path, field, fault):
+    ledger, path = _ledger(), tmp_path / "proposals.ndjson"
+    event = {"event": "proposed", "project_id": "p", "proposal_id": "a" * 12, "recorded_at": RECORDED_AT}
+    event[field] = fault
+    _append_event(path, event)
+    before = path.read_bytes()
+    with pytest.raises(ledger.LedgerUnreadable, match="identity"):
+        ledger.append_expiries(path, now=datetime.fromisoformat("2026-11-25T00:00:00+00:00"))
+    assert path.read_bytes() == before

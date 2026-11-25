@@ -227,6 +227,9 @@ def append_expiries(path: Path, *, now: datetime) -> None:
         raise LedgerUnreadable("expiry now must have a timezone")
     with slot_lock(path):
         events = read_events(path)
+        for event in events:
+            if any(not isinstance(event.get(k), str) or not event[k] for k in ("project_id", "proposal_id")):
+                raise LedgerUnreadable(f"{path}: invalid proposal identity")
         closed = {(e.get("project_id"), e.get("proposal_id")) for e in events
                   if e.get("event") in (APPROVED, EXPIRED, VERDICT)}
         fresh = []
