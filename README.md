@@ -90,6 +90,8 @@ flowchart LR
 
 The architecture in depth: [docs/core/00_VNX_ARCHITECTURE.md](docs/core/00_VNX_ARCHITECTURE.md).
 
+[CI Profile A](docs/core/CI_PROFILE_A.md) runs its tests in parallel with pytest-xdist by default.
+
 ## Is VNX for you?
 
 - You already use Claude Code or Codex and want more than one session working at once.

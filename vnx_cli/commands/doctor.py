@@ -1272,11 +1272,15 @@ def _check_launchd_agents(project_dir: Path) -> list[Check]:
     for family in lps.REQUIRED_PER_PROJECT_FAMILIES:
         expected_label = f"{family}.{project_id}"
         if family in missing_families:
+            remedy = (
+                f"send operating the request `vnx daily-metrics install --project-id {project_id}`"
+                if family == "com.vnx.daily-metrics" else
+                f"run `vnx init` or `bash scripts/launchd/reload_plist.sh {family}` to install it"
+            )
             checks.append(Check(
                 f"launchd:{family}",
                 FAIL,
-                f"{expected_label} is not loaded — run `vnx init` or "
-                f"`bash scripts/launchd/reload_plist.sh {family}` to install it",
+                f"{expected_label} is not loaded — {remedy}",
             ))
         else:
             checks.append(Check(f"launchd:{family}", PASS, f"{expected_label} is loaded"))

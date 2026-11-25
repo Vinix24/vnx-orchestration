@@ -892,6 +892,7 @@ class TestInitDoctorDataDirConsistency:
                 f"-\t0\tcom.vnx.receipt-processor.{resolved_project_id}\n"
                 f"-\t0\tcom.vnx.cleanup-reviewed-worktrees.{resolved_project_id}\n"
                 f"-\t0\tcom.vnx.ledger-health.{resolved_project_id}\n"
+                f"-\t0\tcom.vnx.daily-metrics.{resolved_project_id}\n"
             ),
         )
 

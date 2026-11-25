@@ -181,7 +181,7 @@ def test_global_set_and_unset(store):
     assert code == 0 and out.startswith(f"{GLOB}=http://h:1  [global_config]")
     code, out, _ = _w(store, "unset", GLOB, "--global", "--reason", "local again")
     assert code == 0 and "[global_config]" not in out
-    lines = [json.loads(line) for line in _audit(store)[1]]
+    lines = [r for line in _audit(store)[1] if (r := json.loads(line))["operation"] in ("set", "unset")]
     assert [(r["operation"], r["reason"], r["actor"]) for r in lines] == [
         ("set", "remote ollama", "operator"), ("unset", "local again", "operator")]
 

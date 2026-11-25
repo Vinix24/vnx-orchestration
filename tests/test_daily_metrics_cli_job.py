@@ -1,7 +1,7 @@
 """doorloop PR-13: ``vnx daily-metrics`` owns the job; ``vnx init`` never installs it.
 
 The command is a thin pass-through to ``scripts/daily_metrics.py`` (decision 28) plus
-``install`` for one opt-in per-project job at 04:10 (decisions 14 and 29). The real
+``install`` for one required per-project job at 04:10 (ADR-063 amended). The real
 install path runs against a fake engine root and a temp ``HOME``; ``launchctl`` is
 stubbed at ``subprocess.run`` and never reaches the real domain.
 """
@@ -150,7 +150,7 @@ def test_install_fails_with_one_stderr_line_when_the_template_is_missing(
     assert not list(_launch_agents(home).glob(f"{LABEL}.*"))
 
 
-# opt-in: vnx init installs no daily-metrics job
+# Operator boundary: vnx init prepares but never loads the daily-metrics job.
 def test_vnx_init_installs_no_daily_metrics_job(tmp_path, monkeypatch):
     home = _fake_home(tmp_path, monkeypatch)
     engine = tmp_path / "init-engine"
@@ -185,8 +185,9 @@ def test_passthrough_survives_the_fabric_pythonpath(monkeypatch):
     assert dm_cmd.vnx_daily_metrics(_args("collect", "--help")) == 0
 
 
-def test_no_verb_is_a_usage_error():
+def test_no_verb_is_a_usage_error(capsys):
     assert dm_cmd.vnx_daily_metrics(_args()) == 2
+    assert "required per project (ADR-063 amendment 2026-11-25)" in capsys.readouterr().err
 
 
 def test_install_without_project_id_exits_two():
@@ -223,3 +224,4 @@ def test_daily_metrics_help_and_description_name_only_install():
 
     assert "install" in combined
     assert "uninstall" not in combined
+    assert "required per project" in combined and "opt-in" not in combined

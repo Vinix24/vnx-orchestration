@@ -1,13 +1,18 @@
 #!/usr/bin/env python3
-"""CI check: documentation must not point at paths or links that no longer exist.
+"""CI check: documentation paths, links, version claims and symbols must match code.
 
-Rule 1 of the documentation-follows-the-code track (ADR-079).  Two selectable
-rule names share one grammar:
+Rules 1-3 of the documentation-follows-the-code track (ADR-079):
 
 * ``paths`` -- an inline backtick token that
   ``check_architecture_doc_paths.py`` accepts as a repo path must resolve.
 * ``links`` -- a markdown link ``[text](target)`` must point at a tracked file
   or directory.
+* ``versions`` -- ADR-079's closed VERSION/release claims must match VERSION;
+  historical prefixes, ranges, changelogs and redirect stubs are not claims.
+* ``symbols`` -- in docs/modules/*.md and docs/features/*.md, Python references
+  must name a tracked definition (via ast), not a line number.
+
+The default remains ``paths`` and ``links``. Versions and symbols are opt-in.
 
 Ground truth is ``git ls-files``.  The scanset is ``docs/**/*.md``,
 ``README.md`` and ``CONTRIBUTING.md``, minus the frozen trees in
@@ -33,24 +38,30 @@ Usage:
   python3 scripts/ci/check_docs_stale_refs.py                 # exit 1 on a finding
   python3 scripts/ci/check_docs_stale_refs.py --report        # print, exit 0
   python3 scripts/ci/check_docs_stale_refs.py --rule paths    # repeatable
+  python3 scripts/ci/check_docs_stale_refs.py --report --rule versions --rule symbols
   python3 scripts/ci/check_docs_stale_refs.py --root DIR
 
-Exit 2 means the check could not run (git failed, a tracked doc is unreadable);
+Exit 2 means the check could not run (git failed, unreadable input, invalid
+VERSION or unparseable Python source);
 it is never a pass, with or without ``--report``.
 """
 from __future__ import annotations
 
 import argparse
+import ast
 import importlib.util
 import posixpath
 import re
 import subprocess
 import sys
 from dataclasses import dataclass
+from functools import cached_property
 from pathlib import Path
 from urllib.parse import unquote
 
 _HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(_HERE))
+from check_docs_layers import is_redirect_stub
 
 
 def _load_path_grammar():
@@ -69,7 +80,8 @@ _grammar = _load_path_grammar()
 _BACKTICK_PATH_RE = _grammar._BACKTICK_PATH_RE
 _looks_like_repo_path = _grammar._looks_like_repo_path
 
-RULES = ("paths", "links")
+DEFAULT_RULES = ("paths", "links")
+RULES = (*DEFAULT_RULES, "versions", "symbols")
 
 FROZEN_DOC_DIRS = (
     "docs/_archive/",
@@ -104,6 +116,19 @@ _FENCE_RE = re.compile(r"^\s{0,3}(`{3,}|~{3,})")
 _BEGIN_RE = re.compile(r"<!--\s*BEGIN\b[^>]*generated[^>]*-->", re.IGNORECASE)
 _END_RE = re.compile(r"<!--\s*END\b[^>]*generated[^>]*-->", re.IGNORECASE)
 _SKIPPED_SCHEMES = ("http:", "https:", "mailto:")
+_VERSION_NUMBER = r"\d+\.\d+\.\d+"
+_VERSION_CLAIM_RE = re.compile(
+    r"(?<![\w`])(?:"
+    r"(?:\[`VERSION`\]\(VERSION\)|`VERSION`|VERSION)\s+(?:(?:is|says|zegt|staat op)\s+)?"
+    r"|(?:last release|(?:latest|laatste) release(?: is)?)\s+)"
+    rf"(?P<quote>`?)(?P<version>{_VERSION_NUMBER})(?P=quote)(?![\w`]|\.\d|[-+]\w)"
+)
+_HISTORICAL_PREFIX_RE = re.compile(r"\b(?:since|sinds|vanaf|tot|until|in)\s+$", re.IGNORECASE)
+_VERSION_RANGE_RE = re.compile(
+    rf"^\s*(?:[-–—]|\.\.|\b(?:to|tot|through)\b)\s*`?{_VERSION_NUMBER}\b", re.IGNORECASE
+)
+_SYMBOL_DOC_RE = re.compile(r"docs/(?:modules|features)/[^/]+\.md\Z")
+_SYMBOL_REF_RE = re.compile(r"`([^`\s]+\.py)(?:::(\w+(?:\.\w+)?)|:(\d+(?:[-–,]\d+)*))`")
 
 
 @dataclass(frozen=True)
@@ -145,8 +170,10 @@ def is_path_exception(token: str) -> bool:
 class Tree:
     """Tracked files and directories, from ``git ls-files``."""
 
-    def __init__(self, files: set[str]):
+    def __init__(self, files: set[str], root: Path):
         self.files = files
+        self.root = root.resolve()
+        self._symbols: dict[str, set[str]] = {}
         self.dirs: set[str] = set()
         for f in files:
             parent = posixpath.dirname(f)
@@ -169,6 +196,58 @@ class Tree:
             return True
         suffix = "/" + token
         return sum(1 for e in self.entries if e.endswith(suffix)) == 1
+
+    def is_source(self, rel: str) -> bool:
+        return rel in self.files and not rel.startswith("/") and not {"", ".", ".."}.intersection(rel.split("/"))
+
+    def read_source(self, rel: str) -> str:
+        """Read only exact tracked regular files; failures remain check errors."""
+        if not self.is_source(rel):
+            raise CheckError(f"not a tracked source file: {rel}")
+        try:
+            path = self.root / rel
+            resolved = path.resolve(strict=True)
+            if resolved != path:
+                raise CheckError(f"symlink source is not allowed: {rel}")
+            return resolved.read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as exc:
+            raise CheckError(f"cannot read source {rel}: {exc}") from exc
+
+    @cached_property
+    def version(self) -> str:
+        version = self.read_source("VERSION").strip()
+        if not re.fullmatch(_VERSION_NUMBER, version):
+            raise CheckError("VERSION must contain one major.minor.patch version")
+        return version
+
+    def symbols(self, rel: str) -> set[str]:
+        if rel not in self._symbols:
+            try:
+                module = ast.parse(self.read_source(rel), filename=rel)
+            except (SyntaxError, ValueError) as exc:
+                raise CheckError(f"cannot parse source {rel}: {exc}") from exc
+            self._symbols[rel] = _defined_symbols(module.body)
+        return self._symbols[rel]
+
+
+def _defined_symbols(nodes: list[ast.AST]) -> set[str]:
+    names: set[str] = set()
+    for node in nodes:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            names.add(node.name)
+            if isinstance(node, ast.ClassDef):
+                names.update(f"{node.name}.{child.name}" for child in node.body
+                             if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)))
+        elif isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+            if isinstance(node, ast.AnnAssign) and node.value is None:
+                continue  # An annotation without a value does not define an assignment.
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            names.update(child.id for target in targets for child in ast.walk(target)
+                         if isinstance(child, ast.Name) and isinstance(child.ctx, ast.Store))
+        else:
+            # Module-level control flow does not introduce a Python name scope.
+            names.update(_defined_symbols(list(ast.iter_child_nodes(node))))
+    return names
 
 
 def in_scanset(rel: str) -> bool:
@@ -216,6 +295,8 @@ def check_document(rel: str, text: str, tree: Tree, rules: set[str]) -> list[Fin
     generated = generated_lines(rel, lines)
     findings: list[Finding] = []
     check_paths = "paths" in rules and not rel.startswith(PATH_RULE_SKIP_DIRS)
+    check_versions = "versions" in rules and posixpath.basename(rel) != "CHANGELOG.md" and not is_redirect_stub(text)
+    check_symbols = "symbols" in rules and _SYMBOL_DOC_RE.fullmatch(rel)
     for no, line in prose_lines(lines):
         gen = no in generated
         if check_paths:
@@ -234,6 +315,36 @@ def check_document(rel: str, text: str, tree: Tree, rules: set[str]) -> list[Fin
                 finding = _check_link(rel, no, m.group(1), tree, gen)
                 if finding:
                     findings.append(finding)
+        if check_versions:
+            findings.extend(_check_versions(rel, no, line, tree.version, gen))
+        if check_symbols:
+            findings.extend(_check_symbols(rel, no, line, tree, gen))
+    return findings
+
+
+def _check_versions(rel: str, no: int, line: str, version: str, gen: bool) -> list[Finding]:
+    findings = []
+    for match in _VERSION_CLAIM_RE.finditer(line):
+        if _HISTORICAL_PREFIX_RE.search(line[:match.start()]) or _VERSION_RANGE_RE.match(line[match.end():]):
+            continue
+        if match.group("version") != version:
+            findings.append(Finding(rel, no, "versions", f"{match.group()} differs from VERSION {version}", gen))
+    return findings
+
+
+def _check_symbols(rel: str, no: int, line: str, tree: Tree, gen: bool) -> list[Finding]:
+    findings = []
+    for match in _SYMBOL_REF_RE.finditer(line):
+        path, name, number = match.groups()
+        if number is not None:
+            reason = "uses a line number; use a symbol reference"
+        elif not tree.is_source(path):
+            reason = "does not name a tracked source file"
+        elif name not in tree.symbols(path):
+            reason = "is not defined in that file or class"
+        else:
+            continue
+        findings.append(Finding(rel, no, "symbols", f"{match.group()} {reason}", gen))
     return findings
 
 
@@ -273,7 +384,9 @@ def run_check(root: Path, rules: set[str]) -> list[Finding]:
     files = {ln for ln in _git(root, "ls-files").splitlines() if ln}
     if not files:
         raise CheckError("git ls-files returned no tracked files")
-    tree = Tree(files)
+    tree = Tree(files, root)
+    if "versions" in rules:
+        tree.version  # Validate ground truth even when the scanset has no claims.
     findings: list[Finding] = []
     for rel in sorted(f for f in files if in_scanset(f)):
         try:
@@ -290,7 +403,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--rule", action="append", choices=RULES, help="rule to run (repeatable)")
     parser.add_argument("--root", help="repository root (default: git toplevel)")
     args = parser.parse_args(sys.argv[1:] if argv is None else argv)
-    rules = set(args.rule) if args.rule else set(RULES)
+    rules = set(args.rule) if args.rule else set(DEFAULT_RULES)
     try:
         root = Path(args.root).resolve() if args.root else Path(
             _git(Path.cwd(), "rev-parse", "--show-toplevel").strip()

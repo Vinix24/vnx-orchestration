@@ -2,7 +2,9 @@
 
 This document is the single source of truth for which VNX subsystems are live, parked, cut, or scoped. **Generated (PR-3):** the deterministic columns (subsystem/what/flag/status) are regenerated from `scripts/lib/config_registry.py` via `vnx subsystems --md`; `.github/workflows/subsystems-drift.yml` fails CI if this file drifts from that output. The `health` column is dynamic — it comes from a live health beacon when a probe has run (PR-5–7), else falls back to the last-committed value here. Hand-edits to the deterministic columns will be reverted by the next `vnx subsystems --md` run; hand-edits to `health` are fine until a probe takes over that row.
 
-**Not the daemon-process register.** These rows are feature flags (`config_registry`), not OS processes. Which processes VNX's supervisor actually starts, and whether each one is currently running, lives in a separate generated file: `docs/core/DAEMON_LIVENESS.md` (source: `scripts/lib/daemon_register.py`, regenerate with `python3 scripts/generate_daemon_liveness_md.py`). It is a dedicated file rather than a section here because its table shares this ledger's 5-column shape, which `check_subsystems_drift.py` would otherwise misread as phantom subsystem rows (measured while building the D2 daemon-liveness dispatch). Overlap between the two registers is exactly two.
+**Not the daemon-process register.** These rows describe flag-backed and flagless subsystems (`config_registry`), not OS processes. Which processes VNX's supervisor actually starts, and whether each one is currently running, lives in a separate generated file: `docs/core/DAEMON_LIVENESS.md` (source: `scripts/lib/daemon_register.py`, regenerate with `python3 scripts/generate_daemon_liveness_md.py`). It is a dedicated file rather than a section here because its table shares this ledger's 5-column shape, which `check_subsystems_drift.py` would otherwise misread as phantom subsystem rows (measured while building the D2 daemon-liveness dispatch). Overlap between the two registers is exactly two.
+
+Each registry row carries a `doc` path under `docs/modules/`, or `geschrapt`, `geen-module` or `niet-gebouwd`. Missing pages are reported by `scripts/check_subsystems_drift.py` as advisory diagnostics without changing its exit code; the table retains five columns. M3/M4 found no merged candidates, so their thirteen new rows are distinct and flagless.
 
 | subsystem | what | flag | status | health |
 |-----------|------|------|--------|--------|
@@ -41,8 +43,21 @@ This document is the single source of truth for which VNX subsystems are live, p
 | ledger-lifecycle | Dispatch lifecycle in the receipt ledger (ADR-045): one start line, one end line per attempt, and a report that is never a second outcome. | `VNX_LEDGER_LIFECYCLE` | LIVE | works — K-act acceptance: one door run with no override books one start, one end and one report_ingested |
 | headless-builder-context | Settings levels a claude_headless builder loads (--setting-sources); default project,local, user,project,local restores the old argv; carries `cleanupPeriodDays` and `claudeMdExcludes` (walk-up, claude-code#87590), never `effortLevel`. | `VNX_BUILDER_SETTING_SOURCES` | ACTIVATE-and-measure | unknown — no probe yet |
 | docs-style-file | The Markdown file with writing rules that staging appends to a docs dispatch; empty is off, an unreadable set path refuses staging. | `VNX_DOC_STYLE_FILE` | ACTIVATE-and-measure | unknown — no probe yet |
-| plan-gate-panel | 5-model deliberation panel for plan-first enforcement. | `VNX_PLAN_GATE_ENFORCE` | SCOPE | works — panel runs, verdicts recorded |
-| agent-layout | Agent-as-folder skill layout (track agents-als-map-fase-1): off or shadow; `on` is phase 2 and reads as off. | `VNX_AGENT_LAYOUT` | SCOPE | unknown — no probe yet |
+| pool | Project-scoped worker pool membership, reaping and scaling. | — | ACTIVATE-and-measure | unknown — no probe yet |
+| merge-door | Merge preflights, door permit, head pinning and confirmed-merge bookkeeping. | — | ACTIVATE-and-measure | unknown — no probe yet |
+| provider-switch | Provider-family availability policy and refusal before invocation. | — | ACTIVATE-and-measure | unknown — no probe yet |
+| cost-ledger | Provider-run pricing, ledger/spool recording and cost aggregation. | — | ACTIVATE-and-measure | unknown — no probe yet |
+| daily-metrics | Per-project daily source collection, catch-up and metric documents. | — | ACTIVATE-and-measure | unknown — no probe yet |
+| worker-permissions | Worker permission profiles, isolation policy and tool/MCP CLI scoping. | — | ACTIVATE-and-measure | unknown — no probe yet |
+| receipt-pipeline | Report conversion and validated, enriched, idempotent receipt append. | — | ACTIVATE-and-measure | unknown — no probe yet |
+| event-streams | Canonical event validation, persistence and stream rotation. | — | ACTIVATE-and-measure | unknown — no probe yet |
+| control-centre | Registered-project lease/heartbeat display and audited queue forwarding. | — | ACTIVATE-and-measure | unknown — no probe yet |
+| unified-supervisor | Periodic runtime checks, lease expiry and anomaly recording. | — | ACTIVATE-and-measure | unknown — no probe yet |
+| state-aggregator | Event-backed per-project snapshots and central activity counts. | — | ACTIVATE-and-measure | unknown — no probe yet |
+| producer-freshness-monitor | Per-key producer cadence checks, job-exit harvesting and freshness reports. | — | ACTIVATE-and-measure | unknown — no probe yet |
+| wiring-gate | Diff and committed-tree caller analysis with advisory or required findings. | — | ACTIVATE-and-measure | unknown — no probe yet |
+| plan-gate-panel | Configurable plan-review panel: one default seat, BLOCK escalation, path/profile floors. | `VNX_PLAN_GATE_ENFORCE` | SCOPE | works — panel runs, verdicts recorded |
+| agent-layout | Agent-skill materialisation: off, shadow copy or on at the provider's native discovery location. | `VNX_AGENT_LAYOUT` | SCOPE | unknown — no probe yet |
 | subsystem-cockpit | SUBSYSTEMS.md + config_registry + vnx subsystems + dashboard tile. | — | COCKPIT | degraded — SSOT exists, probes partial |
 | effectiveness-probe-framework | Generic "does it produce crap?" probes per subsystem. | — | COCKPIT | unknown — framework not built yet |
 
@@ -56,7 +71,7 @@ This document is the single source of truth for which VNX subsystems are live, p
 
 ## CI guards that are not flags
 
-The rows above are feature flags. Two CI guards are not, and are described here
+The rows above include flag-backed and flagless subsystems. Two additional CI guards are described here
 because they are subsystems an operator has to know the state of. Both are on `main`,
 and were released in 1.9.0. This is code behaviour; no ADR records them.
 

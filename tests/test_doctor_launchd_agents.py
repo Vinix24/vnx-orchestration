@@ -58,6 +58,16 @@ class TestMissingJobIsLoud:
     """The core red test: doctor on a project without a receipt-processor
     job must FAIL, and the failure must name the job."""
 
+    def test_missing_daily_metrics_names_operating_request(self, tmp_path, monkeypatch):
+        _write_marker(tmp_path, "new-project")
+        _patch(monkeypatch, labels=["com.vnx.daily-metrics.new-project-other"])
+        checks = doctor._check_launchd_agents(tmp_path)
+        rows = [c for c in checks if c.name == "launchd:com.vnx.daily-metrics"]
+        assert len(rows) == 1, checks
+        assert rows[0].status == doctor.FAIL
+        assert "operating" in rows[0].detail
+        assert "vnx daily-metrics install --project-id new-project" in rows[0].detail
+
     def test_missing_receipt_processor_fails_with_job_name(self, tmp_path, monkeypatch):
         _write_marker(tmp_path, "vnx-dev")
         _patch(monkeypatch, labels=[f"{GATE_OBLIGATION}.vnx-dev"])  # receipt-processor absent
@@ -121,6 +131,7 @@ class TestCleanStateIsGreen:
                 f"{GATE_OBLIGATION}.vnx-dev",
                 f"{CLEANUP_WORKTREES}.vnx-dev",
                 f"{LEDGER_HEALTH}.vnx-dev",
+                "com.vnx.daily-metrics.vnx-dev",
             ],
         )
 

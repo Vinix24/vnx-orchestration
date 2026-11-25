@@ -180,3 +180,51 @@ def test_no_project_id_exits_two_with_one_stderr_line(tmp_path):
     assert proc.returncode == 2
     assert len(proc.stderr.strip().splitlines()) == 1
     assert "project-id" in proc.stderr
+
+
+def test_proposal_inbox_points_are_exact_and_retry_safe(tmp_path):
+    import operator_queue as oq
+    import operator_queue_ask as qa
+    store = _store(tmp_path)
+    for day in _window_days():
+        value = 5.0 if day == METRIC_DAY else 1.0
+        store.write_final(day.isoformat(), {"metrics": {
+            KEY: _scalar(value), "pr_open_to_merge_p75_hours": _scalar(value)}})
+    for _ in range(2):
+        proc = _run(tmp_path, ["propose", *_args(tmp_path)])
+        assert proc.returncode == 0, proc.stderr
+        points = {e["point_id"]: e for e in oq.read_lines("p", state_dir=tmp_path / "state") if e["kind"] == "opened"}
+        assert len(points) == 2
+        for event in _events(tmp_path):
+            point = next(p for p in points.values() if p["ref"] == f"proposal:{event['proposal_id']}")
+            assert point["bron"] == 2
+            assert point["kopieerblok"] == f'vnx daily-metrics approve {event["proposal_id"]} --action "<intervention>"'
+            assert all(str(event[k]) in point["vraag"] for k in ("project_id", "metric_id", "value", "baseline", "metric_day"))
+            assert qa.ask("p", bron="besluit", ref=point["ref"], vraag=point["vraag"],
+                          sluit_bij=point["sluit_bij"], opened_by="lezer", state_dir=tmp_path / "state") is None
+    assert len([e for e in oq.read_lines("p", state_dir=tmp_path / "state") if e["kind"] == "opened"]) == 2
+
+
+def test_inbox_failure_preserves_proposal_and_retry_recovers(tmp_path):
+    import operator_queue as oq
+    _seed_window(tmp_path)
+    state = tmp_path / "state"
+    state.write_text("not a directory")
+    proc = _run(tmp_path, ["propose", *_args(tmp_path)])
+    assert proc.returncode == 1 and "inbox" in proc.stderr
+    assert len(_events(tmp_path)) == 1
+    state.rename(tmp_path / "blocked-state")
+    proc = _run(tmp_path, ["propose", *_args(tmp_path)])
+    assert proc.returncode == 0, proc.stderr
+    assert len(_events(tmp_path)) == len(oq.read_state("p", state_dir=state)["points"]) == 1
+
+
+def test_propose_expires_before_new_proposals_even_without_a_final_day(tmp_path):
+    _seed_window(tmp_path)
+    assert _run(tmp_path, ["propose", *_args(tmp_path)]).returncode == 0
+    args = _args(tmp_path)
+    args[-1] = "2026-11-15T03:00:00Z"
+    for _ in range(2):
+        proc = _run(tmp_path, ["propose", *args])
+        assert proc.returncode == 0, proc.stderr
+        assert [e["event"] for e in _events(tmp_path)] == ["proposed", "expired"]
