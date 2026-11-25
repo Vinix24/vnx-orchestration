@@ -140,6 +140,8 @@ def _run_migrator(
     """
     if central_state is None:
         central_state = tmp_path / "central" / "state"
+    central_state.parent.mkdir(parents=True, exist_ok=True)
+    (central_state.parent / ".vnx-project-id").write_text("test-project\n")
 
     cmd = [
         "--apply",
