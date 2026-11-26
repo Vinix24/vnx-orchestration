@@ -1,4 +1,4 @@
-"""ADR-097: register ci_run/1 configuration before M3a/M3b add readers."""
+"""ADR-097: ci_run/1 configuration is wired through the nightly collector."""
 
 import sys
 import sqlite3
@@ -36,7 +36,7 @@ def test_ci_run_key_contract(key):
     entry = cr.CONFIG_REGISTRY[key]
     type_, default, owner = ROWS[key]
     assert (entry.type, entry.default, entry.scope) == (type_, default, "project")
-    assert entry.read_site_wired is False
+    assert entry.read_site_wired is True
     assert entry.category == "gate"
     assert entry.subsystem == "governance-enforcement-stack"
     assert "ADR-097" in entry.description and owner in entry.description

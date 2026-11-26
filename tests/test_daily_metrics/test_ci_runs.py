@@ -55,9 +55,9 @@ def transport(rows, jobs=None, override=None):
 def execute(writer, tmp_path, rows=None, jobs=None, override=None, **options):
     runner, calls = transport(rows if rows is not None else [run_row()], jobs, override)
     result = writer.write_runs("vnx-dev", DAY, date(2026, 11, 24), now=NOW,
-                               project_root=tmp_path, state_dir=tmp_path, runner=runner,
+                               project_root=tmp_path, state_dir=tmp_path / "state", runner=runner,
                                **options)
-    path = tmp_path / "ci_runs.ndjson"
+    path = tmp_path / "state/ci_runs.ndjson"
     records = [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
     return result, records, calls
 
@@ -154,7 +154,7 @@ def test_stopped_reads_preserve_completed_attempt_and_retry_unknown(writer, tmp_
     assert beacon["project_id"] == "vnx-dev" and beacon["reason"] == reason
     assert len(beacon["skipped_attempts"]) == 1 and result["coverage"] == "incomplete"
     assert execute(writer, tmp_path, [run_row(2)])[0]["coverage"] == "complete"
-    assert len(writer.existing_records(tmp_path / "ci_runs.ndjson")) == 2
+    assert len(writer.existing_records(tmp_path / "state/ci_runs.ndjson")) == 2
 
 def test_incomplete_pagination_is_not_a_total(writer, tmp_path):
     def override(args, count):
@@ -187,7 +187,7 @@ def test_invalid_budget_before_calls(writer, tmp_path, bad):
 @pytest.mark.parametrize("bad", ["..", "/tmp", "vnx-dev/../other"])
 def test_project_path_refused(writer, tmp_path, bad):
     with pytest.raises(ValueError):
-        writer.write_runs(bad, DAY, DAY, now=NOW, project_root=tmp_path, state_dir=tmp_path)
+        writer.write_runs(bad, DAY, DAY, now=NOW, project_root=tmp_path, state_dir=tmp_path / "state")
 
 def test_ledger_validation_read_failure_and_short_write(writer, tmp_path, monkeypatch):
     _, records, _ = execute(writer, tmp_path)
@@ -244,20 +244,63 @@ def test_raising_runner_and_beacon_io_failure_are_visible(tmp_path, capsys):
     from daily_metrics.collect import collect_ci_runs
     def runner(args, cwd):
         raise OSError("gh unavailable")
-    result = collect_ci_runs("vnx-dev", NOW, tmp_path, project_root=tmp_path, runner=runner)
+    result = collect_ci_runs("vnx-dev", NOW, tmp_path / "state", project_root=tmp_path, runner=runner)
     assert result["reason"] == "writer_failed" and result["coverage"] == "incomplete"
     assert json.loads((tmp_path / "health/ci_runs.json").read_text())["status"] == "fail"
     blocked = tmp_path / "blocked"
     blocked.write_text("file instead of directory")
-    result = collect_ci_runs("..", NOW, blocked, project_root=tmp_path, runner=runner)
+    result = collect_ci_runs("..", NOW, blocked / "state", project_root=tmp_path, runner=runner)
     assert result["beacon_error"] and '"writer_failed"' in capsys.readouterr().err
 
 def test_nightly_configuration_and_shared_window(tmp_path):
     from daily_metrics.collect import collect_ci_runs
     runner, calls = transport([run_row(2)])
-    result = collect_ci_runs("vnx-dev", NOW, tmp_path, project_root=tmp_path, runner=runner)
+    result = collect_ci_runs("vnx-dev", NOW, tmp_path / "state", project_root=tmp_path, runner=runner)
     assert result["written"] == 2 and result["calls"] == len(calls)
     assert result["range"] == ["2026-11-11", "2026-11-24"]
+
+@pytest.mark.parametrize("failure_at", ["repo", "jobs"])
+@pytest.mark.parametrize("reader", ["all_beacons", "t0_health"])
+def test_collection_failure_reaches_health_readers(tmp_path, failure_at, reader):
+    from daily_metrics.collect import collect_ci_runs
+    from health_beacon import all_beacons
+    from build_t0_state import _build_system_health
+
+    def response(args, count):
+        if (failure_at == "repo" and args[1] == "repo") or (failure_at == "jobs" and "/jobs?" in args[2]):
+            return 1, "", "HTTP 502"
+    runner, _ = transport([run_row()], override=response)
+    result = collect_ci_runs("vnx-dev", NOW, tmp_path / "state", project_root=tmp_path, runner=runner)
+    assert result["coverage"] == "incomplete"
+    if reader == "all_beacons":
+        beacons = all_beacons(tmp_path)
+        assert beacons["ci_runs"]["details"] == result
+    else:
+        health = _build_system_health(
+            tmp_path / "state", True, expected_beacon_components=(),
+            daemon_liveness={"overall": "ok"}, launchd_liveness={"overall": "ok"},
+            processor_liveness={"overall": "ok"},
+        )
+        beacons = health["beacon_health"]["beacons"]
+        assert health["beacon_health"]["overall"] == "fail"
+        assert beacons["ci_runs"]["reason"] == result["reason"]
+    assert beacons["ci_runs"]["health"] == "fail"
+    assert (tmp_path / "health/ci_runs.json").is_file()
+
+
+def test_initial_repo_rate_limit_keeps_reason(tmp_path):
+    from daily_metrics.collect import collect_ci_runs
+
+    def response(args, count):
+        assert args[1] == "repo"
+        return 1, "", "HTTP 429 rate limit exceeded"
+    runner, calls = transport([], override=response)
+    result = collect_ci_runs("vnx-dev", NOW, tmp_path / "state", project_root=tmp_path, runner=runner)
+    assert result["reason"] == "rate_limited"
+    assert result["coverage"] == "incomplete" and result["population_total"] is None
+    assert len(calls) == 1
+    beacon = json.loads((tmp_path / "health/ci_runs.json").read_text())
+    assert beacon["status"] == "fail" and beacon["details"] == result
 
 @pytest.mark.parametrize("field", ["head_sha", "repository", "run_attempt"])
 def test_contradictory_or_missing_identity_is_incomplete(writer, tmp_path, field):
@@ -340,7 +383,7 @@ def cli_night(writer, tmp_path, monkeypatch, runner, **options):
         return subprocess.CompletedProcess(args, code, stdout, stderr)
     monkeypatch.setattr(subprocess, "run", process)
     return writer.write_runs("vnx-dev", DAY, date(2026, 11, 24), now=NOW,
-                             project_root=tmp_path, state_dir=tmp_path, **options)
+                             project_root=tmp_path, state_dir=tmp_path / "state", **options)
 
 
 def test_long_history_bounds_discovery_and_reserves_window_reads(writer, tmp_path, monkeypatch):
@@ -359,7 +402,7 @@ def test_long_history_bounds_discovery_and_reserves_window_reads(writer, tmp_pat
             return 0, json.dumps({"total_count": len(selected), "workflow_runs": selected[(page-1)*100:page*100]}), ""
     runner, calls = transport(rows, override=response)
     result = cli_night(writer, tmp_path, monkeypatch, runner, max_calls=12)
-    records = writer.existing_records(tmp_path / "ci_runs.ndjson")
+    records = writer.existing_records(tmp_path / "state/ci_runs.ndjson")
     assert len(records) == 2 and all(r["queue_seconds"]["value"] == 10 for r in records.values())
     assert "created=2026-10-24T00:00:00Z..2026-11-24T23:59:59Z" in calls[1][2]
     discovery = [c[2] for c in calls if "/actions/runs?" in c[2]]
@@ -386,7 +429,7 @@ def test_transient_jobs_retry_next_night(writer, tmp_path, monkeypatch, response
     assert json.loads((tmp_path / "health/ci_runs.json").read_text())["status"] == "fail"
     runner, _ = transport([run_row()])
     second = cli_night(writer, tmp_path, monkeypatch, runner)
-    latest = writer.existing_records(tmp_path / "ci_runs.ndjson")
+    latest = writer.existing_records(tmp_path / "state/ci_runs.ndjson")
     assert next(iter(latest.values()))["queue_seconds"]["value"] == 10
     assert second["coverage"] == "complete" and second["reason"] is None
     assert json.loads((tmp_path / "health/ci_runs.json").read_text())["status"] == "ok"
@@ -411,7 +454,7 @@ def test_empty_pr_association_is_resolved_or_recorded_once(writer, tmp_path, mon
             return 0, json.dumps({"pull_requests": prs}), ""
     runner, calls = transport([dict(run_row(), pull_requests=[])], override=response)
     result = cli_night(writer, tmp_path, monkeypatch, runner)
-    record = next(iter(writer.existing_records(tmp_path / "ci_runs.ndjson").values()))
+    record = next(iter(writer.existing_records(tmp_path / "state/ci_runs.ndjson").values()))
     assert record["pr_id"] == expected
     assert record["pr_id_unknown_reason"] == ("source_missing" if expected is None else None)
     assert result["coverage"] == "complete" and result["population_total"] == 1
@@ -436,17 +479,37 @@ def test_pr_lookup_invalid_evidence_blocks(writer, tmp_path, monkeypatch, payloa
     assert result["skipped_attempts"] and result["written"] == 0
 
 
-@pytest.mark.parametrize("budget", [5, 10])
-def test_pr_lookup_pagination_failure_stays_blocking(writer, tmp_path, monkeypatch, budget):
+@pytest.mark.parametrize("budget,stop_page,failure,reason", [
+    (4, 1, "HTTP 502", "call_budget_exhausted"),
+    (5, 2, "HTTP 502", "call_budget_exhausted"),
+    (10, 1, "HTTP 429 rate limit exceeded", "rate_limited"),
+    (10, 2, "HTTP 429 rate limit exceeded", "rate_limited"),
+    (10, 2, "HTTP 502", "source_missing"),
+])
+def test_pr_lookup_pagination_failure_stays_blocking(writer, tmp_path, monkeypatch, budget, stop_page, failure, reason):
     def response(args, count):
         if args[2].endswith("/attempts/1"):
             return 0, json.dumps(dict(run_row(), pull_requests=[])), ""
         if "/commits/" in args[2]:
-            if "page=2" in args[2]:
-                return 1, "", "HTTP 502"
+            if args[2].endswith(f"&page={stop_page}"):
+                return 1, "", failure
             prs = [{"number": n + 1, "head": {"sha": "b" * 40}} for n in range(100)]
             return 0, json.dumps({"pull_requests": prs}), ""
-    runner, _ = transport([run_row()], override=response)
+    runner, calls = transport([run_row()], override=response)
     result = cli_night(writer, tmp_path, monkeypatch, runner, max_calls=budget)
-    assert result["reason"] == ("call_budget_exhausted" if budget == 5 else "source_missing")
-    assert result["coverage"] == "incomplete" and result["written"] == 0
+    assert result["reason"] == reason and result["coverage"] == "incomplete"
+    assert result["skipped_attempts"] == [{"run_id": 7, "run_attempt": 1, "reason": reason}]
+    assert len(calls) == min(budget, 4 + stop_page)
+    if reason == "source_missing":
+        assert result["written"] == 0
+        return
+    assert result["written"] == 1
+    records = writer.existing_records(tmp_path / "state/ci_runs.ndjson")
+    record = records[("org/repo", "vnx-dev", 7, 1)]
+    writer.validate_record(record)
+    assert all(record[name]["value"] is None and record[name]["unknown_reason"] == reason
+               and record[name]["source"] for name in writer.FIELDS)
+    runner, _ = transport([run_row()])
+    assert cli_night(writer, tmp_path, monkeypatch, runner)["coverage"] == "complete"
+    latest = writer.existing_records(tmp_path / "state/ci_runs.ndjson")
+    assert len(latest) == 1 and latest[writer.identity(record)]["conclusion"]["value"] == "success"

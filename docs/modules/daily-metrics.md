@@ -19,18 +19,21 @@ all identified window attempts were collected. `VNX_CI_WORKFLOWS` is a
 comma-separated exact-name filter; empty selects all PR workflows. Each earlier
 attempt is read separately. A stopped read cannot establish an earlier attempt's
 timestamp/status: these unresolved attempts are named in beacon issues, never guessed.
-`state/health/ci_runs.json` and a stderr JSON line report coverage, calls, skipped
+`health/ci_runs.json` under the data root (the parent of `--state-dir` when overridden)
+and a stderr JSON line report coverage, calls, skipped
 attempts and failures. Incomplete coverage has `population_total: null`. Writer
 failure leaves the other daily metrics running. The existing merged-PR metric is unchanged.
 Both `ci_runs` and `daily_metrics` beacons are opt-in: absence alone is not a failure
 on projects that never ran the nightly command. Existing beacons still report failures.
 The top-level reason is the strongest actual blocking cause, in descending order:
 `rate_limited`, `call_budget_exhausted`, `source_invalid`, `source_missing`.
+A rate-limited initial repository lookup also reports `rate_limited` in the failing beacon.
 
 Each validated line has six field wrappers. Test fields remain `junit_not_configured`
 without `VNX_CI_JUNIT_ARTIFACT`; configured artifacts remain `source_missing` naming
 the artifact and M3b reader. A budget/rate stop makes all six fields unknown for
-identified completed attempts. Unresolved Actions fields (including transient read
+identified completed attempts, including when the stop occurs during the PR lookup
+after the attempt and its jobs were read. Unresolved Actions fields (including transient read
 failures and records written by the earlier writer) are retried inside the catch-up
 window; they remain issues/skipped attempts with a failing beacon until resolved.
 Lines remain immutable, but one complete Actions observation may supersede an

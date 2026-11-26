@@ -343,6 +343,13 @@ def write_runs(project_id, from_day, to_day, *, now, project_root, state_dir=Non
         try:
             if not read_error and not error:
                 row = resolve_pr(reader, repo, row)
+        except RunReadFailure as exc:
+            error = str(exc)
+            issues.append(f"{exc}: {source}: PR association")
+            skipped.append({"run_id": row["id"], "run_attempt": row["run_attempt"], "reason": error})
+            if error not in {"rate_limited", "call_budget_exhausted"}:
+                continue
+        try:
             record = make_record(project_id, repo, row, now, source, jobs, read_error or error, artifact)
             if read_error:
                 for name in FIELDS[:4]:
@@ -352,9 +359,6 @@ def write_runs(project_id, from_day, to_day, *, now, project_root, state_dir=Non
             if record["pr_id_unknown_reason"] == "source_invalid":
                 reasons.add("source_invalid")
             issues.extend(f"{reason}: {source}" for reason in REASON_PRIORITY if reason in reasons)
-        except RunReadFailure as exc:
-            issues.append(f"{exc}: {source}: PR association")
-            skipped.append({"run_id": row["id"], "run_attempt": row["run_attempt"], "reason": str(exc)})
         except ValueError as exc:
             issues.append(f"source_invalid: {source}: {exc}")
     reasons = {issue.split(":", 1)[0] for issue in issues} | {s["reason"] for s in skipped} | {reader.stopped}
@@ -364,5 +368,5 @@ def write_runs(project_id, from_day, to_day, *, now, project_root, state_dir=Non
                   calls=reader.calls, budget=max_calls, skipped_attempts=skipped,
                   reason=next((reason for reason in REASON_PRIORITY if reason in reasons), None))
     result["written"] = append_records(state / "ci_runs.ndjson", records)
-    HealthBeacon(state, "ci_runs", 36 * 3600).heartbeat_strict("fail" if result["reason"] else "ok", result)
+    HealthBeacon(state.parent, "ci_runs", 36 * 3600).heartbeat_strict("fail" if result["reason"] else "ok", result)
     return result

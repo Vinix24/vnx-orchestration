@@ -34,6 +34,7 @@ from types import ModuleType
 from typing import Any
 
 from daily_metrics import days, metric
+from daily_metrics.github_fetch import RunReadFailure
 from daily_metrics.store import DayStore
 from health_beacon import HealthBeacon
 
@@ -275,10 +276,11 @@ def collect_ci_runs(project_id, now, state_dir, *, project_root=None, runner=Non
                             state_dir=state_dir, max_calls=int(values[0]), workflows=values[1],
                             artifact=values[2], runner=runner)
     except Exception as exc:  # vnx-silent-except: nightly CI writer failure is reported; other metrics must continue
+        reason = "rate_limited" if isinstance(exc, RunReadFailure) and str(exc) == "rate_limited" else "writer_failed"
         result = dict(project_id=project_id, coverage="incomplete", population_total=None,
-                      reason="writer_failed", error=f"{type(exc).__name__}: {exc}", skipped_attempts=[])
+                      reason=reason, error=f"{type(exc).__name__}: {exc}", skipped_attempts=[])
         try:
-            HealthBeacon(state_dir, "ci_runs", BEACON_MAX_AGE_SECONDS).heartbeat_strict("fail", result)
+            HealthBeacon(Path(state_dir).parent, "ci_runs", BEACON_MAX_AGE_SECONDS).heartbeat_strict("fail", result)
         except OSError as beacon_error:  # vnx-silent-except: stderr retains evidence when the beacon store is unwritable
             result["beacon_error"] = str(beacon_error)
     print(json.dumps({"ci_runs": result}), file=sys.stderr)
