@@ -36,6 +36,14 @@ catalogue's explicit `default_model`. Unknown models, conflicting pairs and
 missing provider defaults raise `ValueError` with `worker_model_unknown`,
 `worker_pair_conflict` or `worker_model_unresolved`. Read/config errors refuse.
 
+For terminal requests, the config reader autowires the runtime store for the
+requested `project_id` (or the runtime project when omitted) and passes
+`config_runtime.strict_resolver()` explicitly. Project rows are therefore read
+even in a previously unwired process. An unreadable or corrupt database raises
+`ValueError("worker_config_unreadable: project_config_error")`; it cannot select
+a lower pair. A failed store lookup also refuses. No project or no store retains
+the storeless config chain, without reusing a previously wired project's resolver.
+
 Omitting `terminal_id` selects a pool, without terminal env overrides. Only
 builder rows count; `orchestrator` is excluded. Multiple builder pairs require
 `pools[].default_pair: {provider, model}`, validated against the catalogue;

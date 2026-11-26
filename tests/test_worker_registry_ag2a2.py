@@ -1,6 +1,7 @@
 """AG-2a2 whole-pair resolution, pool selection and unchanged fleet."""
 import logging
 from pathlib import Path
+import sqlite3
 import sys
 
 import pytest
@@ -8,11 +9,19 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts" / "lib"))
+import config_registry
+import config_runtime
+import config_store_db
 import worker_registry as registry
 
 
 @pytest.fixture(autouse=True)
-def clean_terminal_env(monkeypatch):
+def clean_terminal_env(tmp_path, monkeypatch):
+    monkeypatch.setattr(config_runtime, "_wired_for", {})
+    monkeypatch.setattr(config_runtime, "_wire_status", None)
+    monkeypatch.setattr(config_registry, "_db_resolver", None)
+    monkeypatch.setattr(config_registry, "_default_project_id", None)
+    monkeypatch.setenv("VNX_STATE_DIR", str(tmp_path / "state"))
     for terminal in ("T1", "T2", "T3"):
         for field in ("PROVIDER", "MODEL"):
             for prefix in ("VNX_", "VNX_OVERRIDE_"):
@@ -61,7 +70,7 @@ def test_spec_beats_env_as_whole_pair(tmp_path, monkeypatch, caplog):
     with caplog.at_level(logging.INFO, logger=registry.__name__):
         result = registry.resolve_worker("T1", spec={"model": "kimi-k3"}, repo_root=tmp_path)
     assert result == dict(provider="kimi", model="kimi-k3", source="spec", overridden=["env"])
-    assert caplog.messages == [
+    assert [record.getMessage() for record in caplog.records if record.name == registry.__name__] == [
         "worker_resolution: provider=kimi model=kimi-k3 source=spec overridden=[env]"]
 
 
@@ -70,6 +79,82 @@ def write_registry(tmp_path, data):
     path.parent.mkdir(exist_ok=True)
     path.write_text(yaml.safe_dump(data))
     return path
+
+
+@pytest.fixture
+def project_config(tmp_path, monkeypatch):
+    state = tmp_path / "state"
+    state.mkdir()
+    conn = sqlite3.connect(state / "runtime_coordination.db")
+    try:
+        config_store_db.ensure_config_tables(conn)
+        for project, provider, model in (
+            ("worker-project", "kimi", "kimi-k3"),
+            ("worker-project-shadow", "codex", "gpt-6-astra"),
+        ):
+            for field, value in (("PROVIDER", provider), ("MODEL", model)):
+                conn.execute(
+                    "INSERT INTO project_config (project_id, config_key, config_value, updated_by) "
+                    "VALUES (?, ?, ?, 'test')", (project, f"VNX_T1_{field}", value))
+        conn.commit()
+    finally:
+        conn.close()
+    monkeypatch.setenv("VNX_PROJECT_ID", "worker-project-shadow")
+    return state
+
+
+@pytest.mark.parametrize("with_registry", [False, True])
+@pytest.mark.parametrize("project_id", [None, "worker-project"])
+def test_project_config_pair_wins_unwired(tmp_path, monkeypatch, project_config, with_registry, project_id):
+    if with_registry:
+        write_registry(tmp_path, yaml.safe_load(
+            (ROOT / "scripts/lib/defaults/vnx_workers.default.yaml").read_text()))
+    if project_id is None:
+        monkeypatch.setenv("VNX_PROJECT_ID", "worker-project")
+    assert config_registry._db_resolver is None
+    result = registry.resolve_worker("T1", repo_root=tmp_path, project_id=project_id)
+    assert result == dict(provider="kimi", model="kimi-k3", source="env",
+                          overridden=["registry"] if with_registry else [])
+
+
+@pytest.mark.parametrize("wired", [False, True])
+@pytest.mark.parametrize("failure", ["corrupt", "unreadable"])
+def test_project_config_db_failure_refuses(tmp_path, project_config, wired, failure):
+    write_registry(tmp_path, yaml.safe_load(
+        (ROOT / "scripts/lib/defaults/vnx_workers.default.yaml").read_text()))
+    if wired:
+        assert config_runtime.autowire(project_id="worker-project")
+    db = project_config / "runtime_coordination.db"
+    if failure == "corrupt":
+        broken = db.with_suffix(".tmp")
+        broken.write_bytes(b"not a SQLite database" * 100)
+        broken.replace(db)
+    else:
+        db.rename(db.with_suffix(".original"))
+        db.mkdir()  # A directory cannot be opened as SQLite, even by a privileged runner.
+    with pytest.raises(ValueError, match="^worker_config_unreadable: project_config_error$"):
+        registry.resolve_worker("T1", repo_root=tmp_path, project_id="worker-project")
+
+
+@pytest.mark.parametrize("project_id", [None, "worker-project"])
+def test_missing_store_ignores_previously_wired_resolver(tmp_path, monkeypatch, project_config, project_id):
+    assert config_runtime.autowire(project_id="worker-project")
+    monkeypatch.setenv("VNX_STATE_DIR", str(tmp_path / "missing-state"))
+    monkeypatch.delenv("VNX_PROJECT_ID")
+    result = registry.resolve_worker("T1", repo_root=tmp_path, project_id=project_id)
+    assert (result["provider"], result["model"], result["source"]) == ("claude", "sonnet", "default")
+
+
+def test_config_store_discovery_error_refuses(tmp_path, monkeypatch):
+    import vnx_paths
+
+    def unreadable_paths():
+        raise OSError("project store lookup failed")
+
+    monkeypatch.delenv("VNX_STATE_DIR")
+    monkeypatch.setattr(vnx_paths, "resolve_paths", unreadable_paths)
+    with pytest.raises(ValueError, match="^worker_config_unreadable: project_config_error$"):
+        registry.resolve_worker("T1", repo_root=tmp_path, project_id="worker-project")
 
 
 @pytest.mark.parametrize("default_pair", [None, {"provider": "kimi", "model": "kimi-k3"}])

@@ -433,18 +433,28 @@ def resolve_worker(terminal_id=None, *, pool_id="default", spec=None, repo_root=
     File/config errors propagate; the legacy loader's code fallback is untouched.
     """
     if __package__:
-        from . import config_registry
+        from . import config_registry, config_runtime
     else:
         import config_registry
+        import config_runtime
     if terminal_id is not None:
         _validate_terminal_id(terminal_id)
     spec = {} if spec is None else spec
     if not isinstance(spec, dict):
         raise ValueError("worker_pair_conflict: spec must be a mapping")
+    resolver = None
+    if terminal_id is not None:
+        if config_runtime.autowire(project_id=project_id):
+            resolver, project_id = config_runtime.strict_resolver()
+        else:
+            status = config_runtime.wire_status()
+            if status is None or status.cause not in {"no_project", "store_missing"}:
+                raise ValueError("worker_config_unreadable: project_config_error")
     env = {}
     for field_name in ("provider", "model") if terminal_id is not None else ():
         value, source = config_registry.resolve_with_source(
-            f"VNX_{terminal_id}_{field_name.upper()}", project_id, strict_resolver=True)
+            f"VNX_{terminal_id}_{field_name.upper()}", project_id, resolver,
+            use_default_resolver=False, strict_resolver=True)
         if source in config_registry.ERROR_SOURCES:
             raise ValueError(f"worker_config_unreadable: {source}")
         env[field_name] = value
