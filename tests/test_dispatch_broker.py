@@ -473,7 +473,7 @@ class TestBrokerFailureRecording(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 class TestBrokerShadowMode(unittest.TestCase):
-    """Verify shadow mode flag behavior and load_broker() env-based creation."""
+    """Q1bb: production cutover is fixed; explicit constructors retain a test seam."""
 
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
@@ -495,24 +495,22 @@ class TestBrokerShadowMode(unittest.TestCase):
         self.assertTrue(broker.enabled)
 
     def test_load_broker_returns_instance_when_enabled(self) -> None:
-        with patch.dict(os.environ, {"VNX_BROKER_ENABLED": "1", "VNX_BROKER_SHADOW": "1"}):
-            broker = load_broker(self.state_dir, self.dispatch_dir)
+        broker = load_broker(self.state_dir, self.dispatch_dir)
         self.assertIsNotNone(broker)
         self.assertIsInstance(broker, DispatchBroker)
 
-    def test_load_broker_returns_none_when_disabled(self) -> None:
+    def test_load_broker_ignores_retired_disable_flag(self) -> None:
         with patch.dict(os.environ, {"VNX_BROKER_ENABLED": "0"}):
             broker = load_broker(self.state_dir, self.dispatch_dir)
-        self.assertIsNone(broker)
+        self.assertIsInstance(broker, DispatchBroker)
 
-    def test_load_broker_shadow_mode_from_env_on(self) -> None:
+    def test_load_broker_ignores_retired_shadow_flag(self) -> None:
         with patch.dict(os.environ, {"VNX_BROKER_ENABLED": "1", "VNX_BROKER_SHADOW": "1"}):
             broker = load_broker(self.state_dir, self.dispatch_dir)
-        self.assertTrue(broker.shadow_mode)
+        self.assertFalse(broker.shadow_mode)
 
-    def test_load_broker_shadow_mode_from_env_off(self) -> None:
-        with patch.dict(os.environ, {"VNX_BROKER_ENABLED": "1", "VNX_BROKER_SHADOW": "0"}):
-            broker = load_broker(self.state_dir, self.dispatch_dir)
+    def test_load_broker_authoritative_by_default(self) -> None:
+        broker = load_broker(self.state_dir, self.dispatch_dir)
         self.assertFalse(broker.shadow_mode)
 
     def test_broker_config_from_env_enabled_default(self) -> None:
@@ -523,17 +521,25 @@ class TestBrokerShadowMode(unittest.TestCase):
             with patch.dict(os.environ, env, clear=True):
                 config = broker_config_from_env()
         self.assertTrue(config["enabled"])
-        self.assertTrue(config["shadow_mode"])
+        self.assertFalse(config["shadow_mode"])
 
-    def test_broker_config_from_env_disabled(self) -> None:
+    def test_broker_config_ignores_retired_disable_flag(self) -> None:
         with patch.dict(os.environ, {"VNX_BROKER_ENABLED": "0", "VNX_BROKER_SHADOW": "1"}):
             config = broker_config_from_env()
-        self.assertFalse(config["enabled"])
+        self.assertTrue(config["enabled"])
 
-    def test_broker_config_from_env_shadow_off(self) -> None:
-        with patch.dict(os.environ, {"VNX_BROKER_ENABLED": "1", "VNX_BROKER_SHADOW": "0"}):
+    def test_broker_config_ignores_retired_shadow_flag(self) -> None:
+        with patch.dict(os.environ, {"VNX_BROKER_SHADOW": "1"}):
             config = broker_config_from_env()
         self.assertFalse(config["shadow_mode"])
+
+    def test_q1bb_standalone_registration_does_not_start_delivery(self) -> None:
+        broker = load_broker(self.state_dir, self.dispatch_dir)
+        result = _register_dispatch(broker, "q1bb-standalone")
+        with get_connection(self.state_dir) as conn:
+            self.assertEqual(get_dispatch(conn, "q1bb-standalone")["state"], "queued")
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM dispatch_attempts").fetchone()[0], 0)
+        self.assertEqual((result.bundle_path / "prompt.txt").read_text(), "Do some work.")
 
     def test_shadow_mode_broker_still_registers_durably(self) -> None:
         """In shadow mode, registration must still be durable in the DB."""

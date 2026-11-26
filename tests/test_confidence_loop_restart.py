@@ -33,6 +33,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+pytestmark = pytest.mark.usefixtures("receipt_project")
+
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 sys.path.insert(0, str(ROOT / "scripts" / "lib"))
@@ -289,7 +291,7 @@ def test_a_different_outcome_for_the_same_dispatch_is_a_new_fact(stores):
     assert [row[0] for row in _events(stores.central, dispatch_id)] == ["failure", "success"]
 
 
-def test_the_same_outcome_is_scoped_to_its_project(stores, monkeypatch):
+def test_conflicting_project_cannot_update_store(stores, monkeypatch, capsys):
     dispatch_id = "20260923-conf-tenants"
     _hook(_outcome_receipt(dispatch_id), stores.central)
     monkeypatch.setenv("VNX_PROJECT_ID", "other-project")
@@ -303,7 +305,8 @@ def test_the_same_outcome_is_scoped_to_its_project(stores, monkeypatch):
         ).fetchall()
     finally:
         conn.close()
-    assert projects == [("vnx-dev",), ("other-project",)]
+    assert projects == [("vnx-dev",)]
+    assert "project_id conflict" in capsys.readouterr().err
 
 
 # ---------------------------------------------------------------------------

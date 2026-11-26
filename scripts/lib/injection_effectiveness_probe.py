@@ -482,6 +482,7 @@ def _emit_tuning_proposals_written_event(
     proposals_added: int,
     proposals_total: int,
     generated_at: str,
+    project_id: str,
 ) -> None:
     """ADR-005 audit event for the ``pending_injection_tuning.json`` write.
 
@@ -497,7 +498,6 @@ def _emit_tuning_proposals_written_event(
     default (flags off) behavior is unchanged, since ``write_tuning_proposals``
     is never reached when either flag is off.
     """
-    project_id = os.environ.get("VNX_PROJECT_ID", "vnx-dev")
     timestamp = _now_utc().strftime("%Y-%m-%dT%H:%M:%SZ")
     record_id = hashlib.sha256(
         f"{project_id}:{output_path}:{generated_at}:{proposals_added}:{proposals_total}".encode(
@@ -530,6 +530,7 @@ def write_tuning_proposals(
     proposals: List[Dict[str, Any]],
     output_path: "Path | str",
     generated_at: Optional[str] = None,
+    project_id: Optional[str] = None,
 ) -> int:
     """Atomically write/merge proposals into ``pending_injection_tuning.json``
     (tmp + os.replace, mirroring skill_refinement.write_proposals).
@@ -548,7 +549,9 @@ def write_tuning_proposals(
     Emits an ADR-005 NDJSON audit event (``_emit_tuning_proposals_written_event``)
     after the ``os.replace`` that persists the queue.
     """
+    from project_scope import resolve_stamp_project_id
     output_path = Path(output_path)
+    project_id = resolve_stamp_project_id(project_id, output_path)
     if generated_at is None:
         generated_at = _now_utc().strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -584,6 +587,7 @@ def write_tuning_proposals(
         proposals_added=added,
         proposals_total=len(merged),
         generated_at=generated_at,
+        project_id=project_id,
     )
 
     return added

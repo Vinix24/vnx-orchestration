@@ -19,6 +19,8 @@ from unittest import mock
 
 import pytest
 
+pytestmark = pytest.mark.usefixtures("receipt_project")
+
 TESTS_DIR = Path(__file__).resolve().parent
 SCRIPTS_DIR = TESTS_DIR.parent / "scripts"
 LIB_DIR = SCRIPTS_DIR / "lib"

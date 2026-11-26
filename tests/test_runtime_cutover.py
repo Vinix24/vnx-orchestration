@@ -92,9 +92,7 @@ class TestRuntimePrimaryFlag(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory()
         try:
             state_dir, dispatch_dir = _setup_dirs(tmp)
-            with patch.dict(os.environ, {"VNX_BROKER_ENABLED": "1",
-                                          "VNX_BROKER_SHADOW": "0"}):
-                core = load_runtime_core(state_dir, dispatch_dir)
+            core = load_runtime_core(state_dir, dispatch_dir)
             self.assertIsInstance(core, RuntimeCore)
         finally:
             tmp.cleanup()
@@ -394,11 +392,7 @@ class TestGovernanceCompatibility(unittest.TestCase):
 
     def test_compat_check_all_components_ok(self) -> None:
         """Full compat check passes with default env (runtime primary enabled)."""
-        with patch.dict(os.environ, {
-            "VNX_BROKER_ENABLED": "1",
-            "VNX_BROKER_SHADOW": "0",
-        }):
-            result = RuntimeCore.check_compatibility(self.state_dir, self.dispatch_dir)
+        result = RuntimeCore.check_compatibility(self.state_dir, self.dispatch_dir)
         self.assertTrue(result["compatible"])
 
 
@@ -438,11 +432,7 @@ class TestCutoverCompatibilityCheck(unittest.TestCase):
         self._tmp.cleanup()
 
     def test_compat_check_returns_compatible_true(self) -> None:
-        with patch.dict(os.environ, {
-            "VNX_BROKER_ENABLED": "1",
-            "VNX_BROKER_SHADOW": "0",
-        }):
-            result = RuntimeCore.check_compatibility(self.state_dir, self.dispatch_dir)
+        result = RuntimeCore.check_compatibility(self.state_dir, self.dispatch_dir)
         self.assertTrue(result["compatible"])
 
     def test_adapter_load_failure_is_incompatible(self) -> None:
@@ -468,8 +458,6 @@ class TestCutoverCompatibilityCheck(unittest.TestCase):
             "VNX_DATA_DIR": str(Path(self._tmp.name)),
             "VNX_STATE_DIR": self.state_dir,
             "VNX_DISPATCH_DIR": self.dispatch_dir,
-            "VNX_BROKER_ENABLED": "1",
-            "VNX_BROKER_SHADOW": "0",
         }
         result = subprocess.run(
             [sys.executable, str(_SCRIPTS_DIR / "runtime_cutover_check.py")],

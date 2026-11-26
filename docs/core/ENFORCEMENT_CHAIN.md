@@ -41,6 +41,8 @@ The project's review stack (default `codex_gate,deepseek_gate` since the operato
 
 `scripts/pr_merge.py`, function `_run_door`, runs five preflights in the order of `PREFLIGHT_ORDER` and stops at the first refusal. A refusal writes a `pr_merge_refused` receipt and exits non-zero.
 
+CI is waived only when the optional-feature snapshot says no source requires it (`ci_requirement`); the preflight names the waiver and the receipt carries `waived_guarantees`. See `docs/core/DISPATCH_RULES.md` section 2.2 for the pinned snapshot and live protection evidence.
+
 | Order | Preflight | Function | What it refuses |
 |---|---|---|---|
 | 1 | `ci` | `_run_ci_gate` | The project's CI workflow (`ci_workflow` in the protection YAML on `main`, else `VNX CI`) has no `conclusion=success` on exactly the PR head |

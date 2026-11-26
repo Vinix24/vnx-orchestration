@@ -17,8 +17,8 @@ import config_registry as cr  # noqa: E402
 SCOUT = ("codex", "deepseek", "gemini", "ollama")
 # key -> (type, default, approval, allowed_values, read_site_wired)
 ROWS = {
-    "VNX_PAID_LANE_DAILY_BUDGET_USD": ("float", "5.00", True, None, False),
-    "VNX_RECEIPT_CLASSIFIER_DAILY_COST_USD": ("float", "0.20", True, None, False),
+    "VNX_PAID_LANE_DAILY_BUDGET_USD": ("float", "5.00", True, None, True),
+    "VNX_RECEIPT_CLASSIFIER_DAILY_COST_USD": ("float", "0.20", True, None, True),
     "VNX_RECEIPT_CLASSIFIER_MODE": ("string", "batch", False, None, False),
     "VNX_RECEIPT_CLASSIFIER_PROVIDER": ("string", "haiku", False, None, False),
     "VNX_REQUIRE_DISPATCH_TRACK": ("bool", "0", False, None, True),

@@ -25,7 +25,8 @@ from test_confidence_loop_restart import _bootstrap_like_production, _events, _s
 
 
 @pytest.fixture()
-def state(tmp_path) -> Path:
+def state(tmp_path, monkeypatch) -> Path:
+    monkeypatch.setenv("VNX_PROJECT_ID", "test-project")
     state_dir = tmp_path / "state"
     state_dir.mkdir()
     _bootstrap_like_production(state_dir)

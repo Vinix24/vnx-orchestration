@@ -111,7 +111,7 @@ def test_md_health_falls_back_to_committed_seed_when_no_beacon(tmp_path, capsys)
     for subsystem, expected_health in seed_health.items():
         line = next((l for l in out.splitlines() if l.startswith(f"| {subsystem} |")), None)
         assert line is not None, f"missing row for {subsystem}"
-        assert line.rstrip("|").rsplit("|", 1)[-1].strip() == expected_health
+        assert line.strip("|").split("|")[4].strip() == expected_health
 
 
 # ---------------------------------------------------------------------------

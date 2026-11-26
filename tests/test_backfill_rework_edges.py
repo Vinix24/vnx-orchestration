@@ -19,6 +19,7 @@ PID = "tproj"
 
 
 def _bootstrap(path: Path) -> Path:
+    (path.parent / ".vnx-project-id").write_text(PID + "\n")
     assert qdi.bootstrap_qi_db(path) is True
     return path
 

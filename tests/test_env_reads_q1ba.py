@@ -1,4 +1,4 @@
-"""Q1b-a cutover readers and rollback-variable regressions."""
+"""Q1b cutover readers and rollback-variable regressions (parts a and b)."""
 import ast
 import os
 from pathlib import Path
@@ -19,6 +19,7 @@ FILES = (
     "lib/lease_manager.py", "runtime_core_cli.py", "runtime_cutover_check.py",
     "commands/recover.sh", "lib/vnx_recovery_phases.py",
     "lib/mixed_execution_router.py", "lib/dispatch_lifecycle.sh",
+    "dispatcher_minimal.sh", "lib/dispatch_broker.py",
 )
 
 
@@ -41,12 +42,10 @@ def test_no_cutover_env_reads():
                 name = arg.value if isinstance(arg, ast.Constant) else aliases.get(getattr(arg, "id", ""))
                 if name in FLAGS:
                     reads.append((file, name))
-    # Rule 1 stops these readers: inherited dispatcher values differ from standalone defaults.
-    retained = [("lib/terminal_state_core.py", "VNX_CANONICAL_LEASE_ACTIVE"),
-                ("lib/lease_manager.py", "VNX_CANONICAL_LEASE_ACTIVE"),
-                ("lib/mixed_execution_router.py", "VNX_BROKER_SHADOW")]
-    assert [read for read in reads if read not in retained] == [], reads
-    assert sorted(reads) == sorted(retained), "Revisit deferred readers only with entry-point evidence"
+    # Q1bb STOP: lease_sweep is dispatcher-only and opt-in; no standalone expiry owner.
+    retained = [(file, "VNX_CANONICAL_LEASE_ACTIVE") for file in (
+        "dispatcher_minimal.sh", "lib/terminal_state_core.py", "lib/lease_manager.py")]
+    assert sorted(reads) == sorted(retained), reads
 
 
 @pytest.mark.parametrize("flag,function", [
@@ -85,8 +84,12 @@ def test_cli_initialization_failure_blocks(tmp_path, command):
     import json
     state = tmp_path / "state"
     state.write_text("not a directory")
-    result = subprocess.run([sys.executable, str(ROOT / "scripts/runtime_core_cli.py"), *command],
-                            env={**os.environ, "VNX_STATE_DIR": str(state), "VNX_BROKER_ENABLED": "0"},
+    runner = ("import runpy,sys; from pathlib import Path; from unittest.mock import patch; "
+              "sys.path.insert(0,str(Path(sys.argv[1]).parent/'lib'))\n"
+              "with patch('runtime_core.load_broker', side_effect=OSError('broker unavailable')): "
+              "runpy.run_path(sys.argv.pop(1),run_name='__main__')")
+    result = subprocess.run([sys.executable, "-c", runner, str(ROOT / "scripts/runtime_core_cli.py"), *command],
+                            env={**os.environ, "VNX_STATE_DIR": str(state)},
                             capture_output=True, text=True)
     assert result.returncode == 1, result.stdout + result.stderr
     payload = json.loads(result.stdout)

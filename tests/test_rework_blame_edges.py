@@ -43,6 +43,7 @@ class Fixture:
         self.rc = sqlite3.connect(tmp_path / "rc.db")
         self.rc.executescript(_RC)
         qi = tmp_path / "qi.db"
+        (tmp_path / ".vnx-project-id").write_text(PID + "\n")
         assert qdi.bootstrap_qi_db(qi) is True
         self.qi = sqlite3.connect(qi)
         self.wm = tmp_path / "wm.json"

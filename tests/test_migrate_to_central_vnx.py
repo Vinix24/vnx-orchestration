@@ -109,6 +109,7 @@ def fixture_env(tmp_path: Path, monkeypatch) -> dict:
 
     central_state = tmp_path / "central" / "state"
     central_qi, central_rc = _make_central_dbs(central_state)
+    (central_state / ".vnx-project-id").write_text("vnx-dev\n")
 
     specs: list[dict] = []
     for name, pid in [
@@ -1421,6 +1422,7 @@ def test_round3_canonical_bootstrap_includes_imperative_tables(tmp_path: Path):
     state_dir.mkdir()
     qi_db = state_dir / "quality_intelligence.db"
     rc_db = state_dir / "runtime_coordination.db"
+    (state_dir / ".vnx-project-id").write_text("test-project\n")
     M._init_central_if_missing(qi_db, rc_db)
 
     with sqlite3.connect(qi_db) as c:

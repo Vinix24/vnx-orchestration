@@ -51,7 +51,16 @@ vnx doctor
 ```
 
 `vnx init` creates the tracked project scaffold (`.vnx/`, `.vnx-project-id`,
-and `agents/`) and a resolved runtime state directory.
+and `agents/`) and a resolved runtime state directory. Both pip and source
+init reuse an existing project marker, otherwise slugify the directory basename
+(or use a deterministic `vnx-<8 hex>` path hash if no valid slug exists). Source
+init anchors `<data-root>/.vnx-project-id` before initializing its store; it needs
+no pre-created marker or `VNX_PROJECT_ID`. An existing data marker wins over a
+renamed directory. Conflicting project/data markers or store layouts refuse.
+Direct store initialization still requires a project id from the database layout, a `.vnx-project-id` marker, or
+`VNX_PROJECT_ID`; present sources must agree. Without a source it refuses and
+asks you to run `vnx init` in the project. A failed QI tenant reconciliation
+also fails initialization; correct the reported error before retrying.
 
 ## Step 3: Prepare the Project and Dispatch
 

@@ -279,6 +279,7 @@ from vnx_paths import ensure_env, project_id_from_state_dir
 from main_window import active_store, read_admission_config, read_window, admit as admit_main
 from governance_receipts import dispatch_identity_fields, emit_governance_receipt, utc_now_iso
 import forge_gate_publisher
+import optional_features
 from forge_gate_publisher import CONCLUSION_FAILURE, DOOR_CHECK_NAME, REVOKE_FAILED, REVOKED, ForgeCheckRunError
 from merge_preflight_ci_check import check_ci_run_for_head, _resolve_override_reason
 from merge_preflight_adr_check import check_adr_numbers_for_pr
@@ -289,6 +290,7 @@ from contract_invalid_ledger import (
 )
 from forge_protection_drift import (
     BranchNotProtectedError,
+    ENFORCEMENT_ENFORCE,
     ENFORCEMENT_OFF,
     ENFORCEMENT_WARN,
     MISSING_FILE_ENFORCEMENT,
@@ -447,6 +449,7 @@ def _preflight_record(name: str, gate: Dict[str, Any], head_sha: str = "") -> Di
         "reason_code": str(gate.get("reason_code") or ""),
         "mode": str(gate.get("mode") or ""),
         "pr_size": _pr_size_block(gate.get("pr_size")) if name == PR_SIZE_GATE else None,
+        **{key: gate[key] for key in ("status", "optional_features", "waived_guarantees") if key in gate},
     }
 
 
@@ -634,7 +637,72 @@ def _project_ci_workflow(override_reason: Optional[str]) -> Tuple[Optional[str],
     """
     if _resolve_override_reason(override_reason) is not None:
         return None, ""
-    return fetch_ci_workflow_from_main(_target_root(), fetch=fetch_yaml_from_ref)
+    return fetch_ci_workflow_from_main(_target_root(), fetch=_ci_protection_read)
+
+
+def _ci_protection_read(root, ref, path):
+    """Serve the shared read at its actual path; keep the canonical search order."""
+    found, fetched = _fetch_protection_yaml(root, ref)
+    return fetched if path == found or fetched.not_found else YamlFetchResult(None, True, None)
+
+
+def _door_features():
+    """One snapshot from pinned main, shared with all later protection readers (ADR-092)."""
+    try:
+        main = _gh(["api", "repos/{owner}/{repo}/commits/main", "--jq", ".sha"])
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise optional_features.OptionalFeatureRefused("branch_protection_unreadable", str(exc)) from exc
+    sha = main.stdout.strip()
+    if main.returncode != 0 or re.fullmatch(r"[0-9a-fA-F]{40}", sha) is None:
+        raise optional_features.OptionalFeatureRefused("branch_protection_unreadable", "main SHA unreadable")
+    path, fetched = _fetch_protection_yaml(_target_root(), sha)
+    if fetched.error or (not fetched.not_found and not isinstance(fetched.text, str)):
+        raise optional_features.OptionalFeatureRefused("branch_protection_unreadable", fetched.error or "empty read")
+    if _PROTECTION_READS is not None:
+        _PROTECTION_READS[(str(_target_root()), "main")] = (path, fetched)
+    return optional_features.snapshot(active_store()[1], protection_yaml=fetched.text,
+                                      protection_source=f"{path}@{sha}")
+
+
+def _run_optional_ci_gate(pr_number: int, *, override_reason=None):
+    """CI may be waived only by the snapshot's ci_requirement result; unknown state refuses."""
+    try:
+        states = _door_features()
+        if type(states["ci"].on) is not bool:
+            raise optional_features.OptionalFeatureRefused("ci_requirement_unreadable", "CI requirement is not boolean")
+        waived = optional_features.waived_guarantees(None, snapshot=states)
+    except optional_features.OptionalFeatureRefused as exc:
+        return dict(verdict="NO-GO", message=f"OptionalFeatureRefused: {exc}", reason_code=exc.code), None
+    if states["ci"].on is True:
+        gate, pr_data = _run_ci_gate(pr_number, override_reason=override_reason)
+    else:
+        pr_data = _query_pr(pr_number)
+        head, branch = (pr_data or {}).get("headRefOid"), (pr_data or {}).get("headRefName")
+        valid = isinstance(head, str) and re.fullmatch(r"[0-9a-fA-F]{40}", head) and isinstance(branch, str) and branch.strip()
+        gate = dict(verdict="GO" if valid else "NO-GO", status="waived" if valid else "refused",
+                    reason_code="ci_not_required" if valid else "pr_head_unreadable",
+                    message="CI waived: ci_requirement=false; VNX_CI_GATE_REQUIRED=" + states["ci"].value
+                    if valid else "PR-head (sha/branch) unreadable; CI waiver cannot waive identity")
+    evidence = {name: dict(feature=s.feature, on=s.on, value=s.value, source=s.source,
+                           server_verified=False if name == "branch_protection" else s.server_verified)
+                for name, s in states.items()}
+    return dict(gate, optional_features=evidence, waived_guarantees=waived), pr_data
+
+
+def _optional_evidence(records):
+    """Copy recorded evidence only: direct/backfill callers did not take a snapshot."""
+    ci = next((record for record in records or [] if record["gate"] == "ci"), {})
+    return {key: ci[key] for key in ("optional_features", "waived_guarantees") if key in ci}
+
+
+def _protection_record(gate, head_sha, evaluated):
+    evidence = _optional_evidence(evaluated)
+    if "optional_features" in evidence:
+        state = evidence["optional_features"]["branch_protection"]
+        state["server_verified"] = state["value"] == ENFORCEMENT_ENFORCE and gate.get("server_verified") is True
+        if state["value"] == ENFORCEMENT_WARN:
+            state["drift_fields"] = gate.get("drift_fields", [])
+    return _preflight_record("branch_protection", gate, head_sha)
 
 
 def _run_ci_gate(
@@ -756,7 +824,7 @@ def _apply_dispatch_base_ref(
             data_dir=Path(ensure_env()["VNX_DATA_DIR"]),
         )
         if base_gate["verdict"] != "GO":
-            return base_gate
+            return dict(gate, **base_gate)
         if base_gate.get("reason_code") == "base_ref_not_applied":
             print(base_gate["message"], file=sys.stderr)
     return gate
@@ -1553,6 +1621,8 @@ _DOOR_INTEGRITY_PATHS = (
     "scripts/lib/forge_check_run.py",
     "scripts/lib/pr_size_policy.py",
     "scripts/lib/review_risk_class.py",
+    "scripts/lib/optional_features.py",
+    "scripts/lib/gate_profile.py",
 )
 
 
@@ -1729,6 +1799,7 @@ def _run_branch_protection_gate(
         )
     warn_only = mode == ENFORCEMENT_WARN
     warnings: List[str] = []
+    drift_fields: List[str] = []
 
     try:
         live_norm = fetch_live_protection(target_root, branch="main")
@@ -1738,6 +1809,7 @@ def _run_branch_protection_gate(
         if not warn_only:
             return _no_go_protection(f"live branch-protection niet leesbaar: {exc}", mode)
         warnings.append(f"live branch-protection niet leesbaar, drift niet getoetst: {exc}")
+        drift_fields = ["branch_protection"]
     except Exception as exc:
         # Broad by intent, and a refusal under every mode: auth, network, a
         # rate limit or an unparseable answer say nothing about the repo, so
@@ -1745,6 +1817,7 @@ def _run_branch_protection_gate(
         return _no_go_protection(f"live branch-protection niet leesbaar: {exc}", mode)
     else:
         diffs = compare_protection_state(main_norm, live_norm)
+        drift_fields = sorted({d["field"] for d in diffs})
         if diffs:
             fields = ", ".join(sorted({d["field"] for d in diffs}))
             drift = f"branch-protection wijkt af van {main_path} op main: {fields}"
@@ -1772,8 +1845,15 @@ def _run_branch_protection_gate(
             return refusal
         reason = (allow_weaken_reason or "").strip()
 
+    return _protection_go(mode, weakening, weak_fields, reason, warnings, drift_fields)
+
+
+def _protection_go(mode, weakening, weak_fields, reason, warnings, drift_fields):
+    """The existing GO message plus the measurement of live server protection."""
+    warn_only = mode == ENFORCEMENT_WARN
     result: Dict[str, Any] = {
         "verdict": "GO", "mode": mode, "overridden": False, "override_reason": None,
+        "server_verified": mode == ENFORCEMENT_ENFORCE and not drift_fields, "drift_fields": drift_fields,
     }
     if weakening:
         message = (
@@ -2341,6 +2421,7 @@ def _emit_receipt(
         [], unevaluated_message=GATES_NOT_RUN_MESSAGE,
     )
     kwargs["pr_size"] = _pr_size_receipt_field(kwargs["preflight_gates"])  # ADR-088: written always
+    kwargs.update(_optional_evidence(preflight_gates))
     kwargs["review_seats"] = review_seats or _unjudged_seats_record(pr_number, "", "not_evaluated")
     if shadow_seat_rule is not None:
         kwargs["shadow_seat_rule"] = shadow_seat_rule
@@ -2429,6 +2510,7 @@ def _emit_refusal_receipt(
         "conclusion": "refused",
         "refused_by": refused_by,
         "preflight_gates": preflight_gates,
+        **_optional_evidence(preflight_gates),
         "pr_size": _pr_size_receipt_field(preflight_gates),
         "head_sha": head_sha or "",
         "commit_sha": head_sha or "",
@@ -3524,7 +3606,7 @@ def _run_door(args: argparse.Namespace) -> int:
     evaluated: list[Dict[str, Any]] = []
 
     # ── Merge gate: VNX CI conclusion=success for the exact PR head ──────
-    gate, pr_data = _run_ci_gate(args.pr, override_reason=args.override_reason)
+    gate, pr_data = _run_optional_ci_gate(args.pr, override_reason=args.override_reason)
     gate = _apply_dispatch_base_ref(args, gate, pr_data)
     # The head SHA the gates approve is established once, here: the merge is
     # pinned to it (--match-head-commit) and every preflight record names it.
@@ -3586,7 +3668,7 @@ def _run_door(args: argparse.Namespace) -> int:
     # weakening; drift between live and main's own YAML has no override.
     protection_gate = _run_branch_protection_gate(
         args.pr, pr_data=pr_data, allow_weaken_reason=args.allow_weaken)
-    evaluated.append(_preflight_record("branch_protection", protection_gate, head_sha))
+    evaluated.append(_protection_record(protection_gate, head_sha, evaluated))
     if protection_gate["verdict"] != "GO":
         return refuse("branch_protection", protection_gate, "branch_protection_gate")
     if protection_gate.get("overridden"):

@@ -20,7 +20,7 @@ sys.path.insert(0, str(SCRIPT_DIR / "lib"))
 try:
     from vnx_paths import ensure_env
     from project_root import resolve_state_dir
-    from project_scope import current_project_id
+    from project_scope import current_project_id, resolve_stamp_project_id
     from quality_advisory import generate_quality_advisory, get_changed_files
     from cqs_calculator import calculate_cqs
     from receipt_provenance import enrich_receipt_provenance, validate_receipt_provenance
@@ -118,6 +118,7 @@ __all__ = [
     "rebuild_outcome_index",
     "register_facade",
     "resolve_state_dir",
+    "resolve_stamp_project_id",
     "should_route_to_gate_stream",
     "subprocess",
     "validate_receipt_provenance",

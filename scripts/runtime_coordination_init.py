@@ -246,14 +246,8 @@ def main() -> int:
             log("WARNING", "  runtime_coordination.terminal_leases: not present, worker_pid skipped")
 
         qi_db = Path(state_dir) / "quality_intelligence.db"
-        # For QI, resolve from the QI DB path; use the RC-resolved pid if QI has no marker
-        # (common when both DBs live in the same directory).
-        try:
-            qi_pid = resolve_init_project_id(qi_db)
-        except RuntimeError:
-            # QI DB not yet present or no marker reachable from QI path — fall back to
-            # the already-resolved RC pid so both DBs are stamped consistently.
-            qi_pid = owning_pid
+        # The QI store must resolve independently; a conflict is never a fallback.
+        qi_pid = resolve_init_project_id(qi_db)
 
         qi_result = run_quality_intelligence_migration(qi_db, default_project_id=qi_pid)
         if qi_result.get("status") == "skipped_no_db":

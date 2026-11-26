@@ -221,6 +221,7 @@ def enrich_pattern_tags(
     limit: int = 200,
     only_untagged: bool = True,
     tables: "Optional[List[str]]" = None,
+    project_id: Optional[str] = None,
 ) -> dict:
     """Persist enriched tags onto success_patterns/antipatterns (`tags` JSON column).
 
@@ -229,7 +230,7 @@ def enrich_pattern_tags(
     writes the result as a JSON array. NO-OP when the tagger is disabled — storing
     the deterministic floor alone adds nothing the selector doesn't already derive
     on the fly, so the stored column is only worth populating when the LLM enriches.
-    Best-effort + never raises; missing ``tags`` column → skipped.
+    Missing ``tags`` column → skipped; unresolved attribution raises TenantUnresolved.
 
     Returns a per-table count dict, e.g. ``{"success_patterns": 12, "antipatterns": 7}``. LLM calls
     skipped because the provider family is switched off are counted under ``_provider_switched_off``.
@@ -238,6 +239,9 @@ def enrich_pattern_tags(
         return {"_skipped": "tagger_disabled"}
     import json as _json
     import sqlite3 as _sqlite3
+    from project_scope import resolve_stamp_project_id
+
+    _audit_default_project = resolve_stamp_project_id(project_id, db_path)
 
     # Whitelist: only these identifiers are ever interpolated into SQL, so the
     # public ``tables`` arg can never reach an arbitrary table name (no injection).
@@ -255,14 +259,12 @@ def enrich_pattern_tags(
     except _sqlite3.Error:
         return {"_skipped": "db_open_failed"}
     # Best-effort tagging audit log (never blocks tagging). project_id + provider captured per run.
-    import os as _os
     try:
         conn.executescript(_TAGGING_EVENTS_SCHEMA)
     except _sqlite3.Error:
         pass
     # The process project only labels the audit event when a row carries no project of its own.
     # It never decides the provider switch: that is resolved per row from the row's project_id.
-    _audit_default_project = _os.environ.get("VNX_PROJECT_ID") or "vnx-dev"
     _skips_before = switch_skip_count()
     _provider = get_tagger_provider_name()
     try:

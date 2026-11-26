@@ -46,6 +46,8 @@ except ImportError as e:
     sys.exit(1)
 
 from completion_reading import completion_outcome, is_v3_end_line  # noqa: E402
+from project_scope import TenantUnresolved
+from project_id_refusals import record_project_id_refusal
 
 # Configure logging
 logging.basicConfig(
@@ -240,6 +242,10 @@ class GovernanceDigestRunner:
                         persist_result["antipatterns_upserted"],
                         persist_result["metadata_updated"],
                     )
+            except TenantUnresolved as exc:
+                record_project_id_refusal("intelligence_daemon", self.state_dir,
+                                          "project_id_unresolved", error=str(exc))
+                return False
             except Exception as exc:
                 logger.warning("GovernanceDigestRunner: signal persistence failed (non-fatal): %s", exc)
 
@@ -253,6 +259,10 @@ class GovernanceDigestRunner:
                     tag_result = enrich_pattern_tags(tagger_db, limit=100)
                     if any(v for k, v in tag_result.items() if not k.startswith("_")):
                         logger.info("GovernanceDigestRunner: tagger enriched patterns: %s", tag_result)
+            except TenantUnresolved as exc:
+                record_project_id_refusal("intelligence_daemon", self.state_dir,
+                                          "project_id_unresolved", error=str(exc))
+                return False
             except Exception as exc:
                 logger.warning("GovernanceDigestRunner: tagger enrichment failed (non-fatal): %s", exc)
 

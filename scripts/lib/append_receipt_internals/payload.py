@@ -12,6 +12,7 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional
+from project_scope import TenantUnresolved, resolve_stamp_project_id
 
 from .common import (
     AppendReceiptError,
@@ -528,6 +529,13 @@ def _prepare_receipt(
     # its own v2 stamp and can never carry a lifecycle type.
     stamp_lifecycle(receipt)
 
+    if not skip_enrichment and facade._is_completion_event(receipt):
+        try:
+            receipt["project_id"] = resolve_stamp_project_id(
+                explicit=receipt.get("project_id"), db_path=receipt_path,
+            )
+        except TenantUnresolved as exc:
+            raise AppendReceiptError("project_id_unresolved", EXIT_INVALID_INPUT, str(exc)) from exc
     _stamp_identity(receipt, identity_cwd=receipt_path.parent)
     _stamp_observability_tier(receipt)
 
@@ -710,7 +718,6 @@ def _confidence_event_recorded(db_path: Path, dispatch_id: str, outcome: str) ->
     """
     try:
         sys.path.insert(0, str(SCRIPTS_DIR / "lib"))
-        from project_scope import current_project_id
         conn = sqlite3.connect(str(db_path), timeout=10.0)
         try:
             columns = {row[1] for row in conn.execute("PRAGMA table_info(confidence_events)")}
@@ -720,7 +727,7 @@ def _confidence_event_recorded(db_path: Path, dispatch_id: str, outcome: str) ->
             params: List[Any] = [dispatch_id, outcome]
             if "project_id" in columns:
                 sql += " AND project_id = ?"
-                params.append(current_project_id())
+                params.append(resolve_stamp_project_id(db_path=db_path))
             return conn.execute(sql + " LIMIT 1", params).fetchone() is not None
         finally:
             conn.close()
