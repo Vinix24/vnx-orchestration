@@ -49,8 +49,9 @@ was applied. A same-vendor reviewer that is allowed through carries
 
 from __future__ import annotations
 
-import glob
 import json
+import os
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -162,17 +163,37 @@ def dispatch_spec_paths(dispatch_id: str, *, data_dir: Path) -> Tuple[Optional[L
     """The ``dispatch-spec.json`` files of ``dispatch_id`` in ``data_dir``, and why there are none.
 
     ``(paths, "")`` when found; ``([], reason)`` when this store has no spec
-    for the id; ``(None, reason)`` for an id that is no plain name, whose spec
-    is therefore never read. One lookup for every reader of a spec on the
-    review side (the builder's vendor, the review risk class).
+    for the id; ``(None, reason)`` for an invalid id or a failed directory
+    scan, never partial paths. A missing dispatches directory is no spec;
+    errors after opening it are unverifiable evidence. All callers retain
+    the reason: unknown builder, high review risk, unknown blast-radius
+    scope, or NO-GO at the merge base guard.
     """
     if "/" in dispatch_id or "\\" in dispatch_id or dispatch_id in (".", ".."):
         return None, f"dispatch id {dispatch_id!r} is not a plain name; no spec is read for it"
     dispatches_dir = Path(data_dir) / "dispatches"
-    specs = sorted(dispatches_dir.glob(f"*/{glob.escape(dispatch_id)}/dispatch-spec.json"))
+    absent = f"no dispatch-spec.json for {dispatch_id} under {dispatches_dir}"
+    try:
+        try:
+            entries = os.scandir(dispatches_dir)
+        except FileNotFoundError:
+            return [], absent
+        specs = []
+        with entries:
+            for bucket in entries:
+                if not stat.S_ISDIR(bucket.stat().st_mode):
+                    continue
+                with os.scandir(bucket.path) as dispatches:
+                    for dispatch in dispatches:
+                        if dispatch.name != dispatch_id or not stat.S_ISDIR(dispatch.stat().st_mode):
+                            continue
+                        with os.scandir(dispatch.path) as files:
+                            specs.extend(Path(f.path) for f in files if f.name == "dispatch-spec.json")
+    except OSError as exc:
+        return None, f"cannot scan dispatch specs for {dispatch_id} under {dispatches_dir}: {type(exc).__name__}: {exc}"
     if not specs:
-        return [], f"no dispatch-spec.json for {dispatch_id} under {dispatches_dir}"
-    return specs, ""
+        return [], absent
+    return sorted(specs), ""
 
 
 def resolve_builder_vendor(dispatch_id: Optional[str], *, data_dir: Path) -> BuilderVendor:
