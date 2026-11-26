@@ -31,6 +31,7 @@ CLI = REPO_ROOT / "scripts" / "daily_metrics.py"
 COMMANDS = REPO_ROOT / "scripts" / "lib" / "daily_metrics" / "commands"
 PID = "aaaa11112222"
 OTHER = "bbbb33334444"
+PROJECT_ID = "project-a"
 METRIC = "pr_open_to_merge_median_hours"
 A = date(2026, 11, 1)
 NOW = "2026-11-09T09:00:00Z"      # a+7 = 11-08 is settled at 11-09T02:00Z
@@ -50,7 +51,7 @@ def _doc(value, *, metric=METRIC, n=8, schema=1, status="final"):
 
 
 def _approved(frozen=50.0, *, metric=METRIC, schema=1, proposal_id=PID, day=A):
-    return {"event": "approved", "proposal_id": proposal_id, "project_id": "p",
+    return {"event": "approved", "proposal_id": proposal_id, "project_id": PROJECT_ID,
             "key": metric, "metric_id": metric, "seat": None,
             "approval_day": day.isoformat(), "approved_at": f"{day.isoformat()}T09:00:00Z",
             "approved_by": "operator", "evidence": {"tty": True},
@@ -66,13 +67,15 @@ def _run(tmp_path, args, commands=None):
     env = dict(os.environ)
     env.pop("VNX_PROJECT_ID", None)
     env.pop("PYTEST_CURRENT_TEST", None)
+    # Fail CI collection before project lookup or gh; verdict tests assert its diagnostic.
+    env["VNX_OVERRIDE_CI_RECORD_MAX_CALLS"] = "0"
     return subprocess.run(cli_command(tmp_path / "sources", args, commands or COMMANDS), env=env,
                           capture_output=True, text=True, cwd=str(REPO_ROOT))
 
 
 def _args(tmp_path, now=NOW):
     return ["--store", str(tmp_path / "store"), "--state-dir", str(tmp_path / "state"),
-            "--project-id", "p", "--now", now]
+            "--project-id", PROJECT_ID, "--now", now]
 
 
 def _ledger(tmp_path):
@@ -90,11 +93,11 @@ def _seed_ledger(tmp_path, *approved, applied=True):
     rows = []
     for event in approved:
         rows.append({"event": "proposed", "proposal_id": event["proposal_id"],
-                     "project_id": "p", "key": event["key"], "metric_id": event["metric_id"],
+                     "project_id": PROJECT_ID, "key": event["key"], "metric_id": event["metric_id"],
                      "seat": None, "metric_day": "2026-10-31", "value": 60.0})
         rows.append(event)
         if applied:
-            rows.append(_applied(event))
+            rows.append(dict(_applied(event), project_id=event["project_id"]))
     path = _ledger(tmp_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("".join(json.dumps(row, sort_keys=True) + "\n" for row in rows),
@@ -102,7 +105,7 @@ def _seed_ledger(tmp_path, *approved, applied=True):
 
 
 def _seed_post(tmp_path, docs=None):
-    store = DayStore(tmp_path / "store", "p")
+    store = DayStore(tmp_path / "store", PROJECT_ID)
     for day, doc in (docs or _post()).items():
         store.write_final(day.isoformat(), doc)
 
@@ -141,7 +144,7 @@ def test_the_command_writes_the_full_verdict_event(tmp_path):
 
 
 def test_the_frozen_baseline_survives_rewritten_pre_approval_days(tmp_path):
-    store = DayStore(tmp_path / "store", "p")
+    store = DayStore(tmp_path / "store", PROJECT_ID)
     pre = [A - timedelta(days=offset) for offset in range(1, 8)]
     for day in pre:
         store.write_final(day.isoformat(), _doc(50.0))
@@ -206,7 +209,7 @@ def test_a_post_day_without_a_recorded_schema_is_written_as_schema_missing(tmp_p
 def test_failed_notification_replay_does_not_block_new_due_verdict(tmp_path, fault):
     _seed_post(tmp_path)
     _seed_ledger(tmp_path, _approved(), _approved(proposal_id=OTHER))
-    old = dict(event="verdict", proposal_id=PID, project_id="p", verdict="helped",
+    old = dict(event="verdict", proposal_id=PID, project_id=PROJECT_ID, verdict="helped",
                window={"from": "2026-11-02", "to": "2026-11-08"})
     if fault == "missing_window":
         old.pop("window")
