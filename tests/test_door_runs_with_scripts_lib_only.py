@@ -48,6 +48,8 @@ _SUBPROCESS_TIMEOUT = 180
 
 def _store(tmp_path: Path) -> dict:
     """A central-layout store under a tmp HOME: ``<HOME>/.vnx-data/<project>``."""
+    # Registry discovery needs the same real project root as a dispatched checkout.
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
     home = tmp_path / "home"
     data_dir = home / ".vnx-data" / PROJECT_ID
     state_dir = data_dir / "state"
