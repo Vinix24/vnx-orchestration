@@ -164,8 +164,7 @@ _DPO_CONFLICT_FALLBACK: Tuple[str, ...] = ("dispatch_id", "pattern_id")
 def record_pattern_usage(
     result: "InjectionResult",
     db: sqlite3.Connection,
-    has_column_fn: Callable[[str, str], bool],
-    project_id=None,
+    has_column_fn: Callable[[str, str], bool], project_id=None,
 ) -> None:
     """Write pattern_usage + dispatch_pattern_offered rows for the feedback loop.
 
