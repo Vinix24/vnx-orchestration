@@ -251,10 +251,10 @@ def test_writers_refuse_then_resolve(tmp_path, monkeypatch, source):
         for table in ("success_patterns", "antipatterns", "tagging_events"):
             assert conn.execute(f"SELECT DISTINCT project_id FROM {table} WHERE project_id IS NOT NULL").fetchall() == [("other",)]
     assert json.loads(probe._tuning_proposals_events_path().read_text().splitlines()[-1])["project_id"] == "other"
-
 @pytest.mark.parametrize("with_receipt", [True, False])
 def test_daemon_project_refusal_continues(tmp_path, monkeypatch, caplog, with_receipt):
-    from intelligence_daemon import GovernanceDigestRunner
+    import runpy
+    GovernanceDigestRunner = runpy.run_path(str(REPO_ROOT / "scripts/intelligence_daemon.py"))["GovernanceDigestRunner"]
     from project_id_refusals import project_id_refusal_section
     db, receipts = tmp_path / "quality_intelligence.db", tmp_path / "t0_receipts.ndjson"
     TestIntelligencePersist()._create_test_db(db)
