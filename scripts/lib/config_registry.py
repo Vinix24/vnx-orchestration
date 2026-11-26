@@ -527,7 +527,7 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         "VNX_CI_WORKFLOWS", "string", "", "gate",
         "PR-CI workflow names, comma-separated (ADR-097 section 1; owner M3a). Empty means "
         "every workflow with a PR run counts.", scope="project",
-        subsystem="governance-enforcement-stack", status="ACTIVATE", read_site_wired=False),
+        subsystem="governance-enforcement-stack", status="ACTIVATE", read_site_wired=True),
     "VNX_CI_RECORD_MAX_CALLS": _e(
         "VNX_CI_RECORD_MAX_CALLS", "integer", "1000", "gate",
         "GitHub call budget per project per night for ci_run/1 collection (ADR-097 section 3; "
@@ -535,12 +535,12 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         "download, and retries; shared across catch-up days. A framework budget, not an adapter "
         "key. Must be a finite positive integer; invalid configuration is rejected before collection.",
         scope="project", minimum=1,
-        subsystem="governance-enforcement-stack", status="ACTIVATE", read_site_wired=False),
+        subsystem="governance-enforcement-stack", status="ACTIVATE", read_site_wired=True),
     "VNX_CI_JUNIT_ARTIFACT": _e(
         "VNX_CI_JUNIT_ARTIFACT", "string", "", "gate",
         "JUnit artifact name per attempt (ADR-097 section 2; owner M3b). Empty means test fields "
         "are unknown with junit_not_configured.", scope="project",
-        subsystem="governance-enforcement-stack", status="ACTIVATE", read_site_wired=False),
+        subsystem="governance-enforcement-stack", status="ACTIVATE", read_site_wired=True),
     "VNX_CI_GATE_REQUIRED": _e(
         "VNX_CI_GATE_REQUIRED", "bool", "1", "gate",
         "Require the CI gate before merge.", approval=True,

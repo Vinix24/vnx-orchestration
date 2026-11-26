@@ -293,15 +293,17 @@ def expected_component_names(register: Optional[Sequence[BeaconSpec]] = None) ->
     ``health/``), so a recorded ``fail`` stays ``fail``. This is the single place
     that decides it; every reader gets it by calling this function.
 
-    ``daily_metrics`` is periodic but opt-in per project (ADR-063 decision 29).
-    Its existing project-local beacon is the participation signal, read directly
+    ``daily_metrics`` and ``ci_runs`` are periodic but opt-in per project
+    (ADR-063 decision 29 and its ADR-097 amendment). Each existing project-local
+    beacon is the participation signal, read directly
     by ``all_beacons`` even when unreadable. It is never universally expected:
     a project that has never written that signal cannot acquire an absence row
     merely because the collector declares a 36-hour interval.
     """
     if register is None:
         register = read_beacon_register()
-    return tuple(spec.name for spec in register if not spec.event_driven and spec.name != "daily_metrics")
+    opt_in = {"daily_metrics", "ci_runs"}
+    return tuple(spec.name for spec in register if not spec.event_driven and spec.name not in opt_in)
 
 
 def parked_component_names() -> Tuple[str, ...]:

@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import fcntl
 import importlib.util
+import json
 import os
 import sys
 from collections.abc import Iterator, Mapping
@@ -33,6 +34,7 @@ from types import ModuleType
 from typing import Any
 
 from daily_metrics import days, metric
+from daily_metrics.github_fetch import RunReadFailure
 from daily_metrics.store import DayStore
 from health_beacon import HealthBeacon
 
@@ -250,3 +252,36 @@ def write_beacon(state_dir: Path, store: DayStore, now: datetime) -> None:
             "reason": None if final_days else "no_final_settled_day",
         },
     )
+
+
+def collect_ci_runs(project_id, now, state_dir, *, project_root=None, runner=None):
+    """Isolated nightly writer: failure is visible without stopping day metrics."""
+    try:
+        from config_registry import resolve_with_source
+        from config_store_db import make_db_resolver
+        from daily_metrics.sources.ci_runs import write_runs
+        from vnx_paths import resolve_central_data_dir
+
+        resolve_central_data_dir(project_id)
+        resolver = make_db_resolver(lambda _pid: state_dir, raise_on_error=True)
+        values = []
+        for key in ("VNX_CI_RECORD_MAX_CALLS", "VNX_CI_WORKFLOWS", "VNX_CI_JUNIT_ARTIFACT"):
+            value, source = resolve_with_source(key, project_id, resolver, strict_resolver=True)
+            if value is None:
+                raise ValueError(f"{key}: {source}")
+            values.append(value)
+        window = days.completed_days(now)
+        root = project_root if project_root is not None else CollectContext(project_id, window[0], now).project_root()
+        result = write_runs(project_id, window[0], window[-1], now=now, project_root=root,
+                            state_dir=state_dir, max_calls=int(values[0]), workflows=values[1],
+                            artifact=values[2], runner=runner)
+    except Exception as exc:  # vnx-silent-except: nightly CI writer failure is reported; other metrics must continue
+        reason = "rate_limited" if isinstance(exc, RunReadFailure) and str(exc) == "rate_limited" else "writer_failed"
+        result = dict(project_id=project_id, coverage="incomplete", population_total=None,
+                      reason=reason, error=f"{type(exc).__name__}: {exc}", skipped_attempts=[])
+        try:
+            HealthBeacon(Path(state_dir).parent, "ci_runs", BEACON_MAX_AGE_SECONDS).heartbeat_strict("fail", result)
+        except OSError as beacon_error:  # vnx-silent-except: stderr retains evidence when the beacon store is unwritable
+            result["beacon_error"] = str(beacon_error)
+    print(json.dumps({"ci_runs": result}), file=sys.stderr)
+    return result

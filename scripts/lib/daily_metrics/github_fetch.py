@@ -160,3 +160,99 @@ def fetch_merged(
             cache[key] = population
         return population
     return cache[key]
+
+
+class RunReadFailure(ValueError):
+    """A named, blocking Actions read failure; never an empty population."""
+
+
+class RunReader:
+    """One project/night budget, including discovery, pagination and any retries."""
+
+    def __init__(self, root, maximum, runner=None):
+        if type(maximum) is not int or maximum <= 0:
+            raise ValueError("VNX_CI_RECORD_MAX_CALLS must be a positive integer")
+        self.root, self.maximum = root, maximum
+        self.runner, self.calls, self.stopped = runner or _default_runner, 0, None
+
+    def read(self, args, *, reserve=0):
+        if self.stopped is None and self.calls >= self.maximum:
+            self.stopped = "call_budget_exhausted"
+        if self.stopped:
+            raise RunReadFailure(self.stopped)
+        if self.calls >= self.maximum - reserve:
+            raise RunReadFailure("call_budget_exhausted")  # Discovery cannot spend hydration's reserve.
+        self.calls += 1
+        try:
+            code, stdout, stderr = self.runner(["gh", *args], cwd=self.root)
+        except Exception as exc:
+            raise RunReadFailure("source_missing") from exc
+        if type(code) is not int or code != 0:
+            if isinstance(stderr, str) and any(s in stderr.lower() for s in ("rate limit", "http 429")):
+                self.stopped = "rate_limited"
+            raise RunReadFailure(self.stopped or "source_missing")
+        try:
+            data = json.loads(stdout)
+        except (ValueError, TypeError) as exc:
+            raise RunReadFailure("source_invalid") from exc
+        if not isinstance(data, dict):
+            raise RunReadFailure("source_invalid")
+        return data
+
+    def pages(self, endpoint, key, first=None, *, reserve=0):
+        """Return observed rows plus a failure reason unless every page is proven."""
+        rows, seen, total, page = [], set(), None, 1
+        while True:
+            try:
+                sep = "&" if "?" in endpoint else "?"
+                data = first if page == 1 and first is not None else self.read(
+                    ["api", f"{endpoint}{sep}per_page=100&page={page}"], reserve=reserve)
+                batch, count = data.get(key), data.get("total_count")
+                if (not isinstance(batch, list) or type(count) is not int or count < 0
+                        or (total is not None and total != count)):
+                    raise RunReadFailure("source_invalid")
+                total = count
+                for row in batch:
+                    ident = row.get("id") if isinstance(row, dict) else None
+                    if type(ident) is not int or ident <= 0 or ident in seen:
+                        raise RunReadFailure("source_invalid")
+                    seen.add(ident)
+                    rows.append(row)
+                if len(rows) == total:
+                    return rows, None
+                if not batch or len(rows) > total:
+                    raise RunReadFailure("source_invalid")
+                page += 1
+            except RunReadFailure as exc:
+                return rows, str(exc)
+
+    def runs(self, repo, start, end, *, reserve=0):
+        """Split capped searches newest first, leaving reserved calls for attempts/jobs."""
+        if start > end:
+            return [], None
+        endpoint = (f"repos/{repo}/actions/runs?event=pull_request&created="
+                    f"{start:%Y-%m-%dT%H:%M:%S}Z..{end:%Y-%m-%dT%H:%M:%S}Z")
+        try:
+            data = self.read(["api", endpoint + "&per_page=100&page=1"], reserve=reserve)
+        except RunReadFailure as exc:
+            return [], str(exc)
+        rows, count = data.get("workflow_runs"), data.get("total_count")
+        if not isinstance(rows, list) or type(count) is not int or count < 0:
+            return [], "source_invalid"
+        if count > 1000:
+            halves = _halves(start, end)
+            if halves is None:
+                return rows, "source_invalid"
+            right, re = self.runs(repo, *halves[1], reserve=reserve)
+            left, le = self.runs(repo, *halves[0], reserve=reserve)
+            rows, error = rows + right + left, re or le
+        else:
+            rows, error = self.pages(endpoint, "workflow_runs", first=data, reserve=reserve)
+        unique = {}
+        for row in rows:
+            stamp = parse_timestamp(row.get("created_at")) if isinstance(row, dict) else None
+            if (stamp is None or not start <= stamp <= end
+                    or type(row.get("id")) is not int or row["id"] <= 0):
+                return list(unique.values()), error or "source_invalid"
+            unique[row["id"]] = row
+        return sorted(unique.values(), key=lambda row: row["created_at"], reverse=True), error or (None if len(unique) == count else "source_invalid")

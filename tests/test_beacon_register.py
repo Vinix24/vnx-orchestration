@@ -155,6 +155,16 @@ def test_expected_component_names_is_just_the_names(fixture_scripts: Path) -> No
     assert br.expected_component_names(reg) == ("one",)
 
 
+def test_ci_runs_absence_is_opt_in_but_written_failure_is_visible(tmp_path: Path) -> None:
+    from health_beacon import HealthBeacon, beacon_summary
+
+    register = tuple(s for s in br.read_beacon_register() if s.name in {"ci_runs", "daily_metrics"})
+    assert {s.name for s in register} == {"ci_runs", "daily_metrics"}
+    assert beacon_summary(tmp_path, expected=br.expected_component_names(register))["overall"] == "ok"
+    HealthBeacon(tmp_path, "ci_runs", 36 * 3600).heartbeat_strict("fail", {"reason": "source_missing"})
+    assert beacon_summary(tmp_path, expected=br.expected_component_names(register))["overall"] == "fail"
+
+
 # ---------------------------------------------------------------------------
 # Event-driven writers (absence-is-loud, punt 1 / defect B)
 #
@@ -362,6 +372,8 @@ def test_real_scripts_tree_gives_the_nine_measured_writers() -> None:
     ``scripts/daily_metrics.py daily`` run. Periodic (36 h, ADR-097), so
     opt-in remains per project: ``expected_component_names()`` excludes it,
     while existing project-local beacons still get the 36-hour deadline.
+
+    ADR-097 M3a adds ``ci_runs`` for attempt population coverage and writer failures.
     """
     reg = br.read_beacon_register()
     names = {s.name for s in reg}
@@ -391,6 +403,7 @@ def test_real_scripts_tree_gives_the_nine_measured_writers() -> None:
         "lifecycle_count",
         "door_audit",
         "daily_metrics",
+        "ci_runs",
         "dream_liveness",
         "rework_attribution",
     }

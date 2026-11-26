@@ -300,6 +300,7 @@ def _run_daily(args: argparse.Namespace) -> int:
         if not acquired:
             print("skipped: locked")
             return EXIT_OK
+        collect_mod.collect_ci_runs(project_id, now, _state_dir(args, project_id))
         _collect_window(store, project_id, now)
         failures = _run_daily_commands(args, project_id, now, store)
         for failure in failures:
