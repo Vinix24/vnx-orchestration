@@ -50,7 +50,11 @@ import os, stat, sys
 cutoff = int(sys.argv[1])
 paths, skipped = [], 0
 for directory in sys.argv[2:]:
-    with os.scandir(directory) as entries:
+    try:
+        entries = os.scandir(directory)
+    except FileNotFoundError:
+        continue  # An absent directory contributes no files, like the old glob.
+    with entries:
         for entry in sorted(entries, key=lambda e: e.name):
             if entry.name.startswith(".") or not entry.name.endswith(".md"):
                 continue

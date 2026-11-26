@@ -97,12 +97,31 @@ _poll_new_reports_cycle 1 100
     assert len(selected(tmp_path)) == 4  # Includes two files exactly at cutoff.
 
 
-@pytest.mark.parametrize("failure", ["missing", "unreadable", "stat", "python", "cutoff", "invalid", "empty"])
+@pytest.mark.parametrize("missing", [("headless",), ("unified",), ("unified", "headless")])
+def test_missing_directories_complete_cycle_with_both_heartbeats(tmp_path, missing):
+    reports(tmp_path, fresh=2)
+    for directory in missing:
+        (tmp_path / directory).rename(tmp_path / f"prior-{directory}")
+    expected = {os.fsencode(p) for directory in ("unified", "headless")
+                for p in (tmp_path / directory).glob("*.md")}
+    result = run_cycle(tmp_path, "PS4='+ '; set -x\n_poll_new_reports_cycle 6 100")
+    assert result.returncode == 0, result.stderr
+    assert "[ERROR]" not in result.stderr
+    assert set(selected(tmp_path)) == expected
+    heartbeat, scan = "+ _write_processor_heartbeat 6", "+ _run_receipt_converter_scan"
+    trace = [line for line in result.stderr.splitlines() if line in (heartbeat, scan)]
+    assert trace == [heartbeat, scan, heartbeat]
+    assert (tmp_path / "state/receipt_processor_heartbeat.json").is_file()
+
+
+@pytest.mark.parametrize("failure", ["not_directory", "unreadable", "stat", "python", "cutoff", "invalid", "empty"])
 def test_prefilter_failure_is_visible_without_processing_or_watermark_advance(tmp_path, failure):
+    if failure == "unreadable" and os.geteuid() == 0:
+        pytest.skip("root can scan chmod 000 directories")
     reports(tmp_path)
     body = ""
-    if failure == "missing":
-        body = 'HEADLESS_REPORTS="$STATE_DIR/missing"\n'
+    if failure == "not_directory":
+        body = 'HEADLESS_REPORTS="$WATERMARK_FILE"\n'
     elif failure == "unreadable":
         (tmp_path / "headless").chmod(0)
     elif failure == "stat":
@@ -121,6 +140,10 @@ def test_prefilter_failure_is_visible_without_processing_or_watermark_advance(tm
         (tmp_path / "headless").chmod(0o755)
     assert result.returncode == 1, result.stderr
     assert "prefilter failed" in result.stderr
+    errors = {"not_directory": "NotADirectoryError", "unreadable": "PermissionError", "stat": "FileNotFoundError"}
+    if failure in errors:
+        assert errors[failure] in result.stderr
+        assert "incomplete directory scan; cycle aborted" in result.stderr
     assert selected(tmp_path) == []
     assert (tmp_path / "state/receipt_processor_watermark").read_text() == str(CUTOFF)
 
