@@ -86,6 +86,16 @@ def test_corrupt_store_logs_key_path_error_and_preserves_append(
                and "not a database" in r["message"] for r in logs)
 
 
+@pytest.mark.parametrize("value", ["0", "1"])
+def test_explicit_store_rebinds_same_project_a_b_a(tmp_path, value):
+    opposite = str(1 - int(value))
+    a = _store(tmp_path / "a", "same-project", value)
+    b = _store(tmp_path / "b", "same-project", opposite)
+    assert chain.chain_receipts_variable_on(state_dir=a) is (value == "1")
+    assert chain.chain_receipts_variable_on(state_dir=b) is (opposite == "1")
+    assert chain.chain_receipts_variable_on(state_dir=a) is (value == "1")
+
+
 @pytest.mark.parametrize("identity", [None, "../invalid", ""])
 @pytest.mark.parametrize("global_value", [None, "0", "1"])
 def test_unknown_project_warns_and_never_reuses_ambient_row(
@@ -124,6 +134,9 @@ def test_unknown_project_fallback_preserves_non_project_precedence(
 ):
     state = tmp_path / "unidentified" / "state"
     state.mkdir(parents=True)
+    monkeypatch.setenv("VNX_PROJECT_ID", "project-a")
+    with sqlite3.connect(state / "runtime_coordination.db") as conn:
+        config_store_db.set_config(conn, "project-a", KEY, "1", actor="test", approval_id="oi3094")
     if global_value is not None:
         _global_config(tmp_path, monkeypatch, global_value)
     if env_value is not None:
@@ -163,8 +176,8 @@ def test_retired_key_only_remains_in_retirement_assertions_and_history():
                           text=True, capture_output=True)
     assert proc.returncode in (0, 1), proc.stderr
     retirement_tests = {"tests/test_env_reads_pr6h_hash_chain.py", Path(__file__).relative_to(ROOT).as_posix()}
-    # CHANGELOG.md is frozen release history; changelog.d/README.md forbids PR edits.
+    # Frozen release history and archived investigations retain the keys measured then.
     unexpected = [p for p in proc.stdout.splitlines()
                   if p not in retirement_tests and p != "CHANGELOG.md" and not p.startswith("changelog.d/")
-                  and not p.startswith("docs/governance/decisions/ADR-")]
+                  and not p.startswith(("docs/governance/decisions/ADR-", "docs/_archive/"))]
     assert not unexpected, unexpected

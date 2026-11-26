@@ -26,8 +26,12 @@ unchained ledger first (ADR-029); changing the switch alone does not seal its hi
 
 The append writer and ledger-health reader derive the project from the explicit
 ledger directory, without git discovery. That identity wins over `VNX_PROJECT_ID`.
+Successful `config_runtime.autowire` calls make `strict_resolver()` select the
+just-bound store, including A → B → A switches with the same project id.
+Directory identity requires `~/.vnx-data/<id>/state` or a `.vnx-project-id` marker.
 If no project can be derived, a WARNING names the key and directory, and resolution
-excludes every project row (including a previously wired ambient store).
+excludes every project row, even with `VNX_PROJECT_ID` set (including a previously
+wired ambient store).
 Here "global and default layers only" excludes project rows and preserves existing
 override and env precedence: override > global config > env > default.
 

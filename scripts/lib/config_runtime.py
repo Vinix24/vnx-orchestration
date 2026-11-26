@@ -8,7 +8,7 @@ the runtime, while an un-set flag resolves exactly as the env-only world did (be
 
 Single-tenant: one runtime process serves one project. ``autowire()`` binds the resolver to that
 project's state dir + sets it as config_registry's default project, so read-sites call ``get_bool``
-/ ``get`` with no project_id. Idempotent (wires once) and fail-soft (any resolution error leaves the
+/ ``get`` with no project_id. Idempotent and fail-soft (any resolution error leaves the
 registry env-only — the runtime never breaks because the config DB is missing) — but fail-soft is
 LOUD (a WARNING naming the reason), not silent: a store that cannot be found reads identically to a
 flag the operator explicitly turned off unless the miss is logged (OI-1461).
@@ -32,6 +32,7 @@ logger = logging.getLogger(__name__)
 
 # Keyed by (state_dir_str, project_id) so a second project in the same process gets its own store.
 # Value is True when that (state_dir, project_id) pair is wired; False / absent otherwise.
+# Successful re-wires move their pair last so strict_resolver follows the current binding.
 _wired_for: "dict[tuple[str, str], bool]" = {}
 
 
@@ -110,8 +111,8 @@ def _resolve_project_id(state_dir: Path, project_id: Optional[str]) -> Optional[
 def autowire(state_dir: "str | Path | None" = None, project_id: Optional[str] = None) -> bool:
     """Wire config_registry's DB resolver + default project for this runtime process.
 
-    Keyed by (state_dir, project_id): if the same pair is requested again it is a fast no-op
-    (idempotent); a DIFFERENT project_id re-wires to that project's store. Fail-soft — any missing
+    Keyed by (state_dir, project_id): every successful call restores that pair's resolver
+    and makes it the latest binding for strict_resolver. Fail-soft — any missing
     state dir / project_id / DB leaves the registry env-only and returns False."""
     global _wired_for, _wire_status
     try:
@@ -148,6 +149,7 @@ def autowire(state_dir: "str | Path | None" = None, project_id: Optional[str] = 
         resolved = sd
         config_registry.set_db_resolver(config_store_db.make_db_resolver(lambda _pid: resolved))
         config_registry.set_default_project_id(pid)
+        _wired_for.pop(wire_key, None)
         _wired_for[wire_key] = True
         _wire_status = WireStatus(None, pid, str(sd))
         return True
