@@ -55,7 +55,7 @@
   ["scripts/lib/dispatch_cli.py", "vnx-dev", "ebd4c709e73e4e4d", 1], ["scripts/lib/dispatch_metadata_db.py", "vnx-dev", "338ac8e8609d4717", 1], ["scripts/lib/dispatch_metadata_db.py", "vnx-dev", "8e19c3fa19c9a1e6", 1],
   ["scripts/lib/dispatch_metadata_db.py", "vnx-dev", "9512a2c17a8f5417", 1], ["scripts/lib/dispatch_metadata_db.py", "vnx-dev", "fd859a3f67b666e0", 1], ["scripts/lib/dispatch_outcome_classifier.py", "vnx-dev", "92f1bed2af0d0324", 1],
   ["scripts/lib/dispatch_outcome_classifier.py", "vnx-dev", "c86ca0e98b02e330", 1], ["scripts/lib/dispatch_plan.py", "kimi-k3", "efc69096a0df164d", 1], ["scripts/lib/dispatch_prepare.py", "kimi-k3", "650c25cb5164e680", 1],
-  ["scripts/lib/dispatch_project_guard.sh", "vnx-dev", "b8d60e8524cf7180", 1], ["scripts/lib/dispatch_project_guard.sh", "vnx-dev", "efaf0220a21cd395", 1], ["scripts/lib/dispatch_register.py", "vnx-dev", "218a6499da93475a", 1],
+  ["scripts/lib/dispatch_register.py", "vnx-dev", "218a6499da93475a", 1],
   ["scripts/lib/dispatch_spec.py", "kimi-k3", "c2ec10395f8dd227", 1], ["scripts/lib/dispatch_spec.py", "vnx-dev", "5c8a1189488b913a", 1], ["scripts/lib/dispatch_spec.py", "vnx-dev", "b9bf05ae71e08433", 1],
   ["scripts/lib/event_outcome_semantics.py", "vnx-dev", "745a8e579b839b52", 1], ["scripts/lib/forge_gate_publisher.py", "vnx-dev", "3a9feb6eeaff9008", 1], ["scripts/lib/forge_gate_publisher.py", "vnx-dev", "83d95e99f4181bc3", 1],
   ["scripts/lib/gate_findings_bridge.py", "vnx-dev", "6e9309b67525f169", 1], ["scripts/lib/gate_findings_bridge.py", "vnx-dev", "a75f1268bd5bc9a6", 1], ["scripts/lib/gate_lane_contract.py", "kimi-k3", "839c01e0e9298ff0", 1],

@@ -509,7 +509,8 @@ class TestFPCCertification:
         serialized = json.dumps(report_dict, indent=2)
         assert len(serialized) > 0
 
-    def test_certification_has_no_failures(self):
+    def test_certification_has_no_failures(self, monkeypatch):
+        monkeypatch.setenv("VNX_PROJECT_ID", "vnx-dev")
         runner = FPCCertificationRunner()
         report = runner.run()
 

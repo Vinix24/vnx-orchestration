@@ -152,7 +152,6 @@ ceba80628ecc8347	scripts/hooks/vnx_hook_shim.sh	vnx-dev	1	te_repareren	Hook shim
 8e19c3fa19c9a1e6	scripts/lib/dispatch_metadata_db.py	vnx-dev	1	legacy_tenant_reader	Comment or docstring stating that this path refuses to default to vnx-dev (ADR-007); prose, no behaviour	
 92f1bed2af0d0324	scripts/lib/dispatch_outcome_classifier.py	vnx-dev	1	legacy_tenant_reader	Legacy receipts without a project are read as the legacy default project (_LEGACY_RECEIPT_PROJECT_ID)	
 c86ca0e98b02e330	scripts/lib/dispatch_outcome_classifier.py	vnx-dev	1	legacy_tenant_reader	Legacy receipts without a project are read as the legacy default project (_LEGACY_RECEIPT_PROJECT_ID)	
-b8d60e8524cf7180	scripts/lib/dispatch_project_guard.sh	vnx-dev	1	te_repareren	Doc line of vnx_dispatch_resolve_project_id whose real default is ${1:-vnx-dev} at :38 (missed by the quoted grep) used by dispatcher_minimal.sh:95	AG-1
 5c8a1189488b913a	scripts/lib/dispatch_spec.py	vnx-dev	1	legacy_tenant_reader	Comment or docstring stating that this path refuses to default to vnx-dev (ADR-007); prose, no behaviour	
 a75f1268bd5bc9a6	scripts/lib/gate_findings_bridge.py	vnx-dev	1	legacy_tenant_reader	Comment or docstring stating that this path refuses to default to vnx-dev (ADR-007); prose, no behaviour	
 b513d5b3731c55b7	scripts/lib/harness_run_cost.py	vnx-dev	1	te_repareren	ledger_project_id falls back to vnx-dev when neither the store nor env names a tenant (stamps the cost row)	AG-1
@@ -323,7 +322,6 @@ ebd4c709e73e4e4d	scripts/lib/dispatch_cli.py	vnx-dev	1	te_repareren	Docstring of
 338ac8e8609d4717	scripts/lib/dispatch_metadata_db.py	vnx-dev	1	legacy_tenant_reader	Comment or docstring that mentions the vnx-dev project in prose (measurement, ADR-007 note or history); no behaviour	
 9512a2c17a8f5417	scripts/lib/dispatch_metadata_db.py	vnx-dev	1	legacy_tenant_reader	Comment or docstring that mentions the vnx-dev project in prose (measurement, ADR-007 note or history); no behaviour	
 fd859a3f67b666e0	scripts/lib/dispatch_metadata_db.py	vnx-dev	1	legacy_tenant_reader	Comment or docstring that mentions the vnx-dev project in prose (measurement, ADR-007 note or history); no behaviour	
-efaf0220a21cd395	scripts/lib/dispatch_project_guard.sh	vnx-dev	1	te_repareren	vnx_dispatch_resolve_project_id defaults its first argument to vnx-dev (bare, so the quoted guard missed it)	AG-1
 218a6499da93475a	scripts/lib/dispatch_register.py	vnx-dev	1	legacy_tenant_reader	Comment or docstring that mentions the vnx-dev project in prose (measurement, ADR-007 note or history); no behaviour	
 b9bf05ae71e08433	scripts/lib/dispatch_spec.py	vnx-dev	1	legacy_tenant_reader	Comment or docstring that mentions the vnx-dev project in prose (measurement, ADR-007 note or history); no behaviour	
 745a8e579b839b52	scripts/lib/event_outcome_semantics.py	vnx-dev	1	legacy_tenant_reader	Comment or docstring that mentions the vnx-dev project in prose (measurement, ADR-007 note or history); no behaviour	

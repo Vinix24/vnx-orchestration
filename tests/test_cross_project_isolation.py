@@ -12,7 +12,7 @@ E. Re-running the guard on an already-rejected dispatch is idempotent
    (no duplicate marker, no error).
 F. Malformed expected project_id (allowlist violation) → status='fatal', rc=2.
 G. ``vnx_dispatch_resolve_project_id`` honors VNX_PROJECT_ID env override
-   and rejects malformed values; default falls back to 'vnx-dev'.
+   and rejects malformed values; absent sources refuse.
 H. ``vnx_dispatch_assert_dir_under`` returns 0 when child is under parent
    and 1 otherwise — pinning the path-scoping invariant used at startup.
 """
@@ -175,20 +175,20 @@ def test_malformed_expected_project_id_returns_fatal(tmp_path):
 @pytest.mark.parametrize(
     "env_pid,expected_stdout,expected_rc",
     [
-        (None, "vnx-dev", 0),
-        ("", "vnx-dev", 0),
+        (None, "", 1),
+        ("", "", 1),
         ("tenant-a", "tenant-a", 0),
         ("Bad", "", 1),
         ("0bad", "", 1),
         ("a" * 33, "", 1),
     ],
 )
-def test_resolve_project_id(env_pid, expected_stdout, expected_rc):
+def test_resolve_project_id(env_pid, expected_stdout, expected_rc, tmp_path):
     snippet = (
         f'set -uo pipefail; source "{GUARD_SH}"; '
         'vnx_dispatch_resolve_project_id; printf "RC=%s\\n" "$?"'
     )
-    env: dict = {}
+    env: dict = {"VNX_STATE_DIR": str(tmp_path / "state")}
     if env_pid is not None:
         env["VNX_PROJECT_ID"] = env_pid
     out = _run_bash(snippet, env=env)

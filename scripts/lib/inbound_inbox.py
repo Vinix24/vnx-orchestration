@@ -32,7 +32,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from project_scope import current_project_id as _current_project_id
+from project_scope import resolve_stamp_project_id, TenantUnresolved
+from project_id_refusals import record_project_id_refusal
 from runtime_coordination import (
     _append_event,
     _now_utc,
@@ -377,9 +378,6 @@ class InboundInbox:
             if validation is not None:
                 return self._reject(conn, event_id, validation, actor=actor)
 
-            # Extract dispatch parameters from payload and routing hints
-            dispatch_params = self._extract_dispatch_params(event)
-
             # Generate dispatch ID
             if dispatch_id_generator:
                 dispatch_id = dispatch_id_generator()
@@ -388,10 +386,11 @@ class InboundInbox:
 
             # Register dispatch in the canonical dispatches table
             try:
+                dispatch_params = self._extract_dispatch_params(event)
                 dispatch_row = register_dispatch(
                     conn,
                     dispatch_id=dispatch_id,
-                    project_id=_current_project_id(),
+                    project_id=dispatch_params["project_id"],
                     terminal_id=dispatch_params.get("terminal_id"),
                     track=dispatch_params.get("track"),
                     priority=dispatch_params.get("priority", "P2"),
@@ -579,10 +578,16 @@ class InboundInbox:
 
     def _extract_dispatch_params(self, event: InboxEvent) -> Dict[str, Any]:
         """Extract dispatch registration parameters from event payload and routing hints."""
+        try:
+            project_id = resolve_stamp_project_id(db_path=self._state_dir / "runtime_coordination.db")
+        except TenantUnresolved as exc:
+            record_project_id_refusal("inbound_inbox", self._state_dir, "project_id_unresolved")
+            raise TenantUnresolved(f"project_id_unresolved: {exc}") from exc
         hints = event.routing_hints or {}
         payload = event.payload or {}
 
         return {
+            "project_id": project_id,
             "task_class": hints.get("task_class", "channel_response"),
             "terminal_id": hints.get("terminal_id"),
             "track": hints.get("track"),

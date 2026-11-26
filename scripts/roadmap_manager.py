@@ -25,7 +25,8 @@ from governance_receipts import emit_governance_receipt, utc_now_iso
 from pr_queue_manager import PRQueueManager
 from closure_verifier import verify_closure, _find_gate_result, _KNOWN_GATES
 from gate_status import is_pass as gate_is_pass, has_producer_identity as gate_has_producer_identity
-from project_scope import current_project_id
+from project_scope import resolve_stamp_project_id, TenantUnresolved
+from project_id_refusals import record_project_id_refusal
 from vnx_worktree import worktree_start
 import tracks as tracks_db
 
@@ -104,7 +105,11 @@ class RoadmapManager:
         paths = ensure_env()
         self.project_root = Path(paths["PROJECT_ROOT"]).resolve()
         self.state_dir = Path(paths["VNX_STATE_DIR"]).resolve()
-        self.project_id = current_project_id()
+        try:
+            self.project_id = resolve_stamp_project_id(db_path=self.state_dir / "runtime_coordination.db")
+        except TenantUnresolved:
+            record_project_id_refusal("roadmap_manager", self.state_dir, "project_id_unresolved")
+            raise
         self.paths = RoadmapPaths(
             project_root=self.project_root,
             state_dir=self.state_dir,

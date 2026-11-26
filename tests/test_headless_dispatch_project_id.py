@@ -2,12 +2,12 @@
 
 Both pr_queue_manager._get_project_id() and
 headless_dispatch_writer._get_project_id() must delegate to
-project_scope.current_project_id() so dispatch stamps are always
+project_scope.resolve_stamp_project_id() so dispatch stamps are always
 consistent regardless of which stamper is called.
 
 Two scenarios:
   1. VNX_PROJECT_ID is set — all three return the explicit value.
-  2. VNX_PROJECT_ID is unset — all three return the same default ('vnx-dev').
+  2. VNX_PROJECT_ID is unset — dispatch stampers refuse without a source.
 """
 
 from __future__ import annotations
@@ -35,7 +35,6 @@ def _reload_modules():
     import headless_dispatch_writer
     import pr_queue_manager
 
-    importlib.reload(project_scope)
     importlib.reload(headless_dispatch_writer)
     importlib.reload(pr_queue_manager)
 
@@ -46,8 +45,9 @@ ENV_KEY = "VNX_PROJECT_ID"
 
 
 @pytest.fixture(autouse=True)
-def _clean_env():
+def _clean_env(tmp_path, monkeypatch):
     """Ensure VNX_PROJECT_ID is restored after each test."""
+    monkeypatch.chdir(tmp_path)
     saved = os.environ.get(ENV_KEY)
     yield
     if saved is None:
@@ -83,7 +83,7 @@ class TestProjectIdWithEnvSet:
 
 
 class TestProjectIdWithEnvUnset:
-    """When VNX_PROJECT_ID is unset, all stampers must return 'vnx-dev'."""
+    """Dispatch stampers refuse; the legacy scope helper changes in AG-1z."""
 
     def test_project_scope_returns_default(self):
         os.environ.pop(ENV_KEY, None)
@@ -93,17 +93,20 @@ class TestProjectIdWithEnvUnset:
     def test_headless_dispatch_writer_matches_project_scope(self):
         os.environ.pop(ENV_KEY, None)
         ps, hdw, _ = _reload_modules()
-        assert hdw._get_project_id() == ps.current_project_id()
+        with pytest.raises(ps.TenantUnresolved, match="vnx init"):
+            hdw._get_project_id()
 
     def test_pr_queue_manager_matches_project_scope(self):
         os.environ.pop(ENV_KEY, None)
         ps, _, pqm = _reload_modules()
-        assert pqm._get_project_id() == ps.current_project_id()
+        with pytest.raises(ps.TenantUnresolved, match="vnx init"):
+            pqm._get_project_id()
 
     def test_all_three_stampers_agree_on_default(self):
         os.environ.pop(ENV_KEY, None)
         ps, hdw, pqm = _reload_modules()
         scope_val = ps.current_project_id()
         assert scope_val == "vnx-dev"
-        assert hdw._get_project_id() == scope_val
-        assert pqm._get_project_id() == scope_val
+        for stamper in (hdw, pqm):
+            with pytest.raises(ps.TenantUnresolved, match="vnx init"):
+                stamper._get_project_id()

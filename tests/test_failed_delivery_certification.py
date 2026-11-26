@@ -72,6 +72,7 @@ class _CertBase(unittest.TestCase):
         self.dispatch_dir = base / "dispatches"
         self.state_dir.mkdir(parents=True)
         self.dispatch_dir.mkdir(parents=True)
+        (self.state_dir / ".vnx-project-id").write_text("vnx-dev\n")
         init_schema(self.state_dir)
 
         self.broker = DispatchBroker(
