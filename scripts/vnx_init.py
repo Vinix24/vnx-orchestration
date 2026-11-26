@@ -530,7 +530,7 @@ def _read_init_marker(root: Path) -> Optional[str]:
 
 
 def anchor_init_project_id(paths: Dict[str, str]) -> str:
-    """Anchor source-init identity; preserve markers and refuse conflicting stores."""
+    """Validate all init identities under one lock before publishing the marker."""
     data = Path(paths["VNX_DATA_DIR"])
     data.mkdir(parents=True, exist_ok=True)
     marker = data / PROJECT_FILE_NAME
@@ -539,22 +539,21 @@ def anchor_init_project_id(paths: Dict[str, str]) -> str:
         fcntl.flock(lock, fcntl.LOCK_EX)
         existing = _read_init_marker(data)
         project_marker = _read_init_marker(Path(paths["PROJECT_ROOT"]))
-        if existing and project_marker and existing != project_marker:
-            raise ValueError("project_id conflict between project and data markers")
-        pid = existing or project_marker
-        if pid is None:
-            explicit = paths.get("VNX_PROJECT_ID", os.environ.get("VNX_PROJECT_ID"))
-            pid = derive_project_id(paths["PROJECT_ROOT"], explicit=explicit)
+        explicit = paths.get("VNX_PROJECT_ID", os.environ.get("VNX_PROJECT_ID"))
+        pid = derive_project_id(paths["PROJECT_ROOT"], explicit=explicit,
+                                marker=existing or project_marker)
+        for source, value in (("data marker", existing), ("project marker", project_marker)):
+            if value is not None and value != pid:
+                raise ValueError(f"project_id conflict: {source}={value!r}, init={pid!r}")
+        pid = resolve_init_project_id(
+            Path(paths["VNX_STATE_DIR"]) / "quality_intelligence.db",
+            candidate_project_id=pid,
+        )
         if existing is None:
             temporary = marker.with_name(marker.name + ".tmp")
             with temporary.open("x", encoding="utf-8") as output:
                 output.write(pid + "\n")
             os.replace(temporary, marker)
-        resolved = resolve_init_project_id(
-            Path(paths["VNX_STATE_DIR"]) / "quality_intelligence.db"
-        )
-        if resolved != pid:
-            raise ValueError(f"project_id conflict: marker={pid!r}, store={resolved!r}")
         paths["VNX_PROJECT_ID"] = pid
         return pid
 
