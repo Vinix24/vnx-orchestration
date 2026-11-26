@@ -11,6 +11,9 @@ import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import List, Optional
+import pytest
+
+pytestmark = pytest.mark.usefixtures("receipt_project")
 
 TESTS_DIR = Path(__file__).resolve().parent
 VNX_ROOT = TESTS_DIR.parent

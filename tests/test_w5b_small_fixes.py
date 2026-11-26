@@ -66,7 +66,6 @@ class TestRequireCoreMarker:
         dispatch_dir.mkdir(parents=True)
 
         env = os.environ.copy()
-        env["VNX_BROKER_ENABLED"] = "0"
         env["VNX_DATA_DIR"] = str(data_dir)
         env["VNX_DATA_DIR_EXPLICIT"] = "1"
         env["VNX_STATE_DIR"] = str(state_dir)
@@ -77,6 +76,10 @@ class TestRequireCoreMarker:
         result = subprocess.run(
             [
                 sys.executable,
+                "-c", "import runpy,sys; from pathlib import Path; from unittest.mock import patch; "
+                "sys.path.insert(0,str(Path(sys.argv[1]).parent/'lib'))\n"
+                "with patch('runtime_core.load_broker', side_effect=OSError('broker unavailable')): "
+                "runpy.run_path(sys.argv.pop(1),run_name='__main__')",
                 str(SCRIPTS_DIR / "runtime_core_cli.py"),
                 "delivery-start",
                 "--dispatch-id", "test-oi-1075",
@@ -107,7 +110,6 @@ class TestRequireCoreMarker:
         dispatch_dir.mkdir(parents=True)
 
         env = os.environ.copy()
-        env["VNX_BROKER_ENABLED"] = "0"
         env["VNX_DATA_DIR"] = str(data_dir)
         env["VNX_DATA_DIR_EXPLICIT"] = "1"
         env["VNX_STATE_DIR"] = str(state_dir)
@@ -118,6 +120,10 @@ class TestRequireCoreMarker:
         result = subprocess.run(
             [
                 sys.executable,
+                "-c", "import runpy,sys; from pathlib import Path; from unittest.mock import patch; "
+                "sys.path.insert(0,str(Path(sys.argv[1]).parent/'lib'))\n"
+                "with patch('runtime_core.load_broker', side_effect=OSError('broker unavailable')): "
+                "runpy.run_path(sys.argv.pop(1),run_name='__main__')",
                 str(SCRIPTS_DIR / "runtime_core_cli.py"),
                 "acquire-lease",
                 "--terminal", "T2",

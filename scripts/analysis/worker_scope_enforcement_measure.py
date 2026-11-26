@@ -19,7 +19,7 @@ measured, both by replaying the hook's OWN matchers over real history:
 Method (honest, per-dispatch, no extrapolation):
 
   1. Read every real dispatch spec from the project's pending dir
-     (``~/.vnx-data/vnx-dev/dispatches/pending/*/dispatch-spec.json``).
+     (``~/.vnx-data/<project-id>/dispatches/pending/*/dispatch-spec.json``).
      Plan-gate panel seat dirs (``final_prompt.md`` only, no spec) are excluded
      — they are not dispatches.
   2. Link each spec to the commit(s) that landed its work via the
@@ -34,11 +34,12 @@ Method (honest, per-dispatch, no extrapolation):
      verdict is the hook's verdict, not a reimplementation.
 
 Only the *linked* population is reported as measured; the unlinked remainder is
-a count, not a percentage. Exit 0 always; results go to stdout (JSON summary +
+a count, not a percentage. Unresolved identity exits nonzero; results go to stdout (JSON summary +
 human-readable detail).
 """
 from __future__ import annotations
 
+import argparse
 import fnmatch
 import json
 import logging
@@ -46,7 +47,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-PENDING_DIR = Path.home() / ".vnx-data" / "vnx-dev" / "dispatches" / "pending"
+PENDING_DIR = None  # Optional explicit path for embedded callers.
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 WRITE_ACCESS = frozenset({"read_write", "write", "create"})
@@ -60,6 +61,7 @@ logging.getLogger("worker_permissions").setLevel(logging.CRITICAL)
 _LIB = REPO_ROOT / "scripts" / "lib"
 if str(_LIB) not in sys.path:
     sys.path.insert(0, str(_LIB))
+from operator_paths import operator_data_dir
 from worker_permissions import (  # noqa: E402
     PermissionPolicyRefused,
     default_code_worker_profile,
@@ -91,11 +93,12 @@ def _git(*args: str) -> str:
     ).stdout
 
 
-def load_specs() -> "dict[str, dict]":
+def load_specs(project_id: str | None = None) -> "dict[str, dict]":
     specs: dict[str, dict] = {}
-    if not PENDING_DIR.is_dir():
+    pending = PENDING_DIR if PENDING_DIR is not None else operator_data_dir(project_id) / "dispatches/pending"
+    if not pending.is_dir():
         return specs
-    for entry in PENDING_DIR.iterdir():
+    for entry in pending.iterdir():
         if not entry.is_dir():
             continue
         spec_file = entry / "dispatch-spec.json"
@@ -152,8 +155,11 @@ def declared_directory_paths(declared: "list[str]") -> "list[str]":
     ]
 
 
-def main() -> int:
-    specs = load_specs()
+def main(argv=()) -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--project-id")
+    args = parser.parse_args(argv)
+    specs = load_specs(args.project_id) if args.project_id else load_specs()
     spec_ids = set(specs)
     did2shas = link_dispatch_to_commits(spec_ids)
 
@@ -383,4 +389,4 @@ def _print_examples(blocked_examples: "list[dict]", role_outside_examples: "list
         print(f"  {did}")
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(main(sys.argv[1:]))

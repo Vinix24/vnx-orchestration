@@ -51,6 +51,8 @@ logger = logging.getLogger(__name__)
 # `report_line` is not rebound here for other writers to reuse.
 import report_lifecycle_mode
 from atomic_io import atomic_write_text
+from project_scope import TenantUnresolved, resolve_stamp_project_id
+from project_id_refusals import record_project_id_refusal
 from receipt_schema import REPORT_INGESTED_EVENT_TYPE
 from dispatch_identity import _IDENTITY_UNRESOLVED  # single canonical sentinel (dispatch-20260804-190000)
 # Canonical receipt status vocabulary (single generated source). The converter
@@ -1822,6 +1824,21 @@ def _sync_report_open_items(receipt: Dict[str, Any], text: str) -> None:
         )
 
 
+def _report_project_id(report_path: Path, receipts_file: Optional[str], dry_run: bool) -> str:
+    """Resolve against the destination; name/count a refusal and keep it retryable."""
+    from append_receipt import _resolve_receipts_file
+    target = _resolve_receipts_file(receipts_file)
+    try:
+        return resolve_stamp_project_id(db_path=target)
+    except TenantUnresolved:
+        if dry_run:
+            logger.error("project_id_unresolved: report=%s", report_path)
+        else:
+            record_project_id_refusal("receipt_processor", target.parent,
+                                      "project_id_unresolved", report=str(report_path))
+        raise
+
+
 def _convert_one_detailed(
     report_path: Path,
     *,
@@ -1863,9 +1880,6 @@ def _convert_one_detailed(
     sys.path.insert(0, str(_LIB_DIR))
     try:
         import append_receipt  # registers facade as side effect
-        append_receipt_payload = append_receipt.append_receipt_payload
-        AppendReceiptError = append_receipt.AppendReceiptError
-        AppendResult = append_receipt.AppendResult
     except Exception as exc:
         logger.warning("report_to_receipt_converter: cannot import append_receipt: %s", exc)
         return _error_outcome(error_reason_sink, f"append_receipt import failed: {type(exc).__name__}")
@@ -1879,9 +1893,12 @@ def _convert_one_detailed(
     # The store the line is appended to (K-8b rule 2); a None state_dir is never "legacy".
     state_dir_for_route = Path(receipts_file).parent if receipts_file else None
     try:
+        project_id = _report_project_id(report_path, receipts_file, dry_run)
         receipt = build_receipt_from_report(
             report_path, text, state_dir=state_dir_for_route, dry_run=dry_run,
         )
+    except TenantUnresolved:
+        return _error_outcome(error_reason_sink, "project_id_unresolved")
     except report_lifecycle_mode.ReportPathRefused as exc:
         # Named refusal (K-8b rule 4): book nothing — or dead-letter when permanent
         # and aged (OI-2542). Caught BEFORE the generic handler: never a crash.
@@ -1897,8 +1914,8 @@ def _convert_one_detailed(
         return _error_outcome(error_reason_sink, f"build_receipt_from_report crashed: {type(exc).__name__}")
     if receipt is None:
         return None, "malformed"
+    receipt["project_id"] = project_id
 
-    _guard_did = receipt.get("dispatch_id")
     _guard_matched = _completion_already_booked(receipt, receipts_file)
 
     # The sync call sits outside the OSError-scoped try of
@@ -1912,15 +1929,15 @@ def _convert_one_detailed(
     if _guard_matched:
         if not dry_run:
             _sync_report_open_items(receipt, text)
-        return AppendResult(
+        return append_receipt.AppendResult(
             status="duplicate",
             receipts_file=Path(receipts_file),
-            idempotency_key=_guard_did,
+            idempotency_key=receipt["dispatch_id"],
         ), "duplicate"
 
     if dry_run:
         return _dry_run_outcome(
-            receipt, report_path, AppendReceiptError,
+            receipt, report_path, append_receipt.AppendReceiptError,
             rejected_detail_sink, error_reason_sink,
         )
 
@@ -1930,7 +1947,7 @@ def _convert_one_detailed(
     # shape, with or without a .code attribute) must never be caught by a
     # handler that assumes every exception here is an AppendReceiptError.
     try:
-        result = append_receipt_payload(
+        result = append_receipt.append_receipt_payload(
             receipt,
             receipts_file=receipts_file,
             cache_window_seconds=cache_window_seconds,
@@ -1940,7 +1957,7 @@ def _convert_one_detailed(
             # only outcome record a dispatch gets when the lane wrote none.
             skip_enrichment=True,
         )
-    except AppendReceiptError as exc:
+    except append_receipt.AppendReceiptError as exc:
         if exc.code in MODEL_REFUSAL_CODES:
             # receipt_conversion_rejection_beacon.parse_rejections keys on the
             # exact "REJECTED (fail-closed) dispatch=... file=... reason=..."

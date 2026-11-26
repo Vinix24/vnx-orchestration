@@ -14,6 +14,8 @@ from types import SimpleNamespace
 
 import pytest
 
+pytestmark = pytest.mark.usefixtures("receipt_project")
+
 SCRIPTS_LIB = Path(__file__).resolve().parent.parent / "scripts" / "lib"
 if str(SCRIPTS_LIB) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_LIB))

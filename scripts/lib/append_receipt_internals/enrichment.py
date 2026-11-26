@@ -12,7 +12,10 @@ from .validation import _is_completion_event, _is_subprocess_intermediate_comple
 
 
 def _enrich_project_id_and_git(enriched: Dict[str, Any], paths: Dict[str, str], repo_root: Optional[Path]) -> None:
-    enriched.setdefault("project_id", facade.current_project_id())
+    enriched["project_id"] = facade.resolve_stamp_project_id(
+        explicit=enriched.get("project_id"),
+        db_path=Path(paths["VNX_STATE_DIR"]) / "t0_receipts.ndjson",
+    )
 
     if "provenance" in enriched:
         return
@@ -172,7 +175,7 @@ def _enrich_oi_delta(enriched: Dict[str, Any], state_dir: Path) -> None:
             row = conn_oi.execute(
                 "SELECT target_open_items FROM dispatch_metadata "
                 "WHERE dispatch_id=? AND project_id=?",
-                (dispatch_id_for_oi, facade.current_project_id()),
+                (dispatch_id_for_oi, facade.resolve_stamp_project_id(db_path=db_path_oi)),
             ).fetchone()
         else:
             row = conn_oi.execute(
@@ -222,7 +225,7 @@ def _enrich_cqs(enriched: Dict[str, Any], state_dir: Path) -> None:
                     enriched.get("open_items_resolved", 0),
                     json.dumps(enriched.get("quality_advisory") or {}),
                     dispatch_id,
-                    facade.current_project_id(),
+                    facade.resolve_stamp_project_id(db_path=db_path),
                 ),
             )
         else:
@@ -284,8 +287,8 @@ def _enrich_toolcall_signals(enriched: Dict[str, Any], signal_dir: Optional[str]
 def _enrich_completion_receipt(receipt: Dict[str, Any], repo_root: Optional[Path] = None) -> Dict[str, Any]:
     """Enrich completion receipts with provenance and session metadata.
 
-    This is best-effort - failures will result in status="unavailable" markers
-    rather than crashing the receipt append flow.
+    Project attribution raises TenantUnresolved when no source exists; other
+    enrichment is best-effort and leaves status="unavailable" markers on failure.
 
     T-B2: a receipt no longer carries ``terminal_snapshot``. A receipt's
     identity comes from its dispatch row; "what is running" is ``live_work``

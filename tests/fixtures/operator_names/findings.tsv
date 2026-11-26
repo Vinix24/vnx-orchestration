@@ -131,15 +131,12 @@ fcc726d8b3c3d943	schemas/migrations/0031_runtime_tenant_fk_repair.sql	vnx-dev	1	
 2dc415b697046803	schemas/migrations/0032_track_pr_delivery.sql	vnx-dev	1	frozen_migration	0032_track_pr_delivery.sql: project_id DEFAULT 'vnx-dev' on track_pr_delivery: SURVIVES as effective default on a fresh store of another project (measured); every in-repo insert names project_id	
 2dc415b697046803	schemas/runtime_coordination_v10.sql	vnx-dev	3	frozen_migration	runtime_coordination_v10.sql: project_id DEFAULT 'vnx-dev' on terminal_leases: replaced by the owning project at apply time (measured default on a fresh store: the resolved id)	
 3af41a448c66bd09	schemas/runtime_coordination_v10.sql	vnx-dev	1	frozen_migration	runtime_coordination_v10.sql: comment inside a frozen migration describing its own vnx-dev placeholder; prose	
-edd46643023d5972	scripts/analysis/worker_scope_enforcement_measure.py	vnx-dev	1	te_repareren	Measurement script hardcodes the operator's store ~/.vnx-data/vnx-dev/dispatches/pending	AG-1
 366b4a15180bb016	scripts/backfill_dispatch_metadata.py	vnx-dev	1	legacy_tenant_reader	Comment or docstring stating that this path refuses to default to vnx-dev (ADR-007); prose, no behaviour	
 f72c9a1214b445ac	scripts/backfill_dispatch_metadata.py	vnx-dev	1	te_repareren	Help text promises a vnx-dev default while the code refuses to guess (:445); the text misleads	AG-1
 74da2524e00d01ad	scripts/backfill_dispatch_track_linkage.py	vnx-dev	1	te_repareren	Backfill --project-id default (code and help text) is env or vnx-dev	AG-1
 77a752e942d9f40e	scripts/backfill_dispatch_track_linkage.py	vnx-dev	1	te_repareren	Backfill --project-id default (code and help text) is env or vnx-dev	AG-1
 74da2524e00d01ad	scripts/backfill_track_decision_ref.py	vnx-dev	1	te_repareren	Backfill --project-id default (code and help text) is env or vnx-dev	AG-1
 77a752e942d9f40e	scripts/backfill_track_decision_ref.py	vnx-dev	1	te_repareren	Backfill --project-id default (code and help text) is env or vnx-dev	AG-1
-5bbba44b571e3b0f	scripts/benchmark/field-tests/runners/lane_adapter.py	vnx-dev	1	te_repareren	Benchmark runner hardcodes the operator's store ~/.vnx-data/vnx-dev/unified_reports	AG-1
-648c0965259698dc	scripts/benchmarks/run_lane_bench.py	vnx-dev	1	te_repareren	Lane benchmark hardcodes REPORT_DIR_CENTRAL under ~/.vnx-data/vnx-dev	AG-1
 d94f52d9499667e2	scripts/ci/test_exclusions.txt	vnx-dev	1	legacy_tenant_reader	Comment quoting a measured ADR-007 init-backfill conflict (env value) for an excluded test; prose in a CI list	
 f0fe2fe1c4e5f186	scripts/ci/test_exclusions.txt	vnx-dev	1	legacy_tenant_reader	Comment quoting a measured ADR-007 init-backfill conflict (env value) for an excluded test; prose in a CI list	
 633705d1f8f11068	scripts/conversation_analyzer/runner.py	vnx-dev	1	legacy_tenant_reader	Comment or docstring stating that this path refuses to default to vnx-dev (ADR-007); prose, no behaviour	
@@ -148,7 +145,6 @@ f0fe2fe1c4e5f186	scripts/ci/test_exclusions.txt	vnx-dev	1	legacy_tenant_reader	C
 1deff95b46e74135	scripts/hooks/vnx_hook_shim.sh	vnx-dev	1	te_repareren	Hook shim prefers the in-repo hook scripts only for the registry entry whose project_id is vnx-dev, i.e. the operator's fabric checkout	AG-5
 ceba80628ecc8347	scripts/hooks/vnx_hook_shim.sh	vnx-dev	1	te_repareren	Hook shim prefers the in-repo hook scripts only for the registry entry whose project_id is vnx-dev, i.e. the operator's fabric checkout	AG-5
 398eb9c02fa29d4d	scripts/index_adrs.py	vnx-dev	1	legacy_tenant_reader	Comment or docstring stating that this path refuses to default to vnx-dev (ADR-007); prose, no behaviour	
-0005beeca958ef5a	scripts/intel_injection_join.py	vnx-dev	1	te_repareren	Join script hardcodes the operator's state dir ~/.vnx-data/vnx-dev/state	AG-1
 2a4474ace24708c1	scripts/intelligence_backfill.py	vnx-dev	1	legacy_tenant_reader	Comment or docstring stating that this path refuses to default to vnx-dev (ADR-007); prose, no behaviour	
 53ccc8dcb6f37c81	scripts/lib/crash_recovery_sweep.py	vnx-dev	1	te_repareren	Library signature default project_id='vnx-dev' for the sweep	AG-1
 6342078068775165	scripts/lib/dispatch_cli.py	vnx-dev	1	te_repareren	_resolve_data_dir resolves the store of ~/.vnx-data/<pid> with a vnx-dev fallback when neither argument nor env names a project	AG-1
@@ -283,7 +279,6 @@ e401c50c61a98d4b	schemas/migrations/0010_add_project_id.sql	vnx-dev	1	frozen_mig
 6492addad58fc25a	schemas/migrations/0031_runtime_tenant_fk_repair.sql	vnx-dev	1	frozen_migration	0031_runtime_tenant_fk_repair.sql: comment inside a frozen migration naming the vnx-dev store it was measured or written on; prose	
 f2836b6e3bc8a244	schemas/migrations/0034_runtime_project_id_completion.sql	vnx-dev	1	frozen_migration	0034_runtime_project_id_completion.sql: comment inside a frozen migration naming the vnx-dev store it was measured or written on; prose	
 9146606d89a9fef2	scripts/aggregator/build_central_view.py	vnx-dev	1	legacy_tenant_reader	Comment or docstring that mentions the vnx-dev project in prose (measurement, ADR-007 note or history); no behaviour	
-1af4ff7894aa0b94	scripts/analysis/worker_scope_enforcement_measure.py	vnx-dev	1	te_repareren	Usage example or docstring command that names the operator's project vnx-dev or its store ~/.vnx-data/vnx-dev; reword with a placeholder	AG-1
 0c4fc19ab98322aa	scripts/audit_chain.py	vnx-dev	2	te_repareren	Usage example or docstring command that names the operator's project vnx-dev or its store ~/.vnx-data/vnx-dev; reword with a placeholder	AG-1
 2a1b70d4970bb631	scripts/audit_chain.py	vnx-dev	2	te_repareren	Usage example or docstring command that names the operator's project vnx-dev or its store ~/.vnx-data/vnx-dev; reword with a placeholder	AG-1
 5984769cd7193109	scripts/audit_chain.py	vnx-dev	1	legacy_tenant_reader	Comment or docstring that mentions the vnx-dev project in prose (measurement, ADR-007 note or history); no behaviour	
@@ -310,7 +305,6 @@ e540b5bd2ab7e7a3	scripts/gate_obligation_retire_backlog.py	vincentvandeth	1	lega
 d35f5743f32cabd5	scripts/gate_obligation_runner.py	vnx-dev	1	te_repareren	Usage example or docstring command that names the operator's project vnx-dev or its store ~/.vnx-data/vnx-dev; reword with a placeholder	AG-1
 a530d501be5ff558	scripts/hooks/vnx_hook_shim.sh	vnx-dev	1	te_repareren	Hook guard identifies the fabric source by the first vnx-dev entry of the user-owned project registry; sibling of the table rows for the shim	AG-5
 b0a87bccc4b0dfae	scripts/import_open_items_to_tracks.py	vnx-dev	1	legacy_tenant_reader	Comment or docstring that mentions the vnx-dev project in prose (measurement, ADR-007 note or history); no behaviour	
-042ee375974b7292	scripts/intel_injection_join.py	vnx-dev	1	te_repareren	Usage example or docstring command that names the operator's project vnx-dev or its store ~/.vnx-data/vnx-dev; reword with a placeholder	AG-1
 5376e1855455a8a0	scripts/intelligence_aggregator_cli.py	vnx-dev	1	te_repareren	Usage example or docstring command that names the operator's project vnx-dev or its store ~/.vnx-data/vnx-dev; reword with a placeholder	AG-1
 9f6017e07ff0503c	scripts/intelligence_aggregator_cli.py	vnx-dev	1	te_repareren	Usage example or docstring command that names the operator's project vnx-dev or its store ~/.vnx-data/vnx-dev; reword with a placeholder	AG-1
 eccb6623bb98316e	scripts/intelligence_aggregator_cli.py	vnx-dev	1	te_repareren	Usage example or docstring command that names the operator's project vnx-dev or its store ~/.vnx-data/vnx-dev; reword with a placeholder	AG-1
@@ -363,8 +357,6 @@ db9093dddbe1d0bf	scripts/lib/provider_dispatch.py	vnx-dev	1	legacy_tenant_reader
 11a0aa9fa11e5321	scripts/lib/report_to_receipt_converter.py	vnx-dev	1	legacy_tenant_reader	Comment or docstring that mentions the vnx-dev project in prose (measurement, ADR-007 note or history); no behaviour	
 8f96db455fae06c7	scripts/lib/report_to_receipt_converter.py	vnx-dev	1	legacy_tenant_reader	Comment or docstring that mentions the vnx-dev project in prose (measurement, ADR-007 note or history); no behaviour	
 857740fa7278ec0e	scripts/lib/review_vendor.py	vnx-dev	1	legacy_tenant_reader	Comment or docstring that mentions the vnx-dev project in prose (measurement, ADR-007 note or history); no behaviour	
-335310b336fba9c5	scripts/lib/router_baseline.py	vnx-dev	1	te_repareren	Usage line of router_baseline naming the operator's receipt store ~/.vnx-data/vnx-dev	AG-1
-b302d5a5bbb8116d	scripts/lib/router_baseline.py	vnx-dev	1	te_repareren	router_baseline hardcodes the operator's receipt store ~/.vnx-data/vnx-dev as its default input	AG-1
 636299089fc63fec	scripts/lib/t0_rotation_state.py	vnx-dev	1	legacy_tenant_reader	Comment or docstring that mentions the vnx-dev project in prose (measurement, ADR-007 note or history); no behaviour	
 a336038dac94d1c7	scripts/lib/t0_rotation_state.py	vnx-dev	1	legacy_tenant_reader	Comment or docstring that mentions the vnx-dev project in prose (measurement, ADR-007 note or history); no behaviour	
 0d8812c25fc7f71f	scripts/lib/tenant_stamping.py	vnx-dev	1	legacy_tenant_reader	Comment or docstring that mentions the vnx-dev project in prose (measurement, ADR-007 note or history); no behaviour	

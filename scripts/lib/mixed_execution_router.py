@@ -6,7 +6,7 @@ Wires together DispatchRouter, HeadlessAdapter, IntelligenceSelector,
 InboundInbox, and RecommendationTracker into a single orchestration
 entry point with cutover controls and rollback.
 
-This is the live dispatch path after FP-C cutover:
+The FP-C routing pipeline (also exercised by standalone certification):
   1. Resolve task class from dispatch metadata
   2. Run bounded intelligence injection (dispatch_create or dispatch_resume)
   3. Route dispatch to the correct execution target (interactive or headless)
@@ -17,7 +17,7 @@ This is the live dispatch path after FP-C cutover:
 Cutover controls:
   VNX_MIXED_EXECUTION    "0" (default) = cutover disabled, "1" = enabled
   VNX_HEADLESS_ROUTING   "0" (default) = headless routing disabled, "1" = enabled
-  VNX_BROKER_SHADOW      "1" (default) = shadow mode, "0" = authoritative
+  Broker authority is fixed; it does not control routing or headless execution.
 
 Rollback:
   Set VNX_MIXED_EXECUTION=0 or VNX_HEADLESS_ROUTING=0 to revert to
@@ -92,7 +92,7 @@ def cutover_config_from_env() -> Dict[str, Any]:
         "mixed_execution": mixed_execution_enabled(),
         "headless_routing": headless_routing_enabled(),
         "headless_enabled": headless_enabled(),
-        "broker_shadow": os.environ.get("VNX_BROKER_SHADOW", "1").strip() != "0",
+        "broker_shadow": False,
         "intelligence_injection": True,
     }
 
