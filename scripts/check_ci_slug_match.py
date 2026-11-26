@@ -367,7 +367,17 @@ def run_gate(
 
 def _build_parser() -> argparse.ArgumentParser:
     import os
+    import logging
     import config_runtime
+    import config_registry
+    from enforcement_profile import enforced_storeless
+    key = "VNX_SLUG_ENFORCEMENT"
+    strict = config_runtime.strict_resolver() if config_runtime.autowire() else None
+    value, source = (config_registry.resolve_with_source(key, strict[1], strict[0], strict_resolver=True)
+                     if strict else enforced_storeless(key))
+    unreadable = source in config_registry.ERROR_SOURCES
+    if unreadable:
+        logging.getLogger(__name__).error("%s: %s; retaining enforcement", key, source)
 
     parser = argparse.ArgumentParser(
         description="CI gate: Dispatch-ID present + slug-match in branch commits"
@@ -385,7 +395,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--enforce",
         action="store_true",
-        default=config_runtime.get_bool("VNX_SLUG_ENFORCEMENT"),
+        default=unreadable or value.strip().lower() in ("1", "true", "yes", "on"),
         help="Exit 1 on failure instead of warning (also: VNX_SLUG_ENFORCEMENT=1)",
     )
     return parser

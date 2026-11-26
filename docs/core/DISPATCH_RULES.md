@@ -135,7 +135,7 @@ So a green CI does **not** prove:
 - function size outside `scripts/`, `vnx_cli/` and `dashboard/`, or inside a `tests` or `spikes` path; lint patterns outside `scripts/` and `dashboard/` or on lines the PR did not add;
 - anything on a docs-only PR beyond the four light-profile files.
 
-A required check is not a verdict either: the `Dispatch-ID Slug-Match Gate` is a required context that cannot fail while `VNX_SLUG_ENFORCEMENT` is `0` in the workflow. Do not quote a test count from a green run. Every CI lock, its release and its test: `docs/core/LOCKS_AND_RELEASES.md` stage 5.
+A required check is not a verdict either: the `Dispatch-ID Slug-Match Gate` is a required context whose workflow exports `VNX_SLUG_ENFORCEMENT=0` (shadow). Override, project row and global config outrank that env value; unreadable configuration retains enforcement. Do not quote a test count from a green run. Every CI lock, its release and its test: `docs/core/LOCKS_AND_RELEASES.md` stage 5.
 
 ### 2.4 The gate profile (`VNX_GOVERNANCE_PROFILE`)
 

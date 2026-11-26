@@ -180,12 +180,9 @@ def _relative_to_cwd(file_path: str, cwd: str) -> str:
 
 
 def _hook_data_dir() -> Path:
-    """Use the hook process's supplied paths without git discovery."""
-    if os.environ.get("VNX_DATA_DIR"):
-        return Path(os.environ["VNX_DATA_DIR"])
-    if os.environ.get("VNX_STATE_DIR"):
-        return Path(os.environ["VNX_STATE_DIR"]).parent
-    return Path(".vnx-data")
+    """Use the fabric resolver; only an explicit data pin bypasses git discovery."""
+    import project_root
+    return project_root.resolve_data_dir(__file__)
 
 
 def _is_within_report_dir(file_path: str) -> bool:
