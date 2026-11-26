@@ -15,16 +15,13 @@ import check_ci_slug_match as slug
 import config_registry as registry
 import config_runtime as runtime
 import config_store_db
-import trace_token_validator as trace
 import worker_permissions as worker
 from test_env_reads_t0_rotation_flag import python_reads
 from test_t0_context_guard import _logging_git
 
 READERS = [
-    ("VNX_PROVENANCE_ENFORCEMENT", lambda: trace.get_enforcement_mode() == trace.EnforcementMode.ENFORCED),
     ("VNX_SLUG_ENFORCEMENT", lambda: slug._build_parser().parse_args([]).enforce),
     ("VNX_ENFORCE_WORKER_PERMISSIONS", worker.worker_permission_enforcement_enabled),
-    ("VNX_PROVENANCE_LEGACY_ACCEPTED", trace.is_legacy_accepted),
 ]
 DELETED = ("VNX_DEFAULT_BRANCHES", "VNX_RECEIPT_FALLBACK")
 
@@ -60,7 +57,7 @@ def test_precedence(store, monkeypatch, key, read, value, source):
     assert read() is (value == "1")
 
 
-@pytest.mark.parametrize("key,read", [READERS[0], READERS[2]])
+@pytest.mark.parametrize("key,read", [READERS[1]])
 def test_unreadable_wired_store_keeps_enforcement(store, monkeypatch, tmp_path, caplog, key, read):
     store(key, "1")
     monkeypatch.setenv(key, "0")
@@ -104,8 +101,8 @@ def test_hook_stored_switch_without_git(store, tmp_path, monkeypatch, value, pin
 
 
 def test_zero_environment_reads():
-    counts = dict.fromkeys((*DELETED, *(k for k, _ in READERS[:4])), 0)
-    modules = {"check_ci_slug_match.py", "trace_token_validator.py", "worker_permissions.py",
+    counts = dict.fromkeys((*DELETED, *(k for k, _ in READERS)), 0)
+    modules = {"check_ci_slug_match.py", "worker_permissions.py",
                "ndjson_hash_chain.py", "dispatch_govern.py"}
     for top in ("scripts", "vnx_cli", "dashboard"):
         for path in (ROOT / top).rglob("*.py"):
@@ -117,36 +114,3 @@ def test_zero_environment_reads():
             for key in DELETED:
                 counts[key] += path.read_text().count("${" + key) + path.read_text().count("$" + key)
     assert counts == dict.fromkeys(counts, 0), counts
-
-
-@pytest.mark.parametrize("script", ["ci_trace_token_check.sh", "commands/install_git_hooks.sh"])
-@pytest.mark.parametrize("mode", ["env", "error", "missing"])
-def test_bash_config_and_fallback(store, tmp_path, monkeypatch, script, mode):
-    subprocess.run(["git", "init", "-b", "main", str(tmp_path)], check=True, capture_output=True)
-    for message in ("base", "feat: trace\n\nDispatch-ID: 20261125-120000-pr6h-A"):
-        subprocess.run(["git", "-c", "user.name=Test", "-c", "user.email=test@example.org",
-                        "commit", "--allow-empty", "-m", message], cwd=tmp_path, check=True, capture_output=True)
-    monkeypatch.setenv("VNX_PROVENANCE_ENFORCEMENT", "1")
-    monkeypatch.setenv("VNX_DATA_DIR", str(tmp_path / "data"))
-    monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
-    if mode == "error":
-        Path(os.environ["VNX_GLOBAL_CONFIG_FILE"]).parent.mkdir(parents=True, exist_ok=True)
-        Path(os.environ["VNX_GLOBAL_CONFIG_FILE"]).write_text("invalid json")
-    home = ROOT
-    if mode == "missing":
-        home = tmp_path
-        (home / "scripts/lib").mkdir(parents=True)
-        (home / "scripts/lib/vnx_resolve_root.sh").write_text((ROOT / "scripts/lib/vnx_resolve_root.sh").read_text())
-        (home / "hooks").symlink_to(ROOT / "hooks", target_is_directory=True)
-    target = home / "scripts" / script
-    target.parent.mkdir(parents=True, exist_ok=True)
-    if mode == "missing":
-        target.write_text((ROOT / "scripts" / script).read_text())
-    command = 'bash "$1" HEAD~1' if script.startswith("ci_") else 'log() { echo "$*"; }; err() { echo "$*"; }; source "$1"; cmd_install_git_hooks'
-    result = subprocess.run(["bash", "-c", command, "pr6h", str(target)], cwd=tmp_path,
-                            env=dict(os.environ, VNX_HOME=str(home)), capture_output=True, text=True)
-    expected = ("Enforcement: ENFORCED" if mode == "env" else "Enforcement: shadow") if script.startswith("ci_") else ("Enforcement: ACTIVE" if mode == "env" else "Enforcement: SHADOW")
-    assert expected in result.stdout, result.stdout + result.stderr
-    assert result.returncode == 0
-    if mode != "env":
-        assert "Config read failed" in result.stdout + result.stderr

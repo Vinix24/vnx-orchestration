@@ -21,15 +21,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VALIDATOR="$SCRIPT_DIR/lib/trace_token_validator.py"
-source "$SCRIPT_DIR/lib/vnx_resolve_root.sh"
-vnx_resolve_project_root "${BASH_SOURCE[0]}"
-VNX_ROOT="$VNX_PROJECT_ROOT"
-CONFIG="$("$VNX_ROOT/bin/vnx" config get --raw VNX_PROVENANCE_ENFORCEMENT VNX_PROVENANCE_LEGACY_ACCEPTED)" || {
-    echo "[VNX-CI] Config read failed: VNX_PROVENANCE_ENFORCEMENT=0, VNX_PROVENANCE_LEGACY_ACCEPTED=1" >&2
-    CONFIG=$'0\n1'
-}
-ENFORCEMENT="${CONFIG%%$'\n'*}"
-LEGACY_ACCEPTED="${CONFIG#*$'\n'}"
+ENFORCEMENT="${VNX_PROVENANCE_ENFORCEMENT:-0}"
 
 # ── Determine base ref ──────────────────────────────────────────────
 BASE_REF="${1:-${GITHUB_BASE_REF:-main}}"
@@ -91,7 +83,7 @@ while IFS= read -r sha; do
         if echo "$BODY" | grep -qE '^Dispatch-ID:\s+\S+'; then
             IS_VALID="True"
             FORMAT="preferred"
-        elif [ "$LEGACY_ACCEPTED" = "1" ]; then
+        elif [ "${VNX_PROVENANCE_LEGACY_ACCEPTED:-1}" = "1" ]; then
             if echo "$BODY" | grep -qE 'dispatch:\S+|\\bPR-[0-9]+\\b|\\bFP-[A-Z]\\b'; then
                 IS_VALID="True"
                 FORMAT="legacy"

@@ -13,7 +13,6 @@ Environment variables:
 from __future__ import annotations
 
 import json
-import logging
 import os
 import re
 import sys
@@ -143,24 +142,14 @@ class ValidationResult:
 
 
 def get_enforcement_mode() -> EnforcementMode:
-    """Resolve enforcement strictly: an unreadable wired store cannot turn it off."""
-    import config_runtime
-    import config_registry
-    from enforcement_profile import enforced_storeless
-    key = "VNX_PROVENANCE_ENFORCEMENT"
-    strict = config_runtime.strict_resolver() if config_runtime.autowire() else None
-    val, source = (config_registry.resolve_with_source(key, strict[1], strict[0], strict_resolver=True)
-                   if strict else enforced_storeless(key))
-    if source in config_registry.ERROR_SOURCES:
-        logging.getLogger(__name__).error("%s: %s; retaining enforcement", key, source)
-        return EnforcementMode.ENFORCED
+    """Read enforcement mode from environment."""
+    val = os.environ.get("VNX_PROVENANCE_ENFORCEMENT", "0")
     return EnforcementMode.ENFORCED if val == "1" else EnforcementMode.SHADOW
 
 
 def is_legacy_accepted() -> bool:
     """Check if legacy trace token formats are accepted."""
-    import config_runtime
-    return config_runtime.get_bool("VNX_PROVENANCE_LEGACY_ACCEPTED")
+    return os.environ.get("VNX_PROVENANCE_LEGACY_ACCEPTED", "1") == "1"
 
 
 def get_current_dispatch_id() -> Optional[str]:
