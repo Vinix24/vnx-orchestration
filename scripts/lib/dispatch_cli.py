@@ -86,6 +86,7 @@ from runtime_coordination import (  # noqa: E402
     InvalidStateError as _RcInvalidStateError,
     InvalidTransitionError as _RcInvalidTransitionError,
 )
+from runtime_state_machine import _PROJECT_ID_UNSET, _dispatch_row, _resolve_project_scope
 
 
 class _InvariantViolation(Exception):
@@ -1509,7 +1510,7 @@ def _record_bookkeeping_failure(
 _REFIRE_RECOVERABLE_STATES = frozenset({"failed_delivery", "timed_out"})
 
 
-def _recover_for_refire(conn, row: dict, refire_reason: Optional[str]) -> None:
+def _recover_for_refire(conn, row: dict, refire_reason: Optional[str], *, project_id: str) -> None:
     """OI-1814/OI-2482: move a refired row out of a recoverable failure to ``recovered``.
 
     Without this the claim below met a ``failed_delivery``/``timed_out`` row, was
@@ -1528,7 +1529,7 @@ def _recover_for_refire(conn, row: dict, refire_reason: Optional[str]) -> None:
         conn, dispatch_id=row["dispatch_id"], to_state="recovered", actor="door",
         reason=f"door refire of a {row['state']} row as a new attempt: {reason}",
         metadata={"refire_reason": reason, "recovered_from": row["state"]},
-        **({"project_id": row["project_id"]} if "project_id" in row else {}),
+        project_id=project_id,
     )
 
 
@@ -1674,7 +1675,7 @@ def _persist_dispatch_row_once(
                 },
                 actor="door",
             )
-            _recover_for_refire(conn, row, refire_reason)
+            _recover_for_refire(conn, row, refire_reason, project_id=spec.project_id)
             try:
                 _rc_transition_dispatch(
                     conn,
@@ -1683,8 +1684,7 @@ def _persist_dispatch_row_once(
                     actor="door",
                     reason="door executes synchronously (single-entry dispatch)",
                     metadata={"target_slot": spec.target_slot},
-                    # Legacy dispatch tables have no project column to scope on.
-                    **({"project_id": spec.project_id} if "project_id" in row else {}),
+                    project_id=spec.project_id,
                 )
             except (_RcInvalidTransitionError, _RcInvalidStateError):
                 # Expected idempotent no-op — see docstring. Not a bookkeeping
@@ -4107,6 +4107,7 @@ def _refire_guard_verdict(
 def _owner_transition(
     dispatch_id: str, to_state: str, *, state_dir: Path,
     reason: Optional[str] = None, metadata: Optional[dict] = None,
+    project_id: Any = _PROJECT_ID_UNSET,
 ) -> None:
     """Best-effort: drive the door-owned dispatch row to to_state.
 
@@ -4128,6 +4129,7 @@ def _owner_transition(
             _rc_transition_dispatch_idempotent(
                 conn, dispatch_id=dispatch_id, to_state=to_state,
                 actor="door", reason=reason, metadata=metadata,
+                project_id=project_id,
             )
             conn.commit()
     except _RcDuplicateTransitionError as exc:  # vnx-silent-except: a terminal row is not the door's to move (OI-2482)
@@ -4267,7 +4269,7 @@ def _owner_hand_over(
     """
     _owner_transition(
         spec.dispatch_id, "delivering", state_dir=state_dir,
-        reason="handing off to lane executor",
+        reason="handing off to lane executor", project_id=spec.project_id,
     )
     try:
         _consumer_root, base_sha = _resolve_start_base_sha(plan)
@@ -4285,7 +4287,7 @@ def _owner_hand_over(
             booked_as="start_line_refusal_receipt")
         if attempt_id is not None:
             _owner_finish(spec.dispatch_id, attempt_id, state_dir=state_dir,
-                          success=False, failure_reason=exc.code)
+                          success=False, failure_reason=exc.code, project_id=spec.project_id)
         return None, None
     if handover.mode_write != dispatch_start.MODE_WRITE_OK:
         # The ledger line landed (dispatch_start already logged the failure); the
@@ -4302,6 +4304,7 @@ def _owner_hand_over(
 def _owner_update_attempt(
     attempt_id: Optional[str], state: str, *, dispatch_id: str, state_dir: Path,
     failure_reason: Optional[str] = None,
+    project_id: Any = _PROJECT_ID_UNSET,
 ) -> None:
     """Best-effort: close out the dispatch_attempts row for attempt_id. No-op
     when attempt_id is None (registration/claim never produced one)."""
@@ -4312,6 +4315,7 @@ def _owner_update_attempt(
             _rc_update_attempt(
                 conn, attempt_id=attempt_id, state=state,
                 failure_reason=failure_reason, actor="door",
+                project_id=project_id,
             )
             conn.commit()
     except Exception as exc:  # vnx-silent-except: attempt bookkeeping is best-effort; door must never block on it
@@ -4320,7 +4324,9 @@ def _owner_update_attempt(
         )
 
 
-def _owner_row_closed_by_finalizer(dispatch_id: str, *, state_dir: Path) -> bool:
+def _owner_row_closed_by_finalizer(
+    dispatch_id: str, *, state_dir: Path, project_id: Any = _PROJECT_ID_UNSET,
+) -> bool:
     """True when the lifecycle finalizer already took the row to its end state.
 
     The finalizer leaves a row on completed, failed_delivery or timed_out
@@ -4329,9 +4335,8 @@ def _owner_row_closed_by_finalizer(dispatch_id: str, *, state_dir: Path) -> bool
     """
     try:
         from dispatch_lifecycle import END_STATE_TARGET
-        from coordination_db import get_dispatch
         with _rc_get_connection(state_dir) as conn:
-            row = get_dispatch(conn, dispatch_id)
+            row = _dispatch_row(conn, dispatch_id, _resolve_project_scope(project_id))
         state = row["state"] if row else None
         return state in _RC_TERMINAL_DISPATCH_STATES or state in END_STATE_TARGET.values()
     except Exception:  # vnx-silent-except: state read is best-effort; the door walks the hops as before
@@ -4341,6 +4346,7 @@ def _owner_row_closed_by_finalizer(dispatch_id: str, *, state_dir: Path) -> bool
 def _owner_finish(
     dispatch_id: str, attempt_id: Optional[str], *, state_dir: Path,
     success: bool, failure_reason: Optional[str] = None,
+    project_id: Any = _PROJECT_ID_UNSET,
 ) -> None:
     """Best-effort: drive the door-owned row from delivering through the
     terminal outcome (accepted -> running -> completed on success,
@@ -4356,32 +4362,33 @@ def _owner_finish(
     A row the lifecycle finalizer already closed (OI-2592) is left alone: no
     hops, no bookkeeping failure. The attempt is still closed.
     """
-    owned = _owner_row_closed_by_finalizer(dispatch_id, state_dir=state_dir)
+    owned = _owner_row_closed_by_finalizer(dispatch_id, state_dir=state_dir, project_id=project_id)
     if not owned:
         _owner_transition(
             dispatch_id, "accepted", state_dir=state_dir,
-            reason="lane executor returned",
+            reason="lane executor returned", project_id=project_id,
         )
         _owner_transition(
             dispatch_id, "running", state_dir=state_dir,
-            reason="lane executor returned",
+            reason="lane executor returned", project_id=project_id,
         )
     if success:
         if not owned:
             _owner_transition(
                 dispatch_id, "completed", state_dir=state_dir,
-                reason="lane execution succeeded",
+                reason="lane execution succeeded", project_id=project_id,
             )
-        _owner_update_attempt(attempt_id, "succeeded", dispatch_id=dispatch_id, state_dir=state_dir)
+        _owner_update_attempt(attempt_id, "succeeded", dispatch_id=dispatch_id, state_dir=state_dir,
+                              project_id=project_id)
     else:
         if not owned:
             _owner_transition(
                 dispatch_id, "failed_delivery", state_dir=state_dir,
-                reason=failure_reason or "lane execution failed",
+                reason=failure_reason or "lane execution failed", project_id=project_id,
             )
         _owner_update_attempt(
             attempt_id, "failed", dispatch_id=dispatch_id, state_dir=state_dir,
-            failure_reason=failure_reason,
+            failure_reason=failure_reason, project_id=project_id,
         )
 
 
@@ -4843,6 +4850,7 @@ def _lock_wait_timeout_exit(vspec, handover, attempt_id, exc: Exception, *, stat
     if dispatch_id:
         _owner_finish(
             dispatch_id, attempt_id, state_dir=state_dir,
+            project_id=vspec.spec.project_id,
             success=False, failure_reason=f"lock-wait timeout: {exc}",
         )
     logger.error(
@@ -4936,6 +4944,7 @@ def _run_lane(plan: ExecutionPlan, permit, vspec, *, state_dir: Path, data_dir: 
                 )
             _owner_finish(
                 vspec.spec.dispatch_id, attempt_id, state_dir=state_dir,
+                project_id=vspec.spec.project_id,
                 success=(result.status == "success"),
                 failure_reason=(
                     None if result.status == "success"
@@ -4963,6 +4972,7 @@ def _run_lane(plan: ExecutionPlan, permit, vspec, *, state_dir: Path, data_dir: 
             )
             _owner_finish(
                 vspec.spec.dispatch_id, attempt_id, state_dir=state_dir,
+                project_id=vspec.spec.project_id,
                 success=(rc == 0),
                 failure_reason=None if rc == 0 else "claude_headless lane returned non-zero",
             )

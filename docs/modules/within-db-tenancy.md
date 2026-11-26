@@ -13,13 +13,19 @@ and live-work boundaries, `build_t0_state_hook` continues without the refused
 operation, logging ERROR with the hook name and recording `project_id_unresolved`
 under context `coordination_db` in the store's `skip_metrics.ndjson`.
 
-The door carries its resolved project through claim and refire-recovery
-transitions, including their coordination events. Provenance registration also
+The door carries the spec's project through claim, refire recovery, delivering,
+accepted, running and the completed/failed_delivery outcome, including attempt
+closure and every coordination event. Start refusal and slot timeout retain it
+too. Legacy dispatch/attempt tables without a project column keep their ID-only
+lookup while event tables with the column still receive the spec's project.
+Provenance registration also
 accepts `project_id`; commit reconciliation and receipt enrichment pass their
 known project through to the registration event. These explicit identities
 work even when the database path has no project source or the environment
 names another project. Callers without an explicit identity still need a
 resolvable store; tests of those callers provide a marker or environment source.
+Commit reconciliation propagates `TenantUnresolved` for unresolved identity;
+only git errors return an empty scan.
 
 ## Entry points
 

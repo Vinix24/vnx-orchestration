@@ -715,6 +715,10 @@ def reconcile_commit_provenance(
     This is the merge-side half of the chain (B1 wrote dispatch_id+receipt_id at append; this writes
     commit_sha so chain_status can reach 'receipt_and_commit'). Read-git + upsert-registry; best-effort — git
     errors yield ``{scanned: 0, linked: 0}``. Idempotent: register_provenance_link upserts per dispatch_id.
+    Identity errors are fail-closed: registering a discovered commit raises
+    ``TenantUnresolved`` if no valid explicit ``project_id`` or consistent store
+    identity can be resolved. That refusal propagates to the caller; it is not
+    converted to an empty scan or swallowed by the per-dispatch SQLite handler.
 
     D2 extension: commits that carry a PR number (``(#NNN)``) and resolve to a dispatch with a
     ``track_id`` also upsert that PR onto ``tracks.pr_ref`` in the project state store. This
