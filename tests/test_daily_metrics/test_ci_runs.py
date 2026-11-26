@@ -2,6 +2,7 @@
 import copy
 import importlib
 import json
+import subprocess
 from datetime import date, datetime, timezone
 
 import pytest
@@ -37,6 +38,8 @@ def transport(rows, jobs=None, override=None):
                 return response
         if args[1] == "repo":
             data = {"nameWithOwner": "org/repo", "createdAt": "2026-11-01T00:00:00Z"}
+        elif "/commits/" in endpoint:
+            data = {"pull_requests": []}
         elif "/jobs?" in endpoint:
             batch = jobs if jobs is not None else [job()]
             if jobs is None and "/attempts/2/" in endpoint:
@@ -138,17 +141,20 @@ def test_negative_elapsed(writer, tmp_path, kind):
     assert record[f"{kind}_seconds"]["unknown_reason"] == "source_invalid"
 
 @pytest.mark.parametrize("reason", ["call_budget_exhausted", "rate_limited"])
-def test_stopped_jobs_are_complete_unknown_records_and_beacon(writer, tmp_path, reason):
+def test_stopped_reads_preserve_completed_attempt_and_retry_unknown(writer, tmp_path, reason):
     def override(args, count):
         if count == 5 and reason == "rate_limited":
             return 1, "", "HTTP 403 API rate limit exceeded"
     result, records, calls = execute(writer, tmp_path, [run_row(2)], override=override,
                                      max_calls=4 if reason == "call_budget_exhausted" else 50)
     assert len(records) == 2 and len(calls) == (4 if reason == "call_budget_exhausted" else 5)
-    assert all(r[f]["unknown_reason"] == reason for r in records for f in writer.FIELDS)
+    assert records[0]["queue_seconds"]["value"] == 10
+    assert all(records[1][f]["unknown_reason"] == reason for f in writer.FIELDS)
     beacon = json.loads((tmp_path / "health/ci_runs.json").read_text())["details"]
     assert beacon["project_id"] == "vnx-dev" and beacon["reason"] == reason
-    assert len(beacon["skipped_attempts"]) == 2 and result["coverage"] == "complete"
+    assert len(beacon["skipped_attempts"]) == 1 and result["coverage"] == "incomplete"
+    assert execute(writer, tmp_path, [run_row(2)])[0]["coverage"] == "complete"
+    assert len(writer.existing_records(tmp_path / "ci_runs.ndjson")) == 2
 
 def test_incomplete_pagination_is_not_a_total(writer, tmp_path):
     def override(args, count):
@@ -253,7 +259,7 @@ def test_nightly_configuration_and_shared_window(tmp_path):
     assert result["written"] == 2 and result["calls"] == len(calls)
     assert result["range"] == ["2026-11-11", "2026-11-24"]
 
-@pytest.mark.parametrize("field", ["head_sha", "repository", "pull_requests", "run_attempt"])
+@pytest.mark.parametrize("field", ["head_sha", "repository", "run_attempt"])
 def test_contradictory_or_missing_identity_is_incomplete(writer, tmp_path, field):
     def override(args, count):
         if count == 3:
@@ -262,7 +268,7 @@ def test_contradictory_or_missing_identity_is_incomplete(writer, tmp_path, field
             return 0, json.dumps(row), ""
     result, records, _ = execute(writer, tmp_path, override=override)
     assert result["coverage"] == "incomplete"
-    assert records[0]["pr_id"] is None if field == "pull_requests" else not records
+    assert not records
 
 def test_job_pagination_and_empty_jobs_remain_unknown(writer, tmp_path):
     def override(args, count):
@@ -287,6 +293,16 @@ def test_ledger_concurrency_exact_identity_and_symlink_refusal(writer, tmp_path)
     link.symlink_to(path)
     with pytest.raises(OSError):
         writer.append_records(link, records)
+    records[0].pop("pr_id_unknown_reason")  # Optional on a known PR; strict validation accepts it.
+    pending = copy.deepcopy(records[0])
+    pending["queue_seconds"] = writer.wrapper("failed jobs read", reason="source_missing")
+    retry = tmp_path / "retry.ndjson"
+    assert writer.append_records(retry, [pending]) == 1
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        counts = list(pool.map(lambda _: writer.append_records(retry, records), range(8)))
+    assert sum(counts) == 1 and len(retry.read_text().splitlines()) == 2
+    assert writer.append_records(retry, [pending]) == 0
+    assert writer.existing_records(retry)[writer.identity(records[0])] == records[0]
 
 @pytest.mark.parametrize("change", [{"schema": "ci_run/2"}, {"conclusion": {}},
                                     {"event": None}, {"day": "2026-11-24"}, {"pr_id": None}])
@@ -300,7 +316,7 @@ def test_empty_pr_association_retains_unknown_observation(writer, tmp_path):
     result, records, _ = execute(writer, tmp_path, [dict(run_row(), pull_requests=[])], max_calls=2)
     assert result["coverage"] == "incomplete" and len(records) == 1
     assert records[0]["pr_id"] is None and records[0]["pr_id_unknown_reason"] == "source_missing"
-    assert execute(writer, tmp_path)[0]["coverage"] == "incomplete"
+    assert execute(writer, tmp_path)[0]["coverage"] == "complete"
 
 def test_filtered_search_limit_is_partitioned_without_losing_identified_rows(tmp_path):
     from daily_metrics.github_fetch import RunReader, parse_timestamp
@@ -316,3 +332,121 @@ def test_filtered_search_limit_is_partitioned_without_losing_identified_rows(tmp
     assert error is None and len(found) == 1001
     found, error = RunReader(tmp_path, 1, runner).runs("org/repo", start, end)
     assert error == "call_budget_exhausted" and len(found) == 100
+
+
+def cli_night(writer, tmp_path, monkeypatch, runner, **options):
+    def process(args, **kwargs):
+        code, stdout, stderr = runner(args, kwargs["cwd"])
+        return subprocess.CompletedProcess(args, code, stdout, stderr)
+    monkeypatch.setattr(subprocess, "run", process)
+    return writer.write_runs("vnx-dev", DAY, date(2026, 11, 24), now=NOW,
+                             project_root=tmp_path, state_dir=tmp_path, **options)
+
+
+def test_long_history_bounds_discovery_and_reserves_window_reads(writer, tmp_path, monkeypatch):
+    from daily_metrics.github_fetch import parse_timestamp
+    rows = [dict(run_row(), id=100 + i, created_at="2026-10-25T00:00:00Z",
+                 run_started_at="2026-10-25T00:00:00Z", updated_at="2026-10-25T00:02:00Z")
+            for i in range(1001)] + [run_row(2)]
+    def response(args, count):
+        if args[1] == "repo":
+            return 0, json.dumps({"nameWithOwner": "org/repo", "createdAt": "2010-01-01T00:00:00Z"}), ""
+        if "/actions/runs?" in args[2]:
+            low, high = map(parse_timestamp, args[2].split("created=")[1].split("&")[0].split(".."))
+            selected = sorted((r for r in rows if low <= parse_timestamp(r["created_at"]) <= high),
+                              key=lambda r: r["created_at"], reverse=True)
+            page = int(args[2].rsplit("page=", 1)[1])
+            return 0, json.dumps({"total_count": len(selected), "workflow_runs": selected[(page-1)*100:page*100]}), ""
+    runner, calls = transport(rows, override=response)
+    result = cli_night(writer, tmp_path, monkeypatch, runner, max_calls=12)
+    records = writer.existing_records(tmp_path / "ci_runs.ndjson")
+    assert len(records) == 2 and all(r["queue_seconds"]["value"] == 10 for r in records.values())
+    assert "created=2026-10-24T00:00:00Z..2026-11-24T23:59:59Z" in calls[1][2]
+    discovery = [c[2] for c in calls if "/actions/runs?" in c[2]]
+    assert len(discovery) <= 4 and "created=2026-11-09" in discovery[1]
+    assert result["calls"] <= 12
+    assert result["reason"] == "call_budget_exhausted"  # Unread old ranges remain visible.
+
+
+@pytest.mark.parametrize("response", [(1, "", "HTTP 502"), (0, "bad json", ""),
+                                      (1, "", "HTTP 429 rate limit exceeded"), "timeout"])
+@pytest.mark.parametrize("endpoint", ["/jobs?", "/attempts/1"])
+def test_transient_jobs_retry_next_night(writer, tmp_path, monkeypatch, response, endpoint):
+    def broken(args, count):
+        if endpoint in args[2]:
+            if response == "timeout":
+                raise subprocess.TimeoutExpired(args, 60)
+            return response
+    runner, _ = transport([run_row()], override=broken)
+    first = cli_night(writer, tmp_path, monkeypatch, runner)
+    assert json.loads((tmp_path / "health/ci_runs.json").read_text())["status"] == "fail"
+    assert first["skipped_attempts"]
+    still_broken = cli_night(writer, tmp_path, monkeypatch, runner)
+    assert still_broken["reason"] and still_broken["coverage"] == "incomplete"
+    assert json.loads((tmp_path / "health/ci_runs.json").read_text())["status"] == "fail"
+    runner, _ = transport([run_row()])
+    second = cli_night(writer, tmp_path, monkeypatch, runner)
+    latest = writer.existing_records(tmp_path / "ci_runs.ndjson")
+    assert next(iter(latest.values()))["queue_seconds"]["value"] == 10
+    assert second["coverage"] == "complete" and second["reason"] is None
+    assert json.loads((tmp_path / "health/ci_runs.json").read_text())["status"] == "ok"
+    assert cli_night(writer, tmp_path, monkeypatch, runner)["written"] == 0
+
+
+def test_missing_workflow_reason_is_source_missing(writer, tmp_path, monkeypatch):
+    runner, _ = transport([dict(run_row(), name=None)])
+    result = cli_night(writer, tmp_path, monkeypatch, runner, workflows="CI")
+    assert result["coverage"] == "incomplete" and result["reason"] == "source_missing"
+    assert json.loads((tmp_path / "health/ci_runs.json").read_text())["status"] == "fail"
+
+
+@pytest.mark.parametrize("prs,expected", [([], None), ([{"number": 19, "head": {"sha": "a" * 39 + "b"}},
+                                                     {"number": 3, "head": {"sha": "a" * 40}}], 3)])
+def test_empty_pr_association_is_resolved_or_recorded_once(writer, tmp_path, monkeypatch, prs, expected):
+    def response(args, count):
+        if args[2].endswith("/attempts/1"):
+            return 0, json.dumps(dict(run_row(), pull_requests=[])), ""
+        if "/commits/" in args[2]:
+            assert "/commits/" + "a" * 40 + "/pulls?" in args[2]
+            return 0, json.dumps({"pull_requests": prs}), ""
+    runner, calls = transport([dict(run_row(), pull_requests=[])], override=response)
+    result = cli_night(writer, tmp_path, monkeypatch, runner)
+    record = next(iter(writer.existing_records(tmp_path / "ci_runs.ndjson").values()))
+    assert record["pr_id"] == expected
+    assert record["pr_id_unknown_reason"] == ("source_missing" if expected is None else None)
+    assert result["coverage"] == "complete" and result["population_total"] == 1
+    assert result["reason"] is None and not result["issues"]
+    assert json.loads((tmp_path / "health/ci_runs.json").read_text())["status"] == "ok"
+    assert cli_night(writer, tmp_path, monkeypatch, runner)["written"] == 0
+    assert len(calls) == 7  # Second night reads only repo and population.
+
+
+@pytest.mark.parametrize("payload", [{}, {"pull_requests": None}, {"pull_requests": "invalid"},
+                                     {"pull_requests": [{"number": 1, "head": {}}]},
+                                     {"pull_requests": [{"number": n, "head": {"sha": "a" * 40}} for n in (1, 2)]}])
+def test_pr_lookup_invalid_evidence_blocks(writer, tmp_path, monkeypatch, payload):
+    def response(args, count):
+        if args[2].endswith("/attempts/1"):
+            return 0, json.dumps(dict(run_row(), pull_requests=[])), ""
+        if "/commits/" in args[2]:
+            return 0, json.dumps(payload), ""
+    runner, _ = transport([run_row()], override=response)
+    result = cli_night(writer, tmp_path, monkeypatch, runner)
+    assert result["coverage"] == "incomplete" and result["reason"] == "source_invalid"
+    assert result["skipped_attempts"] and result["written"] == 0
+
+
+@pytest.mark.parametrize("budget", [5, 10])
+def test_pr_lookup_pagination_failure_stays_blocking(writer, tmp_path, monkeypatch, budget):
+    def response(args, count):
+        if args[2].endswith("/attempts/1"):
+            return 0, json.dumps(dict(run_row(), pull_requests=[])), ""
+        if "/commits/" in args[2]:
+            if "page=2" in args[2]:
+                return 1, "", "HTTP 502"
+            prs = [{"number": n + 1, "head": {"sha": "b" * 40}} for n in range(100)]
+            return 0, json.dumps({"pull_requests": prs}), ""
+    runner, _ = transport([run_row()], override=response)
+    result = cli_night(writer, tmp_path, monkeypatch, runner, max_calls=budget)
+    assert result["reason"] == ("call_budget_exhausted" if budget == 5 else "source_missing")
+    assert result["coverage"] == "incomplete" and result["written"] == 0

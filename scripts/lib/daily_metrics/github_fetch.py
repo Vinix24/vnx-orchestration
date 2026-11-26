@@ -175,11 +175,13 @@ class RunReader:
         self.root, self.maximum = root, maximum
         self.runner, self.calls, self.stopped = runner or _default_runner, 0, None
 
-    def read(self, args):
+    def read(self, args, *, reserve=0):
         if self.stopped is None and self.calls >= self.maximum:
             self.stopped = "call_budget_exhausted"
         if self.stopped:
             raise RunReadFailure(self.stopped)
+        if self.calls >= self.maximum - reserve:
+            raise RunReadFailure("call_budget_exhausted")  # Discovery cannot spend hydration's reserve.
         self.calls += 1
         try:
             code, stdout, stderr = self.runner(["gh", *args], cwd=self.root)
@@ -197,14 +199,14 @@ class RunReader:
             raise RunReadFailure("source_invalid")
         return data
 
-    def pages(self, endpoint, key, first=None):
+    def pages(self, endpoint, key, first=None, *, reserve=0):
         """Return observed rows plus a failure reason unless every page is proven."""
         rows, seen, total, page = [], set(), None, 1
         while True:
             try:
                 sep = "&" if "?" in endpoint else "?"
                 data = first if page == 1 and first is not None else self.read(
-                    ["api", f"{endpoint}{sep}per_page=100&page={page}"])
+                    ["api", f"{endpoint}{sep}per_page=100&page={page}"], reserve=reserve)
                 batch, count = data.get(key), data.get("total_count")
                 if (not isinstance(batch, list) or type(count) is not int or count < 0
                         or (total is not None and total != count)):
@@ -224,14 +226,14 @@ class RunReader:
             except RunReadFailure as exc:
                 return rows, str(exc)
 
-    def runs(self, repo, start, end):
-        """Freeze creation bounds; split GitHub's 1000-result filtered searches."""
+    def runs(self, repo, start, end, *, reserve=0):
+        """Split capped searches newest first, leaving reserved calls for attempts/jobs."""
         if start > end:
             return [], None
         endpoint = (f"repos/{repo}/actions/runs?event=pull_request&created="
                     f"{start:%Y-%m-%dT%H:%M:%S}Z..{end:%Y-%m-%dT%H:%M:%S}Z")
         try:
-            data = self.read(["api", endpoint + "&per_page=100&page=1"])
+            data = self.read(["api", endpoint + "&per_page=100&page=1"], reserve=reserve)
         except RunReadFailure as exc:
             return [], str(exc)
         rows, count = data.get("workflow_runs"), data.get("total_count")
@@ -241,11 +243,11 @@ class RunReader:
             halves = _halves(start, end)
             if halves is None:
                 return rows, "source_invalid"
-            left, le = self.runs(repo, *halves[0])
-            right, re = self.runs(repo, *halves[1])
-            rows, error = rows + left + right, le or re
+            right, re = self.runs(repo, *halves[1], reserve=reserve)
+            left, le = self.runs(repo, *halves[0], reserve=reserve)
+            rows, error = rows + right + left, re or le
         else:
-            rows, error = self.pages(endpoint, "workflow_runs", first=data)
+            rows, error = self.pages(endpoint, "workflow_runs", first=data, reserve=reserve)
         unique = {}
         for row in rows:
             stamp = parse_timestamp(row.get("created_at")) if isinstance(row, dict) else None
@@ -253,4 +255,4 @@ class RunReader:
                     or type(row.get("id")) is not int or row["id"] <= 0):
                 return list(unique.values()), error or "source_invalid"
             unique[row["id"]] = row
-        return list(unique.values()), error or (None if len(unique) == count else "source_invalid")
+        return sorted(unique.values(), key=lambda row: row["created_at"], reverse=True), error or (None if len(unique) == count else "source_invalid")

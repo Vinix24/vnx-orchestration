@@ -9,6 +9,7 @@ import json
 import math
 import os
 import re
+from datetime import timedelta
 from pathlib import Path
 
 from daily_metrics import days
@@ -23,12 +24,21 @@ CONCLUSIONS = {"success", "failure", "neutral", "cancelled", "skipped", "timed_o
 STATUSES = {"completed", "queued", "in_progress", "requested", "waiting", "pending"}
 EVENTS = {"pull_request", "push", "schedule", "workflow_dispatch"}
 REPOSITORY = r"[A-Za-z0-9][\w.-]*/[A-Za-z0-9_][\w.-]*"
+# GitHub allows reruns for 30 days after creation:
+# https://docs.github.com/en/actions/managing-workflow-runs-and-deployments/managing-workflow-runs/re-running-workflows-and-jobs
+RERUN_HORIZON_DAYS = 30
+REASON_PRIORITY = ("rate_limited", "call_budget_exhausted", "source_invalid", "source_missing")
 
 def positive(value):
     return type(value) is int and value > 0
 
 def identity(record):
     return tuple(record[k] for k in ("repository", "project_id", "run_id", "run_attempt"))
+
+def retryable(record):
+    """Validated observations with unresolved Actions evidence are not final; JUnit is M3b."""
+    return record.get("pr_id_unknown_reason") == "source_invalid" or any(
+        record[name]["unknown_reason"] is not None for name in FIELDS[:4])
 
 def validate_record(record):
     """Strict ci_run/1 validation, including every wrapper; raises ValueError."""
@@ -79,7 +89,7 @@ def validate_record(record):
     json.dumps(record, allow_nan=False)
 
 def append_records(path, records):
-    """Idempotent under the ledger flock; unreadable/corrupt state raises."""
+    """Append at most one complete successor per unresolved identity under the ledger flock."""
     for record in records:
         validate_record(record)
     path = Path(path)
@@ -87,22 +97,24 @@ def append_records(path, records):
     fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_APPEND | os.O_NOFOLLOW, 0o644)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
-        seen = set()
+        seen = {}
         with os.fdopen(os.dup(fd), "r", encoding="utf-8") as source:
             for line in source:
                 if not line.endswith("\n"):
                     raise ValueError("partial ci_run line")
                 existing = json.loads(line)
                 validate_record(existing)
-                seen.add(identity(existing))
+                key = identity(existing)
+                if key not in seen or not retryable(existing) or retryable(seen[key]):
+                    seen[key] = existing
         written = 0
         for record in records:
             key = identity(record)
-            if key in seen:
+            if key in seen and (not retryable(seen[key]) or retryable(record)):
                 continue
             data = (json.dumps(record, allow_nan=False, separators=(",", ":")) + "\n").encode()
             append_line(fd, data)
-            seen.add(key)
+            seen[key] = record
             written += 1
         return written
     finally:
@@ -124,7 +136,7 @@ def append_line(fd, data):
         raise
 
 def existing_records(path):
-    """Validated snapshot for avoiding repeated API reads, never written back."""
+    """Shared-lock snapshot: complete Actions evidence supersedes unknowns, never regresses."""
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
     except FileNotFoundError:
@@ -137,7 +149,9 @@ def existing_records(path):
                 raise ValueError("partial ci_run line")
             record = json.loads(line)
             validate_record(record)
-            records[identity(record)] = record
+            key = identity(record)
+            if key not in records or not retryable(record) or retryable(records[key]):
+                records[key] = record
         return records
 
 def wrapper(source, value=None, reason=None):
@@ -210,7 +224,7 @@ def make_record(project, repo, row, now, source, jobs, error, artifact):
     return record
 
 def discover_attempts(reader, project, repo, rows, first, last, workflows, issues, skipped, existing):
-    attempts = []
+    """Yield attempts individually so each job read precedes the next attempt read."""
     for row in rows:
         event, status = row.get("event"), row.get("status")
         if not isinstance(event, str) or event not in EVENTS or not isinstance(status, str) or status not in STATUSES:
@@ -233,13 +247,13 @@ def discover_attempts(reader, project, repo, rows, first, last, workflows, issue
         for number in range(1, count + 1):
             saved = existing.get((repo, project, row["id"], number))
             if saved is not None:
-                if saved["pr_id"] is None:
-                    issues.append(f"{saved['pr_id_unknown_reason']}: stored run {row['id']} has unresolved PR identity")
                 if saved["head_sha"] != row.get("head_sha"):
                     issues.append(f"source_invalid: stored head contradicts run {row['id']}")
-                elif first.isoformat() <= saved["day"] <= last.isoformat():
-                    attempts.append((saved, None, None))
-                continue
+                    continue
+                if not retryable(saved):
+                    if first.isoformat() <= saved["day"] <= last.isoformat():
+                        yield saved, None, None
+                    continue
             source = f"repos/{repo}/actions/runs/{row['id']}/attempts/{number}"
             read_error = None
             try:
@@ -265,8 +279,34 @@ def discover_attempts(reader, project, repo, rows, first, last, workflows, issue
             if stamp is None:
                 issues.append(f"source_invalid: attempt timestamp {source}")
             elif attempt["status"] == "completed" and first <= stamp.date() <= last:
-                attempts.append((attempt, source, read_error))
-    return attempts
+                yield attempt, source, read_error
+
+def resolve_pr(reader, repo, row):
+    """Use commit-associated PRs only with an exact head SHA; refuse ambiguous/partial reads."""
+    if row.get("pull_requests") not in (None, []):
+        return row
+    sha = row.get("head_sha")
+    if not isinstance(sha, str) or not re.fullmatch(r"[0-9a-f]{40}", sha):
+        raise RunReadFailure("source_invalid")
+    matches, page = {}, 1
+    while True:
+        data = reader.read(["api", f"repos/{repo}/commits/{sha}/pulls?per_page=100&page={page}",
+                            "--jq", "{pull_requests: .}"])
+        batch = data.get("pull_requests")
+        if not isinstance(batch, list) or len(batch) > 100:
+            raise RunReadFailure("source_invalid")
+        for pr in batch:
+            if not isinstance(pr, dict) or not positive(pr.get("number")) or not isinstance(pr.get("head"), dict):
+                raise RunReadFailure("source_invalid")
+            if not re.fullmatch(r"[0-9a-f]{40}", str(pr["head"].get("sha", ""))):
+                raise RunReadFailure("source_invalid")
+            if pr["head"].get("sha") == sha:
+                matches[pr["number"]] = {"number": pr["number"]}
+        if len(batch) < 100:
+            if len(matches) > 1:
+                raise RunReadFailure("source_invalid")
+            return dict(row, pull_requests=list(matches.values()))
+        page += 1
 
 def write_runs(project_id, from_day, to_day, *, now, project_root, state_dir=None,
                max_calls=1000, workflows="", artifact="", runner=None):
@@ -284,12 +324,16 @@ def write_runs(project_id, from_day, to_day, *, now, project_root, state_dir=Non
         raise ValueError("unresolved repository")
     if created is None:
         raise ValueError("unresolved repository creation time")
-    rows, error = reader.runs(repo, created, parse_timestamp(f"{to_day}T23:59:59Z"))
+    lower = max(created, parse_timestamp(f"{from_day}T00:00:00Z") - timedelta(days=RERUN_HORIZON_DAYS))
+    reserve = max(0, max_calls - max(2, max_calls // 3))
+    rows, error = reader.runs(repo, lower, parse_timestamp(f"{to_day}T23:59:59Z"), reserve=reserve)
     if error:
         issues.append(error)
     attempts = discover_attempts(reader, project_id, repo, rows, from_day, to_day,
                                  {name.strip() for name in workflows.split(",") if name.strip()}, issues, skipped, existing)
+    identified = 0
     for row, source, read_error in attempts:
+        identified += 1
         if source is None:
             continue  # Already validated in the ledger, which append_records rechecks under EX.
         endpoint = f"repos/{repo}/actions/runs/{row['id']}/attempts/{row['run_attempt']}/jobs"
@@ -297,20 +341,28 @@ def write_runs(project_id, from_day, to_day, *, now, project_root, state_dir=Non
         if error and read_error is None:
             skipped.append({"run_id": row["id"], "run_attempt": row["run_attempt"], "reason": error})
         try:
+            if not read_error and not error:
+                row = resolve_pr(reader, repo, row)
             record = make_record(project_id, repo, row, now, source, jobs, read_error or error, artifact)
-            if record["pr_id"] is None:
-                issues.append(f"{record['pr_id_unknown_reason']}: {source}: unresolved PR identity")
             if read_error:
                 for name in FIELDS[:4]:
                     record[name] = wrapper(record[name]["source"], reason=read_error)
             records.append(record)
+            reasons = {record[name]["unknown_reason"] for name in FIELDS[:4]}
+            if record["pr_id_unknown_reason"] == "source_invalid":
+                reasons.add("source_invalid")
+            issues.extend(f"{reason}: {source}" for reason in REASON_PRIORITY if reason in reasons)
+        except RunReadFailure as exc:
+            issues.append(f"{exc}: {source}: PR association")
+            skipped.append({"run_id": row["id"], "run_attempt": row["run_attempt"], "reason": str(exc)})
         except ValueError as exc:
             issues.append(f"source_invalid: {source}: {exc}")
+    reasons = {issue.split(":", 1)[0] for issue in issues} | {s["reason"] for s in skipped} | {reader.stopped}
     result = dict(project_id=project_id, coverage="incomplete" if issues else "complete",
-                  population_total=None if issues else len(attempts), identified_attempts=len(attempts),
+                  population_total=None if issues else identified, identified_attempts=identified,
                   range=[from_day.isoformat(), to_day.isoformat()], issues=issues,
                   calls=reader.calls, budget=max_calls, skipped_attempts=skipped,
-                  reason=reader.stopped or ("source_invalid" if issues or skipped else None))
+                  reason=next((reason for reason in REASON_PRIORITY if reason in reasons), None))
     result["written"] = append_records(state / "ci_runs.ndjson", records)
     HealthBeacon(state, "ci_runs", 36 * 3600).heartbeat_strict("fail" if result["reason"] else "ok", result)
     return result
