@@ -18,6 +18,7 @@ from providers import provider_registry
 def project(tmp_path, monkeypatch, clean_terminal_env):
     subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("VNX_PROJECT_ROOT", str(tmp_path))
     data = yaml.safe_load((Path(registry.__file__).parent / "defaults/vnx_workers.default.yaml").read_text())
     for worker in data["workers"]:
         worker["model"] = "opus"

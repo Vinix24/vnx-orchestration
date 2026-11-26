@@ -20,11 +20,20 @@ Background: [dispatch architecture](../core/DISPATCH_AND_INTELLIGENCE_ARCHITECTU
 
 —
 
-D4 and the door share `_resolve_model`: an explicit builder model wins; otherwise
-`resolve_worker` selects the terminal env/config pair, project worker registry,
+D4 and the door share `_resolve_model`: an explicit builder model wins, followed
+by the provider operator override through its existing resolver (Codex lane then
+direct-spawn default, Kimi, or LiteLLM). With no override, `resolve_worker`
+selects the terminal env/config pair, project worker registry,
 then the packaged default. A provider-only request uses that pair when its
 provider matches, otherwise that provider's `wave7_models.yaml` `default_model`.
-A missing/unreadable model source blocks with slot, provider and registry key.
+The door passes `resolve_consumer_project_root()` explicitly, using the same
+consumer root as worktree allocation instead of the engine CWD. Importing
+`resolve_worker` does not load the legacy singleton; it loads on first legacy
+access, so a fresh door process never reads a CWD registry at import. D4 uses
+`snapshot.repo_root` when resolving independently and retains the door-checked
+`effective_model` otherwise. A missing model source, an unresolvable root, or
+an unreadable or wrong-shape selected registry blocks as
+`worker_model_unresolved`, naming slot, provider and registry key. An operator override is honoured or the dispatch is refused.
 Builder pins (`workers-kimi-pinned`, historical id retained) only warn on a
 mismatch; they never supply a model. T0's floor and the Claude override audit
 gate remain enforced. Broker pair propagation is a separate migration.

@@ -350,10 +350,10 @@ def normalize_codex_event(raw: dict, terminal_id: str, dispatch_id: str) -> Cano
     })
 
 
-def _resolve_codex_model(model: Optional[str]) -> str:
-    """Resolve explicit model first, then env default, then ``openai.default_model`` (OI-2062)."""
+def _resolve_codex_model(model: Optional[str], *, override_only: bool = False) -> Optional[str]:
+    """Explicit, then env, then catalogue; override_only returns None before defaults."""
     return provider_registry.resolve_codex_model(
-        explicit=model, env_names=("VNX_CODEX_DEFAULT_MODEL",),
+        explicit=model, env_names=("VNX_CODEX_DEFAULT_MODEL",), override_only=override_only,
     )
 
 

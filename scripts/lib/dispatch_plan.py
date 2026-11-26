@@ -497,6 +497,20 @@ def _resolve_billing(provider: Provider, is_claude_lane: bool, snapshot: Runtime
     return billing
 
 
+def _provider_model_override(provider: str) -> Optional[str]:
+    """Read provider overrides through their existing resolvers; None means unset."""
+    from provider_dispatch import _resolve_codex_model, _kimi_resolve_requested_key, _litellm_resolve_model
+    if provider == "codex":
+        from provider_spawns.codex_spawn import _resolve_codex_model as spawn_model
+        return _resolve_codex_model(override_only=True) or spawn_model(None, override_only=True)
+    if provider == "kimi":
+        return _kimi_resolve_requested_key(None, override_only=True)
+    if provider.startswith("litellm:"):
+        from argparse import Namespace
+        return _litellm_resolve_model(Namespace(model=None), provider.split(":", 1)[1], None, override_only=True)
+    return None
+
+
 def _resolve_model(
     spec: DispatchSpec, snapshot: RuntimeSnapshot, is_claude_lane: bool, warnings: list[str],
 ) -> "str | Reject":
@@ -511,14 +525,16 @@ def _resolve_model(
             provider = spec.provider.value
             try:
                 from worker_registry import resolve_worker
-                pair = resolve_worker(None if target_slot == "pool" else target_slot,
-                                      repo_root=snapshot.repo_root, project_id=spec.project_id)
-                if provider != "auto" and provider != pair["provider"]:
+                model = _provider_model_override(provider)
+                if model is None:
                     pair = resolve_worker(None if target_slot == "pool" else target_slot,
-                                          spec={"provider": provider}, repo_root=snapshot.repo_root,
-                                          project_id=spec.project_id)
-                model = pair["model"]
-            except (OSError, ValueError, yaml.YAMLError) as exc:
+                                          repo_root=snapshot.repo_root, project_id=spec.project_id)
+                    if provider != "auto" and provider != pair["provider"]:
+                        pair = resolve_worker(None if target_slot == "pool" else target_slot,
+                                              spec={"provider": provider}, repo_root=snapshot.repo_root,
+                                              project_id=spec.project_id)
+                    model = pair["model"]
+            except (OSError, ValueError, RuntimeError, KeyError, TypeError, AttributeError, yaml.YAMLError) as exc:
                 return Reject("worker_model_unresolved", f"slot={target_slot} provider={provider} "
                               f"registry_key={registry_key_for_provider(provider)!r}: {exc}")
         pin = snapshot.model_pins.get(target_slot)

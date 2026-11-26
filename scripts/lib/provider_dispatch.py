@@ -3176,16 +3176,17 @@ def _dispatch_claude_via_envelope(args: argparse.Namespace) -> int:
         return 1
 
 
-def _resolve_codex_model() -> str:
+def _resolve_codex_model(*, override_only: bool = False) -> Optional[str]:
     """The codex model for this lane: ``VNX_CODEX_MODEL``, else ``openai.default_model`` (OI-2062).
 
+    override_only returns None when no override is set; it does not read defaults.
     One resolver for every codex launch path (provider_registry.resolve_codex_model).
     Raises CodexModelResolutionError when the registry gives no model: there is no
     hard-coded fallback, a name written into code is what codex refused on 14-10.
     """
     from providers import provider_registry as _reg
 
-    return _reg.resolve_codex_model(env_names=("VNX_CODEX_MODEL",))
+    return _reg.resolve_codex_model(env_names=("VNX_CODEX_MODEL",), override_only=override_only)
 
 
 def _codex_model_or_record_failure(args: argparse.Namespace) -> "str | None":
@@ -3264,7 +3265,7 @@ def _kimi_normalize_alias(model_key: str) -> str:
     return model_key
 
 
-def _kimi_resolve_requested_key(explicit_model: Optional[str]) -> str:
+def _kimi_resolve_requested_key(explicit_model: Optional[str], *, override_only: bool = False) -> Optional[str]:
     """Resolve the effective kimi model down to a registry KEY (not a CLI arg).
 
     Shared by the spawn seam (dispatch_envelope.ProviderAdapter, _dispatch_kimi),
@@ -3273,6 +3274,7 @@ def _kimi_resolve_requested_key(explicit_model: Optional[str]) -> str:
       1. ``explicit_model`` when set and not a placeholder ("default"/"sonnet"/"");
       2. else the ``VNX_KIMI_MODEL`` env var (source-path override);
       3. else the registry's K3-flagged default.
+    override_only returns None when neither an explicit model nor an env override is set.
     Bare provider/alias tokens ('kimi', 'kimi-default') are normalized to the
     default key at whichever precedence step they appear. Never raises — callers
     needing the CLI arg form (and its fail-loud validation) pass the result to
@@ -3284,7 +3286,7 @@ def _kimi_resolve_requested_key(explicit_model: Optional[str]) -> str:
     env_model = os.environ.get("VNX_KIMI_MODEL", "").strip()
     if env_model:
         return _kimi_normalize_alias(env_model)
-    return _resolve_kimi_model_label()
+    return None if override_only else _resolve_kimi_model_label()
 
 
 def _kimi_resolve_cli_model_arg(model_key: str) -> str:
@@ -3551,9 +3553,12 @@ def _litellm_missing_key_refusal(args: argparse.Namespace, base_sub: str, requir
     return _EX_USAGE
 
 
-def _litellm_resolve_model(args: argparse.Namespace, base_sub: str, model_alias: "str | None") -> str:
-    """The litellm model path for ``base_sub``; VNX_LITELLM_MODEL wins over every default."""
+def _litellm_resolve_model(args: argparse.Namespace, base_sub: str, model_alias: "str | None",
+                           *, override_only: bool = False) -> Optional[str]:
+    """Resolve the lane model; override_only returns None when no env override is set."""
     env_model = os.environ.get("VNX_LITELLM_MODEL", "")
+    if override_only:
+        return env_model or None
     if base_sub == "deepseek":
         model = env_model or _resolve_deepseek_model()
     elif base_sub == "moonshot":

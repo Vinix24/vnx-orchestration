@@ -542,7 +542,8 @@ def resolve_codex_model(
     explicit: Optional[str] = None,
     env_names: tuple = (),
     registry_path: Optional[Path] = None,
-) -> str:
+    *, override_only: bool = False,
+) -> Optional[str]:
     """Return the model every codex launch path passes to the codex CLI.
 
     Order: *explicit* model, then the first non-empty env var in *env_names*
@@ -558,6 +559,7 @@ def resolve_codex_model(
     ``ValueError``, a row that is no mapping ``AttributeError``. Each of them is
     this error, never a raise past it: a gate run that met one stayed
     ``executing`` with no result (OI-2068).
+    override_only returns None for an absent override without reading defaults.
     """
     requested = (explicit or "").strip()
     if requested:
@@ -566,6 +568,8 @@ def resolve_codex_model(
         value = os.environ.get(name, "").strip()
         if value:
             return value
+    if override_only:
+        return None
     path = Path(registry_path) if registry_path is not None else _REGISTRY_PATH
     try:
         registry = load(path)

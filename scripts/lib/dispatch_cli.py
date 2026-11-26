@@ -3340,7 +3340,16 @@ def _override_gate_and_effective_model(
                 ),
             ))
 
-    effective_model = _resolve_model(spec, RuntimeSnapshot(model_pins=model_pin_specs), is_claude_lane, [])
+    try:
+        from dispatch_worktree_isolation import resolve_consumer_project_root
+        root = resolve_consumer_project_root()
+    except (OSError, RuntimeError, ValueError) as exc:
+        from provider_costs import registry_key_for_provider
+        override_gate_verdicts.append(ConstraintVerdict(
+            "worker_model_unresolved", "blocking", f"slot={spec.target_slot} provider={spec.provider.value} "
+            f"registry_key={registry_key_for_provider(spec.provider.value)!r}: {exc}"))
+        return override_gate_verdicts, worker_claude_override_reason, ""
+    effective_model = _resolve_model(spec, RuntimeSnapshot(model_pins=model_pin_specs, repo_root=root), is_claude_lane, [])
     if isinstance(effective_model, Reject):
         override_gate_verdicts.append(ConstraintVerdict(effective_model.code, "blocking", effective_model.reason))
         effective_model = ""  # Blocking verdict above prevents planning/execution.
