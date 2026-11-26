@@ -101,6 +101,7 @@ def _clean_snapshot() -> RuntimeSnapshot:
 def _make_coordination_db(state_dir: Path) -> Path:
     """The production-shaped coordination store (project_id + composite UNIQUE)."""
     state_dir.mkdir(parents=True, exist_ok=True)
+    (state_dir / ".vnx-project-id").write_text(PROJECT + "\n")
     coordination_db.init_schema(state_dir)
     db_path = coordination_db.db_path_from_state_dir(state_dir)
     project_id_migration.run_runtime_coordination_migration(db_path, default_project_id=PROJECT)

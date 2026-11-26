@@ -45,6 +45,7 @@ def _build_db(tmp_path: Path, *, apply_view: bool = True) -> Path:
     measured as still carrying the pre-#1747 discriminator bug."""
     state_dir = tmp_path / "state"
     state_dir.mkdir(parents=True)
+    (state_dir / ".vnx-project-id").write_text(PROJECT_ID + "\n")
     # events dir for track audit ledger
     (state_dir.parent / "events").mkdir(parents=True, exist_ok=True)
 

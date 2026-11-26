@@ -38,6 +38,7 @@ def state_dir(tmp_path: Path) -> Path:
     """The live-shape store the door writes to (tests/test_create_attempt_project_id.py)."""
     sd = tmp_path / "state"
     sd.mkdir(parents=True)
+    (sd / ".vnx-project-id").write_text(k9.PROJECT + "\n")
     _build_live_shape_db(sd / "runtime_coordination.db")
     return sd
 

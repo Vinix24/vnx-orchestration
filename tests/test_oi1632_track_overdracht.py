@@ -45,6 +45,7 @@ def _make_coordination_db(state_dir: Path, *, tracks: "dict[str, str] | None" = 
     fixture of the same name — kept independent per-file rather than shared, matching
     that file's own stated rationale for not importing a cross-file fixture)."""
     state_dir.mkdir(parents=True, exist_ok=True)
+    (state_dir / ".vnx-project-id").write_text("vnx-dev\n")
     coordination_db.init_schema(state_dir)
     db_path = state_dir / "runtime_coordination.db"
     project_id_migration.run_runtime_coordination_migration(db_path, default_project_id="vnx-dev")

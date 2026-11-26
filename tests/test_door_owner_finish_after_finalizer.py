@@ -30,6 +30,7 @@ PROJECT = "vnx-dev"
 def _state_dir(tmp_path: Path) -> Path:
     state_dir = tmp_path / "state"
     state_dir.mkdir(parents=True)
+    (state_dir / ".vnx-project-id").write_text(PROJECT + "\n")
     _build_live_shape_db(state_dir / "runtime_coordination.db")
     return state_dir
 
