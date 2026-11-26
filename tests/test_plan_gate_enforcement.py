@@ -109,6 +109,7 @@ class TestEnforceMode:
         """A persisted project_config value flips the mode when the env var is unset."""
         monkeypatch.delenv("VNX_PLAN_GATE_ENFORCE", raising=False)
         import config_runtime
+        monkeypatch.setattr(config_runtime, "_wired_for", {})
         monkeypatch.setattr(config_registry, "_db_resolver", lambda p, k: "required")
         monkeypatch.setattr(config_registry, "_default_project_id", "vnx-dev")
         assert pge.enforce_mode() == "required"
