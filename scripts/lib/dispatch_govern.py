@@ -12,7 +12,7 @@ govern() is the single authority for producing the final unified report body:
   5. Stamp contract_status + permission_enforcement in frontmatter.
   6. Call ensure_receipt() to guarantee a completion receipt exists for every
      subscription-session dispatch — appending a lane-synthesized receipt if
-     the worker never emitted one (gap #4 / VNX_RECEIPT_FALLBACK default-on).
+     the worker never emitted one (gap #4, always enabled).
 
 govern() NEVER raises — any unhandled error emits a minimal honest synthesized
 body and returns GovernedOutcome(contract_status="synthesized", error=str(e)).
@@ -31,14 +31,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-# ADR-012 worker-permission enforcement flag (default OFF). Imported defensively.
-try:
-    from worker_permissions import worker_permission_enforcement_enabled
-except Exception:  # pragma: no cover - sibling import is available in-tree
-    def worker_permission_enforcement_enabled() -> bool:  # type: ignore[misc]
-        return os.environ.get("VNX_ENFORCE_WORKER_PERMISSIONS", "0").strip().lower() in (
-            "1", "true", "yes", "on",
-        )
+from worker_permissions import worker_permission_enforcement_enabled
 
 logger = logging.getLogger(__name__)
 
@@ -190,7 +183,6 @@ def ensure_receipt(
 ) -> None:
     """Append a lane-synthesized completion receipt when the worker never emitted one.
 
-    Gate: VNX_RECEIPT_FALLBACK (default "1"). Set to "0" to disable.
     Fires only when raw.receipt is None — i.e. the worker never produced a receipt
     before the deadline. Never raises — best-effort audit trail.
 
@@ -203,8 +195,6 @@ def ensure_receipt(
     (worktree or repo-root). Stamped as a ``warnings`` entry on the receipt so
     the relocation is auditable, never silent.
     """
-    if os.environ.get("VNX_RECEIPT_FALLBACK", "1").strip() == "0":
-        return
     if raw.receipt is not None:
         return
 
