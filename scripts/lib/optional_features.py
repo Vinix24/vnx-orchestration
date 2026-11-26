@@ -63,6 +63,7 @@ class FeatureState:
     source: str
     waived: Tuple[Mapping[str, str], ...] = ()
     server_verified: Optional[bool] = None  # branch_protection: only the door sets it (OF-3)
+    conflict: Optional[str] = None  # an off request overruled by the canonical CI sources
 
 
 def _row(feature: str, key: str, value: str, source: str, guarantee: str) -> Mapping[str, str]:
@@ -130,18 +131,25 @@ def _protection_state(source: str, text: Optional[str]) -> FeatureState:
     return FeatureState(BRANCH_PROTECTION, not rows, config.enforcement, source, tuple(rows))
 
 
-def _ci_state(project_id, resolution, resolver, config_path, path: str, text: Optional[str]) -> FeatureState:
+def _ci_state(project_id, resolution, resolver, config_path, project_root,
+              path: str, text: Optional[str]) -> FeatureState:
     try:  # ci_requirement reads the same protection text this snapshot read
         required, sources = gate_profile.ci_requirement(
-            project_id, resolution=resolution, resolver=resolver, config_path=config_path,
+            project_id, resolution=resolution, resolver=resolver, config_path=config_path, project_root=project_root,
             protection_yaml=(path, fpd.YamlFetchResult(text=text, not_found=text is None, error=None)))
     except ReviewGateConfigError as exc:
         raise OptionalFeatureRefused("ci_requirement_unreadable", str(exc)) from exc
-    if required:
-        return FeatureState(CI, True, "required", ",".join(sources))
-    # ci_requirement decided; this read only names value and source, and refuses a flag reading true.
+    # ci_requirement decided; this read names the request, never changes the requirement.
     raw, source = _resolve(gate_profile.CI_GATE_KEY, project_id, resolver)
-    if not isinstance(raw, str) or raw.strip().lower() not in _FALSY:
+    if source == "project_config_error" or not isinstance(raw, str) or raw.strip().lower() not in (
+        _FALSY | gate_profile._TRUTHY
+    ):
+        raise OptionalFeatureRefused("ci_requirement_unreadable", f"{gate_profile.CI_GATE_KEY}={raw!r} (source: {source})")
+    if required:
+        conflict = (f"{gate_profile.CI_GATE_KEY}={raw.strip()} (source: {source}) has no effect: "
+                    + ",".join(sources)) if raw.strip().lower() in _FALSY else None
+        return FeatureState(CI, True, "required", ",".join(sources), conflict=conflict)
+    if raw.strip().lower() not in _FALSY:
         raise OptionalFeatureRefused(
             "ci_requirement_unreadable", f"{gate_profile.CI_GATE_KEY}={raw!r} (source: {source}) yet not required")
     value = raw.strip()
@@ -155,10 +163,11 @@ def snapshot(project_id: Optional[str], *, resolution=None, protection_yaml: Opt
     """The state per feature with its source, taken once. ``protection_yaml`` is text fetched from a
     pinned main, ``protection_source`` its ``<path>@<sha>``; else the local file, ``<path>@worktree``.
     That one text also feeds ``ci_requirement``. Raises :class:`OptionalFeatureRefused`."""
-    config_runtime.autowire()
+    if resolver is None:
+        config_runtime.autowire()
     path, source, text = _protection_text(project_root, protection_yaml, protection_source)
     return MappingProxyType({BRANCH_PROTECTION: _protection_state(source, text),
-                             CI: _ci_state(project_id, resolution, resolver, config_path, path, text),
+                             CI: _ci_state(project_id, resolution, resolver, config_path, project_root, path, text),
                              PLAN_GATE: _plan_gate_state(project_id, resolver)})
 
 
