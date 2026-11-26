@@ -1528,6 +1528,7 @@ def _recover_for_refire(conn, row: dict, refire_reason: Optional[str]) -> None:
         conn, dispatch_id=row["dispatch_id"], to_state="recovered", actor="door",
         reason=f"door refire of a {row['state']} row as a new attempt: {reason}",
         metadata={"refire_reason": reason, "recovered_from": row["state"]},
+        **({"project_id": row["project_id"]} if "project_id" in row else {}),
     )
 
 
@@ -1682,6 +1683,8 @@ def _persist_dispatch_row_once(
                     actor="door",
                     reason="door executes synchronously (single-entry dispatch)",
                     metadata={"target_slot": spec.target_slot},
+                    # Legacy dispatch tables have no project column to scope on.
+                    **({"project_id": spec.project_id} if "project_id" in row else {}),
                 )
             except (_RcInvalidTransitionError, _RcInvalidStateError):
                 # Expected idempotent no-op — see docstring. Not a bookkeeping

@@ -30,6 +30,8 @@ import sys
 import types
 from pathlib import Path
 
+import pytest
+
 REPO = Path(__file__).resolve().parent.parent
 LIB = REPO / "scripts" / "lib"
 sys.path.insert(0, str(LIB))
@@ -148,7 +150,13 @@ class TestDoorDispatchPersistsAttemptRow:
     store.
     """
 
-    def test_door_dispatch_creates_attempt_row_with_project_id(self, tmp_path):
+    @pytest.mark.parametrize("project_id", ["vnx-dev", "other-project"])
+    @pytest.mark.parametrize("ambient", [None, "foreign-project"])
+    def test_door_dispatch_creates_attempt_row_with_project_id(self, tmp_path, monkeypatch, project_id, ambient):
+        if ambient is None:
+            monkeypatch.delenv("VNX_PROJECT_ID", raising=False)
+        else:
+            monkeypatch.setenv("VNX_PROJECT_ID", ambient)
         state_dir = tmp_path / "state"
         state_dir.mkdir(parents=True)
         db_path = state_dir / "runtime_coordination.db"
@@ -156,7 +164,7 @@ class TestDoorDispatchPersistsAttemptRow:
 
         spec = types.SimpleNamespace(
             dispatch_id="20260905-oi1625-door-attempt",
-            project_id="vnx-dev",
+            project_id=project_id,
             track_id=None,
             gate=None,
             target_slot="T1",
@@ -175,11 +183,29 @@ class TestDoorDispatchPersistsAttemptRow:
             "SELECT * FROM dispatch_attempts WHERE dispatch_id = ?",
             (spec.dispatch_id,),
         ).fetchone()
+        assert row is not None, "no dispatch_attempts row was created for the door dispatch"
+        assert row["project_id"] == project_id
+        assert row["attempt_id"] == attempt_id
+        assert {r[0] for r in conn.execute("SELECT project_id FROM coordination_events")} == {project_id}
         conn.close()
 
-        assert row is not None, "no dispatch_attempts row was created for the door dispatch"
-        assert row["project_id"] == "vnx-dev"
-        assert row["attempt_id"] == attempt_id
+    def test_refire_keeps_explicit_project_without_store_source(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("VNX_PROJECT_ID", raising=False)
+        _build_live_shape_db(tmp_path / "runtime_coordination.db")
+        spec = types.SimpleNamespace(dispatch_id="refire-project", project_id="other-project",
+                                     track_id=None, gate=None, target_slot="T1")
+        assert dispatch_cli._persist_dispatch_row(spec, state_dir=tmp_path)
+        with sqlite3.connect(tmp_path / "runtime_coordination.db") as conn:
+            conn.execute("UPDATE dispatches SET state='failed_delivery'")
+        assert dispatch_cli._persist_dispatch_row(spec, state_dir=tmp_path, refire_reason="retry")
+        with sqlite3.connect(tmp_path / "runtime_coordination.db") as conn:
+            assert conn.execute("SELECT state, attempt_count FROM dispatches").fetchone() == ("claimed", 2)
+            assert {r[0] for r in conn.execute("SELECT project_id FROM coordination_events")} == {spec.project_id}
+
+    def test_door_keeps_legacy_schema_without_project_columns(self, tmp_path):
+        spec = types.SimpleNamespace(dispatch_id="legacy-project", project_id="other-project",
+                                     track_id=None, gate=None, target_slot="T1")
+        assert dispatch_cli._persist_dispatch_row(spec, state_dir=tmp_path)
 
 
 if __name__ == "__main__":

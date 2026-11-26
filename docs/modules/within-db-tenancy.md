@@ -13,6 +13,14 @@ and live-work boundaries, `build_t0_state_hook` continues without the refused
 operation, logging ERROR with the hook name and recording `project_id_unresolved`
 under context `coordination_db` in the store's `skip_metrics.ndjson`.
 
+The door carries its resolved project through claim and refire-recovery
+transitions, including their coordination events. Provenance registration also
+accepts `project_id`; commit reconciliation and receipt enrichment pass their
+known project through to the registration event. These explicit identities
+work even when the database path has no project source or the environment
+names another project. Callers without an explicit identity still need a
+resolvable store; tests of those callers provide a marker or environment source.
+
 ## Entry points
 
 [`scripts/lib/tracks.py::get_track`](../../scripts/lib/tracks.py), [`scripts/lib/coordination_db.py::upsert_conflict_target`](../../scripts/lib/coordination_db.py).
