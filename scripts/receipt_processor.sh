@@ -570,9 +570,13 @@ _poll_new_reports_cycle() {
     local _poll_max_mtime=0
     _RP_HB_CYCLE_START="$(_rp_hb_now)"
     _write_processor_heartbeat "$_cycle"
-    for report in "$UNIFIED_REPORTS"/*.md "$HEADLESS_REPORTS"/*.md; do
+    if ! _spr_collect_poll_candidates; then
+        _rp_hb_end_cycle
+        return 1
+    fi
+    for report in ${_SPR_POLL_CANDIDATES[@]+"${_SPR_POLL_CANDIDATES[@]}"}; do
         [ -f "$report" ] || continue
-        if should_process_report "$report" && process_single_report "$report"; then
+        if should_process_report "$report" "$_SPR_POLL_CUTOFF" && process_single_report "$report"; then
             _rp_hb_mark_progress
             local _mtime
             _mtime=$(stat -c %Y "$report" 2>/dev/null || stat -f %m "$report" 2>/dev/null)

@@ -6,7 +6,7 @@
 #           $FLOOD_LOCK_MAX_AGE, $FLOOD_THRESHOLD, get_pane_id_smart() from pane_manager
 
 # OI-1085: log-volume damping for the historical-report rescan. Every poll
-# cycle re-scans the whole reports directory, and before this damping each
+# cycle formerly re-scanned the whole reports directory; before this damping each
 # too-old report emitted one DEBUG line PER CYCLE — measured at 93% of the
 # 4.3 GB receipt_processing.log that filled the disk on 2026-08-07. The
 # information is preserved, the repetition is not: the first skip per report
@@ -21,12 +21,56 @@ _SPR_TOO_OLD_CYCLE_COUNT=0
 # per process instead of once per report per poll cycle.
 _SPR_ALREADY_LOGGED=" "
 
-# Emit the per-cycle aggregate of suppressed too-old skips (one line per
-# scan cycle instead of one line per historical report per cycle).
+# Aggregate prefilter exclusions plus damped skips from other callers.
 log_too_old_cycle_summary() {
     [ "${_SPR_TOO_OLD_CYCLE_COUNT:-0}" -gt 0 ] || return 0
-    log "DEBUG" "Skipped ${_SPR_TOO_OLD_CYCLE_COUNT} too-old report(s) this cycle (per-report lines suppressed after first occurrence)"
+    log "DEBUG" "Skipped ${_SPR_TOO_OLD_CYCLE_COUNT} too-old report(s) this cycle (prefilter exclusions and suppressed per-report repeats)"
     _SPR_TOO_OLD_CYCLE_COUNT=0
+}
+
+# OI-3100: one cutoff and one Python scan, before any per-candidate shell work.
+# RP_PYTHON is the processor's already-resolved converter interpreter.
+_spr_collect_poll_candidates() {
+    local record skipped=""
+    _SPR_POLL_CANDIDATES=()
+    if ! _SPR_POLL_CUTOFF=$(_spr_get_cutoff_seconds); then
+        log "ERROR" "Report prefilter failed: cannot compute cutoff"
+        return 1
+    fi
+    # NUL records preserve arbitrary filenames. The final count is a completion
+    # marker: process-substitution failures must never look like an empty scan.
+    while IFS= read -r -d '' record; do
+        case "$record" in
+            F*) _SPR_POLL_CANDIDATES+=("${record#F}") ;;
+            C*) skipped="${record#C}" ;;
+        esac
+    done < <("$RP_PYTHON" - "$_SPR_POLL_CUTOFF" "$UNIFIED_REPORTS" "$HEADLESS_REPORTS" <<'PY'
+import os, stat, sys
+
+cutoff = int(sys.argv[1])
+paths, skipped = [], 0
+for directory in sys.argv[2:]:
+    with os.scandir(directory) as entries:
+        for entry in sorted(entries, key=lambda e: e.name):
+            if entry.name.startswith(".") or not entry.name.endswith(".md"):
+                continue
+            info = entry.stat()
+            if not stat.S_ISREG(info.st_mode):
+                continue
+            if info.st_mtime_ns < cutoff * 1_000_000_000:
+                skipped += 1
+            else:
+                paths.append(entry.path)
+for path in paths:
+    sys.stdout.buffer.write(b"F" + os.fsencode(path) + b"\0")
+sys.stdout.buffer.write(b"C" + str(skipped).encode("ascii") + b"\0")
+PY
+    )
+    if ! [[ "$skipped" =~ ^[0-9]+$ ]]; then
+        log "ERROR" "Report prefilter failed: incomplete directory scan; cycle aborted"
+        return 1
+    fi
+    _SPR_TOO_OLD_CYCLE_COUNT=$(( _SPR_TOO_OLD_CYCLE_COUNT + skipped ))
 }
 
 # Check if report should be processed
@@ -45,8 +89,8 @@ should_process_report() {
         return 1
     fi
 
-    local cutoff_seconds
-    cutoff_seconds=$(_spr_get_cutoff_seconds)
+    local cutoff_seconds="${2:-}"
+    [ -n "$cutoff_seconds" ] || cutoff_seconds=$(_spr_get_cutoff_seconds)
 
     if [ "$file_mtime" -lt "$cutoff_seconds" ]; then
         local age_minutes=$(( ($(date +%s) - file_mtime) / 60 ))
