@@ -587,8 +587,8 @@ _poll_new_reports_cycle() {
     done
     log_too_old_cycle_summary
     # Update watermark once after the full sweep with the maximum mtime seen.
-    if [ "$_poll_max_mtime" -gt 0 ]; then
-        echo "$_poll_max_mtime" > "$WATERMARK_FILE"
+    if [ "$_SPR_POLL_UNSCANNABLE" -eq 0 ] && [ "$_poll_max_mtime" -gt 0 ]; then
+        echo "$_poll_max_mtime" > "$WATERMARK_FILE.tmp" && mv "$WATERMARK_FILE.tmp" "$WATERMARK_FILE"
     fi
     # Generic YAML-frontmatter converter: runs every ~30 s (every 6 cycles).
     # Handles reports written with --- YAML frontmatter that report_parser.py

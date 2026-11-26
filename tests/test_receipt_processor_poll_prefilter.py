@@ -114,36 +114,68 @@ def test_missing_directories_complete_cycle_with_both_heartbeats(tmp_path, missi
     assert (tmp_path / "state/receipt_processor_heartbeat.json").is_file()
 
 
-@pytest.mark.parametrize("failure", ["not_directory", "unreadable", "stat", "python", "cutoff", "invalid", "empty"])
-def test_prefilter_failure_is_visible_without_processing_or_watermark_advance(tmp_path, failure):
+@pytest.mark.parametrize("failure", ["not_directory", "unreadable", "dangling", "loop"])
+def test_scan_problem_continues_cycle_logs_once_and_recovers(tmp_path, failure):
     if failure == "unreadable" and os.geteuid() == 0:
         pytest.skip("root can scan chmod 000 directories")
-    reports(tmp_path)
-    body = ""
+    reports(tmp_path, fresh=2)
+    setup, repair = "", ""
     if failure == "not_directory":
-        body = 'HEADLESS_REPORTS="$WATERMARK_FILE"\n'
+        setup, repair = 'HEADLESS_REPORTS="$WATERMARK_FILE"', f'HEADLESS_REPORTS="{tmp_path / "headless"}"'
     elif failure == "unreadable":
         (tmp_path / "headless").chmod(0)
-    elif failure == "stat":
-        (tmp_path / "headless/broken.md").symlink_to(tmp_path / "missing")
-    elif failure == "python":
+        repair = 'chmod 755 "$HEADLESS_REPORTS"'
+    else:
+        broken = tmp_path / "unified/broken ' name.md"
+        broken.symlink_to(broken if failure == "loop" else tmp_path / "missing")
+    try:
+        result = run_cycle(tmp_path, f'''{setup}
+PS4='+ '; set -x
+for cycle in 6 12; do
+    _poll_new_reports_cycle "$cycle" 6 || exit 1
+    echo "ERRORS=$_SPR_POLL_SCAN_ERRORS WATERMARK=$(cat "$WATERMARK_FILE")"
+done
+{repair}
+_poll_new_reports_cycle 18 6
+echo "FINAL_ERRORS=$_SPR_POLL_SCAN_ERRORS"
+''')
+    finally:
+        (tmp_path / "headless").chmod(0o755)
+    assert result.returncode == 0, result.stderr
+    assert os.fsencode(tmp_path / "unified/report-1.md") in selected(tmp_path)
+    error = {"not_directory": "NotADirectoryError", "unreadable": "PermissionError",
+             "dangling": "FileNotFoundError", "loop": "OSError"}[failure]
+    log = (tmp_path / "state/receipt_processing.log").read_text()
+    assert sum("[ERROR]" in line and error in line for line in log.splitlines()) == 1
+    held = failure in ("not_directory", "unreadable")
+    assert f"FINAL_ERRORS={0 if held else 1}" in result.stdout
+    assert result.stdout.count(f"ERRORS=1 WATERMARK={CUTOFF if held else CUTOFF + 1}") == 2
+    if held:
+        assert selected(tmp_path)[-1] == os.fsencode(tmp_path / "headless/report-0.md")
+    assert (tmp_path / "state/receipt_processor_watermark").read_text().strip() == str(CUTOFF + 1)
+    trace = [line for line in result.stderr.splitlines() if line.startswith((
+        "+ _write_processor_heartbeat ", "+ _run_receipt_converter_scan", "+ _retry_pending_receipts"))]
+    assert trace == [line for cycle in (6, 12, 18) for line in (
+        f"+ _write_processor_heartbeat {cycle}", "+ _run_receipt_converter_scan",
+        f"+ _write_processor_heartbeat {cycle}", "+ _retry_pending_receipts")]
+
+
+@pytest.mark.parametrize("failure", ["python", "cutoff", "invalid", "empty", "truncated"])
+def test_prefilter_failure_is_visible_without_processing_or_watermark_advance(tmp_path, failure):
+    reports(tmp_path)
+    if failure == "python":
         body = 'RP_PYTHON="$STATE_DIR/missing-python"\n'
     elif failure == "cutoff":
         body = '_spr_get_cutoff_seconds() { return 1; }\n'
     elif failure == "invalid":
         body = '_spr_get_cutoff_seconds() { echo unknown; }\n'
+    elif failure == "truncated":
+        body = 'RP_PYTHON=partial; partial() { printf "F%s\\0" "$UNIFIED_REPORTS/report-1.md"; }\n'
     else:
         body = '_spr_get_cutoff_seconds() { printf ""; }\n'
-    try:
-        result = run_cycle(tmp_path, body + "_poll_new_reports_cycle 1 100")
-    finally:
-        (tmp_path / "headless").chmod(0o755)
+    result = run_cycle(tmp_path, body + "_poll_new_reports_cycle 1 100")
     assert result.returncode == 1, result.stderr
     assert "prefilter failed" in result.stderr
-    errors = {"not_directory": "NotADirectoryError", "unreadable": "PermissionError", "stat": "FileNotFoundError"}
-    if failure in errors:
-        assert errors[failure] in result.stderr
-        assert "incomplete directory scan; cycle aborted" in result.stderr
     assert selected(tmp_path) == []
     assert (tmp_path / "state/receipt_processor_watermark").read_text() == str(CUTOFF)
 

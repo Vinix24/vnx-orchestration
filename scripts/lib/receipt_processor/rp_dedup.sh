@@ -20,6 +20,7 @@ _SPR_TOO_OLD_CYCLE_COUNT=0
 # OI-2903: same damping for "Already processed" — logged once per report name
 # per process instead of once per report per poll cycle.
 _SPR_ALREADY_LOGGED=" "
+_SPR_SCAN_ERRORS_LOGGED=" "
 
 # Aggregate prefilter exclusions plus damped skips from other callers.
 log_too_old_cycle_summary() {
@@ -28,11 +29,11 @@ log_too_old_cycle_summary() {
     _SPR_TOO_OLD_CYCLE_COUNT=0
 }
 
-# OI-3100: one cutoff and one Python scan, before any per-candidate shell work.
-# RP_PYTHON is the processor's already-resolved converter interpreter.
+# OI-3100: one cutoff and one scan with the processor's resolved interpreter.
 _spr_collect_poll_candidates() {
-    local record skipped=""
+    local record key skipped=""
     _SPR_POLL_CANDIDATES=()
+    _SPR_POLL_SCAN_ERRORS=0 _SPR_POLL_UNSCANNABLE=0
     if ! _SPR_POLL_CUTOFF=$(_spr_get_cutoff_seconds); then
         log "ERROR" "Report prefilter failed: cannot compute cutoff"
         return 1
@@ -43,30 +44,45 @@ _spr_collect_poll_candidates() {
         case "$record" in
             F*) _SPR_POLL_CANDIDATES+=("${record#F}") ;;
             C*) skipped="${record#C}" ;;
+            D*|E*)
+                _SPR_POLL_SCAN_ERRORS=$(( _SPR_POLL_SCAN_ERRORS + 1 ))
+                [[ "$record" = D* ]] && _SPR_POLL_UNSCANNABLE=1
+                key="${record%% *}"
+                case "$_SPR_SCAN_ERRORS_LOGGED" in
+                    *" $key "*) ;;
+                    *) _SPR_SCAN_ERRORS_LOGGED+="$key "; log "ERROR" "Report scan skipped ${record#* } (further repeats counted)" ;;
+                esac ;;
         esac
     done < <("$RP_PYTHON" - "$_SPR_POLL_CUTOFF" "$UNIFIED_REPORTS" "$HEADLESS_REPORTS" <<'PY'
 import os, stat, sys
 
 cutoff = int(sys.argv[1])
-paths, skipped = [], 0
+skipped = 0
 for directory in sys.argv[2:]:
     try:
-        entries = os.scandir(directory)
-    except FileNotFoundError:
-        continue  # An absent directory contributes no files, like the old glob.
-    with entries:
-        for entry in sorted(entries, key=lambda e: e.name):
-            if entry.name.startswith(".") or not entry.name.endswith(".md"):
-                continue
+        try:
+            entries = os.scandir(directory)
+        except FileNotFoundError:
+            continue  # An absent directory contributes no files, like the old glob.
+        with entries:
+            entries = sorted(entries, key=lambda e: e.name)
+    except OSError as exc:
+        print(f"D{type(exc).__name__}:{os.fsencode(directory).hex()} {directory!r}: {type(exc).__name__}", end="\0", flush=True)
+        continue
+    for entry in entries:
+        if entry.name.startswith(".") or not entry.name.endswith(".md"):
+            continue
+        try:
             info = entry.stat()
-            if not stat.S_ISREG(info.st_mode):
-                continue
-            if info.st_mtime_ns < cutoff * 1_000_000_000:
-                skipped += 1
-            else:
-                paths.append(entry.path)
-for path in paths:
-    sys.stdout.buffer.write(b"F" + os.fsencode(path) + b"\0")
+        except OSError as exc:
+            print(f"E{type(exc).__name__}:{os.fsencode(entry.path).hex()} {entry.path!r}: {type(exc).__name__}", end="\0", flush=True)
+            continue
+        if not stat.S_ISREG(info.st_mode):
+            continue
+        if info.st_mtime_ns < cutoff * 1_000_000_000:
+            skipped += 1
+        else:
+            sys.stdout.buffer.write(b"F" + os.fsencode(entry.path) + b"\0")
 sys.stdout.buffer.write(b"C" + str(skipped).encode("ascii") + b"\0")
 PY
     )
