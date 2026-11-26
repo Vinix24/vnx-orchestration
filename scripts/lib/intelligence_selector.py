@@ -408,9 +408,6 @@ class IntelligenceSelector:
     def _query_candidates(self, task_class: str, scope_tags: List[str]) -> Dict[str, List[IntelligenceItem]]:
         """Query all standard-class candidates from quality_intelligence.db."""
         project_id = self.project_id
-        # AG-1d2 owns source readers that still take their scope from the environment.
-        if resolve_stamp_project_id() != project_id:
-            raise TenantUnresolved("intelligence source project differs from selected store")
         db = self._get_quality_db()
         result: Dict[str, List[IntelligenceItem]] = {"proven_pattern": [], "failure_prevention": [], "recent_comparable": []}
         if db is None:
@@ -854,15 +851,15 @@ class IntelligenceSelector:
         if state_dir is not None:
             record_injection_audit(result, state_dir, self.project_id)
         if result.items and self._quality_db_path is not None and self._quality_db_path.exists():
-            record_pattern_usage(result, self._get_quality_db(), self._has_column)
+            record_pattern_usage(result, self._get_quality_db(), self._has_column, self.project_id)
         try:
-            _stamp(result, self._get_quality_db())
+            _stamp(result, self._get_quality_db(), self.project_id)
         except (sqlite3.Error, OSError) as e:
             logger.debug("Failed to stamp source_dispatch_ids: %s", e)
 
     def stamp_source_dispatch_ids(self, result: InjectionResult) -> int:
         """Public injection-time stamping helper (Phase 1.5 PR-2 / OI-1315)."""
-        return _stamp(result, self._get_quality_db())
+        return _stamp(result, self._get_quality_db(), self.project_id)
 
 
 

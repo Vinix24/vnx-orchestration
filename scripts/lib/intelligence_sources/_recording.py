@@ -20,18 +20,19 @@ from ._common import (
     _new_id,
     _now_utc,
     _table_has_column,
+    _source_project_id,
 )
 
 if TYPE_CHECKING:
     from ._models import InjectionResult
 
 try:
-    from project_scope import current_project_id, project_filter_enabled
+    from project_scope import project_filter_enabled
 except ImportError:
     import sys as _sys
     from pathlib import Path as _Path
     _sys.path.insert(0, str(_Path(__file__).resolve().parent.parent))
-    from project_scope import current_project_id, project_filter_enabled  # type: ignore[no-redef]
+    from project_scope import project_filter_enabled  # type: ignore[no-redef]
 
 logger = logging.getLogger(__name__)
 
@@ -164,6 +165,7 @@ def record_pattern_usage(
     result: "InjectionResult",
     db: sqlite3.Connection,
     has_column_fn: Callable[[str, str], bool],
+    project_id=None,
 ) -> None:
     """Write pattern_usage + dispatch_pattern_offered rows for the feedback loop.
 
@@ -174,7 +176,7 @@ def record_pattern_usage(
     if db is None:
         return
     now = _now_utc()
-    project_id = current_project_id()
+    project_id = _source_project_id(db, project_id)
     pu_has_project = has_column_fn("pattern_usage", "project_id")
     dpo_has_project = has_column_fn("dispatch_pattern_offered", "project_id")
     dpo_has_ab_arm = has_column_fn("dispatch_pattern_offered", "ab_arm")
@@ -240,7 +242,7 @@ def record_pattern_usage(
                     db, item, result.dispatch_id, now, project_id, dpo_has_project, dpo_has_ab_arm,
                     getattr(result, "ab_arm", None), dpo_conflict_target,
                 )
-            _stamp_source_dispatch_id(db, item, result.dispatch_id)
+            _stamp_source_dispatch_id(db, item, result.dispatch_id, project_id)
         rearm_busy_timeout(db, deadline)
         db.commit()
     except CoordinationLockError:
@@ -326,14 +328,16 @@ def _resolve_conflict_target(
 def stamp_source_dispatch_ids(
     result: "InjectionResult",
     db: Optional[sqlite3.Connection],
+    project_id=None,
 ) -> int:
     """Public injection-time stamping: append dispatch_id to source row JSON arrays."""
     if not result.items or not result.dispatch_id or db is None:
         return 0
+    project_id = _source_project_id(db, project_id)
     stamped = 0
     for item in result.items:
         try:
-            if _stamp_source_dispatch_id(db, item, result.dispatch_id):
+            if _stamp_source_dispatch_id(db, item, result.dispatch_id, project_id):
                 stamped += 1
         except Exception as exc:
             logger.warning("stamp_source_dispatch_ids: failed to stamp item %s: %s", getattr(item, "item_id", "?"), exc)
@@ -427,7 +431,7 @@ def _upsert_dispatch_pattern_offered(
         )
 
 
-def _stamp_source_dispatch_id(db, item, dispatch_id: str) -> bool:
+def _stamp_source_dispatch_id(db, item, dispatch_id: str, project_id=None) -> bool:
     """Append dispatch_id to source_dispatch_ids on the originating pattern row."""
     if not dispatch_id:
         return False
@@ -444,7 +448,7 @@ def _stamp_source_dispatch_id(db, item, dispatch_id: str) -> bool:
         return False
     has_pid = _table_has_column(db, table, "project_id")
     pid_clause = " AND project_id = ?" if (has_pid and project_filter_enabled()) else ""
-    pid_params: tuple = (current_project_id(),) if pid_clause else ()
+    pid_params: tuple = (_source_project_id(db, project_id),) if pid_clause else ()
     try:
         row = db.execute(
             f"SELECT source_dispatch_ids FROM {table} WHERE id = ?{pid_clause}",

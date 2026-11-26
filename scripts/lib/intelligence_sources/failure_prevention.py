@@ -20,15 +20,12 @@ from ._common import (
     _content_hash,
     _now_utc,
     _project_scope_clause,
+    _source_project_id,
     _scope_matches,
     _merge_stored_tags,
     _stable_item_id,
     _table_has_column,
 )
-try:
-    from project_scope import current_project_id
-except ImportError:
-    from project_scope import current_project_id  # type: ignore
 from config_runtime import central_db_flag as _central_db_flag
 from pattern_activation import injectable_clause, state_dir_of
 
@@ -63,14 +60,14 @@ def query_failure_prevention(
 ) -> List[IntelligenceItem]:
     """3-state dispatcher: per-project | central | shadow (metric 3, antipatterns)."""
     flag = _central_db_flag()
-    if flag == "":
-        return _query_per_project(db, task_class, scope_tags, has_column_fn)
     if flag == "1":
         return _query_central(task_class, scope_tags, central_conn_fn, project_id_fn=project_id_fn)
-    legacy = _query_per_project(db, task_class, scope_tags, has_column_fn)
+    project_id = _source_project_id(db, project_id_fn() if project_id_fn else None)
+    legacy = _query_per_project(db, task_class, scope_tags, has_column_fn, project_id=project_id)
+    if flag == "":
+        return legacy
     central = _query_central(task_class, scope_tags, central_conn_fn, project_id_fn=project_id_fn)
     if _shadow_verifier is not None:
-        project_id = current_project_id()
         try:
             cmp = _shadow_verifier.compare(
                 [item.to_dict() for item in legacy],
@@ -95,10 +92,12 @@ def _query_per_project(
     task_class: str,
     scope_tags: List[str],
     has_column_fn: Callable[[str, str], bool],
+    project_id=None,
 ) -> List[IntelligenceItem]:
     """Query antipatterns and prevention_rules tables."""
-    items = _query_antipatterns(db, scope_tags, has_column_fn)
-    items += _query_prevention_rules(db, scope_tags, has_column_fn)
+    project_id = _source_project_id(db, project_id)
+    items = _query_antipatterns(db, scope_tags, has_column_fn, project_id)
+    items += _query_prevention_rules(db, scope_tags, has_column_fn, project_id)
     return items
 
 
@@ -106,11 +105,12 @@ def _query_antipatterns(
     db: sqlite3.Connection,
     scope_tags: List[str],
     has_column_fn: Callable[[str, str], bool],
+    project_id=None,
 ) -> List[IntelligenceItem]:
     """Query antipatterns table for failure_prevention candidates."""
     items: List[IntelligenceItem] = []
     ap_scope_clause, ap_scope_params = _project_scope_clause(
-        has_column_fn("antipatterns", "project_id")
+        has_column_fn("antipatterns", "project_id"), _source_project_id(db, project_id)
     )
     tags_col = ", tags" if has_column_fn("antipatterns", "tags") else ""
     try:
@@ -177,11 +177,12 @@ def _query_prevention_rules(
     db: sqlite3.Connection,
     scope_tags: List[str],
     has_column_fn: Callable[[str, str], bool],
+    project_id=None,
 ) -> List[IntelligenceItem]:
     """Query prevention_rules table for failure_prevention candidates."""
     items: List[IntelligenceItem] = []
     pr_scope_clause, pr_scope_params = _project_scope_clause(
-        has_column_fn("prevention_rules", "project_id")
+        has_column_fn("prevention_rules", "project_id"), _source_project_id(db, project_id)
     )
     try:
         guard_sql, guard_params = injectable_clause(db, state_dir_of(db))
@@ -293,7 +294,7 @@ def _query_central(
     if conn is None:
         return items
     try:
-        project_id = (project_id_fn or current_project_id)()
+        project_id = _source_project_id(conn, project_id_fn() if project_id_fn else None)
         has_project_id = _table_has_column(conn, "antipatterns", "project_id")
         if has_project_id and project_id:
             rows = conn.execute(

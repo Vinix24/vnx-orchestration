@@ -172,12 +172,12 @@ class TestProviderRegistryContextWindow:
 # ---------------------------------------------------------------------------
 
 class TestRecordingImportFallback:
-    """_recording.py must be importable and have current_project_id."""
+    """_recording.py must be importable and have _source_project_id."""
 
     def test_module_imports(self):
         from intelligence_sources import _recording
-        assert hasattr(_recording, "current_project_id")
-        assert callable(_recording.current_project_id)
+        assert hasattr(_recording, "_source_project_id")
+        assert callable(_recording._source_project_id)
 
 
 @pytest.fixture(autouse=True)
