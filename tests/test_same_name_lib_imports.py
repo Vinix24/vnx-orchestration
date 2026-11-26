@@ -51,7 +51,7 @@ from pathlib import Path
 orphan_sweep = load_file("orphan_sweep", os.path.join(LIB, "orphan_sweep.py"))
 d = Path(tempfile.mkdtemp())
 (d / "dispatches" / "active").mkdir(parents=True)
-orphan_sweep.sweep(repo_root=d, data_dir=d, state_dir=d / "state", dry_run=True, list_sessions=lambda: [])
+orphan_sweep.sweep(project_id="vnx-dev", repo_root=d, data_dir=d, state_dir=d / "state", dry_run=True, list_sessions=lambda: [])
 assert in_lib(sys.modules["crash_recovery_sweep"]), sys.modules["crash_recovery_sweep"].__file__
 assert sys.modules["crash_recovery_sweep"].DEFAULT_MAX_ORPHANS
 """
@@ -77,7 +77,7 @@ orphan_sweep = load_file("orphan_sweep", os.path.join(LIB, "orphan_sweep.py"))
 lib.is_pid_alive = lambda pid: True
 d = Path(tempfile.mkdtemp())
 (d / "dispatches" / "active").mkdir(parents=True)
-orphan_sweep.sweep(repo_root=d, data_dir=d, state_dir=d / "state", dry_run=True, list_sessions=lambda: [])
+orphan_sweep.sweep(project_id="vnx-dev", repo_root=d, data_dir=d, state_dir=d / "state", dry_run=True, list_sessions=lambda: [])
 assert sys.modules["crash_recovery_sweep"] is lib
 """
     _ok(_run(body, tmp_path))

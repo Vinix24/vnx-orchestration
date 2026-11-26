@@ -163,7 +163,7 @@ class TestInstallSchedulerLinux:
             patch("scheduler.Path.home", return_value=tmp_path),
             patch("scheduler.subprocess.run", side_effect=mock_run),
         ):
-            result = scheduler.install_scheduler("vnx-dev", vnx_bin="/usr/bin/vnx")
+            result = scheduler.install_scheduler("vnx-dev", project_root=tmp_path, vnx_bin="/usr/bin/vnx")
 
         assert "vnx-dev" in captured["new"]
         assert "vnx-auto-dream" in captured["new"]
@@ -188,7 +188,7 @@ class TestInstallSchedulerLinux:
             patch("scheduler.Path.home", return_value=tmp_path),
             patch("scheduler.subprocess.run", side_effect=mock_run),
         ):
-            scheduler.install_scheduler("vnx-dev", vnx_bin="/usr/bin/vnx")
+            scheduler.install_scheduler("vnx-dev", project_root=tmp_path, vnx_bin="/usr/bin/vnx")
 
         lines = [l for l in captured["new"].splitlines() if "vnx-auto-dream" in l]
         assert len(lines) == 1, "Expected exactly one auto-dream cron line"

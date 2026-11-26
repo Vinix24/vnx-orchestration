@@ -90,6 +90,12 @@ brew install jq tmux fswatch
 ./bin/vnx doctor
 ```
 
+`./bin/vnx init --help` (or `-h`) prints help without changing `mode.json`,
+creating runtime directories or config, or running bootstrap, including with
+the legacy Bash fallback. The central-install guard still applies: run from
+your project directory, not the immutable central code tree. Without help,
+`init` defaults to operator mode; `--starter` and `--operator` select the mode.
+
 ### Step 3: Launch T0
 
 ```bash

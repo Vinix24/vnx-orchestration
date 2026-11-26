@@ -78,6 +78,7 @@ import deliverable_dependencies as dlv_deps
 import deliverable_fireable as dlv_fireable
 from delivery_identity import delivery_identity_fields
 import plan_scope
+from project_scope import TenantUnresolved, resolve_stamp_project_id
 import plan_gaps
 import provider_switch
 import schema_manifest
@@ -2376,7 +2377,7 @@ def _append_coordination_event(
     to_state: Optional[str],
     actor: str,
     reason: Optional[str] = None,
-    project_id: str = "vnx-dev",
+    project_id: str,
     metadata: Optional[dict] = None,
 ) -> None:
     if not _has_table(conn, "coordination_events"):
@@ -7098,7 +7099,7 @@ def _add_plan_gate_attest_parser(pg_sub: Any, common: Callable[[Any], None]) -> 
 def _add_plan_gate_sign_parser(pg_sub: Any, common: Callable[[Any], None]) -> None:
     """`plan-gate sign`: the operator signs the latest plan-gate pass of a track (OI-2849)."""
     p_sign = pg_sub.add_parser("sign", help="operator only: sign the latest plan-gate pass so a T0 may promote (ADR-056)")
-    p_sign.add_argument("--project-id", default=os.environ.get("VNX_PROJECT_ID", "vnx-dev"))  # no --state-dir/--json: unused
+    p_sign.add_argument("--project-id", default=None)  # no --state-dir/--json: unused
     p_sign.add_argument("track_id")
     p_sign.add_argument("--key", required=True, help="the operator's SSH private key path")
     p_sign.add_argument("--identity", required=True, help="signer identity, as in allowed_signers")
@@ -7474,7 +7475,7 @@ def _build_parser() -> argparse.ArgumentParser:
     obj_sub = obj.add_subparsers(dest="action", required=True)
 
     def _common(p: argparse.ArgumentParser) -> None:
-        p.add_argument("--project-id", default=os.environ.get("VNX_PROJECT_ID", "vnx-dev"))
+        p.add_argument("--project-id", default=None)
         p.add_argument("--state-dir", default="")
         p.add_argument("--json", action="store_true", help="emit JSON instead of a table")
 
@@ -7612,6 +7613,13 @@ def _add_objective_hint_and_review_parsers(obj_sub, _common) -> None:
 def main(argv: Optional[list[str]] = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
+    try:
+        args.project_id = resolve_stamp_project_id(
+            args.project_id or os.environ.get("VNX_PROJECT_ID"),
+            _resolve_state_dir(getattr(args, "state_dir", "")) / "runtime_coordination.db")
+    except TenantUnresolved as exc:
+        print(f"{exc} (ADR-007). No change made.", file=sys.stderr)
+        return 2
     return args.func(args)
 
 
