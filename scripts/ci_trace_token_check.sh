@@ -38,8 +38,22 @@ if ! git rev-parse --verify "$BASE_REF" >/dev/null 2>&1; then
 fi
 
 # ── Find commits to check ───────────────────────────────────────────
-MERGE_BASE="$(git merge-base "$BASE_REF" HEAD 2>/dev/null)" || MERGE_BASE="$BASE_REF"
-COMMITS="$(git log "$MERGE_BASE..HEAD" --format="%H" 2>/dev/null)" || true
+CHECK_REF=HEAD
+if [ "${GITHUB_EVENT_NAME:-}" = "pull_request" ]; then
+    # Checkout uses a synthetic merge; validate the event's exact PR head instead.
+    CHECK_REF="$(python3 - "${GITHUB_EVENT_PATH:?Missing GitHub event payload}" <<'PY'
+import json, re, sys
+from pathlib import Path
+sha = json.loads(Path(sys.argv[1]).read_text())["pull_request"]["head"]["sha"]
+if not isinstance(sha, str) or not re.fullmatch(r"[0-9a-f]{40}", sha):
+    raise ValueError("Invalid pull_request.head.sha")
+print(sha)
+PY
+    )"
+    git rev-parse --verify "$CHECK_REF^{commit}" >/dev/null
+fi
+MERGE_BASE="$(git merge-base "$BASE_REF" "$CHECK_REF" 2>/dev/null)" || MERGE_BASE="$BASE_REF"
+COMMITS="$(git log "$MERGE_BASE..$CHECK_REF" --format="%H" 2>/dev/null)" || true
 
 if [ -z "$COMMITS" ]; then
     echo "[VNX-CI] No new commits to check."

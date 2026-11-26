@@ -34,6 +34,8 @@ DELETED = ("VNX_DEFAULT_BRANCHES", "VNX_RECEIPT_FALLBACK")
 
 @pytest.fixture
 def store(tmp_path, monkeypatch):
+    monkeypatch.delenv("GITHUB_EVENT_NAME", raising=False)
+    monkeypatch.delenv("GITHUB_EVENT_PATH", raising=False)
     for key in [k for k, _ in READERS] + list(DELETED) + ["VNX_WORKER_ENFORCEMENT_SKIP"]:
         monkeypatch.delenv(key, raising=False)
         monkeypatch.delenv("VNX_OVERRIDE_" + key[4:], raising=False)
@@ -266,3 +268,35 @@ def test_bash_config_and_fallback(store, tmp_path, monkeypatch, script, mode):
         assert hook.returncode == int(blocked), hook.stdout + hook.stderr
     if mode in ("error", "missing", "store_error", "unresolvable", *invalid) or mode.startswith("bad_legacy_"):
         assert "Config read failed" in result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("token", [False, True])
+@pytest.mark.parametrize("evidence", ["head", "missing", "null", "malformed", "unknown", "unavailable", "no_payload", "no_path"])
+def test_ci_pr_head_evidence(store, tmp_path, monkeypatch, token, evidence):
+    def git(*args, **kwargs):
+        return subprocess.run(["git", "-c", "core.hooksPath=/dev/null", "-c", "user.name=Test",
+                               "-c", "user.email=test@example.org", *args], cwd=tmp_path,
+                              check=True, capture_output=True, text=True, **kwargs).stdout.strip()
+    git("init", "-q")
+    git("commit", "--allow-empty", "-m", "base")
+    base = git("rev-parse", "HEAD")
+    git("commit", "--allow-empty", "-m", "feat: change" + ("\n\nDispatch-ID: dlv-ac12ec2948bd-hd" if token else ""))
+    head = git("rev-parse", "HEAD")
+    merge = git("commit-tree", "HEAD^{tree}", "-p", base, "-p", head, input="Synthetic merge\n")
+    git("checkout", "--detach", merge)
+    sha = {"head": head, "null": None, "malformed": [], "unknown": "unknown", "unavailable": "0" * 40}
+    event = tmp_path / "event.json"
+    if evidence not in ("no_payload", "no_path"):
+        event.write_text(json.dumps({"pull_request": {"head": {} if evidence == "missing" else {"sha": sha[evidence]}}}))
+    monkeypatch.setenv("GITHUB_EVENT_NAME", "pull_request")
+    monkeypatch.setenv("GITHUB_EVENT_PATH", str(event))
+    if evidence == "no_path":
+        monkeypatch.delenv("GITHUB_EVENT_PATH")
+    monkeypatch.setenv("VNX_PROVENANCE_ENFORCEMENT", "1")
+    result = subprocess.run(["bash", str(ROOT / "scripts/ci_trace_token_check.sh"), base],
+                            cwd=tmp_path, capture_output=True, text=True)
+    assert (result.returncode == 0) is (token and evidence == "head"), result.stdout + result.stderr
+    if evidence == "head":
+        assert "Total: 1" in result.stdout
+    else:
+        assert result.stderr and "RESULT: PASS" not in result.stdout
