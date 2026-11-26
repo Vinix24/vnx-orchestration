@@ -11,8 +11,11 @@ Required coverage:
 """
 from __future__ import annotations
 import contextlib, importlib.util as _ilu, json, os, sys, tempfile, unittest
+import logging
 from pathlib import Path
 from unittest.mock import patch
+
+import pytest
 
 SCRIPT_DIR = Path(__file__).resolve().parent.parent / "scripts"
 sys.path.insert(0, str(SCRIPT_DIR / "lib"))
@@ -70,12 +73,13 @@ class _Base(unittest.TestCase):
             c.execute("INSERT INTO dispatches (dispatch_id, project_id, state, priority) VALUES (?,?,'queued','P2')", (did, pid))
             c.commit()
 
-    def _bundle(self, did, provider="claude", instr="# test"):
+    def _bundle(self, did, provider="claude", instr="# test", target_profile=None):
         d = self.dd / did
         d.mkdir(parents=True, exist_ok=True)
         (d / "prompt.txt").write_text(instr, encoding="utf-8")
         (d / "bundle.json").write_text(
-            json.dumps({"dispatch_id": did, "target_profile": {"provider": provider}, "gate": ""}),
+            json.dumps({"dispatch_id": did, "target_profile": (
+                {"provider": provider} if target_profile is None else target_profile), "gate": ""}),
             encoding="utf-8")
 
     def _run(self, tid="T1", pid="proj", **kw):
@@ -99,6 +103,92 @@ class TestClaimsAndDelivers(_Base):
         self.assertEqual(args[0], "T1")          # terminal_id
         self.assertEqual(args[1], "d-001")        # dispatch_id
         self.assertEqual(args[2], "# Instruction body")  # instruction
+
+
+@pytest.fixture
+def queued_pair_runner():
+    runner = _Base()
+    runner.setUp()
+    try:
+        with get_connection(runner.sd) as conn:
+            conn.execute("ALTER TABLE terminal_leases ADD COLUMN project_id TEXT")
+            conn.execute("ALTER TABLE terminal_leases ADD COLUMN lease_token TEXT")
+        yield runner
+    finally:
+        runner.tearDown()
+
+
+def _run_pair_cli(runner, profile, cli_model, caplog):
+    dispatch_id = "d-bundle-pair"
+    runner._queue(dispatch_id)
+    runner._bundle(dispatch_id, target_profile=profile)
+    argv = ["--terminal-id", "T1", "--project-id", "proj",
+            "--state-dir", runner.sd, "--dispatch-dir", str(runner.dd)]
+    if cli_model is not None:
+        argv += ["--model", cli_model]
+    with caplog.at_level(logging.INFO, logger="pool_worker_runner"), \
+            patch("pool_worker_runner._deliver_claude", return_value=EXIT_OK) as claude, \
+            patch("pool_worker_runner._deliver_provider", return_value=EXIT_OK) as other:
+        assert pool_worker_runner.main(argv) == EXIT_OK
+    with get_connection(runner.sd) as conn:
+        row = conn.execute("SELECT state, claimed_by FROM dispatches WHERE dispatch_id=? "
+                           "AND project_id=?", (dispatch_id, "proj")).fetchone()
+        assert tuple(row) == ("claimed", "T1")
+    assert claude.call_count + other.call_count == 1
+    if claude.called:
+        return "claude", claude.call_args.args[3]
+    return other.call_args.args[0], other.call_args.args[4]
+
+
+@pytest.mark.parametrize("pair", [
+    ("claude", "sonnet"), ("codex", "gpt-6-astra"), ("kimi", "kimi-code/k3"),
+])
+@pytest.mark.parametrize("cli_model", [None, "opus"])
+@pytest.mark.parametrize("env_model", [None, "kimi-k3"])
+def test_whole_bundle_pair_wins(queued_pair_runner, monkeypatch, caplog,
+                               pair, cli_model, env_model):
+    if env_model is None:
+        monkeypatch.delenv("VNX_DISPATCH_MODEL", raising=False)
+    else:
+        monkeypatch.setenv("VNX_DISPATCH_MODEL", env_model)
+    profile = dict(zip(("provider", "model"), pair))
+    assert _run_pair_cli(queued_pair_runner, profile, cli_model, caplog) == pair
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+    execution = [r.getMessage() for r in caplog.records if r.getMessage().startswith("Executing ")]
+    assert len(execution) == 1
+    assert "bundle_pair: whole" in execution[0]
+
+
+@pytest.mark.parametrize("profile,provider,missing", [
+    ({"provider": "claude"}, "claude", "model"),
+    ({"model": "sonnet"}, "kimi", "provider"),
+    ({"provider": "claude", "model": None}, "claude", "model"),
+    ({"provider": "claude", "model": ""}, "claude", "model"),
+    ({"provider": None, "model": "sonnet"}, "kimi", "provider"),
+    ({"provider": "", "model": "sonnet"}, "kimi", "provider"),
+    ({}, "kimi", None),
+    ({"provider": None, "model": None}, "kimi", None),
+    ({"provider": "", "model": ""}, "kimi", None),
+])
+@pytest.mark.parametrize("cli_model", [None, "opus"])
+@pytest.mark.parametrize("env_model", [None, "gpt-6-astra"])
+def test_incomplete_bundle_keeps_legacy_pair(queued_pair_runner, monkeypatch, caplog,
+                                           profile, provider, missing, cli_model, env_model):
+    if env_model is None:
+        monkeypatch.delenv("VNX_DISPATCH_MODEL", raising=False)
+    else:
+        monkeypatch.setenv("VNX_DISPATCH_MODEL", env_model)
+    expected_model = "kimi-k3" if cli_model is None else cli_model
+    assert _run_pair_cli(queued_pair_runner, profile, cli_model, caplog) == (provider, expected_model)
+    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert len(warnings) == (1 if missing else 0)
+    if missing:
+        assert warnings[0].levelno == logging.WARNING
+        assert "d-bundle-pair" in warnings[0].getMessage()
+        assert f"missing target_profile.{missing}" in warnings[0].getMessage()
+    execution = [r.getMessage() for r in caplog.records if r.getMessage().startswith("Executing ")]
+    assert len(execution) == 1
+    assert f"bundle_pair: {'partial' if missing else 'absent'}" in execution[0]
 
 
 class TestEmptyQueue(_Base):

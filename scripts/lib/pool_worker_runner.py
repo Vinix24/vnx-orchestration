@@ -267,10 +267,16 @@ def run(terminal_id: str, project_id: str, *,
 
     instruction = prompt_path.read_text(encoding="utf-8")
     tp = bundle.get("target_profile") or {}
-    # worker-provider-kimi-flip (20260723): this runtime fallback stays kimi when the
-    # bundle's target_profile doesn't declare a provider. The registry default in
-    # vnx_workers.default.yaml is claude/sonnet; the two are decided separately.
+    # AG-2p: whole bundle pairs win; partial/absent pairs retain the legacy fallback
+    # until producers guarantee whole pairs (AG-2c) and refusal follows (AG-2s).
     provider = (tp.get("provider") or "kimi").lower().strip()
+    bundle_pair = "absent"
+    if tp.get("provider") and tp.get("model"):
+        bundle_pair, _model = "whole", tp["model"]
+    elif tp.get("provider") or tp.get("model"):
+        bundle_pair = "partial"
+        logger.warning("Dispatch %r missing target_profile.%s; retaining legacy pair",
+                       dispatch_id, "model" if tp.get("provider") else "provider")
     role: Optional[str] = tp.get("role") or None
     gate = (bundle.get("gate") or "").strip()
 
@@ -299,8 +305,8 @@ def run(terminal_id: str, project_id: str, *,
                 spec_path, exc_info=True,
             )
 
-    logger.info("Executing %r provider=%r role=%r model=%r deadline=%ds skill=%r",
-                dispatch_id, provider, role, _model, deadline_seconds, skill)
+    logger.info("Executing %r provider=%r role=%r model=%r deadline=%ds skill=%r bundle_pair: %s",
+                dispatch_id, provider, role, _model, deadline_seconds, skill, bundle_pair)
 
     if provider == "claude":
         return _deliver_claude(terminal_id, dispatch_id, instruction, _model, role, gate,
