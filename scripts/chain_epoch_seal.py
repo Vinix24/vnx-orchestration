@@ -2,7 +2,7 @@
 """ADR-029 chain-epoch seal migration.
 
 Appends a ``chain_epoch_start`` marker to a receipt ledger BEFORE enabling
-``VNX_CHAIN_RECEIPTS`` default-on, so that new receipts chain within a fresh
+``VNX_HASH_CHAIN_REQUIRED`` default-on, so that new receipts chain within a fresh
 epoch and ``verify_chain`` returns ``verified-segmented`` (healthy) instead of
 ``broken`` (the naive-flip footgun). The immutable pre-adoption entries stay
 epoch 0.

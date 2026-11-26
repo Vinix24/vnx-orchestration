@@ -337,9 +337,52 @@ def unchained_write(ledger_path: Path) -> Iterator[str]:
 
 
 def chain_receipts_variable_on(*, state_dir: Path | None = None) -> bool:
-    """``VNX_HASH_CHAIN_REQUIRED`` is 1/true/yes/on (case-insensitive) in this process."""
+    """Resolve the switch for the ledger's project; warn and fall back on config read errors.
+
+    With no explicit store, retain the process's normal config resolution. An explicit
+    store never borrows the ambient project row. Config failures must not lose receipts.
+    Fallback uses global and default layers only: project rows are excluded, with
+    existing override and env precedence preserved (override > global config > env > default).
+    """
+    import config_registry
     import config_runtime
-    return config_runtime.get_bool("VNX_HASH_CHAIN_REQUIRED", state_dir=state_dir)
+    from vnx_paths import project_id_from_state_dir
+
+    key = "VNX_HASH_CHAIN_REQUIRED"
+    if state_dir is None:
+        return config_runtime.get_bool(key)
+
+    project_id = project_id_from_state_dir(state_dir)
+    strict = None
+    if project_id:
+        if config_runtime.autowire(state_dir=state_dir, project_id=project_id):
+            strict = config_runtime.strict_resolver()
+    else:
+        config_runtime.logger.warning(
+            "config_runtime: %s: could not derive project_id for state_dir=%s; "
+            "ignoring project rows (global and default layers only); "
+            "existing override and env precedence preserved: override > global config > env > default",
+            key, state_dir,
+        )
+
+    resolver = None
+    if strict is not None:
+        store_resolver, project_id = strict
+
+        def resolver(pid, requested_key):
+            try:
+                return store_resolver(pid, requested_key)
+            except Exception as exc:
+                # resolve_with_source logs this context and returns project_config_error.
+                raise RuntimeError(f"state_dir={state_dir}: {type(exc).__name__}: {exc}") from exc
+
+    value, source = config_registry.resolve_with_source(
+        key, project_id, resolver, use_default_resolver=False, strict_resolver=True,
+    )
+    if source in config_registry.ERROR_SOURCES:
+        # The strict read has logged the failure; continue without the unreadable layer.
+        value, _ = config_registry.resolve_with_source(key, use_default_resolver=False)
+    return value is not None and value.strip().lower() in ("1", "true", "yes", "on")
 
 
 def append_chains(tail_state: str, *, state_dir: Path | None = None) -> bool:
@@ -362,7 +405,7 @@ def verify_chain(path: Path) -> tuple[bool, list[dict], str]:
       chained intact. is_valid=True.
     - "broken": a within-epoch prev_hash mismatch, an unchained entry INSIDE a
       chained epoch, a chained entry with no preceding epoch marker after an
-      unchained prefix (a naive VNX_CHAIN_RECEIPTS flip that skipped the seal),
+      unchained prefix (a naive VNX_HASH_CHAIN_REQUIRED flip that skipped the seal),
       an epoch marker whose prev_hash != GENESIS, or unparseable lines.
       is_valid=False.
 

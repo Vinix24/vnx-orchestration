@@ -59,14 +59,16 @@ def _verify_report(path, ok, violations, status):
     if status == "unchained":
         # D1: "unchained" means verify_chain() could not check anything — no
         # entry carries prev_hash, so integrity is UNMEASURED, not confirmed.
-        # Chaining stays an explicit decision (VNX_CHAIN_RECEIPTS=1).
+        # Chaining stays an explicit decision through vnx config set.
         return {
             "verified": False,
             "status": "unchained",
             "path": str(path),
             "warning": (
                 "Hash-chain verification not possible: no entries carry prev_hash. "
-                "Enable chaining by setting VNX_CHAIN_RECEIPTS=1."
+                "After sealing an existing ledger's epoch, enable chaining with "
+                'vnx config set VNX_HASH_CHAIN_REQUIRED 1 --approval-id <approval-id> --reason "<why>" '
+                "for the ledger's project (add --global for all projects without a project row)."
             ),
         }, 2
     payload = {
