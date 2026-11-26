@@ -15,6 +15,7 @@ would make the red run a collection error instead of a failing assertion.
 import argparse
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 from pathlib import Path
@@ -203,6 +204,9 @@ class TestDoctorCheck:
         project = tmp_path / "project"
         (project / ".vnx").mkdir(parents=True)
         (project / ".vnx-data" / "state").mkdir(parents=True)
+        with sqlite3.connect(project / ".vnx-data" / "state" / "runtime_coordination.db") as conn:
+            from config_store_db import ensure_config_tables
+            ensure_config_tables(conn)
         return home, project
 
     def _doctor(self, project: Path, capsys) -> tuple[int, dict]:
