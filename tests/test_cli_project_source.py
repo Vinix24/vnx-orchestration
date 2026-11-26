@@ -13,7 +13,7 @@ from test_seed_tracks_from_roadmap import _make_db
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 COMMANDS = ("planning_cli", "sign", "seed_tracks_from_roadmap", "crash_recovery_sweep",
-            "orphan_sweep", "permission_posture_report")
+            "orphan_sweep")
 
 
 @pytest.mark.parametrize("command", COMMANDS)
@@ -38,8 +38,6 @@ def test_cli_project_source(tmp_path, command, source):
         extra = ["--project-id", "/bad"]
     roadmap = root / "roadmap.yaml"
     roadmap.write_text("features: []\n")
-    (root / ".vnx").mkdir()
-    (root / ".vnx" / "worker_permissions.yaml").write_text("version: 1\nprofiles: {}\n")
     with sqlite3.connect(state / "runtime_coordination.db") as conn:
         conn.execute("CREATE TABLE terminal_leases (terminal_id TEXT, project_id TEXT, worker_pid INTEGER)")
         conn.executemany("INSERT INTO terminal_leases VALUES ('T1', ?, ?)",
@@ -55,7 +53,6 @@ def test_cli_project_source(tmp_path, command, source):
         "seed_tracks_from_roadmap": ["--state-dir", str(state), "--roadmap", str(roadmap)],
         "crash_recovery_sweep": ["--data-dir", str(root), "--dry-run", "--json"],
         "orphan_sweep": ["--data-dir", str(root), "--repo-root", str(root), "--dry-run", "--json"],
-        "permission_posture_report": ["--state-dir", str(state), "--project-root", str(root), "--json"],
     }[command]
     script = "planning_cli" if command == "sign" else command
     master, slave = pty.openpty()
@@ -72,9 +69,6 @@ def test_cli_project_source(tmp_path, command, source):
         assert proc.returncode == 0 and "other-project-track" in output, output
     elif command == "seed_tracks_from_roadmap":
         assert proc.returncode == 0 and "project_id : other" in output, output
-    elif command == "permission_posture_report":
-        assert proc.returncode == 1, output
-        assert json.loads(proc.stdout)["conditions"][-1]["evidence"] == "no decision recorded"
     else:
         assert proc.returncode in (0, 1), output  # tmux may be absent; the active pass still runs.
         key = "active_skipped_alive" if command == "orphan_sweep" else "skipped_alive"

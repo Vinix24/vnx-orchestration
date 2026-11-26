@@ -373,6 +373,7 @@ f21f74c57072a17a	scripts/lib/vnx_paths.py	vnx-dev	1	te_repareren	Usage example o
 c8ed2a1c8013ec16	scripts/migrate_to_central_vnx.py	vnx-dev	1	legacy_tenant_reader	Comment or docstring that mentions the vnx-dev project in prose (measurement, ADR-007 note or history); no behaviour	
 f988293fddacc321	scripts/migrate_to_central_vnx.py	vnx-dev	1	legacy_tenant_reader	Comment or docstring that mentions the vnx-dev project in prose (measurement, ADR-007 note or history); no behaviour	
 a6887d7721272e68	scripts/open_items_manager.py	vnx-dev	1	legacy_tenant_reader	Comment or docstring that mentions the vnx-dev project in prose (measurement, ADR-007 note or history); no behaviour	
+3b4957424364cd3a	scripts/permission_posture_report.py	vnx-dev	1	te_repareren	Help text states the --project-id default is env or vnx-dev, the default the code applies	AG-1
 348e3b32fa585d83	scripts/quality_db_init.py	vnx-dev	1	legacy_tenant_reader	Comment or docstring that mentions the vnx-dev project in prose (measurement, ADR-007 note or history); no behaviour	
 568afce7395ce5e8	scripts/quality_db_init.py	vnx-dev	1	te_repareren	Docstring of the helper that stamps the vnx-dev project id on session_analytics rows whose project_id is NULL	AG-1
 8f347c16c276d2b0	scripts/quality_db_init.py	vnx-dev	1	legacy_tenant_reader	Comment or docstring that mentions the vnx-dev project in prose (measurement, ADR-007 note or history); no behaviour	
