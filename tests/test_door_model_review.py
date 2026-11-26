@@ -16,7 +16,6 @@ from dispatch_spec import Provider
 
 OVERRIDES = [
     (Provider.CODEX, "VNX_CODEX_MODEL", "gpt-5.5", "gpt-5.4"),
-    (Provider.CODEX, "VNX_CODEX_DEFAULT_MODEL", "gpt-5.5", "gpt-5.4"),
     (Provider.KIMI, "VNX_KIMI_MODEL", "kimi-k2-7", "kimi-k3"),
     (Provider.LITELLM_DEEPSEEK, "VNX_LITELLM_MODEL", "deepseek-v4-flash", "deepseek-v4-pro"),
     (Provider.LITELLM_ZAI, "VNX_LITELLM_MODEL", "glm-5.3", "glm-5.2"),
@@ -93,12 +92,6 @@ def test_door_root_failure_is_blocking(project, monkeypatch, error):
     assert model == ""
     assert verdicts[0].code == "worker_model_unresolved"
     assert all(v in verdicts[0].message for v in ("T1", "claude", "anthropic", "consumer root unavailable"))
-
-
-def test_codex_lane_override_beats_spawn_default(project, monkeypatch, resolve):
-    monkeypatch.setenv("VNX_CODEX_MODEL", "gpt-5.5")
-    monkeypatch.setenv("VNX_CODEX_DEFAULT_MODEL", "gpt-5.4")
-    assert resolve(_make_spec(tmp_path=project, provider=Provider.CODEX))[0] == "gpt-5.5"
 
 
 def test_legacy_registry_remains_cached_and_errors_visible(project, monkeypatch):

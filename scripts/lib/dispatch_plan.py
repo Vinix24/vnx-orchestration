@@ -501,8 +501,7 @@ def _provider_model_override(provider: str) -> Optional[str]:
     """Read provider overrides through their existing resolvers; None means unset."""
     from provider_dispatch import _resolve_codex_model, _kimi_resolve_requested_key, _litellm_resolve_model
     if provider == "codex":
-        from provider_spawns.codex_spawn import _resolve_codex_model as spawn_model
-        return _resolve_codex_model(override_only=True) or spawn_model(None, override_only=True)
+        return _resolve_codex_model(override_only=True)
     if provider == "kimi":
         return _kimi_resolve_requested_key(None, override_only=True)
     if provider.startswith("litellm:"):

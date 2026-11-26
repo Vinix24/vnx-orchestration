@@ -21,8 +21,8 @@ Background: [dispatch architecture](../core/DISPATCH_AND_INTELLIGENCE_ARCHITECTU
 —
 
 D4 and the door share `_resolve_model`: an explicit builder model wins, followed
-by the provider operator override through its existing resolver (Codex lane then
-direct-spawn default, Kimi, or LiteLLM). With no override, `resolve_worker`
+by the provider operator override through its existing resolver (`VNX_CODEX_MODEL`,
+`VNX_KIMI_MODEL`, or `VNX_LITELLM_MODEL`). With no override, `resolve_worker`
 selects the terminal env/config pair, project worker registry,
 then the packaged default. A provider-only request uses that pair when its
 provider matches, otherwise that provider's `wave7_models.yaml` `default_model`.
