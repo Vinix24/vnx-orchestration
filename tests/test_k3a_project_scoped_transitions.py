@@ -226,6 +226,7 @@ def test_unknown_project_is_the_not_found_error_and_changes_nothing(state_dir: P
 # ---------------------------------------------------------------------------
 
 def test_without_project_id_keeps_the_existing_behaviour(state_dir: Path) -> None:
+    (state_dir / ".vnx-project-id").write_text(PROJECT_A + "\n")
     with get_connection(state_dir) as conn:
         _insert_dispatch(conn, dispatch_id=SHARED_DISPATCH, project_id=PROJECT_A)
         conn.commit()

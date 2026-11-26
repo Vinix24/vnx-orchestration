@@ -144,6 +144,7 @@ def _register_provenance_link(enriched: Dict[str, Any], state_dir: Path) -> None
                 trace_token=enriched.get("trace_token"),
                 pr_number=pr_number,
                 feature_plan_pr=enriched.get("feature_plan_pr"),
+                project_id=enriched.get("project_id"),
             )
             conn.commit()
         finally:

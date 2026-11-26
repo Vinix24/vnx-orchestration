@@ -19,7 +19,6 @@ import schema_migration
 
 try:
     from project_scope import TenantUnresolved
-    from project_scope import current_project_id as _current_project_id
     from project_scope import project_filter_enabled as _project_filter_enabled
     from project_scope import resolve_stamp_project_id as _resolve_stamp_project_id
 except ImportError:
@@ -27,7 +26,6 @@ except ImportError:
     from pathlib import Path as _Path
     _sys.path.insert(0, str(_Path(__file__).resolve().parent))
     from project_scope import TenantUnresolved  # type: ignore[no-redef]
-    from project_scope import current_project_id as _current_project_id  # type: ignore[no-redef]
     from project_scope import project_filter_enabled as _project_filter_enabled  # type: ignore[no-redef]
     from project_scope import resolve_stamp_project_id as _resolve_stamp_project_id  # type: ignore[no-redef]
 
@@ -294,6 +292,14 @@ def _has_project_id_col(conn: sqlite3.Connection, table: str) -> bool:
     )
 
 
+def _connection_project_id(conn: sqlite3.Connection, explicit: Optional[str] = None) -> str:
+    """Adapt the opened connection to the canonical resolver; raises TenantUnresolved."""
+    if explicit:
+        return _resolve_stamp_project_id(explicit=explicit)
+    path = next(row[2] for row in conn.execute("PRAGMA database_list") if row[1] == "main")
+    return _resolve_stamp_project_id(db_path=path or None)
+
+
 def _append_event(
     conn: sqlite3.Connection,
     *,
@@ -307,10 +313,10 @@ def _append_event(
     metadata: Optional[Dict[str, Any]] = None,
     project_id: Optional[str] = None,
 ) -> str:
-    """Append a coordination event row. Returns the event_id."""
+    """Append an event and return its ID; raises TenantUnresolved without identity."""
     event_id = _new_event_id()
     if _has_project_id_col(conn, "coordination_events"):
-        effective_pid = project_id or _current_project_id()
+        effective_pid = _connection_project_id(conn, project_id)
         conn.execute(
             """
             INSERT INTO coordination_events
@@ -654,10 +660,12 @@ def get_dispatch(conn: sqlite3.Connection, dispatch_id: str) -> Optional[Dict[st
     return dict(row) if row else None
 
 
-def get_lease(conn: sqlite3.Connection, terminal_id: str) -> Optional[Dict[str, Any]]:
-    """Return terminal lease row or None."""
+def get_lease(
+    conn: sqlite3.Connection, terminal_id: str, *, project_id: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """Return the scoped lease or None; raises TenantUnresolved without identity."""
     pid_clause = " AND project_id = ?" if (_has_project_id_col(conn, "terminal_leases") and _project_filter_enabled()) else ""
-    params = (terminal_id, _current_project_id()) if pid_clause else (terminal_id,)
+    params = (terminal_id, _connection_project_id(conn, project_id)) if pid_clause else (terminal_id,)
     row = conn.execute(
         f"SELECT * FROM terminal_leases WHERE terminal_id = ?{pid_clause}", params
     ).fetchone()
@@ -671,8 +679,9 @@ def get_events(
     entity_type: Optional[str] = None,
     event_type: Optional[str] = None,
     limit: int = 100,
+    project_id: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
-    """Return recent coordination events, newest first."""
+    """Return scoped events, newest first; raises TenantUnresolved without identity."""
     clauses: List[str] = []
     params: list = []
     if entity_id:
@@ -686,7 +695,7 @@ def get_events(
         params.append(event_type)
     if _has_project_id_col(conn, "coordination_events") and _project_filter_enabled():
         clauses.append("project_id = ?")
-        params.append(_current_project_id())
+        params.append(_connection_project_id(conn, project_id))
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
     params.append(limit)
     rows = conn.execute(
@@ -696,11 +705,14 @@ def get_events(
     return [dict(r) for r in rows]
 
 
-def project_terminal_state(conn: sqlite3.Connection) -> Dict[str, Any]:
-    """Project current terminal_leases state into terminal_state.json format."""
+def project_terminal_state(
+    conn: sqlite3.Connection, *, project_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Project scoped leases; raises TenantUnresolved without identity."""
     if _has_project_id_col(conn, "terminal_leases") and _project_filter_enabled():
         rows = conn.execute(
-            "SELECT * FROM terminal_leases WHERE project_id = ?", (_current_project_id(),)
+            "SELECT * FROM terminal_leases WHERE project_id = ?",
+            (_connection_project_id(conn, project_id),),
         ).fetchall()
     else:
         rows = conn.execute("SELECT * FROM terminal_leases").fetchall()

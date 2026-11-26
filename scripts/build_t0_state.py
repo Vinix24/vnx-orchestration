@@ -690,6 +690,9 @@ def _init_and_check_db(state_dir: Path, migration_skip: Any = _SKIP_UNDECIDED) -
     it is taken once per build). Left out, it is taken here: every caller of
     this function is guarded.
     """
+    from project_scope import TenantUnresolved
+    from project_id_refusals import record_project_id_refusal
+
     if migration_skip is _SKIP_UNDECIDED:
         migration_skip = _migration_skip(state_dir)
     guarded = migration_skip is not None
@@ -703,9 +706,15 @@ def _init_and_check_db(state_dir: Path, migration_skip: Any = _SKIP_UNDECIDED) -
             try:
                 from migrations.auto_apply import auto_apply
                 auto_apply(db_path_from_state_dir(state_dir))
+            except TenantUnresolved:
+                raise
             except Exception as e:
                 log.warning("migration auto_apply failed: %s", e)
             return True
+        except TenantUnresolved as exc:
+            record_project_id_refusal("coordination_db", state_dir, "project_id_unresolved",
+                                     hook="build_t0_state_hook", error=str(exc))
+            return False
         except (ImportError, OSError, sqlite3.OperationalError) as e:
             log.debug("coordination_db init failed, falling back: %s", e)
     # Fallback: check if DB already exists and has tables
@@ -728,6 +737,10 @@ def _init_and_check_db(state_dir: Path, migration_skip: Any = _SKIP_UNDECIDED) -
     try:
         from migrations.auto_apply import auto_apply
         auto_apply(db_path)
+    except TenantUnresolved as exc:
+        record_project_id_refusal("coordination_db", state_dir, "project_id_unresolved",
+                                 hook="build_t0_state_hook", error=str(exc))
+        return False
     except Exception as e:
         log.warning("migration auto_apply (fallback path) failed: %s", e)
     return True
@@ -1200,13 +1213,20 @@ def _build_live_work(
     """
     from coordination_db import IN_FLIGHT_DISPATCH_STATES
     from dispatch_worktree_isolation import claims_dir_for_state_dir
+    from project_scope import TenantUnresolved, resolve_stamp_project_id
+    from project_id_refusals import record_project_id_refusal
 
-    if not project_id:
-        # ADR-007: an unscoped read of a shared table would show every project.
-        return _live_work_unavailable(
-            "no project_id: refusing an unscoped dispatches read", read_error=False,
-        )
     db_path = state_dir / "runtime_coordination.db"
+    try:
+        if not project_id:
+            raise TenantUnresolved("no project_id: refusing an unscoped dispatches read")
+        project_id = resolve_stamp_project_id(explicit=project_id, db_path=db_path)
+    except TenantUnresolved as exc:
+        record_project_id_refusal("coordination_db", state_dir, "project_id_unresolved",
+                                 hook="build_t0_state_hook", error=str(exc))
+        return _live_work_unavailable(
+            f"project_id_unresolved: no project_id for live work: {exc}", read_error=False,
+        )
     if not db_path.exists():
         return _live_work_unavailable(
             f"runtime_coordination.db not found at {db_path}", read_error=False,

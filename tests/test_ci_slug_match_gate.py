@@ -461,11 +461,11 @@ class TestResolveBranchName:
         branch, skip = resolve_branch_name(None)
         assert skip is True
 
-    def test_custom_default_branches_via_env(self, monkeypatch):
+    def test_custom_default_branches_via_constant(self, monkeypatch):
         monkeypatch.setenv("GITHUB_EVENT_NAME", "push")
         monkeypatch.delenv("GITHUB_HEAD_REF", raising=False)
         monkeypatch.setenv("GITHUB_REF_NAME", "develop")
-        monkeypatch.setenv("VNX_DEFAULT_BRANCHES", "develop,trunk")
+        monkeypatch.setattr("check_ci_slug_match.DEFAULT_BRANCH_NAMES", ("develop", "trunk"))
         branch, skip = resolve_branch_name(None)
         assert skip is True
 

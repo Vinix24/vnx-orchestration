@@ -72,7 +72,7 @@ class TestProjectIdFnInQueryCandidates:
     @patch("intelligence_selector.query_recent_comparable", return_value=[])
     def test_project_id_fn_passed(self, mock_recent, mock_failure, mock_proven):
         from intelligence_selector import IntelligenceSelector
-        selector = IntelligenceSelector.__new__(IntelligenceSelector)
+        selector = IntelligenceSelector()
         selector._has_column = MagicMock(return_value=False)
         selector._get_central_qi_conn = MagicMock(return_value=None)
 
@@ -178,3 +178,8 @@ class TestRecordingImportFallback:
         from intelligence_sources import _recording
         assert hasattr(_recording, "current_project_id")
         assert callable(_recording.current_project_id)
+
+
+@pytest.fixture(autouse=True)
+def _explicit_intelligence_project(monkeypatch):
+    monkeypatch.setenv("VNX_PROJECT_ID", "vnx-dev")

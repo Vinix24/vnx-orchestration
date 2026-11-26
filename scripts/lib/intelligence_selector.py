@@ -166,7 +166,7 @@ def arm_for_dispatch(
     return (arm, window_stamp(window)) if arm is not None else (None, None)
 
 
-def _resolve_arm(dispatch_id: object) -> "tuple[Optional[str], Optional[str]]":
+def _resolve_arm(dispatch_id: object, project_id=None, db_path=None) -> "tuple[Optional[str], Optional[str]]":
     """Return ``(arm, ab_window)``; arm is 'placebo' | 'control' | 'treatment' | None.
 
     The placebo arm is a negative control (see ``_select_placebo_pattern``),
@@ -175,12 +175,9 @@ def _resolve_arm(dispatch_id: object) -> "tuple[Optional[str], Optional[str]]":
     both come from ``arm_for_dispatch`` inside the frozen window; ``(None, None)``
     means the dispatch gets its normal injection and no arm is recorded.
     """
+    project_id = resolve_stamp_project_id(project_id, db_path)
     if _placebo_arm_enabled():
         return PLACEBO_ARM, None
-    try:
-        project_id: object = current_project_id()
-    except ValueError:
-        project_id = None
     return arm_for_dispatch(dispatch_id, project_id, load_window_config())
 
 
@@ -199,11 +196,11 @@ except ImportError:
     _resolve_central_data_dir = None  # type: ignore[assignment]
 
 try:
-    from project_scope import current_project_id, project_filter_enabled
+    from project_scope import TenantUnresolved, resolve_stamp_project_id, project_filter_enabled
 except ImportError:
     import sys as _sys
     _sys.path.insert(0, str(Path(__file__).resolve().parent))
-    from project_scope import current_project_id, project_filter_enabled
+    from project_scope import TenantUnresolved, resolve_stamp_project_id, project_filter_enabled
 
 try:
     from vnx_tag_vocabulary import derive_tags as _derive_tags
@@ -327,10 +324,19 @@ def _relevance_score(item, query_scope) -> float:
 class IntelligenceSelector:
     """Selects bounded, evidence-backed intelligence items for dispatch injection."""
 
-    def __init__(self, quality_db_path=None, coord_db_state_dir=None) -> None:
+    def __init__(self, quality_db_path=None, coord_db_state_dir=None, *, project_id=None) -> None:
+        self._project_id = project_id
         self._quality_db_path = quality_db_path
         self._coord_state_dir = coord_db_state_dir
         self._quality_db: Optional[sqlite3.Connection] = None
+
+    @property
+    def project_id(self):
+        """Resolve against the selected store; unresolved tenants raise TenantUnresolved."""
+        db_path = self._quality_db_path
+        if db_path is None and self._coord_state_dir is not None:
+            db_path = Path(self._coord_state_dir) / "runtime_coordination.db"
+        return resolve_stamp_project_id(self._project_id, db_path)
 
     def _get_quality_db(self) -> Optional[sqlite3.Connection]:
         if self._quality_db is not None:
@@ -379,10 +385,8 @@ class IntelligenceSelector:
     def _get_central_qi_conn(self) -> Optional[sqlite3.Connection]:
         if _resolve_central_data_dir is None:
             return None
+        project_id = self.project_id
         try:
-            project_id = current_project_id()
-            if not project_id:
-                return None
             db_path = _resolve_central_data_dir(project_id) / "state" / "quality_intelligence.db"
             if not db_path.exists():
                 return None
@@ -403,11 +407,15 @@ class IntelligenceSelector:
 
     def _query_candidates(self, task_class: str, scope_tags: List[str]) -> Dict[str, List[IntelligenceItem]]:
         """Query all standard-class candidates from quality_intelligence.db."""
+        project_id = self.project_id
+        # AG-1d2 owns source readers that still take their scope from the environment.
+        if resolve_stamp_project_id() != project_id:
+            raise TenantUnresolved("intelligence source project differs from selected store")
         db = self._get_quality_db()
         result: Dict[str, List[IntelligenceItem]] = {"proven_pattern": [], "failure_prevention": [], "recent_comparable": []}
         if db is None:
             return result
-        kw = dict(has_column_fn=self._has_column, central_conn_fn=self._get_central_qi_conn, project_id_fn=current_project_id)
+        kw = dict(has_column_fn=self._has_column, central_conn_fn=self._get_central_qi_conn, project_id_fn=lambda: project_id)
         result["proven_pattern"] = query_proven_patterns(db, task_class, scope_tags, reconcile_fn=self._maybe_reconcile_confidence, **kw)
         result["failure_prevention"] = query_failure_prevention(db, task_class, scope_tags, **kw)
         result["recent_comparable"] = query_recent_comparable(db, task_class, scope_tags, **kw)
@@ -844,7 +852,7 @@ class IntelligenceSelector:
             raise ValueError("record_injection: dispatch_id required for audit attribution")
         state_dir = coord_state_dir or self._coord_state_dir
         if state_dir is not None:
-            record_injection_audit(result, state_dir, current_project_id())
+            record_injection_audit(result, state_dir, self.project_id)
         if result.items and self._quality_db_path is not None and self._quality_db_path.exists():
             record_pattern_usage(result, self._get_quality_db(), self._has_column)
         try:
@@ -862,7 +870,7 @@ def select_intelligence(
     dispatch_id,
     injection_point,
     *,
-    quality_db_path=None,
+    quality_db_path=None, project_id=None,
     coord_state_dir=None,
     task_class=None,
     skill_name=None,
@@ -873,9 +881,9 @@ def select_intelligence(
     instruction_text=None,
 ) -> InjectionResult:
     """Convenience function: select, emit event, record injection, return result."""
-    selector = IntelligenceSelector(quality_db_path=quality_db_path, coord_db_state_dir=coord_state_dir)
+    selector = IntelligenceSelector(quality_db_path=quality_db_path, coord_db_state_dir=coord_state_dir, project_id=project_id)
     try:
-        ab_arm, ab_window = _resolve_arm(dispatch_id)
+        ab_arm, ab_window = _resolve_arm(dispatch_id, selector.project_id)
         if ab_arm == "control":
             logger.info(
                 "intelligence_selector: A/B control arm — skipping injection for dispatch %s",
@@ -931,7 +939,7 @@ def select_intelligence(
         selector.close()
 
 
-def build_intelligence_context(*, dispatch_id="", role="", pr_id=None, dispatch_paths=None, quality_db_path=None, coord_state_dir=None) -> Optional[IntelligenceContext]:
+def build_intelligence_context(*, dispatch_id="", role="", pr_id=None, dispatch_paths=None, quality_db_path=None, coord_state_dir=None, project_id=None) -> Optional[IntelligenceContext]:
     """Build an IntelligenceContext for adapter prompt assembly.
 
     Returns None immediately when dispatch_id is empty (no audit rows written).
@@ -939,9 +947,9 @@ def build_intelligence_context(*, dispatch_id="", role="", pr_id=None, dispatch_
     if not dispatch_id or not str(dispatch_id).strip():
         logger.debug("build_intelligence_context: empty dispatch_id, skipping injection (no audit write)")
         return None
-    selector = IntelligenceSelector(quality_db_path=quality_db_path, coord_db_state_dir=coord_state_dir)
+    selector = IntelligenceSelector(quality_db_path=quality_db_path, coord_db_state_dir=coord_state_dir, project_id=project_id)
     try:
-        ab_arm, ab_window = _resolve_arm(dispatch_id)
+        ab_arm, ab_window = _resolve_arm(dispatch_id, selector.project_id)
         if ab_arm == "control":
             logger.info(
                 "intelligence_selector: A/B control arm — skipping context build for dispatch %s",

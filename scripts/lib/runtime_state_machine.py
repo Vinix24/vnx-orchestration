@@ -96,7 +96,9 @@ def _dispatch_row(
     conn: sqlite3.Connection, dispatch_id: str, project_id: Optional[str],
 ) -> Optional[sqlite3.Row]:
     """Read one dispatch row, scoped by project when a project scope is given."""
-    if project_id is None:
+    if project_id is None or "project_id" not in {
+        col[1] for col in conn.execute("PRAGMA table_info(dispatches)")
+    }:
         return conn.execute(
             "SELECT * FROM dispatches WHERE dispatch_id = ?", (dispatch_id,)
         ).fetchone()
@@ -222,7 +224,7 @@ def _transition_dispatch_scoped(
     now = _now_utc()
     sql = "UPDATE dispatches SET state = ?, updated_at = ? WHERE dispatch_id = ?"
     args: tuple = (to_state, now, dispatch_id)
-    if project_id is not None:
+    if project_id is not None and "project_id" in row.keys():
         sql += " AND project_id = ?"
         args += (project_id,)
     cursor = conn.execute(sql, args)
@@ -257,6 +259,8 @@ def transition_dispatch(
     pre-ADR-049 dispatch_id-only behaviour for the callers not migrated yet. A
     ``project_id`` that is ``None``, empty or not a string is refused: naming no
     project must never silently mean "every project".
+    Legacy dispatch tables without a project column still use their unique
+    dispatch ID; their events retain the explicit project.
     """
     return _transition_dispatch_scoped(
         conn,
@@ -516,26 +520,43 @@ def update_attempt(
     failure_reason: Optional[str] = None,
     metadata: Optional[Dict[str, Any]] = None,
     actor: str = "runtime",
+    project_id: Any = _PROJECT_ID_UNSET,
 ) -> Dict[str, Any]:
-    """Update a dispatch attempt state and optionally record failure reason."""
+    """Update an attempt and its event under the given project.
+
+    Omitting project_id preserves the legacy attempt-ID lookup. An explicit
+    project scopes the lookup/update when the table has that column, and always
+    stamps the event. Invalid explicit identity raises ValueError; a missing
+    attempt in the requested project raises KeyError before writing. Schema
+    inspection failures propagate instead of widening a scoped lookup.
+    """
+    scope = _resolve_project_scope(project_id)
+    where, args = "attempt_id = ?", (attempt_id,)
+    if scope is not None and "project_id" in {
+        col[1] for col in conn.execute("PRAGMA table_info(dispatch_attempts)")
+    }:
+        where += " AND project_id = ?"
+        args += (scope,)
     row = conn.execute(
-        "SELECT * FROM dispatch_attempts WHERE attempt_id = ?", (attempt_id,)
+        f"SELECT * FROM dispatch_attempts WHERE {where}", args,
     ).fetchone()
     if row is None:
         raise KeyError(f"Attempt not found: {attempt_id!r}")
 
     from_state = row["state"]
     now = _now_utc()
-    conn.execute(
-        "UPDATE dispatch_attempts SET state = ?, ended_at = ?, failure_reason = ? WHERE attempt_id = ?",
-        (state, now, failure_reason, attempt_id),
+    cursor = conn.execute(
+        f"UPDATE dispatch_attempts SET state = ?, ended_at = ?, failure_reason = ? WHERE {where}",
+        (state, now, failure_reason, *args),
     )
+    if scope is not None and cursor.rowcount == 0:
+        raise KeyError(f"Attempt not found: {attempt_id!r} (project_id={scope!r})")
     event_type = "attempt_failed" if state == "failed" else f"attempt_{state}"
     _append_event(
         conn, event_type=event_type, entity_type="attempt",
         entity_id=attempt_id, from_state=from_state, to_state=state,
-        actor=actor, reason=failure_reason, metadata=metadata,
+        actor=actor, reason=failure_reason, metadata=metadata, project_id=scope,
     )
     return dict(
-        conn.execute("SELECT * FROM dispatch_attempts WHERE attempt_id = ?", (attempt_id,)).fetchone()
+        conn.execute(f"SELECT * FROM dispatch_attempts WHERE {where}", args).fetchone()
     )

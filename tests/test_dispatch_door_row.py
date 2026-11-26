@@ -69,6 +69,7 @@ def _make_coordination_db(state_dir: Path, *, tracks: "dict[str, str] | None" = 
     fix retires; the real schema is the only one under test now.
     """
     state_dir.mkdir(parents=True, exist_ok=True)
+    (state_dir / ".vnx-project-id").write_text("vnx-dev\n")
     coordination_db.init_schema(state_dir)
     db_path = state_dir / "runtime_coordination.db"
     # ADR-007 project_id column + composite UNIQUE — a real central store has
