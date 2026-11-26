@@ -3,8 +3,8 @@
 
 The matcher counts, per (path, name, fingerprint), the lines of tracked files in
 SCOPE that carry one of the operator's own names. The generator reads ONLY the
-per-finding table (``tests/fixtures/operator_names/findings.tsv``) and writes the
-allowlist the guard compares against: no path rule, no category per directory.
+per-finding table (``tests/fixtures/operator_names/findings.tsv``) and builds the
+in-memory allowance the guard compares against: no path rule, no category per directory.
 A new finding is allowed by a new table row, which shows in the diff, never by
 regenerating. The sentinel tenant name is matched quoted and bare (AG-G3), which
 includes the ``DEFAULT`` clause of a column definition. The scope covers ``dashboard/``,
@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import collections
 import hashlib
-import json
 import re
 import subprocess
 import sys
@@ -36,7 +35,6 @@ CATEGORIES = ("frozen_migration", "legacy_tenant_reader", "model_catalog",
 COLUMNS = ("fingerprint", "path", "name", "count", "category", "reason", "group")
 REPO = Path(__file__).resolve().parents[2]
 TABLE = REPO / "tests/fixtures/operator_names/findings.tsv"
-ALLOWLIST = REPO / "tests/fixtures/operator_names/allowlist.json"
 
 
 def normalise(line: str) -> str:
@@ -115,13 +113,6 @@ def generate(rows: list) -> dict:
     return {"columns": ["path", "name", "fingerprint", "count"], "entries": entries}
 
 
-def render(allowlist: dict) -> str:
-    head = json.dumps(allowlist["columns"])
-    items = [json.dumps(e) for e in allowlist["entries"]]
-    body = ",\n".join("  " + ", ".join(items[i:i + 3]) for i in range(0, len(items), 3))  # 3 per line keeps the diff short
-    return f'{{"columns": {head}, "entries": [\n{body}\n]}}\n'
-
-
 def compare(found: dict, allowlist: dict) -> list:
     """Failures between the scan and the allowlist; each names path, name, fingerprint."""
     allowed = {(p, n, f): c for p, n, f, c in allowlist["entries"]}
@@ -139,16 +130,14 @@ def compare(found: dict, allowlist: dict) -> list:
 
 
 def main(argv: list) -> int:
-    """``generate`` writes the allowlist from the table; ``check`` compares the tree."""
+    """``check`` compares the tree against the table in memory."""
     cmd = argv[0] if argv else ""
-    if cmd == "generate":
-        ALLOWLIST.write_text(render(generate(load_table())), encoding="utf-8")
-        return 0
     if cmd == "check":
-        problems = validate_table(load_table()) + compare(scan(REPO), generate(load_table()))
+        rows = load_table()
+        problems = validate_table(rows) + compare(scan(REPO), generate(rows))
         print("\n".join(problems))
         return 1 if problems else 0
-    print("usage: operator_names.py generate|check", file=sys.stderr)
+    print("usage: operator_names.py check", file=sys.stderr)
     return 2
 
 

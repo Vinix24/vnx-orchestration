@@ -34,6 +34,16 @@ def test_missed_test_is_selected_by_reason_d(touched, test):
     assert any(r.startswith("d:") for r in selected[test])
 
 
+@pytest.mark.parametrize("touched, test", [
+    ("scripts/ci/operator_names.py", "tests/test_no_operator_defaults.py"),
+    ("scripts/lib/migration_linter.py", "tests/test_w_init_project_id_threading.py"),
+])
+def test_operator_guard_readers_select_their_tests(touched, test):
+    selected = pps.select_tests(REPO, [touched])
+    assert test in selected
+    assert any(reason.startswith("c:") for reason in selected[test])
+
+
 def _tests_tree(tmp_path, files):
     for rel, text in files.items():
         p = tmp_path / rel

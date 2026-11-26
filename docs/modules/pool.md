@@ -20,6 +20,16 @@ records `bundle_pair: absent`. Null and empty values count as absent.
 Refusing partial pairs with `bundle_pair_incomplete` belongs to AG-2s, after
 AG-2c makes producers write whole pairs; AG-2b changes the absent-pair fallback.
 
+Inventory the actual broker bundles before that transition with
+`python3 scripts/bundle_pair_inventory.py --project-id vnx-dev --json` (omit
+`--json` for text). The existing project-store resolver selects the store; the
+command reads its broker rows and the same `bundle.json` paths as the consumer.
+It includes queued/ready, claimed/delivering, recovered, timed-out and failed
+deliveries, with per-bundle `whole`, `partial` or `absent` states and totals.
+Missing, corrupt or unsafe bundles are reported as `error` and cause exit 1;
+unreadable stores or unknown broker states also fail. It never rewrites bundles
+or broker state. Null and empty pair fields count as absent, matching AG-2p.
+
 ## Entry points
 
 - [`scripts/lib/pool_manager.py::PoolManager.tick`](../../scripts/lib/pool_manager.py)
