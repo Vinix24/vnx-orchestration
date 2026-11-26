@@ -165,7 +165,7 @@ def test_non_directory_and_foreign_name_entries_are_ignored(env, tmp_path, caplo
     (worktrees_dir / "not-a-dispatch").mkdir()
 
     caplog.set_level(logging.INFO, logger=_LOGGER)
-    res = osweep.sweep(repo_root=local, data_dir=env, list_sessions=lambda: [])
+    res = osweep.sweep(project_id="vnx-dev", repo_root=local, data_dir=env, list_sessions=lambda: [])
 
     assert res.worktrees_scanned == []
     assert res.worktrees_removed == []
@@ -184,7 +184,7 @@ def test_unmeasurable_listing_skips_every_worktree(env, tmp_path, caplog):
     handle = _alloc(local, "unmeasured-1")
 
     caplog.set_level(logging.INFO, logger=_LOGGER)
-    res = osweep.sweep(repo_root=local, data_dir=env, list_sessions=lambda: None)
+    res = osweep.sweep(project_id="vnx-dev", repo_root=local, data_dir=env, list_sessions=lambda: None)
 
     assert res.worktrees_scanned == [str(handle.path)]
     assert res.worktrees_skipped_live == [str(handle.path)]
@@ -211,6 +211,7 @@ def test_surviving_session_id_skips_its_worktree(env, tmp_path, caplog):
         data_dir=env,
         list_sessions=lambda: ["vnx-survivor-1"],
         probe_liveness=lambda s: True,
+        project_id="vnx-dev",
     )
 
     assert res.worktrees_scanned == [str(handle.path)]
@@ -227,7 +228,7 @@ def test_register_in_flight_skips_worktree_with_log(env, tmp_path, caplog):
     _write_register_event(env, "dispatch_created", "inflight-1")
 
     caplog.set_level(logging.INFO, logger=_LOGGER)
-    res = osweep.sweep(repo_root=local, data_dir=env, list_sessions=lambda: [])
+    res = osweep.sweep(project_id="vnx-dev", repo_root=local, data_dir=env, list_sessions=lambda: [])
 
     assert res.worktrees_scanned == [str(handle.path)]
     assert res.worktrees_skipped_live == [str(handle.path)]
@@ -252,7 +253,7 @@ def test_register_unmeasurable_skips_worktree_with_log(env, tmp_path, caplog, mo
     handle = _alloc(local, "unmeasurable-reg-1")
 
     caplog.set_level(logging.INFO, logger=_LOGGER)
-    res = osweep.sweep(repo_root=local, data_dir=env, list_sessions=lambda: [])
+    res = osweep.sweep(project_id="vnx-dev", repo_root=local, data_dir=env, list_sessions=lambda: [])
 
     assert res.worktrees_scanned == [str(handle.path)]
     assert res.worktrees_skipped_live == [str(handle.path)]
@@ -279,7 +280,7 @@ def test_classify_exception_recorded_and_loop_continues(env, tmp_path, monkeypat
 
     monkeypatch.setattr(tmux_worktree, "classify_path", _raise)
 
-    res = osweep.sweep(repo_root=local, data_dir=env, list_sessions=lambda: [])
+    res = osweep.sweep(project_id="vnx-dev", repo_root=local, data_dir=env, list_sessions=lambda: [])
 
     assert res.worktrees_scanned == [str(handle.path)]
     assert res.worktrees_removed == []
@@ -308,7 +309,7 @@ def test_dry_run_dirty_preserved_and_clean_removed_without_reaping(env, tmp_path
     monkeypatch.setattr(tmux_worktree, "reap", _record)
 
     caplog.set_level(logging.INFO, logger=_LOGGER)
-    res = osweep.sweep(repo_root=local, data_dir=env, list_sessions=lambda: [], dry_run=True)
+    res = osweep.sweep(project_id="vnx-dev", repo_root=local, data_dir=env, list_sessions=lambda: [], dry_run=True)
 
     # sorted(worktrees_dir.iterdir()): dry-clean-1 before dry-dirty-1.
     assert res.worktrees_scanned == [str(clean.path), str(dirty.path)]
@@ -335,7 +336,7 @@ def test_reap_removes_clean_worktree(env, tmp_path, caplog):
     handle = _alloc(local, "reap-clean-1")
 
     caplog.set_level(logging.INFO, logger=_LOGGER)
-    res = osweep.sweep(repo_root=local, data_dir=env, list_sessions=lambda: [])
+    res = osweep.sweep(project_id="vnx-dev", repo_root=local, data_dir=env, list_sessions=lambda: [])
 
     assert res.worktrees_scanned == [str(handle.path)]
     assert res.worktrees_removed == [str(handle.path)]
@@ -353,7 +354,7 @@ def test_reap_preserves_dirty_worktree(env, tmp_path, caplog):
     (handle.path / "uncommitted.txt").write_text("wip\n")
 
     caplog.set_level(logging.INFO, logger=_LOGGER)
-    res = osweep.sweep(repo_root=local, data_dir=env, list_sessions=lambda: [])
+    res = osweep.sweep(project_id="vnx-dev", repo_root=local, data_dir=env, list_sessions=lambda: [])
 
     assert res.worktrees_scanned == [str(handle.path)]
     assert res.worktrees_removed == []
@@ -376,7 +377,7 @@ def test_reap_exception_recorded(env, tmp_path, monkeypatch):
 
     monkeypatch.setattr(tmux_worktree, "reap", _raise)
 
-    res = osweep.sweep(repo_root=local, data_dir=env, list_sessions=lambda: [])
+    res = osweep.sweep(project_id="vnx-dev", repo_root=local, data_dir=env, list_sessions=lambda: [])
 
     assert res.worktrees_removed == []
     assert res.worktrees_preserved == []
@@ -397,7 +398,7 @@ def test_reap_returned_errors_recorded(env, tmp_path, monkeypatch):
 
     monkeypatch.setattr(tmux_worktree, "reap", _partial)
 
-    res = osweep.sweep(repo_root=local, data_dir=env, list_sessions=lambda: [])
+    res = osweep.sweep(project_id="vnx-dev", repo_root=local, data_dir=env, list_sessions=lambda: [])
 
     assert res.worktrees_removed == []
     assert res.worktrees_preserved == []

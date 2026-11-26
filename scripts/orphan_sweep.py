@@ -44,6 +44,8 @@ sys.path[:] = [p for p in sys.path if os.path.realpath(p or '.') != os.path.real
 sys.path.insert(0, str(_LIB))
 
 from orphan_sweep import DEFAULT_MAX_ORPHANS, sweep  # noqa: E402
+from project_scope import TenantUnresolved, resolve_stamp_project_id
+from vnx_paths import resolve_state_dir
 
 
 def main(argv: "list[str] | None" = None) -> int:
@@ -68,6 +70,12 @@ def main(argv: "list[str] | None" = None) -> int:
     data_dir = _optional_path(args.data_dir)
     state_dir = _optional_path(args.state_dir)
     account_data_root = _optional_path(args.account_data_root)
+    try:
+        anchor = state_dir or (data_dir / "state" if data_dir else resolve_state_dir())
+        args.project_id = resolve_stamp_project_id(
+            args.project_id or os.environ.get("VNX_PROJECT_ID"), anchor / "runtime_coordination.db")
+    except TenantUnresolved as exc:
+        parser.error(str(exc))
 
     result = sweep(
         repo_root=repo_root,
@@ -123,8 +131,8 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--project-id",
-        default=os.environ.get("VNX_PROJECT_ID", "vnx-dev"),
-        help="Project id for the lease PID lookup (default: $VNX_PROJECT_ID or vnx-dev).",
+        default=None,
+        help="Project id for the lease PID lookup (default: $VNX_PROJECT_ID or store marker/layout).",
     )
     parser.add_argument(
         "--current-dispatch",

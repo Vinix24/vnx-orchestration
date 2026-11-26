@@ -137,6 +137,7 @@ class TestDeadPidRecovery(_SweepBase):
             self.data_dir,
             state_dir=self.state_dir,
             pid_alive=_dead_pid_predicate,
+            project_id="vnx-dev",
         )
 
         self.assertEqual(result.recovered, ["d-dead-001"])
@@ -156,6 +157,7 @@ class TestDeadPidRecovery(_SweepBase):
         self._make_orphan("d-dead-002", worker_pid=999999)
         crs.sweep(
             self.data_dir, state_dir=self.state_dir, pid_alive=_dead_pid_predicate,
+            project_id="vnx-dev",
         )
         self.assertTrue((self.reports_dir / "d-dead-002.md").exists())
 
@@ -168,6 +170,7 @@ class TestLivePidSkipped(_SweepBase):
             self.data_dir,
             state_dir=self.state_dir,
             pid_alive=_alive_pid_predicate,
+            project_id="vnx-dev",
         )
 
         self.assertEqual(result.recovered, [])
@@ -185,7 +188,7 @@ class TestLivePidSkipped(_SweepBase):
         def liveness(pid):
             return pid == 222
 
-        result = crs.sweep(self.data_dir, state_dir=self.state_dir, pid_alive=liveness)
+        result = crs.sweep(self.data_dir, project_id="vnx-dev", state_dir=self.state_dir, pid_alive=liveness)
 
         self.assertEqual(result.recovered, ["d-dead"])
         self.assertEqual(result.skipped_alive, ["d-live"])
@@ -203,6 +206,7 @@ class TestCapBehaviour(_SweepBase):
             state_dir=self.state_dir,
             max_orphans=2,
             pid_alive=_dead_pid_predicate,
+            project_id="vnx-dev",
         )
 
         self.assertEqual(len(result.recovered), 2)
@@ -217,6 +221,7 @@ class TestCapBehaviour(_SweepBase):
         result = crs.sweep(
             self.data_dir, state_dir=self.state_dir,
             max_orphans=10, pid_alive=_dead_pid_predicate,
+            project_id="vnx-dev",
         )
         self.assertFalse(result.capped)
         self.assertEqual(len(result.recovered), 1)
@@ -233,6 +238,7 @@ class TestCapBehaviour(_SweepBase):
         result = crs.sweep(
             self.data_dir, state_dir=self.state_dir,
             max_orphans=1, pid_alive=liveness,
+            project_id="vnx-dev",
         )
         # The single dead orphan is recovered; cap is not tripped by the skips.
         self.assertEqual(result.recovered, ["d-dead-a"])
@@ -245,9 +251,11 @@ class TestIdempotency(_SweepBase):
 
         first = crs.sweep(
             self.data_dir, state_dir=self.state_dir, pid_alive=_dead_pid_predicate,
+            project_id="vnx-dev",
         )
         second = crs.sweep(
             self.data_dir, state_dir=self.state_dir, pid_alive=_dead_pid_predicate,
+            project_id="vnx-dev",
         )
 
         self.assertEqual(first.recovered, ["d-idem-001"])
@@ -267,6 +275,7 @@ class TestDryRun(_SweepBase):
             state_dir=self.state_dir,
             dry_run=True,
             pid_alive=_dead_pid_predicate,
+            project_id="vnx-dev",
         )
 
         # Reported as "would recover" but no side effects.
@@ -282,6 +291,7 @@ class TestDryRun(_SweepBase):
         result = crs.sweep(
             self.data_dir, state_dir=self.state_dir,
             dry_run=True, pid_alive=_alive_pid_predicate,
+            project_id="vnx-dev",
         )
         self.assertEqual(result.recovered, [])
         self.assertEqual(result.skipped_alive, ["d-dry-live"])
@@ -294,6 +304,7 @@ class TestNoResolvablePid(_SweepBase):
 
         result = crs.sweep(
             self.data_dir, state_dir=self.state_dir, pid_alive=_dead_pid_predicate,
+            project_id="vnx-dev",
         )
         self.assertEqual(result.recovered, ["d-nopid-001"])
         self.assertEqual(result.skipped_no_pid, ["d-nopid-001"])
@@ -311,6 +322,7 @@ class TestExcludeIds(_SweepBase):
             state_dir=self.state_dir,
             pid_alive=_dead_pid_predicate,
             exclude_ids={"d-excl-001"},
+            project_id="vnx-dev",
         )
 
         self.assertEqual(result.skipped_protected, ["d-excl-001"])
@@ -323,6 +335,7 @@ class TestExcludeIds(_SweepBase):
         self._make_orphan("d-excl-002", worker_pid=999999)
         result = crs.sweep(
             self.data_dir, state_dir=self.state_dir, pid_alive=_dead_pid_predicate,
+            project_id="vnx-dev",
         )
         # No exclude_ids passed -> recovered normally.
         self.assertEqual(result.recovered, ["d-excl-002"])
@@ -331,7 +344,7 @@ class TestExcludeIds(_SweepBase):
 
 class TestDiscovery(_SweepBase):
     def test_empty_active_dir(self):
-        result = crs.sweep(self.data_dir, state_dir=self.state_dir)
+        result = crs.sweep(self.data_dir, project_id="vnx-dev", state_dir=self.state_dir)
         self.assertEqual(result.scanned, 0)
         self.assertEqual(result.recovered, [])
 
@@ -340,6 +353,7 @@ class TestDiscovery(_SweepBase):
         (self.active / "d-bare").mkdir()
         result = crs.sweep(
             self.data_dir, state_dir=self.state_dir, pid_alive=_dead_pid_predicate,
+            project_id="vnx-dev",
         )
         self.assertEqual(result.scanned, 0)
 
