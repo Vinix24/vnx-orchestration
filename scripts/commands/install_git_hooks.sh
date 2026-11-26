@@ -65,8 +65,10 @@ cmd_install_git_hooks() {
     log "[install-git-hooks] Done: $installed installed, $skipped skipped"
 
     # Show current enforcement mode
-    local mode="${VNX_PROVENANCE_ENFORCEMENT:-0}"
-    if [ "$mode" = "1" ]; then
+    local ENFORCEMENT LEGACY_ACCEPTED
+    source "$VNX_HOME/scripts/lib/provenance_config.sh"
+    vnx_read_provenance_config "$VNX_HOME"
+    if [ "$ENFORCEMENT" = "1" ]; then
         log "[install-git-hooks] Enforcement: ACTIVE (commits without trace tokens will be blocked)"
     else
         log "[install-git-hooks] Enforcement: SHADOW (warnings only, commits not blocked)"

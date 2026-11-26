@@ -8,8 +8,8 @@
 # Usage:
 #   ci_trace_token_check.sh [base_ref]
 #
-# Environment:
-#   VNX_PROVENANCE_ENFORCEMENT: "0" = warn, "1" = block (default: from env)
+# Config chain (override > project > global > env > default):
+#   VNX_PROVENANCE_ENFORCEMENT: "0" = warn, "1" = block (errors: block)
 #   VNX_PROVENANCE_LEGACY_ACCEPTED: "1" = accept legacy (default: "1")
 #   GITHUB_BASE_REF: used if base_ref not provided (GitHub Actions)
 #
@@ -21,7 +21,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VALIDATOR="$SCRIPT_DIR/lib/trace_token_validator.py"
-ENFORCEMENT="${VNX_PROVENANCE_ENFORCEMENT:-0}"
+source "$SCRIPT_DIR/lib/provenance_config.sh"
+vnx_read_provenance_config "$SCRIPT_DIR/.."
 
 # ── Determine base ref ──────────────────────────────────────────────
 BASE_REF="${1:-${GITHUB_BASE_REF:-main}}"
@@ -66,7 +67,8 @@ while IFS= read -r sha; do
 
     # Use Python validator if available
     if [ -f "$VALIDATOR" ]; then
-        RESULT="$(echo "$BODY" | python3 "$VALIDATOR" validate - 2>/dev/null)" || RESULT=""
+        RESULT="$(echo "$BODY" | VNX_OVERRIDE_PROVENANCE_ENFORCEMENT="$ENFORCEMENT" \
+            VNX_OVERRIDE_PROVENANCE_LEGACY_ACCEPTED="$LEGACY_ACCEPTED" python3 "$VALIDATOR" validate -)" || true
 
         if [ -n "$RESULT" ]; then
             IS_VALID="$(echo "$RESULT" | python3 -c "import json,sys; print(json.load(sys.stdin).get('valid', False))" 2>/dev/null)" || IS_VALID="unknown"
@@ -83,7 +85,7 @@ while IFS= read -r sha; do
         if echo "$BODY" | grep -qE '^Dispatch-ID:\s+\S+'; then
             IS_VALID="True"
             FORMAT="preferred"
-        elif [ "${VNX_PROVENANCE_LEGACY_ACCEPTED:-1}" = "1" ]; then
+        elif [ "$LEGACY_ACCEPTED" = "1" ]; then
             if echo "$BODY" | grep -qE 'dispatch:\S+|\\bPR-[0-9]+\\b|\\bFP-[A-Z]\\b'; then
                 IS_VALID="True"
                 FORMAT="legacy"
@@ -100,10 +102,6 @@ while IFS= read -r sha; do
             LEGACY=$((LEGACY + 1))
             ICON="~"
         fi
-    elif [ "$IS_VALID" = "unknown" ]; then
-        # Validator error — don't count as invalid
-        VALID=$((VALID + 1))
-        ICON="?"
     else
         INVALID=$((INVALID + 1))
         ICON="✗"
