@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import pytest
 import sys
 import unittest
 from pathlib import Path
@@ -266,3 +267,8 @@ class TestQueryProvenPatterns(unittest.TestCase):
         )
         self.assertTrue(any("Per-project shadow" in i.title for i in items))
         db.close()
+
+
+@pytest.fixture(autouse=True)
+def _explicit_project_source(monkeypatch):
+    monkeypatch.setenv("VNX_PROJECT_ID", "vnx-dev")

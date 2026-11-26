@@ -92,8 +92,6 @@ from intelligence_injection import record_unresolved_injection
 state = Path(sys.argv[1])
 try:
     project_id = resolve_stamp_project_id(db_path=state / "quality_intelligence.db")
-    if resolve_stamp_project_id() != project_id:
-        raise TenantUnresolved("intelligence source project differs from selected store")
 except TenantUnresolved:
     record_unresolved_injection(state, "userpromptsubmit_worker_intelligence_inject.sh")
     sys.exit(1)

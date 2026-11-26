@@ -1,0 +1,1 @@
+- Intelligence sources (AG-1d2): use the caller’s resolved project for local, central and shadow reads, offer recording and source stamps. Marker-only stores and explicit project overrides work without an agreeing environment; unresolved readers refuse without a default tenant.

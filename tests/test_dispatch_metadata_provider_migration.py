@@ -574,7 +574,7 @@ def test_recent_comparable_select_includes_provider_model():
             rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
             return any(r[1] == col for r in rows)
 
-        items = _query_per_project(conn, "test", [], has_column_fn=_has_col)
+        items = _query_per_project(conn, "test", [], has_column_fn=_has_col, project_id="vnx-dev")
         assert items, "expected at least one IntelligenceItem"
         content = items[0].content
         assert "codex" in content, f"provider 'codex' not surfaced in content: {content!r}"
@@ -616,7 +616,7 @@ def test_recent_comparable_unmigrated_db_returns_rows_no_crash():
     )
     conn.commit()
 
-    items = _query_per_project(conn, "coding_interactive", [], has_column_fn=lambda t, c: False)
+    items = _query_per_project(conn, "coding_interactive", [], has_column_fn=lambda t, c: False, project_id="vnx-dev")
     conn.close()
 
     assert items, "must return items from unmigrated DB without crash"
@@ -657,7 +657,7 @@ def test_recent_comparable_migrated_db_surfaces_provider_model():
         rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
         return any(r[1] == col for r in rows)
 
-    items = _query_per_project(conn, "coding_interactive", [], has_column_fn=_has_col)
+    items = _query_per_project(conn, "coding_interactive", [], has_column_fn=_has_col, project_id="vnx-dev")
     conn.close()
 
     assert items, "must return items from migrated DB"
@@ -703,7 +703,7 @@ def test_recent_comparable_provider_only_db_no_crash():
         rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
         return any(r[1] == col for r in rows)
 
-    items = _query_per_project(conn, "coding_interactive", [], has_column_fn=_has_col)
+    items = _query_per_project(conn, "coding_interactive", [], has_column_fn=_has_col, project_id="vnx-dev")
     conn.close()
 
     assert items, "must return items from provider-only DB without crash"

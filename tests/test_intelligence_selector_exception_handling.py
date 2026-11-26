@@ -157,7 +157,7 @@ class TestCentralDbQueryExceptionSilenced(unittest.TestCase):
             items = _query_central(
                 "backend-developer", [],
                 lambda: _broken_central_conn(),
-                project_id_fn=lambda: None,
+                project_id_fn=lambda: "vnx-dev",
             )
         self.assertEqual(items, [])
         self.assertTrue(any("proven-patterns" in line for line in cm.output))
@@ -168,7 +168,7 @@ class TestCentralDbQueryExceptionSilenced(unittest.TestCase):
             items = _query_central(
                 "backend-developer", [],
                 lambda: _broken_central_conn(),
-                project_id_fn=lambda: None,
+                project_id_fn=lambda: "vnx-dev",
             )
         self.assertEqual(items, [])
         self.assertTrue(any("failure-prevention" in line for line in cm.output))
@@ -179,7 +179,7 @@ class TestCentralDbQueryExceptionSilenced(unittest.TestCase):
             items = _query_central(
                 "backend-developer", [],
                 lambda: _broken_central_conn(),
-                project_id_fn=lambda: None,
+                project_id_fn=lambda: "vnx-dev",
             )
         self.assertEqual(items, [])
         self.assertTrue(any("recent-comparable" in line for line in cm.output))

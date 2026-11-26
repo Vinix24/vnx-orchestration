@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+import pytest
 import sys
 from pathlib import Path
 
@@ -260,10 +261,10 @@ class TestPatternUsageUpsertProjectSchema:
         conn = _make_db(_PROJECT_SCHEMA)
         item = _make_item(item_id="shared-pattern")
 
-        monkeypatch.setattr(_recording, "current_project_id", lambda: "project-a")
+        monkeypatch.setenv("VNX_PROJECT_ID", "project-a")
         record_pattern_usage(_make_result([item], dispatch_id="dispatch-pa"), conn, _has_column_fn(conn))
 
-        monkeypatch.setattr(_recording, "current_project_id", lambda: "project-b")
+        monkeypatch.setenv("VNX_PROJECT_ID", "project-b")
         record_pattern_usage(_make_result([item], dispatch_id="dispatch-pb"), conn, _has_column_fn(conn))
 
         pu_rows = conn.execute(
@@ -361,3 +362,8 @@ class TestPatternUsageUpsertConstraintAware:
         assert any("dispatch_pattern_offered" in m and "ON CONFLICT" in m for m in messages), (
             "expected one clear warning naming dispatch_pattern_offered, got: %r" % messages
         )
+
+
+@pytest.fixture(autouse=True)
+def _explicit_project_source(monkeypatch):
+    monkeypatch.setenv("VNX_PROJECT_ID", "vnx-dev")
