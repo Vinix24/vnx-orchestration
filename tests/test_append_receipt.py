@@ -20,6 +20,9 @@ APPEND_SCRIPT = SCRIPTS_DIR / "append_receipt.py"
 
 def _build_env(tmp_path: Path) -> dict:
     env = os.environ.copy()
+    # A worker's session must not override the fixture's provider session file.
+    for key in ("CLAUDE_SESSION_ID", "CODEX_SESSION_ID", "GEMINI_SESSION_ID", "KIMI_SESSION_ID"):
+        env.pop(key, None)
     data_dir = tmp_path / "data"
     state_dir = data_dir / "state"
     state_dir.mkdir(parents=True, exist_ok=True)

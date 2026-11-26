@@ -570,9 +570,13 @@ _poll_new_reports_cycle() {
     local _poll_max_mtime=0
     _RP_HB_CYCLE_START="$(_rp_hb_now)"
     _write_processor_heartbeat "$_cycle"
-    for report in "$UNIFIED_REPORTS"/*.md "$HEADLESS_REPORTS"/*.md; do
+    if ! _spr_collect_poll_candidates; then
+        _rp_hb_end_cycle
+        return 1
+    fi
+    for report in ${_SPR_POLL_CANDIDATES[@]+"${_SPR_POLL_CANDIDATES[@]}"}; do
         [ -f "$report" ] || continue
-        if should_process_report "$report" && process_single_report "$report"; then
+        if should_process_report "$report" "$_SPR_POLL_CUTOFF" && process_single_report "$report"; then
             _rp_hb_mark_progress
             local _mtime
             _mtime=$(stat -c %Y "$report" 2>/dev/null || stat -f %m "$report" 2>/dev/null)
@@ -583,8 +587,8 @@ _poll_new_reports_cycle() {
     done
     log_too_old_cycle_summary
     # Update watermark once after the full sweep with the maximum mtime seen.
-    if [ "$_poll_max_mtime" -gt 0 ]; then
-        echo "$_poll_max_mtime" > "$WATERMARK_FILE"
+    if [ "$_SPR_POLL_UNSCANNABLE" -eq 0 ] && [ "$_poll_max_mtime" -gt 0 ]; then
+        echo "$_poll_max_mtime" > "$WATERMARK_FILE.tmp" && mv "$WATERMARK_FILE.tmp" "$WATERMARK_FILE"
     fi
     # Generic YAML-frontmatter converter: runs every ~30 s (every 6 cycles).
     # Handles reports written with --- YAML frontmatter that report_parser.py
