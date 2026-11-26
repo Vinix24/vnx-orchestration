@@ -331,3 +331,7 @@ def test_learning_summary_missing_db(tmp_path):
 
     assert status == 200
     assert payload["boosts"] == 0
+
+@pytest.fixture(autouse=True)
+def _explicit_project_source(monkeypatch):
+    monkeypatch.setenv("VNX_PROJECT_ID", "vnx-dev")
