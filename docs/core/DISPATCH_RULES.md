@@ -80,6 +80,8 @@ The door reads protection from one pinned main SHA through the existing lookup o
 
 The `vnx-gate/door` check-run summary lists those recorded waivers on both creation and re-permit, without reading configuration again. A recorded empty list says `nothing waived`; missing or malformed legacy display data says `waived guarantees unavailable` without changing permit/publication rules. `vnx doctor` reads fresh under `current state`: each waiver names its feature, key, value, source and guarantee. Waivers and a CI-off request overruled by another canonical CI source are informational; `OptionalFeatureRefused` is a failure naming its code. This current state is not evidence of an earlier action.
 
+With `vnx doctor --project-dir B`, the config resolver reads B's resolved runtime data root (`state/runtime_coordination.db`), including its profile and review stack. The enforcement dials come from B's `.vnx/governance_enforcement.yaml`, then B's root-level file, and branch protection also comes from B. Ambient `VNX_STATE_DIR`, `VNX_HOME` and `PROJECT_ROOT` cannot substitute another project's optional-feature inputs. A missing or unreadable store or failed config autowire produces a named FAIL, even with environment overrides; it never means `nothing waived`.
+
 | # | Preflight | Refuses when | Release |
 |---|---|---|---|
 | 1 | `ci` (`_run_ci_gate`) | the PR head cannot be resolved, the head SHA is not 40 characters, the project's CI workflow has no run for that SHA, a run is running or queued, or the latest completed run is not `success` | `--override-reason "<text>"`; one reason also covers preflight 2 |

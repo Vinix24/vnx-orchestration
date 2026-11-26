@@ -131,10 +131,11 @@ def _protection_state(source: str, text: Optional[str]) -> FeatureState:
     return FeatureState(BRANCH_PROTECTION, not rows, config.enforcement, source, tuple(rows))
 
 
-def _ci_state(project_id, resolution, resolver, config_path, path: str, text: Optional[str]) -> FeatureState:
+def _ci_state(project_id, resolution, resolver, config_path, project_root,
+              path: str, text: Optional[str]) -> FeatureState:
     try:  # ci_requirement reads the same protection text this snapshot read
         required, sources = gate_profile.ci_requirement(
-            project_id, resolution=resolution, resolver=resolver, config_path=config_path,
+            project_id, resolution=resolution, resolver=resolver, config_path=config_path, project_root=project_root,
             protection_yaml=(path, fpd.YamlFetchResult(text=text, not_found=text is None, error=None)))
     except ReviewGateConfigError as exc:
         raise OptionalFeatureRefused("ci_requirement_unreadable", str(exc)) from exc
@@ -162,10 +163,11 @@ def snapshot(project_id: Optional[str], *, resolution=None, protection_yaml: Opt
     """The state per feature with its source, taken once. ``protection_yaml`` is text fetched from a
     pinned main, ``protection_source`` its ``<path>@<sha>``; else the local file, ``<path>@worktree``.
     That one text also feeds ``ci_requirement``. Raises :class:`OptionalFeatureRefused`."""
-    config_runtime.autowire()
+    if resolver is None:
+        config_runtime.autowire()
     path, source, text = _protection_text(project_root, protection_yaml, protection_source)
     return MappingProxyType({BRANCH_PROTECTION: _protection_state(source, text),
-                             CI: _ci_state(project_id, resolution, resolver, config_path, path, text),
+                             CI: _ci_state(project_id, resolution, resolver, config_path, project_root, path, text),
                              PLAN_GATE: _plan_gate_state(project_id, resolver)})
 
 

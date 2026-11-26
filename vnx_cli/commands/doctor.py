@@ -1569,17 +1569,31 @@ def _check_dream(project_dir: Path) -> list[Check]:
     return [_dream_check(name, doc) for name in _DREAM_NAMES]
 
 
-def _check_optional_features(project_dir: Path) -> list[Check]:
+def _check_optional_features(project_dir: Path, data_root: Path | None = None) -> list[Check]:
     """Fresh state, not evidence of an earlier merge or dispatch."""
     _engine.ensure_engine_on_path()
+    import config_runtime
+    import config_store_db
+    import gate_profile
     import optional_features
 
     try:
         project_id = _engine.derive_project_id(project_dir)
-        taken = optional_features.snapshot(project_id, project_root=project_dir)
+        state_dir = (data_root if data_root is not None else _engine.resolve_data_root(project_dir)) / "state"
+        if not (state_dir / "runtime_coordination.db").is_file():
+            raise optional_features.OptionalFeatureRefused("store_missing", str(state_dir))
+        if config_runtime.autowire(state_dir, project_id) is not True:
+            status = config_runtime.wire_status()
+            raise optional_features.OptionalFeatureRefused("config_store_unreadable", f"{state_dir}: {status}")
+        resolver = config_store_db.make_db_resolver(lambda _pid: state_dir, raise_on_error=True)
+        # Check readability even when an override would bypass the DB layer.
+        resolver(project_id, gate_profile.CI_GATE_KEY)
+        taken = optional_features.snapshot(project_id, project_root=project_dir, resolver=resolver)
         rows = optional_features.waived_guarantees(project_id, snapshot=taken)
     except optional_features.OptionalFeatureRefused as exc:
         return [Check("optional_features", FAIL, f"OptionalFeatureRefused: {exc}")]
+    except (OSError, sqlite3.Error) as exc:
+        return [Check("optional_features", FAIL, f"config_store_unreadable: {exc}")]
     # Explicit, readable choices are informational; only refused state changes doctor health.
     checks = [Check("optional_features", PASS,
                     f"{r['feature']}: {r['key']}={r['value']} (source: {r['source']}); waived: {r['guarantee']}")
@@ -1632,7 +1646,7 @@ def vnx_doctor(args) -> int:
     checks.extend(_check_t0_state_freshness(project_dir, data_root))
     checks.extend(_check_dream(project_dir))
     checks.append(_check_steering(data_root))
-    optional_checks = _check_optional_features(project_dir)
+    optional_checks = _check_optional_features(project_dir, data_root)
     checks.extend(optional_checks)
 
     passed = sum(1 for c in checks if c.status == PASS)

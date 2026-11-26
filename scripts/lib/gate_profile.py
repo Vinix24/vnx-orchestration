@@ -160,7 +160,8 @@ def resolve(project_id: Optional[str] = None, *, resolver=None) -> ProfileResolu
 
     Raises :class:`GateProfileConfigError` for a set value that is not a legal profile.
     """
-    config_runtime.autowire()
+    if resolver is None:
+        config_runtime.autowire()
     raw, source = config_registry.resolve_with_source(
         PROFILE_KEY, project_id, resolver, use_default_resolver=resolver is None,
     )
@@ -219,10 +220,18 @@ _LEVEL_RE = re.compile(r"^    level:\s*([^\s#]*)\s*(?:#.*)?$")
 
 
 def enforcement_config_path(project_root: Optional[str] = None) -> Optional[Path]:
-    """The first existing ``governance_enforcement.yaml``: ``$VNX_HOME/.vnx/``,
-    ``$PROJECT_ROOT/.vnx/``, ``$VNX_HOME/`` (the order ``gate.sh`` searched), else ``None``."""
+    """Explicit root: its ``.vnx/`` then root config, never the ambient project's.
+
+    Without a root: ``$VNX_HOME/.vnx/``, ``$PROJECT_ROOT/.vnx/``, ``$VNX_HOME/``
+    (the order ``gate.sh`` searched). Absent configs return ``None``; with an explicit
+    root, unreadable entries reach the dial reader for refusal instead of reading as absent.
+    """
+    if project_root is not None:
+        root = Path(project_root)
+        candidates = [root / ".vnx" / ENFORCEMENT_FILENAME, root / ENFORCEMENT_FILENAME]
+        return next((path for path in candidates if path.exists() or path.is_symlink()), None)
     home = os.environ.get("VNX_HOME", "")
-    root = project_root if project_root is not None else os.environ.get("PROJECT_ROOT", "")
+    root = os.environ.get("PROJECT_ROOT", "")
     candidates = []
     if home:
         candidates.append(Path(home) / ".vnx" / ENFORCEMENT_FILENAME)
@@ -442,12 +451,15 @@ def ci_requirement(
     but is unreadable or invalid, ``ReviewGateConfigError`` for a flag neither true nor false,
     an unreadable config store or an unreadable dial.
     """
-    config_runtime.autowire()
+    if resolver is None:
+        config_runtime.autowire()
     sources: List[str] = []
     flag = _flag_source(project_id, resolver)
     if flag is not None:
         sources.append(flag)
-    dials = read_enforcement_dials(config_path if config_path is not None else enforcement_config_path())
+    dials_path = config_path if config_path is not None else (
+        enforcement_config_path(str(project_root)) if project_root is not None else enforcement_config_path())
+    dials = read_enforcement_dials(dials_path)
     if dials.get(CI_DIAL, 0) >= 2:
         sources.append("dial:" + CI_DIAL)
     path, contexts = _protection_ci_contexts(project_root, protection_yaml)
