@@ -2,6 +2,7 @@
 import importlib.util
 import json
 import os
+import shutil
 from pathlib import Path
 import sqlite3
 import subprocess
@@ -85,24 +86,31 @@ def test_router_passes_arguments_without_env_mutation(monkeypatch):
     assert dict(os.environ) == before
 
 
-@pytest.mark.parametrize('script,output,variable,expected,fallback', [
-    ('conversation_analyzer_nightly.sh', 'deepseek-harness\nops@example.com', 'ANALYZER_LLM', 'deepseek-harness', 'ollama-only'),
-    ('nightly_intelligence_pipeline.sh', 'ops@example.com', 'DIGEST_EMAIL', 'ops@example.com', ''),
-    ('launchd/reload_receipt_classifier.sh', '1', 'CLASSIFIER_ENABLED', '1', '0')])
+@pytest.mark.parametrize('script,output,variable,expected', [
+    ('conversation_analyzer_nightly.sh', 'deepseek-harness\nops@example.com', 'ANALYZER_LLM', 'deepseek-harness'),
+    ('nightly_intelligence_pipeline.sh', 'ops@example.com', 'DIGEST_EMAIL', 'ops@example.com'),
+    ('launchd/reload_receipt_classifier.sh', '1', 'CLASSIFIER_ENABLED', '1')])
 @pytest.mark.parametrize('status', [0, 3, None])
-def test_shell_config_snapshot(tmp_path, script, output, variable, expected, fallback, status):
+def test_shell_config_snapshot(tmp_path, script, output, variable, expected, status):
     text = (ROOT / 'scripts' / script).read_text()
     assert 'vnx_resolve_project_root "${BASH_SOURCE[0]:-$0}"' in text
     block = text[text.index('# Config snapshot'):text.index('# End config snapshot.')]
+    if script == 'conversation_analyzer_nightly.sh':
+        block = text[text.index('LOG_FILE='):text.index('# The deepseek-harness')] + block
     binary = tmp_path / 'bin/vnx'
     binary.parent.mkdir()
     if status is not None:
         binary.write_text(f'#!/bin/bash\n[ "$1 $2 $3" = "config get --raw" ] || exit 9\nprintf "%s\\n" "{output}"\nexit {status}\n')
         binary.chmod(0o755)
-    result = subprocess.run(['bash', '-eu', '-c', block + f'\nprintf "%s" "${variable}"'],
-                            env={**os.environ, 'VNX_ROOT': str(tmp_path)}, text=True, capture_output=True)
-    assert result.returncode == 0, result.stderr
-    assert result.stdout == (expected if status == 0 else fallback)
+    pipeline = script == 'nightly_intelligence_pipeline.sh'
+    probe = '\nprintf "STATUS:%s" "$DIGEST_SNAPSHOT_STATUS"' if pipeline else ''
+    result = subprocess.run(['bash', '-eu', '-c', block + f'\nprintf "%s" "${variable}"' + probe],
+                            env={**os.environ, 'VNX_ROOT': str(tmp_path), 'VNX_STATE_DIR': str(tmp_path),
+                                 'VNX_DATA_DIR': str(tmp_path), 'SCRIPT_DIR': str(ROOT / 'scripts'),
+                                 'VNX_PYTHON': sys.executable}, text=True, capture_output=True)
+    assert result.returncode == (0 if status == 0 or pipeline else 1), result.stderr
+    value = expected if status == 0 or (pipeline and status is not None) else ""
+    assert result.stdout == value + (f'STATUS:{int(status != 0)}' if pipeline else '')
     assert ('WARNING:' in result.stderr) == (status != 0)
 
 
@@ -146,3 +154,106 @@ def test_digest_uses_stored_settings_and_fixed_transport(store, monkeypatch, cap
     output = capsys.readouterr().out
     assert 'To: stored@example.com' in output and 'From: stored@example.com' in output
     assert 'Host: smtp.stored.example.com:587' in output
+
+
+@pytest.mark.parametrize('layout', ['.claude/vnx-system', '.vnx', '.'])
+@pytest.mark.parametrize('script,expected', [
+    ('conversation_analyzer_nightly.sh', 'deepseek-harness|ops@example.com|'),
+    ('nightly_intelligence_pipeline.sh', '|ops@example.com|'),
+    ('launchd/reload_receipt_classifier.sh', '||1')])
+@pytest.mark.parametrize('cli_status', [0, 3, None])
+def test_engine_config_snapshot(tmp_path, layout, script, expected, cli_status):
+    """Run whole scripts; successful nightlies stop at a post-snapshot breakpoint.
+
+    Failed analyzer snapshots write real beacons; reload completes with launchctl isolated.
+    """
+    consumer = tmp_path / 'consumer'
+    consumer.mkdir()
+    subprocess.run(['git', 'init', '-q', str(consumer)], check=True)
+    engine = consumer / layout
+    scripts = engine / 'scripts'
+    (scripts / 'lib').mkdir(parents=True)
+    for name in ('vnx_paths.sh', 'vnx_resolve_root.sh', 'vnx_run_bounded.sh', 'vnx_exec_new_group.py'):
+        shutil.copy2(ROOT / 'scripts/lib' / name, scripts / 'lib' / name)
+    (scripts / 'conversation_analyzer.py').symlink_to(ROOT / 'scripts/conversation_analyzer.py')
+    (engine / '.venv/bin').mkdir(parents=True)
+    (engine / '.venv/bin/python').symlink_to(sys.executable)
+    target = scripts / script
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(ROOT / 'scripts' / script, target)
+    text = target.read_text()
+    stop_line = text[:text.index('# End config snapshot.')].count('\n') + 1
+    home = tmp_path / 'home'
+    (home / 'Library/LaunchAgents').mkdir(parents=True)
+    state = tmp_path / 'data/state'
+    state.mkdir(parents=True)
+    binary = engine / 'bin/vnx'
+    binary.parent.mkdir()
+    if cli_status is not None:
+        binary.write_text(f'''#!/bin/bash
+[ "$1 $2 $3" = "config get --raw" ] || exit 9
+[ "$VNX_PROJECT_ROOT" = "{consumer}" ] || exit 10
+[ "$VNX_PROJECT_ID" = "consumer-test" ] || exit 11
+shift 3
+for key in "$@"; do
+    case "$key" in
+        VNX_ANALYZER_LLM) echo deepseek-harness ;;
+        VNX_DIGEST_EMAIL) echo ops@example.com ;;
+        VNX_RECEIPT_CLASSIFIER_ENABLED) echo 1 ;;
+        *) exit 12 ;;
+    esac
+done
+exit {cli_status}
+''')
+        binary.chmod(0o755)
+    if layout != '.':
+        assert not (consumer / 'bin/vnx').exists()
+    # On old code the classifier reaches launchctl before its snapshot.
+    launchctl = binary.parent / 'launchctl'
+    launchctl.write_text('#!/bin/sh\necho com.vnx.receipt-classifier-batch\n')
+    launchctl.chmod(0o755)
+    reload = script.startswith('launchd/')
+    explicit_home = tmp_path / 'current'
+    if reload:
+        installed = tmp_path / 'installed/scripts/lib'
+        installed.mkdir(parents=True)
+        shutil.copy2(ROOT / 'scripts/lib/receipt_classifier_batch.py', installed)
+        explicit_home.symlink_to(installed.parents[1], target_is_directory=True)
+        shutil.copy2(ROOT / 'scripts/launchd/com.vnx.receipt-classifier-batch.plist', target.parent)
+    debugger = tmp_path / 'breakpoint.sh'
+    debugger.write_text('''trap 'if [[ ${BASH_SOURCE[0]} == "$SNAPSHOT_SCRIPT" && $LINENO -gt $SNAPSHOT_END ]]; then
+    printf "SNAPSHOT:%s|%s|%s\\n" "${ANALYZER_LLM-}" "${DIGEST_EMAIL-}" "${CLASSIFIER_ENABLED-}"
+    exit 0
+fi' DEBUG
+''')
+    env = {'PATH': f"{binary.parent}:{os.environ['PATH']}", 'HOME': str(home),
+           'VNX_HOME': str(explicit_home if reload else engine), 'VNX_PROJECT_ID': 'consumer-test',
+           'VNX_DATA_DIR': str(state.parent), 'VNX_STATE_DIR': str(state),
+           'VNX_DATA_DIR_EXPLICIT': '1',
+           'BASH_ENV': str(debugger), 'SNAPSHOT_SCRIPT': str(target),
+           'SNAPSHOT_END': str(stop_line)}
+    if reload:
+        env.pop('BASH_ENV')
+    result = subprocess.run(['bash', str(target)], cwd=consumer, env=env,
+                            text=True, capture_output=True, timeout=30)
+    if cli_status == 0:
+        assert result.returncode == 0, result.stderr
+        if reload:
+            plist = (home / 'Library/LaunchAgents/com.vnx.receipt-classifier-batch.plist').read_text()
+            assert f'{explicit_home}/scripts/lib/receipt_classifier_batch.py' in plist
+            assert str(engine) not in plist
+        else:
+            assert f'SNAPSHOT:{expected}' in result.stdout
+        assert 'WARNING:' not in result.stderr
+    else:
+        pipeline = script == 'nightly_intelligence_pipeline.sh'
+        assert result.returncode == (0 if pipeline else 1), result.stdout + result.stderr
+        assert 'WARNING:' in result.stderr and 'snapshot unavailable' in result.stderr
+        assert ('SNAPSHOT:' in result.stdout) == pipeline
+        assert 'using ollama-only' not in result.stderr
+        if script == 'conversation_analyzer_nightly.sh':
+            beacon = json.loads((state.parent / 'health/conversation_analyzer.json').read_text())
+            assert beacon['status'] == 'fail'
+            assert beacon['details']['error'] == 'config_snapshot_unavailable'
+            log = (state / 'conversation_analyzer.log').read_text()
+            assert 'WARNING: VNX_ANALYZER_LLM/VNX_DIGEST_EMAIL snapshot unavailable' in log

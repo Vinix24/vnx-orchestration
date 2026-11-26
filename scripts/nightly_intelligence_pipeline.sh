@@ -57,6 +57,18 @@ done
 # VNX_STATE_DIR must equal VNX_DATA_DIR/state so all writers and readers use the same db.
 export VNX_STATE_DIR="$VNX_DATA_DIR/state"
 
+# Read configuration before starting phases or acquiring the run lock.
+source "$SCRIPT_DIR/lib/vnx_resolve_root.sh"
+[ -n "${VNX_PROJECT_ROOT:-}" ] || vnx_resolve_project_root "${BASH_SOURCE[0]:-$0}"
+VNX_ROOT="$VNX_HOME_DEFAULT"  # Engine CLI; preserve the consumer project context.
+# Config snapshot.
+DIGEST_SNAPSHOT_STATUS=0
+if ! DIGEST_EMAIL="$("$VNX_ROOT/bin/vnx" config get --raw VNX_DIGEST_EMAIL)"; then
+    echo "WARNING: VNX_DIGEST_EMAIL snapshot unavailable; skipping digest email; independent phases will still run" >&2
+    DIGEST_SNAPSHOT_STATUS=1
+fi
+# End config snapshot.
+
 LOG_FILE="$VNX_DATA_DIR/state/nightly_pipeline.log"
 LOCK_FILE="$VNX_DATA_DIR/state/nightly_pipeline.lock"
 PHASES_LOG="$VNX_DATA_DIR/state/nightly_pipeline_phases.ndjson"
@@ -260,25 +272,22 @@ run_phase "10-recommendations" python3 "$SCRIPT_DIR/generate_t0_recommendations.
 # The sender resolves its own credential (VNX_SMTP_PASS, else the macOS
 # keychain item "vnx-smtp-pass") and fails loudly if both are empty — that
 # failure must reach run_phase as a failed phase, not be pre-empted here.
-source "$SCRIPT_DIR/lib/vnx_resolve_root.sh"
-vnx_resolve_project_root "${BASH_SOURCE[0]:-$0}"
-VNX_ROOT="$VNX_PROJECT_ROOT"
-# Config snapshot.
-if ! DIGEST_EMAIL="$("$VNX_ROOT/bin/vnx" config get --raw VNX_DIGEST_EMAIL)"; then
-    echo "WARNING: VNX_DIGEST_EMAIL unavailable; using empty recipient" >&2
-    DIGEST_EMAIL=""
-fi
-# End config snapshot.
-if [ -n "$DIGEST_EMAIL" ]; then
+if [ "$DIGEST_SNAPSHOT_STATUS" -ne 0 ]; then
+    log_msg "Phase 11 (email): skipped — VNX_DIGEST_EMAIL snapshot unavailable"
+    log_phase_result "11-email-digest" "skipped" "config_snapshot_unavailable"
+elif [ -n "$DIGEST_EMAIL" ]; then
     run_phase "11-email-digest" python3 "$SCRIPT_DIR/send_digest_email.py"
 else
     log_msg "Phase 11 (email): skipped — VNX_DIGEST_EMAIL not set"
+    log_phase_result "11-email-digest" "skipped" "no_recipient_configured"
 fi
 
 # ── Write pipeline health summary ─────────────────────────────────────────────
 FAILED_CSV="$(IFS=','; printf '%s' "${PHASES_FAILED[*]:-}")"
 OVERALL_STATUS="ok"
-[ -n "$FAILED_CSV" ] && OVERALL_STATUS="partial"
+if [ -n "$FAILED_CSV" ] || [ "$DIGEST_SNAPSHOT_STATUS" -ne 0 ]; then
+    OVERALL_STATUS="partial"
+fi
 
 python3 - <<PY 2>/dev/null || true
 import json
@@ -296,4 +305,4 @@ with open("$HEALTH_FILE", "w") as fh:
 PY
 
 log_msg "=== Pipeline complete: ${PHASES_OK}/${PHASES_RUN} phases OK, failed=[${PHASES_FAILED[*]:-none}] ==="
-exit 0
+exit "$DIGEST_SNAPSHOT_STATUS"

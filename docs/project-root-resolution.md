@@ -113,6 +113,29 @@ source "$(dirname "${BASH_SOURCE[0]}")/vnx_resolve_root.sh"
 | `VNX_STATE_DIR` | `$VNX_DATA_DIR/state` |
 | `VNX_DISPATCH_DIR` | `$VNX_DATA_DIR/dispatches` |
 
+## Engine CLI versus consumer context
+
+The nightly conversation analyzer, nightly intelligence pipeline and classifier
+reload use `VNX_HOME_DEFAULT/bin/vnx`, derived by `scripts/lib/vnx_paths.sh`
+from the engine's own location. `VNX_PROJECT_ROOT` and the project id still
+identify the consumer. This also works when the engine is installed at
+`consumer/.claude/vnx-system` or `consumer/.vnx`; the consumer needs no `bin/vnx`.
+The pipeline preserves an inherited `VNX_PROJECT_ROOT` throughout its phases.
+Classifier reload preserves explicit `VNX_HOME` (including a `current` symlink)
+for its target script and generated plist.
+
+If a configuration snapshot fails, each runner emits a `WARNING` naming the key.
+The intelligence pipeline still runs phases 0–10, records `11-email-digest` as
+`skipped` with detail `config_snapshot_unavailable` in
+`state/nightly_pipeline_phases.ndjson`, marks its health `partial`, then exits 1
+after completion. A successfully read empty recipient instead records
+`no_recipient_configured` and does not cause a nonzero exit.
+The analyzer logs the warning and writes a `fail` beacon with reason
+`config_snapshot_unavailable`, then exits 1 before its phases, skipping conversation analysis
+(including DeepSeek) and digest email; it does not substitute `ollama-only`.
+The classifier runner exits 1 before reloading the agent; a successfully read
+classifier value of `0` still means disabled.
+
 ## Escape Hatch: `VNX_DATA_DIR_EXPLICIT=1`
 
 For CI pipelines or tests that must use a custom data directory, set both:

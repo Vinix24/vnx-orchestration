@@ -209,11 +209,12 @@ lock_age() {
 # Missing key = loud line here; the analyzer then records the failure in the digest.
 source "$SCRIPT_DIR/lib/vnx_resolve_root.sh"
 vnx_resolve_project_root "${BASH_SOURCE[0]:-$0}"
-VNX_ROOT="$VNX_PROJECT_ROOT"
+VNX_ROOT="$VNX_HOME_DEFAULT"  # Engine CLI; VNX_PROJECT_ROOT remains the consumer.
 # Config snapshot (one CLI call for both settings).
 if ! ANALYZER_CONFIG="$("$VNX_ROOT/bin/vnx" config get --raw VNX_ANALYZER_LLM VNX_DIGEST_EMAIL)"; then
-    echo "WARNING: VNX_ANALYZER_LLM/VNX_DIGEST_EMAIL unavailable; using ollama-only/empty" >&2
-    ANALYZER_CONFIG=$'ollama-only\n'
+    log_msg "WARNING: VNX_ANALYZER_LLM/VNX_DIGEST_EMAIL snapshot unavailable; skipping conversation analysis (including DeepSeek) and digest email" >&2
+    record_failure "config_snapshot_unavailable"
+    exit 1
 fi
 ANALYZER_LLM="${ANALYZER_CONFIG%%$'\n'*}"
 DIGEST_EMAIL="$(printf '%s\n' "$ANALYZER_CONFIG" | sed -n '2p')"

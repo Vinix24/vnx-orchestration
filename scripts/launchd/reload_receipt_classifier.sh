@@ -16,10 +16,18 @@ PLIST_DEST="$HOME/Library/LaunchAgents/${PLIST_LABEL}.plist"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PLIST_SRC="$SCRIPT_DIR/${PLIST_LABEL}.plist"
 
-if [ -z "${VNX_HOME:-}" ]; then
-    VNX_HOME="$(cd "$SCRIPT_DIR/../.." && pwd)"
-    echo "VNX_HOME not set — using derived path: $VNX_HOME"
+CALLER_VNX_HOME="${VNX_HOME:-}"
+source "$SCRIPT_DIR/../lib/vnx_paths.sh"
+export VNX_HOME="${CALLER_VNX_HOME:-$VNX_HOME}"
+source "$SCRIPT_DIR/../lib/vnx_resolve_root.sh"
+vnx_resolve_project_root "${BASH_SOURCE[0]:-$0}"
+VNX_ROOT="$VNX_HOME_DEFAULT"  # Engine CLI; preserve the consumer project context.
+# Config snapshot.
+if ! CLASSIFIER_ENABLED="$("$VNX_ROOT/bin/vnx" config get --raw VNX_RECEIPT_CLASSIFIER_ENABLED)"; then
+    echo "WARNING: VNX_RECEIPT_CLASSIFIER_ENABLED snapshot unavailable; skipping classifier reload" >&2
+    exit 1
 fi
+# End config snapshot.
 
 if [ ! -f "$PLIST_SRC" ]; then
     echo "ERROR: plist template not found: $PLIST_SRC" >&2
@@ -55,14 +63,5 @@ fi
 
 echo "Logs: /tmp/vnx-receipt-classifier-batch.log / /tmp/vnx-receipt-classifier-batch.err"
 echo
-source "$SCRIPT_DIR/../lib/vnx_resolve_root.sh"
-vnx_resolve_project_root "${BASH_SOURCE[0]:-$0}"
-VNX_ROOT="$VNX_PROJECT_ROOT"
-# Config snapshot.
-if ! CLASSIFIER_ENABLED="$("$VNX_ROOT/bin/vnx" config get --raw VNX_RECEIPT_CLASSIFIER_ENABLED)"; then
-    echo "WARNING: VNX_RECEIPT_CLASSIFIER_ENABLED unavailable; using 0" >&2
-    CLASSIFIER_ENABLED=0
-fi
-# End config snapshot.
 echo "VNX_RECEIPT_CLASSIFIER_ENABLED=$CLASSIFIER_ENABLED (effective configuration)"
 echo "Enable with: $VNX_ROOT/bin/vnx config set VNX_RECEIPT_CLASSIFIER_ENABLED 1"
