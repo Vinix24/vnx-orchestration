@@ -9,7 +9,7 @@ the canary rollout yields the delta.
 
 Usage:
   python3 scripts/lib/router_baseline.py
-  python3 scripts/lib/router_baseline.py --receipts ~/.vnx-data/vnx-dev/state/t0_receipts.ndjson
+  python3 scripts/lib/router_baseline.py --receipts /path/to/t0_receipts.ndjson
   python3 scripts/lib/router_baseline.py --since 2026-08-03 --json
 
 Window: --since 2026-08-03 (default). Before that the model field is dirty
@@ -30,7 +30,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-DEFAULT_RECEIPTS = "~/.vnx-data/vnx-dev/state/t0_receipts.ndjson"
+from operator_paths import operator_data_dir
 DEFAULT_SINCE = "2026-08-03"
 
 # Outcome buckets (status -> bucket). The ledger is known to carry exactly
@@ -217,9 +217,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     )
     parser.add_argument(
         "--receipts",
-        default=DEFAULT_RECEIPTS,
-        help=f"path to the receipts NDJSON (default: {DEFAULT_RECEIPTS})",
+        help="receipts NDJSON (default: ~/.vnx-data/<project-id>/state/t0_receipts.ndjson)",
     )
+    parser.add_argument("--project-id")
     parser.add_argument(
         "--since",
         default=DEFAULT_SINCE,
@@ -232,7 +232,11 @@ def main(argv: Optional[list[str]] = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    path = Path(args.receipts).expanduser()
+    try:
+        path = (Path(args.receipts).expanduser() if args.receipts else
+                operator_data_dir(args.project_id) / "state/t0_receipts.ndjson")
+    except (RuntimeError, ValueError) as exc:
+        parser.error(str(exc))
     if not path.is_file():
         print(f"router_baseline: receipts file not found: {path}", file=sys.stderr)
         return 2

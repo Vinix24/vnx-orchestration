@@ -148,7 +148,8 @@ def _load_dnf_cells_from_csv(
     if the worker is fast and the task is bounded. The discriminator is report-presence.
     """
     import csv as _csv
-    from lane_adapter import REPORT_DIR_CANDIDATES  # local import to avoid cycle
+    from lane_adapter import report_dirs  # local import to avoid cycle
+    REPORT_DIR_CANDIDATES = report_dirs()
     deadlines = deadlines or {}
     dnf: set[tuple[str, str, int]] = set()
     with csv_path.open(encoding="utf-8") as fh:
