@@ -8,6 +8,16 @@ LIB = REPO / "scripts" / "lib" / "receipt_processor"
 SUPERVISOR = REPO / "scripts" / "receipt_processor_supervisor.sh"
 
 
+def test_prefilter_summary_counts_exclusions_on_every_cycle(tmp_path):
+    from test_receipt_processor_poll_prefilter import reports, run_cycle
+
+    reports(tmp_path, old=2, fresh=0)
+    result = run_cycle(tmp_path, "_poll_new_reports_cycle 1 100\n_poll_new_reports_cycle 2 100")
+    assert result.returncode == 0, result.stderr
+    assert result.stderr.count("Skipped 2 too-old report(s) this cycle") == 2
+    assert "Report too old:" not in result.stderr
+
+
 def _run_cycles(tmp_path, cycles, report_names, processed_names):
     reports = tmp_path / "reports"
     reports.mkdir()

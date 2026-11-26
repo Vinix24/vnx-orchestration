@@ -6,7 +6,7 @@
 #           $FLOOD_LOCK_MAX_AGE, $FLOOD_THRESHOLD, get_pane_id_smart() from pane_manager
 
 # OI-1085: log-volume damping for the historical-report rescan. Every poll
-# cycle re-scans the whole reports directory, and before this damping each
+# cycle formerly re-scanned the whole reports directory; before this damping each
 # too-old report emitted one DEBUG line PER CYCLE — measured at 93% of the
 # 4.3 GB receipt_processing.log that filled the disk on 2026-08-07. The
 # information is preserved, the repetition is not: the first skip per report
@@ -20,13 +20,77 @@ _SPR_TOO_OLD_CYCLE_COUNT=0
 # OI-2903: same damping for "Already processed" — logged once per report name
 # per process instead of once per report per poll cycle.
 _SPR_ALREADY_LOGGED=" "
+_SPR_SCAN_ERRORS_LOGGED=" "
 
-# Emit the per-cycle aggregate of suppressed too-old skips (one line per
-# scan cycle instead of one line per historical report per cycle).
+# Aggregate prefilter exclusions plus damped skips from other callers.
 log_too_old_cycle_summary() {
     [ "${_SPR_TOO_OLD_CYCLE_COUNT:-0}" -gt 0 ] || return 0
-    log "DEBUG" "Skipped ${_SPR_TOO_OLD_CYCLE_COUNT} too-old report(s) this cycle (per-report lines suppressed after first occurrence)"
+    log "DEBUG" "Skipped ${_SPR_TOO_OLD_CYCLE_COUNT} too-old report(s) this cycle (prefilter exclusions and suppressed per-report repeats)"
     _SPR_TOO_OLD_CYCLE_COUNT=0
+}
+
+# OI-3100: one cutoff and one scan with the processor's resolved interpreter.
+_spr_collect_poll_candidates() {
+    local record key skipped=""
+    _SPR_POLL_CANDIDATES=()
+    _SPR_POLL_SCAN_ERRORS=0 _SPR_POLL_UNSCANNABLE=0
+    if ! _SPR_POLL_CUTOFF=$(_spr_get_cutoff_seconds); then
+        log "ERROR" "Report prefilter failed: cannot compute cutoff"
+        return 1
+    fi
+    # NUL records preserve arbitrary filenames. The final count is a completion
+    # marker: process-substitution failures must never look like an empty scan.
+    while IFS= read -r -d '' record; do
+        case "$record" in
+            F*) _SPR_POLL_CANDIDATES+=("${record#F}") ;;
+            C*) skipped="${record#C}" ;;
+            D*|E*)
+                _SPR_POLL_SCAN_ERRORS=$(( _SPR_POLL_SCAN_ERRORS + 1 ))
+                [[ "$record" = D* ]] && _SPR_POLL_UNSCANNABLE=1
+                key="${record%% *}"
+                case "$_SPR_SCAN_ERRORS_LOGGED" in
+                    *" $key "*) ;;
+                    *) _SPR_SCAN_ERRORS_LOGGED+="$key "; log "ERROR" "Report scan skipped ${record#* } (further repeats counted)" ;;
+                esac ;;
+        esac
+    done < <("$RP_PYTHON" - "$_SPR_POLL_CUTOFF" "$UNIFIED_REPORTS" "$HEADLESS_REPORTS" <<'PY'
+import os, stat, sys
+
+cutoff = int(sys.argv[1])
+skipped = 0
+for directory in sys.argv[2:]:
+    try:
+        try:
+            entries = os.scandir(directory)
+        except FileNotFoundError:
+            continue  # An absent directory contributes no files, like the old glob.
+        with entries:
+            entries = sorted(entries, key=lambda e: e.name)
+    except OSError as exc:
+        print(f"D{type(exc).__name__}:{os.fsencode(directory).hex()} {directory!r}: {type(exc).__name__}", end="\0", flush=True)
+        continue
+    for entry in entries:
+        if entry.name.startswith(".") or not entry.name.endswith(".md"):
+            continue
+        try:
+            info = entry.stat()
+        except OSError as exc:
+            print(f"E{type(exc).__name__}:{os.fsencode(entry.path).hex()} {entry.path!r}: {type(exc).__name__}", end="\0", flush=True)
+            continue
+        if not stat.S_ISREG(info.st_mode):
+            continue
+        if info.st_mtime_ns < cutoff * 1_000_000_000:
+            skipped += 1
+        else:
+            sys.stdout.buffer.write(b"F" + os.fsencode(entry.path) + b"\0")
+sys.stdout.buffer.write(b"C" + str(skipped).encode("ascii") + b"\0")
+PY
+    )
+    if ! [[ "$skipped" =~ ^[0-9]+$ ]]; then
+        log "ERROR" "Report prefilter failed: incomplete directory scan; cycle aborted"
+        return 1
+    fi
+    _SPR_TOO_OLD_CYCLE_COUNT=$(( _SPR_TOO_OLD_CYCLE_COUNT + skipped ))
 }
 
 # Check if report should be processed
@@ -45,8 +109,8 @@ should_process_report() {
         return 1
     fi
 
-    local cutoff_seconds
-    cutoff_seconds=$(_spr_get_cutoff_seconds)
+    local cutoff_seconds="${2:-}"
+    [ -n "$cutoff_seconds" ] || cutoff_seconds=$(_spr_get_cutoff_seconds)
 
     if [ "$file_mtime" -lt "$cutoff_seconds" ]; then
         local age_minutes=$(( ($(date +%s) - file_mtime) / 60 ))
