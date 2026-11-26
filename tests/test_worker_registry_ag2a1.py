@@ -1,5 +1,6 @@
 """AG-2a1: project discovery, packaged defaults, and unchanged local workers."""
 
+from fnmatch import fnmatchcase
 import os
 from pathlib import Path
 import shutil
@@ -92,15 +93,123 @@ def test_ag2a1_default_from_package_without_repo_root(tmp_path, module):
     assert result.returncode == 0, result.stderr
 
 
+def _matches_package_pattern(relative, pattern, *, exclude=False):
+    # Setuptools includes glob by component (* stays within /, ** recurses); excludes use full-path fnmatch.
+    if exclude:
+        return fnmatchcase(relative.as_posix(), pattern)
+
+    def match(parts, patterns):
+        if not patterns:
+            return not parts
+        head, *tail = patterns
+        if head == "**":
+            return match(parts, tail) or bool(
+                parts and not parts[0].startswith(".") and match(parts[1:], patterns)
+            )
+        return bool(
+            parts
+            and (not parts[0].startswith(".") or head.startswith("."))
+            and fnmatchcase(parts[0], head)
+            and match(parts[1:], tail)
+        )
+
+    return match(relative.parts, pattern.split("/"))
+
+
 def test_ag2a1_default_is_package_data():
     config = tomllib.loads((ROOT / "pyproject.toml").read_text())["tool"]["setuptools"]
     package_root = ROOT / config["package-dir"]["vnx_orchestration"]
     includes = config["package-data"]["vnx_orchestration"]
     excludes = config["exclude-package-data"]["vnx_orchestration"]
+    relative = DEFAULT.relative_to(package_root)
     assert DEFAULT.is_file()
-    assert any(DEFAULT in package_root.glob(pattern) for pattern in includes)
-    assert not any(DEFAULT in package_root.glob(pattern) for pattern in excludes)
+    assert any(_matches_package_pattern(relative, pattern) for pattern in includes)
+    assert not any(_matches_package_pattern(relative, pattern, exclude=True) for pattern in excludes)
     assert not (ROOT / ".vnx" / DEFAULT.name).exists()
+
+
+@pytest.mark.parametrize(("relative", "included", "excluded"), [
+    ("scripts/lib/defaults/vnx_workers.default.yaml", True, False),
+    ("scripts/maintenance/export_toolkit_plugin.sh", True, True),
+    ("scripts/lib/schema_prep.py", True, True),
+    ("README.md", False, False),
+])
+def test_ag2a1_package_data_pattern_membership(relative, included, excluded):
+    config = tomllib.loads((ROOT / "pyproject.toml").read_text())["tool"]["setuptools"]
+    path = Path(relative)
+    includes = config["package-data"]["vnx_orchestration"]
+    excludes = config["exclude-package-data"]["vnx_orchestration"]
+    assert any(_matches_package_pattern(path, p) for p in includes) is included
+    assert any(_matches_package_pattern(path, p, exclude=True) for p in excludes) is excluded
+
+
+@pytest.mark.parametrize(("pattern", "relative", "expected"), [
+    ("scripts/**/*", "scripts/vnx_guard.py", True),
+    ("scripts/**/*", "scripts/lib/defaults/vnx_workers.default.yaml", True),
+    ("scripts/**/*", "other/scripts/vnx_guard.py", False),
+    ("scripts/**/*", "scripts/.hidden/config.yaml", False),
+    ("scripts/**/*", "scripts/lib/.hidden.yaml", False),
+    ("**/*.pyc", "worker_registry.pyc", True),
+    ("**/*.pyc", "scripts/lib/__pycache__/worker_registry.cpython-311.pyc", True),
+    ("**/*.pyc", "scripts/lib/worker_registry.py", False),
+    ("**/__pycache__/**", "__pycache__/worker_registry.pyc", True),
+    ("**/__pycache__/**", "scripts/lib/__pycache__/worker_registry.pyc", True),
+    ("**/__pycache__/**", "scripts/lib/worker_registry.py", False),
+    ("scripts/*_prep*", "scripts/schema_prep.py", True),
+    ("scripts/*_prep*", "scripts/lib/schema_prep.py", False),
+    (".vnx-data/**", ".vnx-data/worktrees/dispatch/scripts/lib/worker_registry.py", True),
+    ("scripts/maintenance/export_toolkit_plugin.sh", "scripts/maintenance/export_toolkit_plugin.sh.bak", False),
+])
+def test_ag2a1_package_glob_semantics(pattern, relative, expected):
+    config = tomllib.loads((ROOT / "pyproject.toml").read_text())["tool"]["setuptools"]
+    patterns = config["package-data"]["vnx_orchestration"] + config["exclude-package-data"]["vnx_orchestration"]
+    assert pattern in patterns, "Exercise the real packaging patterns"
+    assert _matches_package_pattern(Path(relative), pattern) is expected
+
+
+@pytest.mark.parametrize(("relative", "excluded"), [
+    ("scripts/schema_prep.py", True),
+    ("scripts/lib/schema_prep.py", True),
+    ("scripts/lib/defaults/vnx_workers.default.yaml", False),
+    ("other/scripts/schema_prep.py", False),
+])
+def test_ag2a1_exclusion_matches_setuptools(relative, excluded):
+    from setuptools import Distribution
+    from setuptools.command.build_py import build_py
+
+    config = tomllib.loads((ROOT / "pyproject.toml").read_text())["tool"]["setuptools"]
+    pattern = "scripts/*_prep*"
+    assert pattern in config["exclude-package-data"]["vnx_orchestration"]
+    command = build_py(Distribution())
+    command.exclude_package_data = {"vnx_orchestration": [pattern]}
+    files = [str(ROOT / relative)]
+    assert command.exclude_data_files("vnx_orchestration", str(ROOT), files) == ([] if excluded else files)
+    assert _matches_package_pattern(Path(relative), pattern, exclude=True) is excluded
+
+
+def test_ag2a1_package_data_ignores_vanished_worktree(monkeypatch):
+    original_glob = Path.glob
+    vanished = ROOT / ".vnx-data/worktrees/dispatch-test-dispatch-deepseek/scripts/lib"
+
+    def glob(path, pattern):
+        if pattern.startswith("**/"):
+            raise FileNotFoundError(2, "No such file or directory", str(vanished))
+        return original_glob(path, pattern)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "glob", glob)
+        test_ag2a1_default_is_package_data()
+
+
+def test_ag2a1_package_data_never_walks(monkeypatch):
+    def forbid_walk(*args, **kwargs):
+        pytest.fail("Package-data membership must not enumerate directories")
+
+    with monkeypatch.context() as patch:
+        for method in ("glob", "rglob", "iterdir"):
+            patch.setattr(Path, method, forbid_walk)
+        patch.setattr(os, "scandir", forbid_walk)
+        test_ag2a1_default_is_package_data()
 
 
 def test_ag2a1_repo_registry_matches_before_snapshot():
