@@ -50,6 +50,20 @@
       "symbol": "ClaudeSubprocessAdapter"
     },
     {
+      "file": "tests/test_codex_adapter_deadline.py",
+      "line": 8,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "EnvelopeSpec"
+    },
+    {
+      "file": "tests/test_codex_adapter_deadline.py",
+      "line": 8,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "LaneRouter"
+    },
+    {
       "file": "tests/test_codex_model_registry.py",
       "line": 812,
       "mechanism": "direct-call",
@@ -1612,14 +1626,14 @@
     },
     {
       "file": "tests/test_harness_run_cost.py",
-      "line": 736,
+      "line": 732,
       "mechanism": "direct-call",
       "module_target": "envelope_adapters_provider",
       "symbol": "_map_harness_spawn_result"
     },
     {
       "file": "tests/test_harness_run_cost.py",
-      "line": 750,
+      "line": 746,
       "mechanism": "direct-call",
       "module_target": "envelope_adapters_claude",
       "symbol": "ClaudeSubprocessAdapter"
@@ -2494,28 +2508,28 @@
     },
     {
       "file": "tests/test_plan_gate_panel.py",
-      "line": 1312,
+      "line": 1333,
       "mechanism": "patch.object-attr",
       "module_target": "envelope_adapters_claude",
       "symbol": "ClaudeSubprocessAdapter.run"
     },
     {
       "file": "tests/test_plan_gate_panel.py",
-      "line": 1313,
+      "line": 1334,
       "mechanism": "direct-call",
       "module_target": "envelope_adapters_claude",
       "symbol": "ClaudeSubprocessAdapter"
     },
     {
       "file": "tests/test_plan_gate_panel.py",
-      "line": 1657,
+      "line": 1678,
       "mechanism": "patch.object-attr",
       "module_target": "envelope_adapters_claude",
       "symbol": "ClaudeSubprocessAdapter.run"
     },
     {
       "file": "tests/test_plan_gate_panel.py",
-      "line": 1658,
+      "line": 1679,
       "mechanism": "direct-call",
       "module_target": "envelope_adapters_claude",
       "symbol": "ClaudeSubprocessAdapter"
@@ -2648,7 +2662,7 @@
     },
     {
       "file": "tests/test_provider_switch_launch_functions.py",
-      "line": 299,
+      "line": 291,
       "mechanism": "direct-call",
       "module_target": "envelope_adapters_provider",
       "symbol": "ProviderAdapter"

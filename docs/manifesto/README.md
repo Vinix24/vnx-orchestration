@@ -4,7 +4,7 @@ VNX is a governance-first architecture for multi-agent AI workflows.
 
 Core idea: orchestration is not enough. If you cannot audit decisions, enforce gates, and reconstruct what happened after a failure, you cannot trust multi-agent execution at scale.
 
-This folder is the public narrative: architecture, method, limits, and roadmap.
+This folder is the public narrative: architecture, method, and limits.
 
 ## In Action
 
@@ -56,11 +56,11 @@ Learning and dreaming propose. A human decides.
 
 If this is your first read, use this order:
 
-1. `ARCHITECTURE.md` — full system model and why it exists.
+1. [ARCHITECTURE.md](ARCHITECTURE.md) — architecture story; [core architecture](../core/00_VNX_ARCHITECTURE.md) for the implementation.
 2. `ARCHITECTURAL_DECISIONS.md` — key tradeoffs and constraints.
 3. `OPEN_METHOD.md` — transparency on build process and provenance.
 4. `LIMITATIONS.md` — tested scope and known boundaries.
-5. `ROADMAP.md`: what is done, what is on main, what is 2.0.
+5. [Planning](ROADMAP.md) — tracks via `vnx objective list` and the archived roadmap.
 
 ## Clone
 
@@ -84,7 +84,7 @@ Screenshots are managed in one place:
 | `ARCHITECTURE_DIAGRAM.mermaid` | Mermaid source for architecture visual |
 | `ARCHITECTURAL_DECISIONS.md` | Design decisions, tradeoffs and the index of all ADRs |
 | `OPEN_METHOD.md` | Build methodology and provenance transparency |
-| `ROADMAP.md` | Done, on main unreleased, and 2.0 |
+| [Planning](ROADMAP.md) | Tracks and archived roadmap |
 | `LIMITATIONS.md` | Explicit scope and constraints |
 
 ## Current Status

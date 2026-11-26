@@ -114,7 +114,7 @@ OWNERSHIP_RULES: "list[tuple[str, str]]" = [
     ("docs/operations/WORKER_PERMISSIONS.md", "security-engineer"),  # permission docs
     ("docs/governance/KEY_PROVISIONING.md", "security-engineer"),    # key provisioning
     (".vnx/worker_permissions.yaml", "security-engineer"),           # the scope config itself
-    (".vnx/vnx_workers.default.yaml", "security-engineer"),
+    ("scripts/lib/defaults/vnx_workers.default.yaml", "security-engineer"),
     (".claude/settings.json", "security-engineer"),                  # tool-permission posture
     # --- system-architect: module boundaries / data model / ADRs / scaffolding ---
     ("docs/governance/decisions/**", "system-architect"),            # ADRs

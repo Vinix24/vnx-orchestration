@@ -354,3 +354,8 @@ class TestClaudePathNotDoubleInjected:
                     with _patch_governance():
                         provider_dispatch._dispatch_claude(args)
         mock_enrich.assert_not_called()
+
+
+@pytest.fixture(autouse=True)
+def _explicit_intelligence_project(monkeypatch):
+    monkeypatch.setenv("VNX_PROJECT_ID", "vnx-dev")

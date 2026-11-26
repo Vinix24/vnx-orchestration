@@ -186,34 +186,20 @@ def _decide_ollama(
     A local family the operator switched off takes the existing unavailable path: the
     rule-based decision, with ``backend_used="dry-run(ollama-provider_switched_off)"``.
     """
-    # OllamaAdapter reads host/model from env vars; override them for this call
-    # by temporarily setting them so the adapter picks them up.
-    prev_host  = os.environ.get("VNX_OLLAMA_HOST")
-    prev_model = os.environ.get("VNX_OLLAMA_MODEL")
-    os.environ["VNX_OLLAMA_HOST"]  = host
-    os.environ["VNX_OLLAMA_MODEL"] = model
     try:
-        return _call_ollama_adapter(context, question, timeout)
+        return _call_ollama_adapter(context, question, timeout, host=host, model=model)
     except provider_switch.ProviderDisabledError as exc:
         logger.warning("OllamaAdapter not called (%s) — falling back to dry-run", exc.decision.detail())
         result = _rule_based_decision(context, question)
         result.backend_used = f"dry-run(ollama-{provider_switch.REASON_SWITCHED_OFF})"
         return result
-    finally:
-        if prev_host is None:
-            os.environ.pop("VNX_OLLAMA_HOST", None)
-        else:
-            os.environ["VNX_OLLAMA_HOST"] = prev_host
-        if prev_model is None:
-            os.environ.pop("VNX_OLLAMA_MODEL", None)
-        else:
-            os.environ["VNX_OLLAMA_MODEL"] = prev_model
 
 
 def _call_ollama_adapter(
     context: Dict[str, Any],
     question: str,
     timeout: int,
+    *, host: Optional[str] = None, model: Optional[str] = None,
 ) -> DecisionResult:
     """Execute a decision via OllamaAdapter and map result to DecisionResult.
 
@@ -225,7 +211,7 @@ def _call_ollama_adapter(
     sys.path.insert(0, str(adapters_path))
     from adapters.ollama_adapter import OllamaAdapter  # noqa: PLC0415
 
-    adapter = OllamaAdapter("__decision__")
+    adapter = OllamaAdapter("__decision__", host=host, model=model)
     prompt = _DECISION_PROMPT_SYSTEM + "\n\n" + _build_prompt(context, question)
 
     t0 = time.monotonic()
@@ -360,14 +346,10 @@ class DecisionRouter:
     ) -> None:
         self.data_dir = data_dir or _default_data_dir()
         self.backend  = Backend(backend or _DEFAULT_BACKEND)
-        self.ollama_model = (
-            ollama_model
-            or os.environ.get("VNX_OLLAMA_MODEL", _DEFAULT_OLLAMA_MODEL)
-        )
-        self.ollama_host = (
-            ollama_host
-            or os.environ.get("VNX_OLLAMA_HOST", _DEFAULT_OLLAMA_HOST)
-        )
+        import config_runtime
+        configured, source = config_runtime.get_with_source("VNX_OLLAMA_MODEL")
+        self.ollama_model = ollama_model or (_DEFAULT_OLLAMA_MODEL if source == "default" else configured)
+        self.ollama_host = ollama_host or config_runtime.get("VNX_OLLAMA_HOST")
         self.timeout = int(timeout if timeout is not None else _DEFAULT_TIMEOUT)
 
     def decide(self, context: Dict[str, Any], question: str) -> DecisionResult:

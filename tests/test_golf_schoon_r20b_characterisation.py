@@ -364,3 +364,7 @@ def test_shadow_unreadable_pattern_usage_counts_as_zero(tmp_path):
     assert det == {"title": "T", "current_conf": 0.5,
                    "v1_new_conf": round(beta_score(1, 0), 6), "v2_new_conf": 0.5,
                    "in_v1": True, "in_v2": False}
+
+@pytest.fixture(autouse=True)
+def _explicit_project_source(monkeypatch):
+    monkeypatch.setenv("VNX_PROJECT_ID", "vnx-dev")

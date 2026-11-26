@@ -210,7 +210,6 @@ class TestReleaseOnReceiptCLI(unittest.TestCase):
             # project_root.py respects VNX_DATA_DIR when VNX_DATA_DIR_EXPLICIT=1
             "VNX_DATA_DIR": str(self.state_dir.parent),
             "VNX_DATA_DIR_EXPLICIT": "1",
-            "VNX_RUNTIME_PRIMARY": "1",
             "VNX_CANONICAL_LEASE_ACTIVE": "1",
             "HOME": Path.home().as_posix(),
         }
@@ -380,7 +379,6 @@ class TestShellQuotingEdgeCases(unittest.TestCase):
             "PATH": "/usr/bin:/bin",
             "VNX_DATA_DIR": str(state_dir.parent),
             "VNX_DATA_DIR_EXPLICIT": "1",
-            "VNX_RUNTIME_PRIMARY": "1",
             "VNX_CANONICAL_LEASE_ACTIVE": "1",
             "HOME": Path.home().as_posix(),
         }

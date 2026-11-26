@@ -372,3 +372,8 @@ class TestSkillInjectionDelegation:
         with _patch_selector(result):
             section = _build_intelligence_section("d-delegate-002", "backend-developer")
         assert section == ""
+
+
+@pytest.fixture(autouse=True)
+def _explicit_intelligence_project(monkeypatch):
+    monkeypatch.setenv("VNX_PROJECT_ID", "vnx-dev")

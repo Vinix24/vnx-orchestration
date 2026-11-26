@@ -1,8 +1,8 @@
 """The append-only proposal ledger (decision 26, open question 9).
 
 One file per project store, ``proposals.ndjson``, one JSON object per line,
-never rewritten and never truncated. It holds three events: ``proposed``,
-``approved`` and ``verdict``. The day files stay untouched by a verdict; they
+never rewritten and never truncated. It holds ``proposed``, ``approved``,
+``expired``, ``rejected``, ``deliverable_created`` and ``verdict`` events. The day files stay untouched by a verdict; they
 only ever refer to proposal ids, so yesterday's measurement cannot change
 because today's verdict landed.
 
@@ -20,16 +20,22 @@ proposing stops until a human repairs the file.
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
+import re
+import sys
+from argparse import Namespace
 from collections.abc import Iterable, Mapping, Sequence
-from datetime import date
+from contextlib import redirect_stdout
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 from atomic_io import slot_lock
 
 from .proposal_rules import Candidate
+from .github_fetch import parse_timestamp
 
 LEDGER_NAME = "proposals.ndjson"
 
@@ -40,8 +46,11 @@ BLOCK_DAYS = 14
 
 PROPOSED = "proposed"
 APPROVED = "approved"
+EXPIRED = "expired"
 VERDICT = "verdict"
 UNDETERMINED = "undetermined"
+DELIVERABLE_CREATED = "deliverable_created"
+REJECTED = "rejected"
 
 
 class LedgerUnreadable(Exception):
@@ -65,6 +74,21 @@ def proposal_id(project_id: str, key: str, metric_day: date, rule_version: str) 
     """Decision 26: sha256 of the four inputs joined by ``|``, first 12 hex chars."""
     payload = "|".join([project_id, key, metric_day.isoformat(), rule_version])
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:12]
+
+
+def _validate_deliverable(event: Mapping[str, Any]) -> None:
+    """Optional means absent; a present but malformed specification is refused."""
+    if event.get("event") == DELIVERABLE_CREATED:
+        if not isinstance(event.get("deliverable_id"), str) or not re.fullmatch(r"dlv-[0-9a-f]{12}", event["deliverable_id"]):
+            raise LedgerUnreadable(f"{event.get('proposal_id')}: invalid deliverable_created id")
+    if event.get("event") != PROPOSED or "deliverable" not in event:
+        return
+    from smart_router import TASK_CLASSES
+    spec = event["deliverable"]
+    fields = ("track", "title", "output_kind", "task_class")
+    if (not isinstance(spec, dict) or any(not isinstance(spec.get(k), str) or not spec[k].strip() for k in fields)
+            or spec["output_kind"] not in ("pr", "doc") or spec["task_class"] not in TASK_CLASSES):
+        raise LedgerUnreadable(f"{event.get('proposal_id')}: invalid deliverable: require track, title, output_kind (pr/doc), task_class")
 
 
 def read_events(path: Path) -> list[dict[str, Any]]:
@@ -93,17 +117,18 @@ def read_events(path: Path) -> list[dict[str, Any]]:
             raise LedgerUnreadable(f"{path}: line {number} is not JSON: {exc.msg}") from exc
         if not isinstance(event, dict):
             raise LedgerUnreadable(f"{path}: line {number} is not a JSON object")
+        _validate_deliverable(event)
         events.append(event)
     return events
 
 
 def open_keys(events: Sequence[Mapping[str, Any]]) -> set[str]:
-    """Keys with a ``proposed`` event that no ``verdict`` event answers."""
-    answered = {event.get("proposal_id") for event in events if event.get("event") == VERDICT}
+    """Keys with a proposal that has neither a verdict nor an expiry."""
+    answered = {(e.get("project_id"), e.get("proposal_id")) for e in events if e.get("event") in (VERDICT, EXPIRED, REJECTED)}
     return {event["key"] for event in events
             if event.get("event") == PROPOSED
             and isinstance(event.get("key"), str)
-            and event.get("proposal_id") not in answered}
+            and (event.get("project_id"), event.get("proposal_id")) not in answered}
 
 
 def _parse_day(value: Any) -> date | None:
@@ -151,13 +176,19 @@ def _event(candidate: Candidate, *, proposal_id_value: str, project_id: str,
         "day_n": candidate.day_n,
         "exceedance": candidate.exceedance,
         "recorded_at": recorded_at,
+        **({"deliverable": candidate.deliverable} if candidate.deliverable is not None else {}),
     }
 
 
 def _write(path: Path, events: Sequence[Mapping[str, Any]]) -> None:
     """Append the events as whole lines and fsync before the caller drops the lock."""
-    payload = "".join(json.dumps(event, sort_keys=True, ensure_ascii=False) + "\n"
-                      for event in events)
+    for event in events:
+        _validate_deliverable(event)
+    try:
+        payload = "".join(json.dumps(event, sort_keys=True, ensure_ascii=False, allow_nan=False) + "\n"
+                          for event in events)
+    except ValueError as exc:
+        raise LedgerUnreadable(f"{path}: invalid proposal JSON: {exc}") from exc
     with Path(path).open("a", encoding="utf-8") as handle:
         handle.write(payload)
         handle.flush()
@@ -219,6 +250,71 @@ def _has_event(events: Sequence[Mapping[str, Any]], kind: str, proposal_id_value
                for event in events)
 
 
+def append_expiries(path: Path, *, now: datetime) -> None:
+    """Expire unanswered proposals after seven full days, checking and appending under one lock."""
+    if now.utcoffset() is None:
+        raise LedgerUnreadable("expiry now must have a timezone")
+    with slot_lock(path):
+        events = read_events(path)
+        for event in events:
+            if any(not isinstance(event.get(k), str) or not event[k] for k in ("project_id", "proposal_id")):
+                raise LedgerUnreadable(f"{path}: invalid proposal identity")
+        closed = {(e.get("project_id"), e.get("proposal_id")) for e in events
+                  if e.get("event") in (APPROVED, EXPIRED, VERDICT, REJECTED)}
+        fresh = []
+        for event in events:
+            if event.get("event") not in (PROPOSED, APPROVED, EXPIRED, VERDICT, REJECTED, DELIVERABLE_CREATED):
+                raise LedgerUnreadable(f"{path}: unknown proposal event")
+            identity = (event.get("project_id"), event.get("proposal_id"))
+            if event.get("event") != PROPOSED or identity in closed:
+                continue
+            stamp = parse_timestamp(event.get("recorded_at"))
+            if stamp is None:
+                raise LedgerUnreadable(f"{path}: {identity}: invalid recorded_at")
+            if now - stamp >= timedelta(days=7):
+                fresh.append({"event": EXPIRED, "project_id": identity[0],
+                              "proposal_id": identity[1], "recorded_at": now.isoformat()})
+                closed.add(identity)
+        if fresh:
+            _write(path, fresh)
+
+
+def create_deliverables(path: Path, *, project_id: str, state_dir: Path | None, now: datetime) -> dict[str, str]:
+    """Hold the proposal lock through planning and append; deterministic IDs recover a failed append."""
+    outcomes = {}
+    with slot_lock(path):
+        events = [e for e in read_events(path) if e.get("project_id") == project_id]
+        approved = {e["proposal_id"] for e in events if e.get("event") == APPROVED}
+        closed = {e["proposal_id"] for e in events if e.get("event") in (EXPIRED, REJECTED, DELIVERABLE_CREATED)}
+        for event in events:
+            pid = event["proposal_id"]
+            if event.get("event") != PROPOSED or pid not in approved or pid in closed:
+                continue
+            if "deliverable" not in event:
+                outcomes[pid] = "no deliverable named"
+                continue
+            scripts = str(Path(__file__).resolve().parents[2])
+            if scripts not in sys.path:
+                sys.path.append(scripts)
+            import planning_cli
+            from .store import default_store_dir
+            spec = event["deliverable"]
+            did = "dlv-" + hashlib.sha256(json.dumps([project_id, pid]).encode()).hexdigest()[:12]
+            args = Namespace(state_dir=state_dir or default_store_dir(project_id).parent.parent,
+                project_id=project_id, objective=spec["track"], title=spec["title"],
+                output_kind=spec["output_kind"], task_class=spec["task_class"],
+                proposal_id=pid, dispatch_id=did)
+            with redirect_stdout(io.StringIO()):
+                result = planning_cli.cmd_deliverable_add(args)
+            if result != 0:
+                raise LedgerUnreadable(f"{pid}: deliverable creation refused for track {spec['track']!r}")
+            _write(path, [{"event": DELIVERABLE_CREATED, "project_id": project_id,
+                "proposal_id": pid, "deliverable_id": did, "recorded_at": now.isoformat()}])
+            closed.add(pid)
+            outcomes[pid] = did
+    return outcomes
+
+
 def approval_refusal(events: Sequence[Mapping[str, Any]], proposal_id_value: Any) -> str | None:
     """The reason an approval is refused, or ``None`` when the proposal is open.
 
@@ -226,6 +322,12 @@ def approval_refusal(events: Sequence[Mapping[str, Any]], proposal_id_value: Any
     """
     if not isinstance(proposal_id_value, str) or not _has_event(events, PROPOSED, proposal_id_value):
         return "unknown_proposal"
+    project = next(e.get("project_id") for e in events
+                   if e.get("event") == PROPOSED and e.get("proposal_id") == proposal_id_value)
+    if _has_event([e for e in events if e.get("project_id") == project], EXPIRED, proposal_id_value):
+        return "expired"
+    if _has_event([e for e in events if e.get("project_id") == project], REJECTED, proposal_id_value):
+        return "rejected"
     if _has_event(events, VERDICT, proposal_id_value):
         return "already_judged"
     if _has_event(events, APPROVED, proposal_id_value):

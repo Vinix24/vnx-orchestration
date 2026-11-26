@@ -22,7 +22,7 @@ def test_subsystems_md_exists():
 
 def test_subsystems_md_has_header():
     content = SUBSYSTEMS_MD.read_text(encoding="utf-8")
-    assert "| subsystem | what | flag | status | health |" in content
+    assert "| subsystem | what | flag | status | health | doc |" in content
 
 
 def test_subsystems_md_has_legend():

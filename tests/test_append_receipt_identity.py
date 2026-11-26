@@ -159,13 +159,14 @@ def test_receipt_inherits_identity_from_env(tmp_path):
 def test_receipt_without_identity_still_persists(tmp_path):
     """Backwards compat: receipts that don't supply identity must still work."""
     receipt = _build_receipt(index=3)
-    # No env vars, no fields on receipt — resolver should fail silently and
-    # the receipt should be appended unchanged.
+    # The store supplies attribution; operator/orchestrator/agent remain optional.
+    (tmp_path / ".vnx-project-id").write_text("other\n")
     result = _run_append(tmp_path, json.dumps(receipt))
     assert result.returncode == 0, result.stderr
     records = _read_receipts(tmp_path)
     assert len(records) == 1
     rec = records[0]
+    assert rec["project_id"] == "other"
     # When unresolvable, identity fields must be absent (not None) so the
     # NDJSON line stays compact and existing readers don't see a schema
     # change.

@@ -1224,6 +1224,15 @@ VNX_MODEL=sonnet               # Default build-worker model: provider_constraint
 VNX_T1_PROVIDER=codex_cli      # T1 role can use a different provider
 ```
 
+The Python start runtime (`StartConfig.from_env`, also used by `build-commands`)
+reads `VNX_T0_PROVIDER` and `VNX_T0_SKIP_PERMISSIONS` through `VNX_T3_SKIP_PERMISSIONS`
+via `config_runtime`: override > project row > global config > preset env > registry
+default. T0 defaults to `claude_code`; all four permission skips default to `0`.
+Writing a skip row through `vnx config set` requires an approval id. The existing
+non-strict reader falls back when a store is unreadable; env `0` keeps prompts on.
+`bin/vnx` still exports the preset env. The separate T0 launch in `start.sh` still
+reads its env directly; these Python reader settings do not change that shell path.
+
 **`config.yml`** (`.vnx/config.yml`, gitignored): written by `vnx init`, real keys only:
 ```yaml
 project_root: "/path/to/project"

@@ -447,6 +447,12 @@ def _no_ambient_vnx_project_id(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("VNX_PROJECT_ID", raising=False)
 
 
+@pytest.fixture
+def receipt_project(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Opt-in attribution for receipt fixtures that previously relied on the default."""
+    monkeypatch.setenv("VNX_PROJECT_ID", "vnx-dev")
+
+
 @pytest.fixture(autouse=True)
 def _besluiten_register_isolation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # No test reads the checkout's real daily-log/besluiten.ndjson: build_t0_state resolves the folder from here.
@@ -803,6 +809,13 @@ def _stub_branch_protection_gate_gh_calls(monkeypatch: pytest.MonkeyPatch) -> No
     except ImportError:
         return
     from forge_protection_drift import YamlFetchResult
+    from optional_features import FeatureState
+
+    # OF-3's own tests restore the real snapshot; unrelated door tests retain required CI.
+    monkeypatch.setattr(pr_merge, "_door_features", lambda: {
+        "ci": FeatureState("ci", True, "required", "test"),
+        "branch_protection": FeatureState("branch_protection", False, "absent", "file_absent"),
+    })
 
     monkeypatch.setattr(
         pr_merge, "_door_blob_hash_gate",

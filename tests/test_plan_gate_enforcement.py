@@ -11,6 +11,8 @@ import sys
 from pathlib import Path
 
 import pytest
+import config_registry
+from optional_features import OptionalFeatureRefused
 
 _LIB = Path(__file__).resolve().parent.parent / "scripts" / "lib"
 if str(_LIB) not in sys.path:
@@ -85,11 +87,15 @@ class TestEnforceMode:
     @pytest.mark.parametrize("val,expected", [
         ("off", "off"), ("advisory", "advisory"), ("required", "required"),
         ("REQUIRED", "required"), (" advisory ", "advisory"),
-        ("garbage", "off"), ("", "advisory"),
+        ("garbage", None), ("", None),
     ])
     def test_resolution(self, monkeypatch, val, expected):
         monkeypatch.setenv("VNX_PLAN_GATE_ENFORCE", val)
-        assert pge.enforce_mode() == expected
+        if expected is None:
+            with pytest.raises(OptionalFeatureRefused, match="plan_gate_mode_unknown"):
+                pge.enforce_mode()
+        else:
+            assert pge.enforce_mode() == expected
 
     @pytest.mark.parametrize("val,expected", [
         ("1", True), ("true", True), ("YES", True), ("on", True),
@@ -103,18 +109,20 @@ class TestEnforceMode:
         """A persisted project_config value flips the mode when the env var is unset."""
         monkeypatch.delenv("VNX_PLAN_GATE_ENFORCE", raising=False)
         import config_runtime
-        monkeypatch.setattr(config_runtime, "get",
-                            lambda k: "required" if k == "VNX_PLAN_GATE_ENFORCE" else None)
+        monkeypatch.setattr(config_runtime, "_wired_for", {})
+        monkeypatch.setattr(config_registry, "_db_resolver", lambda p, k: "required")
+        monkeypatch.setattr(config_registry, "_default_project_id", "vnx-dev")
         assert pge.enforce_mode() == "required"
 
-    def test_config_lookup_failure_falls_back_to_advisory(self, monkeypatch):
-        """A raising config layer must not break enforce_mode (fail-soft → advisory)."""
+    def test_config_lookup_failure_refuses(self, monkeypatch):
+        """A raising config layer must refuse by name."""
         monkeypatch.delenv("VNX_PLAN_GATE_ENFORCE", raising=False)
         import config_runtime
-        def _boom(k):
+        def _boom(*args):
             raise RuntimeError("no store")
-        monkeypatch.setattr(config_runtime, "get", _boom)
-        assert pge.enforce_mode() == "advisory"
+        monkeypatch.setattr(config_runtime, "strict_resolver", lambda: (_boom, "vnx-dev"))
+        with pytest.raises(OptionalFeatureRefused, match="plan_gate_mode_unreadable"):
+            pge.enforce_mode()
 
     def test_flag_registered_in_config_registry(self):
         """The flag must be a registered, writable, approval-gated enum so the audited
@@ -201,12 +209,12 @@ class TestDoorEnforcement:
         _make_db(state, tracks={"t": "active"}, plan_blockers={"t": False})
         assert _check_track_link_verdict(_spec("t"), state_dir=state) is None
 
-    def test_unsupported_schema_is_clean(self, tmp_path, monkeypatch):
-        """A live track in a DB without track_open_items still passes clean (no false block)."""
+    def test_unsupported_schema_refuses(self, tmp_path, monkeypatch):
+        """A live track without the evidence schema refuses under required."""
         monkeypatch.setenv("VNX_PLAN_GATE_ENFORCE", "required")
         state = tmp_path / "state"
         _make_db(state, tracks={"t": "active"}, with_open_items=False)
-        assert _check_track_link_verdict(_spec("t"), state_dir=state) is None
+        assert _check_track_link_verdict(_spec("t"), state_dir=state).code == "plan_gate_evidence_unsupported"
 
     def test_done_track_still_rejects_before_plan_check(self, tmp_path, monkeypatch):
         """A done track is rejected on the pre-existing bad-track-link path, not plan-gate."""
@@ -219,24 +227,18 @@ class TestDoorEnforcement:
 
 
 class TestEnforceModeFailureLogs:
-    """OI-1096 companion: enforce_mode's config read is the SAME silent-except class
-    in this file. A raising config layer still falls back to advisory (fail-soft), but
-    now logs a warning instead of swallowing the fault silently."""
+    """Unreadable config stays visible to callers; an absent row keeps the default."""
 
-    def test_raising_config_logs_and_falls_back_to_advisory(self, monkeypatch, caplog):
+    def test_raising_config_refuses(self, monkeypatch, caplog):
         monkeypatch.delenv("VNX_PLAN_GATE_ENFORCE", raising=False)
         import config_runtime
 
-        def _boom(k):
+        def _boom(*args):
             raise RuntimeError("no store")
 
-        monkeypatch.setattr(config_runtime, "get", _boom)
-        with caplog.at_level("WARNING", logger="plan_gate_enforcement"):
-            assert pge.enforce_mode() == "advisory"
-        assert any(
-            "VNX_PLAN_GATE_ENFORCE config read failed" in r.message
-            for r in caplog.records
-        ), "an UNREADABLE VNX_PLAN_GATE_ENFORCE config must log, not stay silent"
+        monkeypatch.setattr(config_runtime, "strict_resolver", lambda: (_boom, "vnx-dev"))
+        with pytest.raises(OptionalFeatureRefused, match="plan_gate_mode_unreadable"):
+            pge.enforce_mode()
 
     def test_not_set_enforce_is_advisory_and_silent(self, monkeypatch, caplog):
         monkeypatch.delenv("VNX_PLAN_GATE_ENFORCE", raising=False)

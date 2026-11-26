@@ -16,7 +16,11 @@ PR-5 activates the full FP-B recovery stack:
 - tmux session profiles ensure terminal identity survives pane churn
 - Legacy file-based recovery runs as complement/fallback
 
-### Feature Flags (Post-Cutover Defaults)
+### Historical Feature Flags (Post-Cutover Defaults)
+
+Q1b retires runtime, broker and adapter switches below; their cutover values
+are fixed. Only the canonical-lease guard remains pending standalone expiry
+coverage. Dispatcher children inherit 1; standalone consumers still default to 0.
 
 | Flag | Default | Meaning |
 |------|---------|---------|
@@ -31,44 +35,12 @@ PR-5 activates the full FP-B recovery stack:
 
 ## 2. Rollback Procedure
 
-If the FP-B recovery stack causes issues in production:
+Q1b rollback is `git revert` of the cutover commit(s), followed by deployment
+of the reverted code. Environment switches cannot restore the removed paths.
+The retired `rollback_runtime_core.py` commands are no longer available.
 
-### Immediate Rollback (< 1 minute)
-
-```bash
-# Step 1: Disable runtime core
-python scripts/rollback_runtime_core.py rollback
-
-# Step 2: Run legacy-only recovery
-vnx recover --legacy
-
-# Step 3: Restart session
-vnx start
-```
-
-### What Rollback Changes
-
-| Component | Active | Rolled Back |
-|-----------|--------|-------------|
-| Dispatch coordination | SQLite broker | File-based dispatch dir |
-| Lease management | Canonical lease_manager | terminal_state_shadow |
-| Recovery command | Runtime + legacy | Legacy only |
-| Incident recording | Shadow mode recording | No recording |
-| tmux delivery | Adapter primary path | Legacy paste-buffer |
-
-### Rollback Safety
-
-- Rollback does **not** delete canonical state — SQLite database is preserved
-- Re-enable is safe: `python scripts/rollback_runtime_core.py enable`
-- Legacy paths never read from canonical state, so no conflict
-- File-based dispatch artifacts and canonical SQLite are independent
-
-### Re-Enable After Rollback
-
-```bash
-python scripts/rollback_runtime_core.py enable
-vnx start
-```
+`vnx recover --legacy` remains an explicit recovery option; it does not disable
+the production runtime or broker. Canonical SQLite state is retained.
 
 ---
 
@@ -235,3 +207,12 @@ Rows from `22_FPB_CERTIFICATION_MATRIX.md`:
 **FP-B is CERTIFIED** — all quality gates pass, all certification matrix rows verified.
 
 FP-C (execution mode expansion) is unblocked pending this certification.
+
+
+Q1b-a update: runtime-core, adapter, CLI and recovery readers no longer accept
+runtime/adapter rollback environment switches. Rollback is `git revert`.
+`runtime_cutover_check.py` retains its component checks and drops the `flags` output.
+Q1b-b removes dispatcher runtime/broker exports and fixes broker/mixed-router
+authority. Canonical-lease readers and the dispatcher export remain: the only
+scheduled `lease_sweep` call is the dispatcher's opt-in unified-supervisor tick,
+so no default expiry owner covers standalone receipt/hook/heartbeat/CLI consumers.

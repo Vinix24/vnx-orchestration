@@ -785,15 +785,12 @@ def _phase_cutover_check(
     state_dir: Path,
     report: RecoveryReport,
 ) -> None:
-    """Verify runtime core cutover status and add rollback guidance."""
-    from runtime_core import runtime_primary_active
-
-    is_primary = runtime_primary_active()
+    """Report the mandatory runtime coordination path."""
 
     report.actions.append(RecoveryAction(
         phase="cutover",
         action="runtime_core_status",
-        target="VNX_RUNTIME_PRIMARY",
+        target="runtime_core",
         outcome="applied",
-        detail=f"Runtime core {'ACTIVE' if is_primary else 'INACTIVE (legacy mode)'}",
+        detail="Runtime core ACTIVE",
     ))

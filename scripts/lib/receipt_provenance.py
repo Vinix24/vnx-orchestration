@@ -341,11 +341,14 @@ def register_provenance_link(
     trace_token: Optional[str] = None,
     chain_status: str = CHAIN_STATUS_INCOMPLETE,
     gaps: Optional[List[Dict[str, Any]]] = None,
+    project_id: Optional[str] = None,
 ) -> ProvenanceLink:
     """Register or update a provenance link in the registry.
 
     Upserts: if dispatch_id exists, merges non-null fields and recalculates
     chain status. This allows links to be discovered incrementally.
+    New-link events use the caller's project_id when supplied; otherwise the
+    coordination store must resolve it, raising TenantUnresolved if it cannot.
 
     Returns the current ProvenanceLink state.
     """
@@ -428,12 +431,11 @@ def register_provenance_link(
     )
 
     _append_event(
-        conn,
-        event_type="provenance_registered",
-        entity_type="provenance",
+        conn, event_type="provenance_registered", entity_type="provenance",
         entity_id=dispatch_id,
         actor="receipt_provenance",
         reason="provenance link registered",
+        project_id=project_id,
         metadata={
             "receipt_id": receipt_id,
             "commit_sha": commit_sha,
@@ -713,6 +715,10 @@ def reconcile_commit_provenance(
     This is the merge-side half of the chain (B1 wrote dispatch_id+receipt_id at append; this writes
     commit_sha so chain_status can reach 'receipt_and_commit'). Read-git + upsert-registry; best-effort — git
     errors yield ``{scanned: 0, linked: 0}``. Idempotent: register_provenance_link upserts per dispatch_id.
+    Identity errors are fail-closed: registering a discovered commit raises
+    ``TenantUnresolved`` if no valid explicit ``project_id`` or consistent store
+    identity can be resolved. That refusal propagates to the caller; it is not
+    converted to an empty scan or swallowed by the per-dispatch SQLite handler.
 
     D2 extension: commits that carry a PR number (``(#NNN)``) and resolve to a dispatch with a
     ``track_id`` also upsert that PR onto ``tracks.pr_ref`` in the project state store. This
@@ -827,8 +833,8 @@ def reconcile_commit_provenance(
             pr_number = _extract_pr_number(body)
             for dispatch_id in dispatch_ids:
                 try:
-                    register_provenance_link(
-                        conn, dispatch_id=dispatch_id, commit_sha=sha, pr_number=pr_number,
+                    register_provenance_link(conn, dispatch_id=dispatch_id, commit_sha=sha,
+                                             pr_number=pr_number, project_id=project_id,
                     )
                     linked += 1
                 except sqlite3.Error:

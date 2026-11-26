@@ -1,11 +1,10 @@
 # VNX Documentation
 
-`DOCS_INDEX.md` is the index of every active doc and the one place to start.
 [docs/DOCS_INDEX.md](DOCS_INDEX.md)
 
 ## Writing
 
-I wrote the architecture down as I built it. The full series is on [vincentvandeth.nl](https://vincentvandeth.nl). Start here.
+[vincentvandeth.nl](https://vincentvandeth.nl)
 
 **Governance and trust**
 - [Glass-box governance for multi-agent AI](https://vincentvandeth.nl/blog/glass-box-governance-multi-agent-ai)
@@ -31,10 +30,8 @@ I wrote the architecture down as I built it. The full series is on [vincentvande
 - [Context rotation at scale](https://vincentvandeth.nl/blog/context-rotation-scale-vnx-implementation)
 - [Async quality gates for AI agent workflows](https://vincentvandeth.nl/blog/async-quality-gates-ai-agent-workflows)
 
-## Context rotation for any Claude Code session
+## Context rotation
 
-`packages/claude-code-toolkit/context-rotation/` is a Claude Code plugin, separate from the VNX runtime and released in the public toolkit repository ([Vinix24/claude-code-toolkit](https://github.com/Vinix24/claude-code-toolkit)). It measures how full the context is, asks Claude for a handover note at set points, checks that note, and gives it to the fresh session after `/clear`. Install, settings and the hook layout are in the [plugin README](../packages/claude-code-toolkit/context-rotation/README.md). The T0 rotation VNX enforces for its own orchestrator is a different mechanism: [T0_CONTEXT_ROTATION.md](operations/T0_CONTEXT_ROTATION.md).
-
-## Compared to dmux
-
-The closest spiritual cousin is [dmux](https://github.com/standardagents/dmux), which also pairs tmux with per-pane git worktrees. My choices differ on ephemeral-per-dispatch workers instead of long-lived panes, NDJSON receipts instead of interactive merge as the main record, and a teardown classifier that preserves dirty or pushed work instead of treating cleanup as one state.
+- [Context-rotation plugin](../packages/claude-code-toolkit/context-rotation/README.md)
+- [Claude Code toolkit](https://github.com/Vinix24/claude-code-toolkit)
+- [T0 context rotation](operations/T0_CONTEXT_ROTATION.md)

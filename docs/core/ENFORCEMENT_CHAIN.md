@@ -41,6 +41,8 @@ The project's review stack (default `codex_gate,deepseek_gate` since the operato
 
 `scripts/pr_merge.py`, function `_run_door`, runs five preflights in the order of `PREFLIGHT_ORDER` and stops at the first refusal. A refusal writes a `pr_merge_refused` receipt and exits non-zero.
 
+CI is waived only when the optional-feature snapshot says no source requires it (`ci_requirement`); the preflight names the waiver and the receipt carries `waived_guarantees`. See `docs/core/DISPATCH_RULES.md` section 2.2 for the pinned snapshot and live protection evidence.
+
 | Order | Preflight | Function | What it refuses |
 |---|---|---|---|
 | 1 | `ci` | `_run_ci_gate` | The project's CI workflow (`ci_workflow` in the protection YAML on `main`, else `VNX CI`) has no `conclusion=success` on exactly the PR head |
@@ -145,7 +147,7 @@ This equals `scripts/forge/branch_protection.yaml` on `origin/main`, so at the m
 | ADR-003: No Anthropic SDK Imports | `.github/workflows/anthropic-sdk-block.yml` | No `import anthropic` in repo code | `CONTRIBUTING.md`, `docs/core/LOCKS_AND_RELEASES.md` |
 | Anchor Immutability Check | `.github/workflows/anchor-immutability-check.yml` | `governance/chain-origin.ndjson` only gains new keys: a line that existed on the base branch may not change or disappear. It runs on `pull_request_target`, so the trusted base-branch version of the job runs, never the PR's copy ([ADR-034](../governance/decisions/ADR-034-external-chain-origin-anchor.md)) | this page |
 | Dashboard TS Lint (fixture-gate + typecheck) | `vnx-ci.yml` job `dashboard-lint` | `npm run test:lint` in `dashboard/token-dashboard`: the fixture gate and the TypeScript typecheck | this page |
-| Dispatch-ID Slug-Match Gate | `vnx-ci.yml` | A commit body carries a `Dispatch-ID:` whose slug matches the branch slug (`scripts/check_ci_slug_match.py`). The workflow sets `VNX_SLUG_ENFORCEMENT` to `"0"`, which is shadow mode: it reports and does not fail | `docs/core/DISPATCH_RULES.md` |
+| Dispatch-ID Slug-Match Gate | `vnx-ci.yml` | A commit body carries a `Dispatch-ID:` whose slug matches the branch slug (`scripts/check_ci_slug_match.py`). `VNX_SLUG_ENFORCEMENT` resolves override > project row > global config > env > default: the workflow's `"0"` is shadow mode unless a higher layer enables enforcement. Unreadable configuration retains enforcement | `docs/core/DISPATCH_RULES.md` |
 | docs/core/SUBSYSTEMS.md matches the live registry | `.github/workflows/subsystems-drift.yml` | The deterministic columns of the subsystem ledger equal `scripts/lib/config_registry.py`, and a LIVE status carries measured health | `docs/core/SUBSYSTEMS.md` |
 | Lint Patterns (silent-except + atomic-write) | `vnx-ci.yml` | Silent excepts and non-atomic state writes, the function-size ratchet ([ADR-052](../governance/decisions/ADR-052-functies-onder-200-in-scripts.md)), the changelog-fragment rules | `docs/core/DISPATCH_RULES.md`, `changelog.d/README.md` |
 | Repo-local state-pin gate (#1043 footgun) | `vnx-ci.yml` job `state-pin-gate` | `ripgrep` bans a `VNX_STATE_DIR` pinned to a repo-local `.vnx-data` path across scripts, hooks, templates, skills, role files, `bin` and `vnx_cli`. Such a pin breaks central-mode resolution and forks the audit trail | this page |

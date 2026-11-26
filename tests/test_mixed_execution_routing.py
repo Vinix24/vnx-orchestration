@@ -453,20 +453,24 @@ class TestFeatureFlags:
         with mock.patch.dict(os.environ, {}, clear=True):
             # Set only the ones we need, clear others
             for key in ["VNX_MIXED_EXECUTION", "VNX_HEADLESS_ROUTING",
-                        "VNX_HEADLESS_ENABLED", "VNX_BROKER_SHADOW"]:
+                        "VNX_HEADLESS_ENABLED"]:
                 os.environ.pop(key, None)
 
             config = cutover_config_from_env()
             assert config["mixed_execution"] is False
             assert config["headless_routing"] is False
             assert config["headless_enabled"] is False
+            assert config["broker_shadow"] is False
+
+    def test_q1bb_retired_shadow_flag_is_ignored(self):
+        with mock.patch.dict(os.environ, {"VNX_BROKER_SHADOW": "1"}):
+            assert cutover_config_from_env()["broker_shadow"] is False
 
     def test_cutover_config_all_enabled(self):
         with mock.patch.dict(os.environ, {
             "VNX_MIXED_EXECUTION": "1",
             "VNX_HEADLESS_ROUTING": "1",
             "VNX_HEADLESS_ENABLED": "1",
-            "VNX_BROKER_SHADOW": "0",
         }):
             config = cutover_config_from_env()
             assert config["mixed_execution"] is True
@@ -560,3 +564,8 @@ class TestMixedRoutingResult:
         assert d["dispatch_id"] == "test"
         assert d["task_class"] == "coding_interactive"
         assert d["cutover_active"] is True
+
+
+@pytest.fixture(autouse=True)
+def _explicit_intelligence_project(monkeypatch):
+    monkeypatch.setenv("VNX_PROJECT_ID", "vnx-dev")

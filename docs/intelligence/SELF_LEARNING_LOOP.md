@@ -19,6 +19,8 @@ The loop is deliberate about signal starvation: when autonomous dispatching is p
 
 ---
 
+Intelligence selection and injection resolve project identity through `resolve_stamp_project_id`: an explicit id, then agreeing store layout/marker/environment sources; no `vnx-dev` default. An unresolved worker injection preserves the prompt, writes one `intelligence: skipped (project_id_unresolved)` line to `$VNX_STATE_DIR/intelligence_hook.log`, and records context `intelligence_injection` in `skip_metrics.ndjson` for `vnx doctor`. Until AG-1d2 migrates the source readers, candidate selection also requires `VNX_PROJECT_ID` to agree with the resolved store; marker-only candidate reads are refused rather than querying the legacy default. ADR reads already support marker-only stores. A selector probe failure keeps the intelligence health pipeline disconnected and includes the error.
+
 ## What the Loop Does
 
 The daily learning cycle mines `t0_receipts.ndjson` and produces three classes of output, all pending operator review:
@@ -393,6 +395,7 @@ Whether injected intelligence changes outcomes is measured by an A/B window ([AD
 
 - `VNX_INTEL_AB_TEST` (default `0`) and the frozen `VNX_INTEL_AB_WINDOW` (default empty) open it. The arm is `sha256(window_id:salt:project_id:dispatch_id)` against `control_fraction`. A missing or invalid window assigns no arm and is never read as treatment. `VNX_INTEL_PLACEBO_ARM` (default `0`) gives the control arm a placebo section.
 - `python3 scripts/intel_injection_join.py cohort|effect|secondary` read the stores. `cohort` counts and never gives a verdict. `effect` gives a stratified risk difference with a 95% interval. `secondary` reports the falsifications F1-F3, each `fired`, `clear` or `not_evaluable`.
+- All injection-report commands default to `~/.vnx-data/<project-id>/state`: `--project-id` wins, otherwise AG-1a resolves the current project's marker/environment identity or the canonical store layout when run from its state directory. Identity lookup starts at the current directory's project marker; a repo-local runtime database, including a symlink to another project's store, never selects the tenant. Missing identity refuses with a `vnx init` / `VNX_PROJECT_ID` hint. Use `--qi` / `--rc` for explicit paths; ambient `VNX_STATE_DIR` / `VNX_DATA_DIR` no longer select these stores. The router baseline, scope measurement and lane benchmarks use the same project-based central-store resolution.
 - A dispatch counts once it is resolved and 72 hours past its injection.
 - A verdict exists only at `MIN_PER_ARM = 200` resolved dispatches per arm (`scripts/lib/intel_effect_cohort.py`). No flag, variable or config row lowers it. Below it `effect` exits 3 with `below_floor` and no verdict. At or above it the verdict is `treatment_better`, `control_better`, `equivalent_within_5pp` or `inconclusive`.
 - No window has produced a verdict, so no effect of injection on outcomes has been measured. A verdict would be input for an operator decision and changes no rule by itself.

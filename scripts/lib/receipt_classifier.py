@@ -84,7 +84,8 @@ _FAILURE_STATUSES = {"failed", "failure", "error", "blocked", "timeout", "contra
 
 
 def is_enabled() -> bool:
-    return os.environ.get(ENV_ENABLED, "0") == "1"
+    import config_runtime
+    return config_runtime.get_bool(ENV_ENABLED)
 
 
 def get_mode() -> str:
@@ -97,7 +98,8 @@ def get_provider_name() -> str:
 
 
 def get_daily_budget_usd() -> float:
-    raw = os.environ.get(ENV_DAILY_BUDGET)
+    import config_runtime
+    raw = config_runtime.get(ENV_DAILY_BUDGET)
     if raw is None or raw == "":
         return DEFAULT_DAILY_BUDGET_USD
     try:

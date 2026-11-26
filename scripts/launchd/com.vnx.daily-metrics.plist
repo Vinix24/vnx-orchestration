@@ -5,13 +5,13 @@
 <dict>
   <key>Label</key><string>com.vnx.daily-metrics.${VNX_PROJECT_ID}</string>
   <!--
-    The opt-in driver of scripts/daily_metrics.py (decision 14). One job PER PROJECT:
+    The driver of scripts/daily_metrics.py is required per project
+    (ADR-063 amendment 2026-11-25). One job PER PROJECT:
     the Label carries the project id, so two projects never replace each other.
 
-    Opt-in (decision 29): `vnx init` does NOT install this job. The operator installs
-    it per project with the `install` verb of `vnx daily-metrics`; removal of exactly
-    that one job follows as a verb in a later change. The family is absent from
-    REQUIRED_PER_PROJECT_FAMILIES, so no project is made to carry it.
+    `vnx init` prepares the definition in the project store and prints an operating
+    request. The operator installs it with the `install` verb of `vnx daily-metrics`.
+    The family belongs to REQUIRED_PER_PROJECT_FAMILIES; doctor names missing jobs.
 
     Cadence 04:10 local (decision 14). A day D (UTC) is settled only after
     D + 1 day + SETTLE_HOURS=2; 04:10 local is 02:10 UTC in CEST and 03:10 UTC in CET,

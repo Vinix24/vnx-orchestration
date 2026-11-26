@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Regression tests for W5B small fixes bundle.
 
-OI-1075 — _require_core exits 0 with legacy_disabled marker (not exit 1)
+OI-1075 / Q1ba — unavailable runtime core fails closed with exit 1
 OI-1118 — _build_report_path produces unique paths within the same second
 OI-1119 — _canonical_report_path raises ValueError on path traversal
 OI-1156 — metric.last_used assigned as tz-aware (no tz-naive/aware compare crash)
@@ -53,12 +53,12 @@ def _make_review_env(tmp_path: Path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# OI-1075 — _require_core legacy disabled marker
+# OI-1075 / Q1ba — _require_core initialization failure
 # ---------------------------------------------------------------------------
 
 class TestRequireCoreMarker:
-    def test_legacy_disabled_marker_on_stdout(self, tmp_path):
-        """With VNX_RUNTIME_PRIMARY=0, delivery-start must emit legacy_disabled and exit 0."""
+    def test_unavailable_core_marker_on_stdout(self, tmp_path):
+        """An unavailable broker must fail delivery-start with exit 1."""
         data_dir = tmp_path / ".vnx-data"
         state_dir = data_dir / "state"
         dispatch_dir = data_dir / "dispatches"
@@ -66,7 +66,6 @@ class TestRequireCoreMarker:
         dispatch_dir.mkdir(parents=True)
 
         env = os.environ.copy()
-        env["VNX_RUNTIME_PRIMARY"] = "0"
         env["VNX_DATA_DIR"] = str(data_dir)
         env["VNX_DATA_DIR_EXPLICIT"] = "1"
         env["VNX_STATE_DIR"] = str(state_dir)
@@ -77,6 +76,10 @@ class TestRequireCoreMarker:
         result = subprocess.run(
             [
                 sys.executable,
+                "-c", "import runpy,sys; from pathlib import Path; from unittest.mock import patch; "
+                "sys.path.insert(0,str(Path(sys.argv[1]).parent/'lib'))\n"
+                "with patch('runtime_core.load_broker', side_effect=OSError('broker unavailable')): "
+                "runpy.run_path(sys.argv.pop(1),run_name='__main__')",
                 str(SCRIPTS_DIR / "runtime_core_cli.py"),
                 "delivery-start",
                 "--dispatch-id", "test-oi-1075",
@@ -88,18 +91,18 @@ class TestRequireCoreMarker:
             env=env,
         )
 
-        assert result.returncode == 0, (
-            f"Expected exit 0 for legacy_disabled, got {result.returncode}. "
+        assert result.returncode == 1, (
+            f"Expected exit 1 for unavailable runtime, got {result.returncode}. "
             f"stdout={result.stdout!r} stderr={result.stderr!r}"
         )
         data = json.loads(result.stdout.strip())
-        assert data.get("status") == "legacy_disabled", (
-            f"Expected status=legacy_disabled, got: {data}"
+        assert data.get("status") == "failed", (
+            f"Expected status=failed, got: {data}"
         )
-        assert "reason" in data
+        assert data["error"] == "runtime_core_unavailable"
 
-    def test_legacy_disabled_marker_acquire_lease(self, tmp_path):
-        """acquire-lease must also emit legacy_disabled and exit 0 when runtime disabled."""
+    def test_unavailable_core_marker_acquire_lease(self, tmp_path):
+        """acquire-lease must fail closed when the broker is unavailable."""
         data_dir = tmp_path / ".vnx-data"
         state_dir = data_dir / "state"
         dispatch_dir = data_dir / "dispatches"
@@ -107,7 +110,6 @@ class TestRequireCoreMarker:
         dispatch_dir.mkdir(parents=True)
 
         env = os.environ.copy()
-        env["VNX_RUNTIME_PRIMARY"] = "0"
         env["VNX_DATA_DIR"] = str(data_dir)
         env["VNX_DATA_DIR_EXPLICIT"] = "1"
         env["VNX_STATE_DIR"] = str(state_dir)
@@ -118,6 +120,10 @@ class TestRequireCoreMarker:
         result = subprocess.run(
             [
                 sys.executable,
+                "-c", "import runpy,sys; from pathlib import Path; from unittest.mock import patch; "
+                "sys.path.insert(0,str(Path(sys.argv[1]).parent/'lib'))\n"
+                "with patch('runtime_core.load_broker', side_effect=OSError('broker unavailable')): "
+                "runpy.run_path(sys.argv.pop(1),run_name='__main__')",
                 str(SCRIPTS_DIR / "runtime_core_cli.py"),
                 "acquire-lease",
                 "--terminal", "T2",
@@ -128,9 +134,10 @@ class TestRequireCoreMarker:
             env=env,
         )
 
-        assert result.returncode == 0
+        assert result.returncode == 1
         data = json.loads(result.stdout.strip())
-        assert data.get("status") == "legacy_disabled"
+        assert data.get("status") == "failed"
+        assert data["error"] == "runtime_core_unavailable"
 
 
 # ---------------------------------------------------------------------------

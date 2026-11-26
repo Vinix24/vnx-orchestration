@@ -55,7 +55,7 @@ def test_live_work_unavailable_is_not_an_empty_list(tmp_path, fake_live, value):
 
 def test_real_live_work_without_db_and_a_raise_are_unavailable(tmp_path, monkeypatch):
     a = store(tmp_path, "a")
-    assert "not found" in src.live_subjects(a, "p").unavailable
+    assert "not found" in src.live_subjects(a, "proj-a").unavailable
     monkeypatch.setattr(bts, "_build_live_work", lambda *x: (_ for _ in ()).throw(RuntimeError("x")))
     assert "RuntimeError" in src.live_subjects(a, "p").unavailable
 

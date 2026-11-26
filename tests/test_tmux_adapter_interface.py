@@ -88,10 +88,10 @@ class TestCapabilityDeclaration:
         assert CAPABILITY_SESSION_HEALTH in caps
         assert CAPABILITY_REHEAL in caps
 
-    def test_disabled_adapter_has_no_capabilities(self, adapter: TmuxAdapter) -> None:
+    def test_removed_flag_cannot_disable_capabilities(self, adapter: TmuxAdapter) -> None:
         with patch.dict("os.environ", {"VNX_TMUX_ADAPTER_ENABLED": "0"}):
             caps = adapter.capabilities()
-            assert len(caps) == 0
+            assert caps == TMUX_CAPABILITIES
 
     def test_adapter_type_is_tmux(self, adapter: TmuxAdapter) -> None:
         assert adapter.adapter_type() == "tmux"

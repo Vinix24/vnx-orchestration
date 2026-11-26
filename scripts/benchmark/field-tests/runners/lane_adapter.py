@@ -43,6 +43,7 @@ SKILLS_ROOT = REPO_ROOT / ".claude" / "skills"
 sys.path.insert(0, str(REPO_ROOT / "scripts" / "lib"))
 from skill_prefix import build_structured_prompt  # noqa: E402
 from benchmark_worker_isolation import BENCH_CELL_DIRNAME  # noqa: E402
+from operator_paths import operator_data_dir
 
 # Models routed via headless subprocess_dispatch instead of provider_dispatch
 # (originally: models where the interactive Claude Code lane was known-broken,
@@ -53,10 +54,13 @@ from benchmark_worker_isolation import BENCH_CELL_DIRNAME  # noqa: E402
 HEADLESS_FORCED_MODELS: set[str] = set()
 # Report-dir search order: project-local first, central second.
 # provider_dispatch can write to central or project-local depending on install mode.
-REPORT_DIR_CANDIDATES = (
-    REPO_ROOT / ".vnx-data" / "unified_reports",
-    Path.home() / ".vnx-data" / "vnx-dev" / "unified_reports",
-)
+REPORT_DIR_CANDIDATES = None  # Optional explicit paths for embedded callers.
+def report_dirs(project_id: str | None = None) -> tuple[Path, ...]:
+    """Resolve lazily so imports never require an operator project identity."""
+    if REPORT_DIR_CANDIDATES is not None:
+        return REPORT_DIR_CANDIDATES
+    return (REPO_ROOT / ".vnx-data/unified_reports",
+            operator_data_dir(project_id) / "unified_reports")
 # Minimum plausible wallclock for a real worker run. Anything under this is an
 # immediate-exit pattern (subscription rate-limit, spawn failure, etc.).
 MIN_REAL_WALLCLOCK_SECONDS = 5.0
@@ -390,7 +394,8 @@ def _append_completion_protocol(instruction: str, dispatch_id: str) -> str:
     # completion instruction (identical for every lane → fairness preserved)
     # pointing at the exact absolute report path that this adapter's report search
     # polls. The worker writes the 4-heading report there on completion.
-    _report_sink = (REPORT_DIR_CANDIDATES[0] / f"{dispatch_id}.md") if REPORT_DIR_CANDIDATES else None
+    candidates = report_dirs()
+    _report_sink = (candidates[0] / f"{dispatch_id}.md") if candidates else None
     if _report_sink is not None:
         _report_sink.parent.mkdir(parents=True, exist_ok=True)
         instruction = (
@@ -425,7 +430,7 @@ def _invoke_lane(
 
 def _find_report(dispatch_id: str) -> Optional[Path]:
     # Search for the worker-emitted report across known locations.
-    for candidate_dir in REPORT_DIR_CANDIDATES:
+    for candidate_dir in report_dirs():
         for suffix in (".md", "_report.md"):
             p = candidate_dir / f"{dispatch_id}{suffix}"
             if p.exists():

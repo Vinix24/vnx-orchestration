@@ -260,6 +260,11 @@ class TestSelectPlaceboPattern:
 # ---------------------------------------------------------------------------
 
 class TestMigrationV32:
+    @pytest.fixture(autouse=True)
+    def store_identity(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("VNX_PROJECT_ID", "test-project")
+        (tmp_path / ".vnx-project-id").write_text("test-project\n")
+
     def test_ab_arm_columns_added(self, tmp_path):
         db_path = tmp_path / "qi.db"
         assert bootstrap_qi_db(db_path, schema_file=_SCHEMA_FILE) is True
@@ -722,3 +727,7 @@ ORDER BY ab_arm
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
+
+@pytest.fixture(autouse=True)
+def _explicit_intelligence_project(monkeypatch):
+    monkeypatch.setenv("VNX_PROJECT_ID", "vnx-dev")

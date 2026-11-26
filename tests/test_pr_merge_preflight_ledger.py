@@ -693,7 +693,7 @@ class TestOneRecordShape:
                 "gate", "verdict", "message", "head_sha",
                 "overridden", "override_unnecessary", "override_not_applicable",
                 "reason_code", "mode", "pr_size",
-            }, g
+            } | ({"optional_features", "waived_guarantees"} if g["gate"] == "ci" else set()), g
 
     def test_a_gate_without_a_code_vocabulary_says_so_explicitly(self):
         """Four of the five preflights decide on their own logic and publish no

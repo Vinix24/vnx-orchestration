@@ -7,7 +7,7 @@ Quality gate coverage (gate_pr5_runtime_core_cutover):
   - Terminal assignment uses canonical lease state by default
   - Receipts still correlate cleanly to dispatch_id after cutover
   - Existing governance workflows remain functional (T0 authority preserved)
-  - Rollback path to legacy transport is documented and tested
+  - Retired rollback variables cannot disable runtime coordination
   - All tests pass for cutover compatibility and receipt linkage
 """
 from __future__ import annotations
@@ -64,28 +64,27 @@ def _make_core(state_dir: str, dispatch_dir: str) -> RuntimeCore:
 # ---------------------------------------------------------------------------
 
 class TestRuntimePrimaryFlag(unittest.TestCase):
-    """VNX_RUNTIME_PRIMARY flag controls cutover on/off."""
+    """Runtime coordination is mandatory."""
 
     def test_runtime_primary_active_default_is_true(self) -> None:
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop("VNX_RUNTIME_PRIMARY", None)
             self.assertTrue(runtime_primary_active())
 
-    def test_runtime_primary_inactive_when_zero(self) -> None:
+    def test_runtime_primary_active_ignores_zero(self) -> None:
         with patch.dict(os.environ, {"VNX_RUNTIME_PRIMARY": "0"}):
-            self.assertFalse(runtime_primary_active())
-
-    def test_runtime_primary_active_when_one(self) -> None:
-        with patch.dict(os.environ, {"VNX_RUNTIME_PRIMARY": "1"}):
             self.assertTrue(runtime_primary_active())
 
-    def test_load_runtime_core_returns_none_when_disabled(self) -> None:
+    def test_runtime_primary_is_active(self) -> None:
+        self.assertTrue(runtime_primary_active())
+
+    def test_load_runtime_core_ignores_disabled_flag(self) -> None:
         tmp = tempfile.TemporaryDirectory()
         try:
             state_dir, dispatch_dir = _setup_dirs(tmp)
             with patch.dict(os.environ, {"VNX_RUNTIME_PRIMARY": "0"}):
                 core = load_runtime_core(state_dir, dispatch_dir)
-            self.assertIsNone(core)
+            self.assertIsInstance(core, RuntimeCore)
         finally:
             tmp.cleanup()
 
@@ -93,10 +92,7 @@ class TestRuntimePrimaryFlag(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory()
         try:
             state_dir, dispatch_dir = _setup_dirs(tmp)
-            with patch.dict(os.environ, {"VNX_RUNTIME_PRIMARY": "1",
-                                          "VNX_BROKER_ENABLED": "1",
-                                          "VNX_BROKER_SHADOW": "0"}):
-                core = load_runtime_core(state_dir, dispatch_dir)
+            core = load_runtime_core(state_dir, dispatch_dir)
             self.assertIsInstance(core, RuntimeCore)
         finally:
             tmp.cleanup()
@@ -396,12 +392,7 @@ class TestGovernanceCompatibility(unittest.TestCase):
 
     def test_compat_check_all_components_ok(self) -> None:
         """Full compat check passes with default env (runtime primary enabled)."""
-        with patch.dict(os.environ, {
-            "VNX_RUNTIME_PRIMARY": "1",
-            "VNX_BROKER_ENABLED": "1",
-            "VNX_BROKER_SHADOW": "0",
-        }):
-            result = RuntimeCore.check_compatibility(self.state_dir, self.dispatch_dir)
+        result = RuntimeCore.check_compatibility(self.state_dir, self.dispatch_dir)
         self.assertTrue(result["compatible"])
 
 
@@ -410,16 +401,16 @@ class TestGovernanceCompatibility(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 class TestRollbackPath(unittest.TestCase):
-    """The VNX_RUNTIME_PRIMARY flag itself still selects the legacy transport."""
+    """Retired rollback values cannot select legacy transport."""
 
-    def test_runtime_core_disabled_when_primary_zero(self) -> None:
-        """When VNX_RUNTIME_PRIMARY=0, load_runtime_core returns None (legacy path)."""
+    def test_runtime_core_active_when_primary_zero(self) -> None:
+        """The removed rollback variable cannot disable the core."""
         tmp = tempfile.TemporaryDirectory()
         try:
             state_dir, dispatch_dir = _setup_dirs(tmp)
             with patch.dict(os.environ, {"VNX_RUNTIME_PRIMARY": "0"}):
                 core = load_runtime_core(state_dir, dispatch_dir)
-            self.assertIsNone(core)
+            self.assertIsInstance(core, RuntimeCore)
         finally:
             tmp.cleanup()
 
@@ -441,24 +432,19 @@ class TestCutoverCompatibilityCheck(unittest.TestCase):
         self._tmp.cleanup()
 
     def test_compat_check_returns_compatible_true(self) -> None:
-        with patch.dict(os.environ, {
-            "VNX_BROKER_ENABLED": "1",
-            "VNX_BROKER_SHADOW": "0",
-        }):
-            result = RuntimeCore.check_compatibility(self.state_dir, self.dispatch_dir)
+        result = RuntimeCore.check_compatibility(self.state_dir, self.dispatch_dir)
         self.assertTrue(result["compatible"])
 
-    def test_compat_check_flags_reflect_environment(self) -> None:
-        with patch.dict(os.environ, {
-            "VNX_RUNTIME_PRIMARY": "1",
-            "VNX_BROKER_SHADOW": "0",
-            "VNX_CANONICAL_LEASE_ACTIVE": "1",
-        }):
-            result = RuntimeCore.check_compatibility(self.state_dir, self.dispatch_dir)
-        flags = result["flags"]
-        self.assertEqual(flags["VNX_RUNTIME_PRIMARY"], "1")
-        self.assertEqual(flags["VNX_BROKER_SHADOW"], "0")
-        self.assertEqual(flags["VNX_CANONICAL_LEASE_ACTIVE"], "1")
+    def test_adapter_load_failure_is_incompatible(self) -> None:
+        with patch("runtime_core.load_adapter", side_effect=OSError("adapter unavailable")):
+            result = RuntimeCore._check_adapter(Path(self.state_dir))
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "adapter unavailable")
+
+    def test_compat_check_reports_components_without_retired_flags(self) -> None:
+        result = RuntimeCore.check_compatibility(self.state_dir, self.dispatch_dir)
+        self.assertNotIn("flags", result)
+        self.assertIn("shadow_mode", result["components"]["broker"])
 
     def test_compat_check_has_all_required_components(self) -> None:
         result = RuntimeCore.check_compatibility(self.state_dir, self.dispatch_dir)
@@ -472,8 +458,6 @@ class TestCutoverCompatibilityCheck(unittest.TestCase):
             "VNX_DATA_DIR": str(Path(self._tmp.name)),
             "VNX_STATE_DIR": self.state_dir,
             "VNX_DISPATCH_DIR": self.dispatch_dir,
-            "VNX_BROKER_ENABLED": "1",
-            "VNX_BROKER_SHADOW": "0",
         }
         result = subprocess.run(
             [sys.executable, str(_SCRIPTS_DIR / "runtime_cutover_check.py")],

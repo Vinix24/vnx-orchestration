@@ -182,6 +182,12 @@ def get(key: str) -> Optional[str]:
     return config_registry.get(key)
 
 
+def get_with_source(key: str) -> tuple[Optional[str], str]:
+    """Resolve once, retaining the source for readers with legacy per-consumer defaults."""
+    autowire()
+    return config_registry.resolve_with_source(key)
+
+
 def get_bool(key: str, *, state_dir: "str | Path | None" = None) -> bool:
     """Bool view of get(); an explicit state_dir binds its store without git discovery."""
     if not autowire(state_dir=state_dir) and state_dir is not None:

@@ -86,7 +86,9 @@ def test_upsert_skips_and_logs_when_tenant_unresolved(tmp_path, monkeypatch, cap
     monkeypatch.delenv("VNX_PROJECT_ID", raising=False)
     db = tmp_path / "loose" / "quality_intelligence.db"
     db.parent.mkdir(parents=True, exist_ok=True)
-    assert quality_db_init.bootstrap_qi_db(db, _REPO / "schemas" / "quality_intelligence.sql")
+    with monkeypatch.context() as setup:
+        setup.setenv("VNX_PROJECT_ID", "test-project")
+        assert quality_db_init.bootstrap_qi_db(db, _REPO / "schemas" / "quality_intelligence.sql")
 
     import logging
     with caplog.at_level(logging.ERROR):

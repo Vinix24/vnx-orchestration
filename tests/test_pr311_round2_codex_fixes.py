@@ -521,3 +521,8 @@ class TestSourceLevelGuards:
         assert "failure_count  = failure_count + 1" not in src, (
             "Finding 3: failure_count increment in offered-only path is back"
         )
+
+
+@pytest.fixture(autouse=True)
+def _explicit_intelligence_project(monkeypatch):
+    monkeypatch.setenv("VNX_PROJECT_ID", "vnx-dev")

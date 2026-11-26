@@ -150,7 +150,7 @@ def _string_constants(node: ast.AST, docstrings: Set[int]) -> Iterable[str]:
 
 def _holds_model_host(node: ast.AST, docstrings: Set[int]) -> bool:
     for text in _string_constants(node, docstrings):
-        if any(host in text for host in MODEL_HOSTS) or _LOCAL_MODEL_PORT_RE.search(text):
+        if text == "VNX_OLLAMA_HOST" or any(host in text for host in MODEL_HOSTS) or _LOCAL_MODEL_PORT_RE.search(text):
             return True
     return False
 
@@ -797,6 +797,8 @@ def test_rule_http_call_with_model_host():
     module_host = "import urllib.request\nHOST = 'http://localhost:11434'\n" \
                   "def call(url):\n    urllib.request.urlopen(url)\n"
     assert _flagged(module_host) == {"call": {RULE_HTTP_MODEL_HOST}}
+    configured_host = module_host.replace("'http://localhost:11434'", 'config_runtime.get("VNX_OLLAMA_HOST")')
+    assert _flagged(configured_host) == {"call": {RULE_HTTP_MODEL_HOST}}
 
 
 def test_rule_http_without_model_host_or_with_docstring_only_is_not_flagged():

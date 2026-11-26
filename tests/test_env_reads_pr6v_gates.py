@@ -2,7 +2,7 @@
 
 A stored project_config row beats an exported env value for VNX_PLAN_GATE_ENFORCE;
 VNX_OVERRIDE_<NAME> still beats the row. VNX_EVIDENCE_BOUND_GATE reads a stored row.
-Unknown gate values read ``off``.
+Unknown plan-gate values refuse; unknown evidence-gate values read ``off``.
 """
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from optional_features import OptionalFeatureRefused
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts" / "lib"))
@@ -75,11 +76,12 @@ def test_evidence_gate_override_beats_stored_row(store, monkeypatch):
 
 
 @pytest.mark.parametrize("source", ["env", "row"])
-def test_unknown_value_reads_off_for_both_gates(store, monkeypatch, source):
+def test_unknown_value_refuses_plan_gate(store, monkeypatch, source):
     for key in ("VNX_PLAN_GATE_ENFORCE", "VNX_EVIDENCE_BOUND_GATE"):
         if source == "env":
             monkeypatch.setenv(key, "enforce-maybe")
         else:
             store(key, "enforce-maybe")
-    assert plan_gate_enforcement.enforce_mode() == "off"
+    with pytest.raises(OptionalFeatureRefused, match="plan_gate_mode_unknown"):
+        plan_gate_enforcement.enforce_mode()
     assert evidence_bound_gate.gate_state() == "off"

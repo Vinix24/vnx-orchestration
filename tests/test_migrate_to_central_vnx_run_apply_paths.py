@@ -173,6 +173,7 @@ def _drop_central_dbs(env: dict) -> None:
 @pytest.fixture
 def apply_env(tmp_path: Path, monkeypatch) -> dict:
     """Two real source projects + a live (non-fresh) central state dir."""
+    monkeypatch.setenv("VNX_PROJECT_ID", "test-project")
     abort_flag = tmp_path / ".vnx-aggregator" / "ABORT"
     monkeypatch.setattr(M, "ABORT_FLAG", abort_flag)
     monkeypatch.setattr(_MI, "ABORT_FLAG", abort_flag)

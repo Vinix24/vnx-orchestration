@@ -79,6 +79,11 @@ class ConfigEntry:
     # Opt-in integer bound, enforced by registry resolution before a reader gets a value.
     minimum: Optional[int] = None
 
+    @property
+    def doc(self) -> str:
+        """Subsystem module page or explicit disposition; unknown names raise KeyError."""
+        return SUBSYSTEM_DOCS[self.subsystem]
+
     def __post_init__(self) -> None:
         if self.scope not in ALLOWED_SCOPES:
             raise ValueError(f"{self.key}: scope {self.scope!r} is not one of {sorted(ALLOWED_SCOPES)}")
@@ -158,7 +163,7 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
     "VNX_RECEIPT_CLASSIFIER_DAILY_COST_USD": _e(
         "VNX_RECEIPT_CLASSIFIER_DAILY_COST_USD", "float", "0.20", "intelligence",
         "Daily USD spend cap of the receipt classifier. Raising it waives the 0.20 USD/day classifier cost cap.",
-        approval=True, subsystem="intelligence-self-learning-loop", status="ACTIVATE", read_site_wired=False),
+        approval=True, subsystem="intelligence-self-learning-loop", status="ACTIVATE", read_site_wired=True),
     "VNX_AUTO_REPORT": _e(
         "VNX_AUTO_REPORT", "bool", "1", "dispatch",
         "Auto-report Stop hook gate. Default on: the value every fabric process saw while "
@@ -193,31 +198,31 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
     "VNX_T0_PROVIDER": _e(
         "VNX_T0_PROVIDER", "string", "claude_code", "dispatch",
         "Provider of terminal T0.",
-        subsystem="headless-dispatch-routing", status="ACTIVATE", read_site_wired=False),
+        subsystem="headless-dispatch-routing", status="ACTIVATE", read_site_wired=True),
     "VNX_T0_SKIP_PERMISSIONS": _e(
         "VNX_T0_SKIP_PERMISSIONS", "bool", "0", "dispatch",
         "Launch terminal T0 with the CLI permission prompts skipped. Setting 1 waives the permission prompts "
         "(--dangerously-skip-permissions) for that terminal.",
-        approval=True, subsystem="headless-dispatch-routing", status="ACTIVATE", read_site_wired=False),
+        approval=True, subsystem="headless-dispatch-routing", status="ACTIVATE", read_site_wired=True),
     "VNX_T1_SKIP_PERMISSIONS": _e(
         "VNX_T1_SKIP_PERMISSIONS", "bool", "0", "dispatch",
         "Launch terminal T1 with the CLI permission prompts skipped. Setting 1 waives the permission prompts "
         "(--dangerously-skip-permissions) for that terminal.",
-        approval=True, subsystem="headless-dispatch-routing", status="ACTIVATE", read_site_wired=False),
+        approval=True, subsystem="headless-dispatch-routing", status="ACTIVATE", read_site_wired=True),
     "VNX_T2_SKIP_PERMISSIONS": _e(
         "VNX_T2_SKIP_PERMISSIONS", "bool", "0", "dispatch",
         "Launch terminal T2 with the CLI permission prompts skipped. Setting 1 waives the permission prompts "
         "(--dangerously-skip-permissions) for that terminal.",
-        approval=True, subsystem="headless-dispatch-routing", status="ACTIVATE", read_site_wired=False),
+        approval=True, subsystem="headless-dispatch-routing", status="ACTIVATE", read_site_wired=True),
     "VNX_T3_SKIP_PERMISSIONS": _e(
         "VNX_T3_SKIP_PERMISSIONS", "bool", "0", "dispatch",
         "Launch terminal T3 with the CLI permission prompts skipped. Setting 1 waives the permission prompts "
         "(--dangerously-skip-permissions) for that terminal.",
-        approval=True, subsystem="headless-dispatch-routing", status="ACTIVATE", read_site_wired=False),
+        approval=True, subsystem="headless-dispatch-routing", status="ACTIVATE", read_site_wired=True),
     "VNX_PAID_LANE_DAILY_BUDGET_USD": _e(
         "VNX_PAID_LANE_DAILY_BUDGET_USD", "float", "5.00", "dispatch",
         "Daily USD cap of the paid provider lanes. Raising it waives the 5 USD/day paid-lane cost cap.",
-        approval=True, subsystem="headless-dispatch-routing", status="ACTIVATE", read_site_wired=False),
+        approval=True, subsystem="headless-dispatch-routing", status="ACTIVATE", read_site_wired=True),
     "VNX_REQUIRE_DISPATCH_TRACK": _e(
         "VNX_REQUIRE_DISPATCH_TRACK", "bool", "0", "dispatch",
         "Require a track_id on a dispatch. Off (default): the door only warns; on: a dispatch without a track is refused.",
@@ -1015,7 +1020,73 @@ CONFIG_REGISTRY_SUBSYSTEMS: Dict[str, dict] = {
         "status": "COCKPIT",
         "description": "Generic \"does it produce crap?\" probes per subsystem.",
     },
+    "pool": {
+        "status": "ACTIVATE",
+        "description": "Project-scoped worker pool membership, reaping and scaling.",
+    },
+    "merge-door": {
+        "status": "ACTIVATE",
+        "description": "Merge preflights, door permit, head pinning and confirmed-merge bookkeeping.",
+    },
+    "provider-switch": {
+        "status": "ACTIVATE",
+        "description": "Provider-family availability policy and refusal before invocation.",
+    },
+    "cost-ledger": {
+        "status": "ACTIVATE",
+        "description": "Provider-run pricing, ledger/spool recording and cost aggregation.",
+    },
+    "daily-metrics": {
+        "status": "ACTIVATE",
+        "description": "Per-project daily source collection, catch-up and metric documents.",
+    },
+    "worker-permissions": {
+        "status": "ACTIVATE",
+        "description": "Worker permission profiles, isolation policy and tool/MCP CLI scoping.",
+    },
+    "receipt-pipeline": {
+        "status": "ACTIVATE",
+        "description": "Report conversion and validated, enriched, idempotent receipt append.",
+    },
+    "event-streams": {
+        "status": "ACTIVATE",
+        "description": "Canonical event validation, persistence and stream rotation.",
+    },
+    "control-centre": {
+        "status": "ACTIVATE",
+        "description": "Registered-project lease/heartbeat display and audited queue forwarding.",
+    },
+    "unified-supervisor": {
+        "status": "ACTIVATE",
+        "description": "Periodic runtime checks, lease expiry and anomaly recording.",
+    },
+    "state-aggregator": {
+        "status": "ACTIVATE",
+        "description": "Event-backed per-project snapshots and central activity counts.",
+    },
+    "producer-freshness-monitor": {
+        "status": "ACTIVATE",
+        "description": "Per-key producer cadence checks, job-exit harvesting and freshness reports.",
+    },
+    "wiring-gate": {
+        "status": "ACTIVATE",
+        "description": "Diff and committed-tree caller analysis with advisory or required findings.",
+    },
 }
+
+# Module pages use the canonical subsystem name. M3/M4 found no merged candidates:
+# all thirteen candidates above have distinct pages, so no alias rows are invented.
+SUBSYSTEM_DOCS: Dict[str, str] = {
+    name: f"docs/modules/{name}.md"
+    for name in set(CONFIG_REGISTRY_SUBSYSTEMS) | {e.subsystem for e in CONFIG_REGISTRY.values()}
+}
+SUBSYSTEM_DOCS.update({
+    "docs-bloat": "geschrapt", "test-suite": "geen-module",
+    "cross-project-federation": "niet-gebouwd",
+    "effectiveness-probe-framework": "niet-gebouwd",
+})
+for _subsystem, _metadata in CONFIG_REGISTRY_SUBSYSTEMS.items():
+    _metadata["doc"] = SUBSYSTEM_DOCS[_subsystem]
 
 # A resolver for the per-project DB layer (step 2). Signature: (project_id, key) -> str | None.
 # None until the project_config DAO is wired (a later PR), so step 2 is a no-op today.

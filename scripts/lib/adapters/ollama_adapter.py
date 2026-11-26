@@ -7,10 +7,10 @@ Supports DECISION (structured JSON verdict) and DIGEST (narrative text).
 Streaming: uses an HTTP-line drain that emits CanonicalEvent objects live.
 Tier-2 baseline (text-only); Tier-1 when tool_calls are detected in the stream.
 
-Config via env vars:
+Config via vnx config (explicit constructor arguments take precedence):
   VNX_OLLAMA_HOST    — Ollama base URL  (default: http://localhost:11434)
   VNX_OLLAMA_MODEL   — Model to use     (default: gemma3:27b)
-  VNX_OLLAMA_TIMEOUT — Request timeout  (default: 60s)
+  Request timeout: context override, otherwise 60s
 
 BILLING SAFETY: No Anthropic SDK. HTTP-only via urllib.
 """
@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import sys
 import time
 import urllib.error
@@ -65,10 +64,12 @@ class OllamaAdapter(StreamingDrainerMixin, ProviderAdapter):
     provider_name = "ollama"
     provider_observability_tier = OBSERVABILITY_TIER
 
-    def __init__(self, terminal_id: str) -> None:
+    def __init__(self, terminal_id: str, *, host: Optional[str] = None, model: Optional[str] = None) -> None:
+        import config_runtime
         self._terminal_id = terminal_id
-        self._host  = os.environ.get("VNX_OLLAMA_HOST",  _DEFAULT_HOST).rstrip("/")
-        self._model = os.environ.get("VNX_OLLAMA_MODEL", _DEFAULT_MODEL)
+        self._host = (host if host is not None else config_runtime.get("VNX_OLLAMA_HOST")).rstrip("/")
+        configured, source = config_runtime.get_with_source("VNX_OLLAMA_MODEL")
+        self._model = model if model is not None else (_DEFAULT_MODEL if source == "default" else configured)
         # Context used by _normalize() when called through the mixin's drain_stream()
         self._current_dispatch_id: str = ""
         self._current_terminal_id: str = terminal_id
@@ -130,14 +131,14 @@ class OllamaAdapter(StreamingDrainerMixin, ProviderAdapter):
 
         context keys used:
           capability  : str        — "decision" or "digest" (log only)
-          timeout     : int        — override VNX_OLLAMA_TIMEOUT
+          timeout     : int        — override the 60s default
           terminal_id : str        — terminal for EventStore writes
           dispatch_id : str        — dispatch for EventStore writes
           event_store : EventStore — live event storage (optional)
         """
         timeout = int(
             context.get("timeout")
-            or os.environ.get("VNX_OLLAMA_TIMEOUT", str(_DEFAULT_TIMEOUT))
+            or _DEFAULT_TIMEOUT
         )
         terminal_id = context.get("terminal_id", self._terminal_id)
         dispatch_id = context.get("dispatch_id", "")
@@ -193,7 +194,7 @@ class OllamaAdapter(StreamingDrainerMixin, ProviderAdapter):
         """
         timeout = int(
             context.get("timeout")
-            or os.environ.get("VNX_OLLAMA_TIMEOUT", str(_DEFAULT_TIMEOUT))
+            or _DEFAULT_TIMEOUT
         )
         terminal_id = context.get("terminal_id", self._terminal_id)
         dispatch_id = context.get("dispatch_id", "")

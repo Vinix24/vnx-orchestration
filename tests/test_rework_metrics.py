@@ -33,6 +33,7 @@ class World:
 
     def __init__(self, tmp: Path):
         self.receipts, self.rounds, self.db = tmp / "t0_receipts.ndjson", tmp / "rounds.ndjson", tmp / "qi.db"
+        (tmp / ".vnx-project-id").write_text(PID + "\n")
         assert qdi.bootstrap_qi_db(self.db) is True
         self.lines: list = []
         self.round_lines: list = []

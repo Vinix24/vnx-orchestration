@@ -45,6 +45,7 @@ def _make_args(project_dir: str, strict: bool = False, emit_json: bool = False) 
 
 
 def _make_coordination_db(state_dir: Path, active_count: int = 0, schema_version: int = 10) -> Path:
+    state_dir.mkdir(parents=True, exist_ok=True)
     db_path = state_dir / "runtime_coordination.db"
     conn = sqlite3.connect(str(db_path))
     conn.execute("""
@@ -699,7 +700,7 @@ class TestSchemaVersions:
 
     def test_schema_warn_causes_strict_exit_1(self, tmp_path, monkeypatch):
         project = _make_project(tmp_path)
-        _make_coordination_db(project / ".vnx-data" / "state", schema_version=5)
+        _make_coordination_db(_engine.resolve_data_root(project) / "state", schema_version=5)
         monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path / "home"))
 
         exit_code = vnx_doctor(_make_args(str(project), strict=True))
@@ -802,7 +803,7 @@ class TestWorkerCliProbe:
     def test_missing_worker_cli_does_not_fail_doctor(self, tmp_path, monkeypatch):
         """A missing worker CLI is a WARN, so it must not push non-strict `vnx doctor` to exit 1."""
         project = _make_project(tmp_path)
-        _make_coordination_db(project / ".vnx-data" / "state", schema_version=10)
+        _make_coordination_db(_engine.resolve_data_root(project) / "state", schema_version=10)
         monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path / "home"))
 
         def fake_which(tool):
@@ -936,7 +937,7 @@ class TestVnxDoctorIntegration:
 
     def test_non_strict_exit_0_with_warnings(self, tmp_path, monkeypatch):
         project = _make_project(tmp_path)
-        _make_coordination_db(project / ".vnx-data" / "state", active_count=2)
+        _make_coordination_db(_engine.resolve_data_root(project) / "state", active_count=2)
         monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path / "home"))
 
         exit_code = vnx_doctor(_make_args(str(project), strict=False))

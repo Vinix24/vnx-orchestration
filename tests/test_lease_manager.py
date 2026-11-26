@@ -276,6 +276,26 @@ class TestRecover(_LMTestCase):
 # ---------------------------------------------------------------------------
 
 class TestTTLHelpers(_LMTestCase):
+    def test_q1bb_default_supervisor_tick_does_not_expire_standalone_lease(self):
+        import subprocess
+        from lease_sweep import run
+        self.acquire("T1", dispatch_id="q1bb-expiry", lease_seconds=-1)
+        env = {k: v for k, v in os.environ.items() if k != "VNX_SUPERVISOR_MODE"}
+        env.update(VNX_STATE_DIR=self.state_dir, VNX_DATA_DIR=self.state_dir,
+                   VNX_LOGS_DIR=self.state_dir, SCRIPT_DIR=str(SCRIPT_DIR))
+        tick = subprocess.run(
+            ["bash", "-c", 'source "$1"; _unified_supervisor_lease_sweep_tick',
+             "q1bb", str(SCRIPT_DIR / "lib/dispatcher_supervisor_ticks.sh")],
+            env=env, capture_output=True, text=True, timeout=10,
+        )
+        self.assertEqual(tick.returncode, 0, tick.stderr)
+        self.assertTrue(self.mgr.is_expired_by_ttl("T1"))
+        self.assertEqual(self.mgr.get("T1").state, "leased")
+        self.assertEqual(self._events("T1", "lease_expired"), [])
+        self.assertEqual(run(Path(self.state_dir)), ["T1"])
+        self.assertEqual(self.mgr.get("T1").state, "expired")
+        self.assertEqual(len(self._events("T1", "lease_expired")), 1)
+
     def test_is_expired_by_ttl_false_for_fresh_lease(self):
         self.acquire("T1", dispatch_id="d-001", lease_seconds=600)
         self.assertFalse(self.mgr.is_expired_by_ttl("T1"))

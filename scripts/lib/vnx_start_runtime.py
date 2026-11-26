@@ -131,21 +131,20 @@ class StartConfig:
 
         terminals = {}
         for tid, default_provider, default_model, role, track in [
-            ("T0", PROVIDER_CLAUDE, "default", "orchestrator", ""),
+            ("T0", _provider("VNX_T0_PROVIDER", PROVIDER_CLAUDE), "default", "orchestrator", ""),
             ("T1", _provider("VNX_T1_PROVIDER", PROVIDER_KIMI), "kimi-k3", "worker", "A"),
             ("T2", _provider("VNX_T2_PROVIDER", PROVIDER_KIMI), "kimi-k3", "worker", "B"),
             ("T3", _provider("VNX_T3_PROVIDER", PROVIDER_CLAUDE), "default", "worker", "C"),
         ]:
             raw_provider = default_provider
             provider = PROVIDER_ALIASES.get(raw_provider, PROVIDER_CLAUDE)
-            skip_env = os.environ.get(f"VNX_{tid}_SKIP_PERMISSIONS", "0")
             terminals[tid] = TerminalConfig(
                 terminal_id=tid,
                 provider=provider,
                 model=default_model,
                 role=role,
                 track=track,
-                skip_permissions=(skip_env == "1"),
+                skip_permissions=config_runtime.get_bool(f"VNX_{tid}_SKIP_PERMISSIONS"),
                 extra_flags=t0_flags if tid == "T0" else "",
             )
 

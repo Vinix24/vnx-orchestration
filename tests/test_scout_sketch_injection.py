@@ -269,3 +269,8 @@ def test_selector_no_sidecar_no_scout_item(tmp_path):
     finally:
         selector.close()
     assert "scout_sketch" not in [i.item_class for i in result.items]
+
+
+@pytest.fixture(autouse=True)
+def _explicit_intelligence_project(monkeypatch):
+    monkeypatch.setenv("VNX_PROJECT_ID", "vnx-dev")

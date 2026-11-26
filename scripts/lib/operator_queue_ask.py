@@ -21,12 +21,14 @@ try:
     import tracks as tracks_lib
     from forge_project_target import project_checkout_path
     from project_root import resolve_central_data_dir
+    from daily_metrics.proposal_ledger import LedgerUnreadable, ledger_path, read_events
 except ImportError:  # vnx-silent-except: imported as scripts.lib.operator_queue_ask
     from scripts.lib import operator_queue as oq
     from scripts.lib import operator_queue_steering_verdict as steering
     from scripts.lib import tracks as tracks_lib
     from scripts.lib.forge_project_target import project_checkout_path
     from scripts.lib.project_root import resolve_central_data_dir
+    from scripts.lib.daily_metrics.proposal_ledger import LedgerUnreadable, ledger_path, read_events
 
 BRON = {"promote": 1, "besluit": 2, "vraag": 8}
 FORMS = ("dlv:<id>", "oi:<id>", "track:<id>:<fase>", "config:<sleutel>", "verdict:<id>", "antwoord:<hash>", "pr:<n>", "proposal:<id>")
@@ -156,8 +158,9 @@ def answer(project_id: str, point_id: str, *, quote: str, vastgelegd_door: str, 
 def _answer_ts(project_id: str, pid: str, state_dir: Optional[Path]) -> Optional[str]:
     return next((r["ts"] for r in oq.answers(project_id, state_dir=state_dir) if r.get("point_id") == pid), None)
 
-def _eval_proposal(project_id: str, pid: str, state_dir: Optional[Path]) -> tuple:
-    """ADR-063 decision 27: only an explicit rejection or deferral closes; approval belongs to the terminal CLI."""
+def _eval_proposal(src: _Source, pid: str, proposal_id: str) -> tuple:
+    """Read approval/expiry evidence; only the terminal CLI can approve (ADR-063)."""
+    project_id, state_dir = src.project_id, src.state_dir
     for record in oq.answers(project_id, state_dir=state_dir):
         if record["point_id"] == pid:
             quote = record["citaat"]
@@ -165,6 +168,24 @@ def _eval_proposal(project_id: str, pid: str, state_dir: Optional[Path]) -> tupl
             if outcome is not None:  # Every other answer stays open; no approval is inferred.
                 return ("closed", outcome, f"{record['ts']}: {quote}", "t0_namens_operator")
             break
+    if not re.fullmatch(_ID, project_id):
+        raise ValueError("invalid proposal project id")
+    store = (Path(state_dir) if state_dir is not None else src.sdir).resolve() / "daily_metrics" / project_id
+    path = ledger_path(store).resolve()
+    if path.parent != store:
+        raise ValueError("proposal ledger escapes project store")
+    events = [e for e in read_events(path)
+              if e.get("project_id") == project_id and e.get("proposal_id") == proposal_id]
+    if not any(e.get("event") == "proposed" for e in events):
+        return ("unknown", f"proposal {proposal_id} missing from {path}")
+    for event in events:
+        if event.get("event") not in ("proposed", "approved", "expired", "verdict"):
+            return ("unknown", f"proposal {proposal_id}: invalid event")
+        outcome = {"approved": "beantwoord", "expired": "vervallen"}.get(event.get("event"))
+        if outcome is not None:
+            if oq.parse_ts(event.get("recorded_at")) is None:
+                return ("unknown", f"proposal {proposal_id}: invalid recorded_at")
+            return ("closed", outcome, event["recorded_at"], "onbekend")
     return _OPEN
 
 class _Source:
@@ -321,7 +342,7 @@ def _evaluate(src: _Source, project_id: str, point: Dict[str, Any], state_dir: O
         return ("unknown", "ref is not readable")
     try:
         if kind == "proposal":
-            return _eval_proposal(project_id, point["point_id"], state_dir)
+            return _eval_proposal(src, point["point_id"], parts[0])
         if kind == "antwoord":
             ts = _answer_ts(project_id, point["point_id"], state_dir)
             return _OPEN if ts is None else ("closed", "beantwoord", ts, "t0_namens_operator")
@@ -331,7 +352,7 @@ def _evaluate(src: _Source, project_id: str, point: Dict[str, Any], state_dir: O
             return evaluator(src, *parts, point)
         if evaluator:
             return evaluator(src, *parts)
-    except (OSError, ValueError, KeyError, TypeError, sqlite3.Error, oq.QueueRefused, oq.QueueUnreadable) as exc:  # vnx-silent-except: an unreadable source is an unknown line
+    except (OSError, ValueError, KeyError, TypeError, sqlite3.Error, oq.QueueRefused, oq.QueueUnreadable, LedgerUnreadable) as exc:  # vnx-silent-except: an unreadable source is an unknown line
         return ("unknown", f"source unreadable ({type(exc).__name__}: {exc})")
     return _OPEN
 

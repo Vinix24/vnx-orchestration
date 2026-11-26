@@ -2920,7 +2920,7 @@ def _deliverable_metadata(args: argparse.Namespace) -> dict[str, Any]:
     itself names no paths (the schema/security/irreversible case for the second seat).
     """
     meta: dict[str, Any] = {"title": args.title, "deliverable": True}
-    for key in ("task_class", "routing_floor"):
+    for key in ("task_class", "routing_floor", "proposal_id"):
         if getattr(args, key, None):
             meta[key] = getattr(args, key)
     paths = _split_dispatch_paths(getattr(args, "dispatch_paths", None))
@@ -2980,12 +2980,26 @@ def _apply_deliverable_scope_rule(
     return True
 
 
+def _existing_proposal_deliverable(conn, dispatch_id, project_id, track_id, output_kind, metadata) -> bool:
+    """Internal proposal retries match the exact tenant/id and original specification under the DB lock."""
+    if "proposal_id" not in metadata:
+        return False
+    row = conn.execute("SELECT * FROM dispatches WHERE dispatch_id = ? AND project_id = ?",
+                       (dispatch_id, project_id)).fetchone()
+    if row is None:
+        return False
+    stored = json.loads(row["metadata_json"])
+    if (not isinstance(stored, dict) or row["track"] != track_id or row["output_kind"] != output_kind
+            or any(stored.get(k) != v for k, v in metadata.items())):
+        raise ValueError(f"{dispatch_id}: proposal deliverable conflict")
+    return True
+
+
 def cmd_deliverable_add(args: argparse.Namespace) -> int:
     state_dir = _resolve_state_dir(args.state_dir)
     project_id = args.project_id
     track_id = args.objective
     output_kind = args.output_kind
-    title = args.title
     task_class = getattr(args, "task_class", None)
 
     try:
@@ -3003,7 +3017,7 @@ def cmd_deliverable_add(args: argparse.Namespace) -> int:
         )
         return 1
 
-    dispatch_id = f"dlv-{uuid.uuid4().hex[:12]}"
+    dispatch_id = getattr(args, "dispatch_id", None) or f"dlv-{uuid.uuid4().hex[:12]}"
     output_ref = f"{output_kind}:{dispatch_id}"
     metadata_dict = _deliverable_metadata(args)
     metadata = json.dumps(metadata_dict)
@@ -3013,6 +3027,8 @@ def cmd_deliverable_add(args: argparse.Namespace) -> int:
     try:
         # The insert and every dependency edge share one write lock: a refused edge rolls back the deliverable.
         conn.execute("BEGIN IMMEDIATE")
+        if _existing_proposal_deliverable(conn, dispatch_id, project_id, track_id, output_kind, metadata_dict):
+            return 0
         has_oaa = _has_col(conn, "dispatches", "operator_approved_at")
         has_ok = _has_col(conn, "dispatches", "output_kind")
         has_or = _has_col(conn, "dispatches", "output_ref")
@@ -3040,7 +3056,7 @@ def cmd_deliverable_add(args: argparse.Namespace) -> int:
             dispatch_id=dispatch_id,
             from_state=None,
             to_state="proposed",
-            reason=f"deliverable add: {title!r}",
+            reason=f"deliverable add: {args.title!r}",
             project_id=project_id,
             **_derived_actor("operator", metadata=delivery_identity_fields(dispatch_id, project_id)),
         )

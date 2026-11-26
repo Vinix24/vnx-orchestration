@@ -233,6 +233,7 @@ def test_quality_db_init_idempotent_create_index(tmp_path):
 
     _SCHEMA = Path(__file__).resolve().parent.parent / "schemas" / "quality_intelligence.sql"
     db = tmp_path / "qi_test.db"
+    (tmp_path / ".vnx-project-id").write_text("test-project\n")
 
     assert bootstrap_qi_db(db, schema_file=_SCHEMA) is True
     # Second run — must not raise because of existing index
@@ -247,6 +248,7 @@ def test_quality_db_init_backup_failure_non_fatal(tmp_path, monkeypatch):
 
     # Pre-create a DB so backup_existing_db would be called
     db = tmp_path / "qi_backup_test.db"
+    (tmp_path / ".vnx-project-id").write_text("test-project\n")
     assert qd.bootstrap_qi_db(db, schema_file=_SCHEMA) is True
 
     # Monkeypatch backup to always fail

@@ -49,6 +49,12 @@ CREATE TABLE coordination_events (
 _COLS = "dispatch_id, receipt_id, commit_sha, pr_number, feature_plan_pr, trace_token, chain_status, gaps_json"
 
 
+@pytest.fixture(autouse=True)
+def _fixture_project(monkeypatch):
+    """Legacy stores in these characterisations have an explicit owner."""
+    monkeypatch.setenv("VNX_PROJECT_ID", "vnx-dev")
+
+
 def _registry_conn(path: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(str(path))
     conn.executescript(_REGISTRY_SCHEMA)
@@ -221,13 +227,36 @@ def test_reconcile_full_scan_separate_conn_then_idempotent(tmp_path):
     assert rp.reconcile_commit_provenance(repo, conn) == {**_ALL4, "pr_ref_linked": 0, "pr_id_linked": 0}
 
 
-def test_reconcile_explicit_project_id_scopes_pr_id(tmp_path):
+@pytest.mark.parametrize("ambient", [None, "vnx-dev"])
+def test_reconcile_explicit_project_id_scopes_pr_id(tmp_path, monkeypatch, ambient):
+    if ambient is None:
+        monkeypatch.delenv("VNX_PROJECT_ID")
     repo = _repo(tmp_path)
     sd = _state(repo)
-    result = rp.reconcile_commit_provenance(repo, _registry_conn(tmp_path / "r.db"), project_id="r40-char-absent")
+    conn = _registry_conn(tmp_path / "r.db")
+    result = rp.reconcile_commit_provenance(repo, conn, project_id="r40-char-absent")
+    assert {r[0] for r in conn.execute("SELECT project_id FROM coordination_events")} == {"r40-char-absent"}
     assert (result["pr_ref_linked"], result["pr_id_linked"]) == (1, 0)
     qi = sqlite3.connect(str(sd / "quality_intelligence.db"))
     assert qi.execute("SELECT pr_id FROM dispatch_metadata WHERE dispatch_id='D-a'").fetchone() == (None,)
+
+
+@pytest.mark.parametrize("project_id", [None, "", "INVALID", "../other", "/other"])
+@pytest.mark.parametrize("operation", ["register", "reconcile"])
+def test_provenance_refuses_unresolved_project(tmp_path, monkeypatch, project_id, operation):
+    from project_scope import TenantUnresolved
+
+    monkeypatch.delenv("VNX_PROJECT_ID")
+    conn = _registry_conn(tmp_path / "r.db")
+    repo = _repo(tmp_path)
+    with pytest.raises(TenantUnresolved):
+        if operation == "register":
+            rp.register_provenance_link(conn, dispatch_id="D-a", project_id=project_id)
+        else:
+            rp.reconcile_commit_provenance(repo, conn, project_id=project_id)
+    assert _events(conn) == []
+    conn.rollback()
+    assert _rows(conn) == []
 
 
 def test_reconcile_borrowed_conn_is_never_committed(tmp_path):
