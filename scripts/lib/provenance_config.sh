@@ -2,7 +2,7 @@
 # Shared by CI, the hook installer and commit-msg. Only a complete 0/1 pair is usable.
 vnx_read_provenance_config() {
     local config
-    config="$("$1/bin/vnx" config get --raw VNX_PROVENANCE_ENFORCEMENT VNX_PROVENANCE_LEGACY_ACCEPTED)" || config=""
+    config="$(python3 "$1/scripts/lib/trace_token_validator.py" config)" || config=""
     case "$config" in
         $'0\n'[01]|$'1\n'[01])
             ENFORCEMENT="${config%%$'\n'*}"
