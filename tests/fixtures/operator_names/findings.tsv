@@ -161,7 +161,6 @@ b8d60e8524cf7180	scripts/lib/dispatch_project_guard.sh	vnx-dev	1	te_repareren	Do
 a75f1268bd5bc9a6	scripts/lib/gate_findings_bridge.py	vnx-dev	1	legacy_tenant_reader	Comment or docstring stating that this path refuses to default to vnx-dev (ADR-007); prose, no behaviour	
 b513d5b3731c55b7	scripts/lib/harness_run_cost.py	vnx-dev	1	te_repareren	ledger_project_id falls back to vnx-dev when neither the store nor env names a tenant (stamps the cost row)	AG-1
 afa63c3cb59cdb1b	scripts/lib/hook_coverage.py	vnx-dev	1	te_repareren	Hook coverage identifies the fabric source repo by the literal project id vnx-dev	AG-5
-92e2fa78e8d47aae	scripts/lib/injection_effectiveness_probe.py	vnx-dev	1	te_repareren	Probe reads its project from env with a vnx-dev fallback	AG-1
 ac8222ca4f054c1a	scripts/lib/intelligence_injection.py	vnx-dev	1	te_repareren	Injection falls back to _pid='vnx-dev' when the dispatch context has no project	AG-1
 1c950cc09685c545	scripts/lib/migrate_schema.py	vnx-dev	1	legacy_tenant_reader	Comment on preserving the original DEFAULT clause (e.g. 'vnx-dev') when rebuilding a table	
 36388c51ffa330d5	scripts/lib/migration_inventory.py	vnx-dev	1	legacy_tenant_reader	Docstring describing the legacy column default the inventory looks for	
@@ -207,7 +206,6 @@ f9624877d6f5bf6f	scripts/lib/tenant_stamping.py	vnx-dev	1	legacy_tenant_reader	W
 fb35e418bd98c7a7	scripts/lib/tenant_stamping.py	vnx-dev	1	legacy_tenant_reader	W1 tenant-stamping tool: vnx-dev is the legacy sentinel it detects and re-stamps to the owning project	
 6e2868bb06a24ec5	scripts/lib/tracks.py	vnx-dev	1	legacy_tenant_reader	Comment or docstring stating that this path refuses to default to vnx-dev (ADR-007); prose, no behaviour	
 2dc415b697046803	scripts/lib/vnx_tagger.py	vnx-dev	1	te_repareren	tagging_events is created by the tagger with project_id DEFAULT 'vnx-dev'; new stores of another project get the sentinel as column default	AG-1
-83ca7eac9ad5bddc	scripts/lib/vnx_tagger.py	vnx-dev	1	te_repareren	Tagger audit event stamps vnx-dev when a row carries no project and VNX_PROJECT_ID is unset (an explicit but guessed stamp)	AG-1
 1208a1eef40b4f5b	scripts/log_dispatch_metadata.py	vnx-dev	1	legacy_tenant_reader	Comment or docstring stating that this path refuses to default to vnx-dev (ADR-007); prose, no behaviour	
 054371b9bd420763	scripts/migrate_future_system.py	vnx-dev	1	legacy_tenant_reader	Migration tool that refuses to default to vnx-dev and re-stamps the legacy sentinel to the resolved project	
 2a4460b7012f0206	scripts/migrate_future_system.py	vnx-dev	1	legacy_tenant_reader	Migration tool that refuses to default to vnx-dev and re-stamps the legacy sentinel to the resolved project	

@@ -211,3 +211,63 @@ class TestSystemHealthEndpoint:
             assert comp in result["components"], f"Missing component: {comp}"
             assert "status" in result["components"][comp]
             assert result["components"][comp]["status"] in ("healthy", "degraded", "dead")
+
+@pytest.fixture(autouse=True)
+def _explicit_project_source(monkeypatch):
+    monkeypatch.setenv("VNX_PROJECT_ID", "vnx-dev")
+@pytest.mark.parametrize("source", ["env", "marker", "explicit"])
+def test_writers_refuse_then_resolve(tmp_path, monkeypatch, source):
+    import intelligence_persist as ip, injection_effectiveness_probe as probe, vnx_tagger as tagger
+    from project_scope import TenantUnresolved
+    from governance_signal_extractor import GovernanceSignal, SignalCorrelation
+    db = tmp_path / "quality_intelligence.db"
+    TestIntelligencePersist()._create_test_db(db)
+    with sqlite3.connect(db) as conn:
+        for table in ("success_patterns", "antipatterns"):
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN tags TEXT")
+        conn.execute("INSERT INTO success_patterns (pattern_type,category,title,description,pattern_data) VALUES ('approach','governance','fix dispatch','gate','{}')")
+    monkeypatch.delenv("VNX_PROJECT_ID")
+    monkeypatch.setenv("VNX_TAGGER_ENABLED", "1")
+    monkeypatch.setenv("VNX_OVERRIDE_PROVIDER_DEEPSEEK", "off")
+    signals = [GovernanceSignal(k, "fix dispatch gate", "info", SignalCorrelation(dispatch_id="d-1"))
+               for k in ("gate_success", "gate_failure")]
+    writes = [lambda **kw: ip.persist_signals_to_db(signals, db, **kw),
+              lambda **kw: tagger.enrich_pattern_tags(db, **kw),
+              lambda **kw: ip.update_confidence_from_outcome(db, "d-1", "T1", "success", **kw),
+              lambda **kw: ip.shadow_grounding_compare(db, [], **kw),
+              lambda **kw: probe.write_tuning_proposals([], tmp_path / "pending.json", **kw)]
+    before = db.read_bytes()
+    for write in writes:
+        with pytest.raises(TenantUnresolved):
+            write()
+        assert db.read_bytes() == before and not (tmp_path / "pending.json").exists()
+    if source == "env":
+        monkeypatch.setenv("VNX_PROJECT_ID", "other")
+    if source == "marker":
+        (tmp_path / ".vnx-project-id").write_text("other\n")
+    for write in writes:
+        write(**({"project_id": "other"} if source == "explicit" else {}))
+    with sqlite3.connect(db) as conn:
+        for table in ("success_patterns", "antipatterns", "tagging_events"):
+            assert conn.execute(f"SELECT DISTINCT project_id FROM {table} WHERE project_id IS NOT NULL").fetchall() == [("other",)]
+    assert json.loads(probe._tuning_proposals_events_path().read_text().splitlines()[-1])["project_id"] == "other"
+
+@pytest.mark.parametrize("with_receipt", [True, False])
+def test_daemon_project_refusal_continues(tmp_path, monkeypatch, caplog, with_receipt):
+    from intelligence_daemon import GovernanceDigestRunner
+    from project_id_refusals import project_id_refusal_section
+    db, receipts = tmp_path / "quality_intelligence.db", tmp_path / "t0_receipts.ndjson"
+    TestIntelligencePersist()._create_test_db(db)
+    monkeypatch.delenv("VNX_PROJECT_ID")
+    monkeypatch.setenv("VNX_TAGGER_ENABLED", "1")
+    event = json.dumps({"event_type": "gate_pass", "gate": "review", "dispatch_id": "d-1"}) + "\n"
+    receipts.write_text(event if with_receipt else "")
+    runner, before = GovernanceDigestRunner(tmp_path), db.read_bytes()
+    assert runner.run_once() is False and db.read_bytes() == before
+    assert any(r.levelname == "ERROR" and "project_id_unresolved" in r.message for r in caplog.records)
+    assert project_id_refusal_section(tmp_path, home=tmp_path)["contexts"] == {"intelligence_daemon": 1}
+    monkeypatch.setenv("VNX_PROJECT_ID", "other")
+    receipts.write_text(event)
+    assert runner.run_once() is True
+    with sqlite3.connect(db) as conn:
+        assert conn.execute("SELECT project_id FROM success_patterns").fetchall() == [("other",)]

@@ -24,12 +24,12 @@ from typing import Any, Dict, List, Tuple
 _LOG = logging.getLogger(__name__)
 
 try:
-    from project_scope import current_project_id
+    from project_scope import resolve_stamp_project_id
     from pattern_upsert import upsert_antipattern, upsert_success_pattern
 except ImportError:  # pragma: no cover - lib path bootstrap
     import sys as _sys
     _sys.path.insert(0, str(Path(__file__).resolve().parent))
-    from project_scope import current_project_id
+    from project_scope import resolve_stamp_project_id
     from pattern_upsert import upsert_antipattern, upsert_success_pattern
 
 
@@ -147,6 +147,7 @@ def _resolve_grounded_patterns(
 def persist_signals_to_db(
     signals: List[Any],
     db_path: Path,
+    project_id: str | None = None,
 ) -> Dict[str, int]:
     """Persist governance signals to quality_intelligence.db.
 
@@ -160,6 +161,7 @@ def persist_signals_to_db(
     if not signals or not db_path.exists():
         return {"patterns_upserted": 0, "antipatterns_upserted": 0, "metadata_updated": 0}
 
+    project_id = resolve_stamp_project_id(project_id, db_path)
     conn = sqlite3.connect(str(db_path), timeout=10.0)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode = WAL")
@@ -182,19 +184,19 @@ def persist_signals_to_db(
 
             if sig_type == "gate_success":
                 patterns_upserted += _upsert_success_pattern(
-                    conn, content, feature_id, dispatch_id, now,
+                    conn, content, feature_id, dispatch_id, now, project_id,
                 )
 
             elif sig_type in ("gate_failure", "queue_anomaly"):
                 antipatterns_upserted += _upsert_antipattern(
                     conn, sig_type, content, severity, dispatch_id,
-                    defect_family, now,
+                    defect_family, now, project_id,
                 )
 
             if dispatch_id and sig_type in ("gate_success", "gate_failure"):
                 outcome = "success" if sig_type == "gate_success" else "failure"
                 metadata_updated += _update_dispatch_outcome(
-                    conn, dispatch_id, outcome, now,
+                    conn, dispatch_id, outcome, now, project_id,
                 )
 
         conn.commit()
@@ -217,6 +219,7 @@ def _upsert_success_pattern(
     feature_id: str,
     dispatch_id: str,
     now: str,
+    project_id: str | None = None,
 ) -> int:
     """Insert or update a success_pattern from a gate_success signal.
 
@@ -227,7 +230,7 @@ def _upsert_success_pattern(
     title = content[:120] if content else "Gate passed"
     result = upsert_success_pattern(
         conn,
-        project_id=current_project_id(),
+        project_id=resolve_stamp_project_id(project_id, conn.execute("PRAGMA database_list").fetchone()[2] or None),
         pattern_type="approach",
         title=title,
         category="governance",
@@ -257,6 +260,7 @@ def _upsert_antipattern(
     dispatch_id: str,
     defect_family: str,
     now: str,
+    project_id: str | None = None,
 ) -> int:
     """Insert or update an antipattern from a gate_failure or queue_anomaly signal.
 
@@ -269,7 +273,7 @@ def _upsert_antipattern(
         db_severity = "medium"
     upsert_antipattern(
         conn,
-        project_id=current_project_id(),
+        project_id=resolve_stamp_project_id(project_id, conn.execute("PRAGMA database_list").fetchone()[2] or None),
         pattern_type="approach",
         title=title,
         category="governance",
@@ -290,10 +294,11 @@ def _update_dispatch_outcome(
     dispatch_id: str,
     outcome: str,
     now: str,
+    project_id: str,
 ) -> int:
     """Update dispatch_metadata outcome_status if the row exists.
 
-    Scoped to ``current_project_id()`` so a dispatch_id collision across
+    Scoped to the resolved project so a dispatch_id collision across
     tenants does not let one project overwrite another's outcome.
     """
     if _has_column(conn, "dispatch_metadata", "project_id"):
@@ -301,7 +306,7 @@ def _update_dispatch_outcome(
             "UPDATE dispatch_metadata SET outcome_status = ?, completed_at = ? "
             "WHERE dispatch_id = ? AND outcome_status IS NULL "
             "AND project_id = ?",
-            (outcome, now, dispatch_id, current_project_id()),
+            (outcome, now, dispatch_id, project_id),
         )
     else:
         cur = conn.execute(
@@ -317,6 +322,7 @@ def update_confidence_from_outcome(
     dispatch_id: str,
     terminal: str,
     status: str,
+    project_id: str | None = None,
 ) -> Dict[str, int]:
     """Update pattern confidence scores based on dispatch outcome.
 
@@ -350,6 +356,7 @@ def update_confidence_from_outcome(
     if not db_path.exists():
         return {"boosted": 0, "decayed": 0}
 
+    project_id = resolve_stamp_project_id(project_id, db_path)
     # Local import to keep the module standalone-importable.
     from confidence_reconcile import beta_score, SUCCESS_PATTERN_PREFIX
 
@@ -361,7 +368,6 @@ def update_confidence_from_outcome(
     boosted = 0
     decayed = 0
     net_change = 0.0
-    project_id = current_project_id()
     sp_has_project = _has_column(conn, "success_patterns", "project_id")
     pu_has_project = _has_column(conn, "pattern_usage", "project_id")
     ce_has_project = _has_column(conn, "confidence_events", "project_id")
@@ -577,6 +583,7 @@ def _projected_conf(
 def shadow_grounding_compare(
     db_path: Path,
     dispatches: List[Dict[str, Any]],
+    project_id: str | None = None,
 ) -> Dict[str, Any]:
     """Read-only V1 vs V2 confidence divergence report.
 
@@ -641,7 +648,7 @@ def shadow_grounding_compare(
     conn = sqlite3.connect(str(db_path), timeout=10.0)
     conn.row_factory = sqlite3.Row
     try:
-        project_id = current_project_id()
+        project_id = resolve_stamp_project_id(project_id, db_path)
         sp_has_project = _has_column(conn, "success_patterns", "project_id")
         junction_available = _has_table(conn, "dispatch_pattern_offered")
         pu_table_exists = _has_table(conn, "pattern_usage")
