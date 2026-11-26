@@ -358,9 +358,9 @@ class TestB4LogArtifacts:
         assert "TOOL_FAIL" in content
         assert "rate limit exceeded" in content
 
-    def test_path_traversal_run_id_confined_to_artifact_dir(self, artifact_dir):
+    def test_path_traversal_run_id_rejected(self, artifact_dir):
         traversal_id = "../../etc/run-escape"
-        path = write_log_artifact(
+        error = pytest.raises(ValueError, write_log_artifact,
             artifact_dir=artifact_dir,
             run_id=traversal_id,
             dispatch_id="dispatch-traversal",
@@ -371,21 +371,18 @@ class TestB4LogArtifacts:
             exit_code=0,
             duration_seconds=1.0,
         )
-        assert path.parent.resolve() == artifact_dir.resolve()
-        assert ".." not in path.name
-        assert "/" not in path.name
+        error.match("invalid run_id")
+        assert not list(artifact_dir.iterdir())
 
-    def test_path_traversal_output_artifact_confined_to_artifact_dir(self, artifact_dir):
+    def test_path_traversal_output_artifact_rejected(self, artifact_dir):
         traversal_id = "../sneaky/run-out"
-        path = write_output_artifact(
+        error = pytest.raises(ValueError, write_output_artifact,
             artifact_dir=artifact_dir,
             run_id=traversal_id,
             stdout="sensitive data",
         )
-        assert path is not None
-        assert path.parent.resolve() == artifact_dir.resolve()
-        assert ".." not in path.name
-        assert "/" not in path.name
+        error.match("invalid run_id")
+        assert not list(artifact_dir.iterdir())
 
 
 # ---------------------------------------------------------------------------
@@ -561,7 +558,7 @@ class TestB7ProvenanceChain:
             result = adapter.execute(
                 dispatch_id=dispatch_id,
                 target_id="headless-prov",
-                target_type="headless_claude_cli",
+                target_type="custom_headless_cli",
                 task_class="research_structured",
             )
             assert result.success is True
@@ -689,7 +686,7 @@ class TestB10EndToEnd:
             result = adapter.execute(
                 dispatch_id=dispatch_id,
                 target_id="headless-e2e",
-                target_type="headless_claude_cli",
+                target_type="custom_headless_cli",
                 task_class="research_structured",
             )
 

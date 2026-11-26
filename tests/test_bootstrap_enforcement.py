@@ -251,6 +251,7 @@ class TestRcRegisterFailClosed(unittest.TestCase):
         env = {k: v for k, v in os.environ.items()}
         env["VNX_STATE_DIR"] = "/does/not/exist"
         env["VNX_DATA_DIR"] = "/does/not/exist"
+        env["VNX_PROJECT_ID"] = "bootstrap-test"
         result = subprocess.run(
             [
                 sys.executable,
@@ -276,6 +277,7 @@ class TestRcRegisterFailClosed(unittest.TestCase):
             env["VNX_STATE_DIR"] = tmp
             env["VNX_DATA_DIR"] = tmp
             env["VNX_RUNTIME_PRIMARY"] = "0"
+            env["VNX_PROJECT_ID"] = "bootstrap-test"
             result = subprocess.run(
                 [
                     sys.executable,
