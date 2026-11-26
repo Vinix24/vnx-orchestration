@@ -4,6 +4,8 @@ Mines receipt usage and failures to adjust confidence and propose prevention rul
 
 Background: [Self-learning loop](../intelligence/SELF_LEARNING_LOOP.md).
 
+Intelligence persistence, tagger audit writes and injection tuning proposals resolve project attribution with `resolve_stamp_project_id`: an explicit project wins; otherwise the destination store's layout, marker and environment must agree. With no valid source they raise `TenantUnresolved` before writing, without a `vnx-dev` fallback. The intelligence daemon skips that cycle, logs ERROR `project_id_unresolved` and records one refusal under `intelligence_daemon` for the 24-hour `vnx doctor` counter; later cycles continue normally. Schema defaults remain unchanged and inserts name `project_id` explicitly.
+
 ## Entry points
 
 [`scripts/learning_loop.py::LearningLoop.daily_learning_cycle`](../../scripts/learning_loop.py); [`scripts/learning_loop.py::evaluate_activation_gate`](../../scripts/learning_loop.py).

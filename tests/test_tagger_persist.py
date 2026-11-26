@@ -66,7 +66,8 @@ def test_merge_accepts_list_directly():
 # migration v25
 # ---------------------------------------------------------------------------
 
-def test_migration_v25_adds_tags_columns(tmp_path):
+def test_migration_v25_adds_tags_columns(tmp_path, monkeypatch):
+    monkeypatch.setenv("VNX_PROJECT_ID", "test-project")
     from quality_db_init import bootstrap_qi_db, HIGHEST_QI_VERSION
     db = tmp_path / "qi.db"
     (tmp_path / ".vnx-project-id").write_text("test-project\n")
@@ -160,3 +161,7 @@ def test_enrich_missing_tags_column_skipped(tmp_path, monkeypatch):
     # No tags column → that table is skipped; never raises.
     result = vnx_tagger.enrich_pattern_tags(db)
     assert "success_patterns" not in result
+
+@pytest.fixture(autouse=True)
+def _explicit_project_source(monkeypatch):
+    monkeypatch.setenv("VNX_PROJECT_ID", "vnx-dev")
