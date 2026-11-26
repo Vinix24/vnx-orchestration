@@ -1054,7 +1054,7 @@ Each skill has a `SKILL.md` with YAML frontmatter (required for Codex CLI discov
 
 Memory is where most agent systems are weakest. Most bolt a vector store onto a stateless model and call it memory. I treat memory as a governed state machine with three tenses, each with its own store and its own audit guarantees.
 
-The PAST is append-only NDJSON receipts: a forensic ledger of every dispatch, gate, and merge, with hash-chain verification tooling (`audit_chain`) available over it. The chain is opt-in per project (`VNX_CHAIN_RECEIPTS`) and off by default; the main ledger is unchained today, designed for epoch rotation once enabled ([ADR-029](../governance/decisions/ADR-029-hashchain-epoch-rotation.md)). The ledger itself is forensic, not lossy, and is in production now. Learning and dreaming read it; they change nothing without an operator approval.
+The PAST is append-only NDJSON receipts: a forensic ledger of every dispatch, gate, and merge, with hash-chain verification tooling (`audit_chain`) available over it. The chain is opt-in per project (`VNX_HASH_CHAIN_REQUIRED`) and off by default; the main ledger is unchained today, designed for epoch rotation once enabled ([ADR-029](../governance/decisions/ADR-029-hashchain-epoch-rotation.md)). The ledger itself is forensic, not lossy, and is in production now. Learning and dreaming read it; they change nothing without an operator approval.
 
 The CURRENT is `runtime_coordination.db` (SQLite WAL): real-time orchestration state, leases, tracks, and dispatch status that any terminal can read for situational awareness. The `dispatches` table is ADR-007 tenant-scoped on a composite `UNIQUE(dispatch_id, project_id)`, rebuilt in place by a crash-safe migration (#859).
 

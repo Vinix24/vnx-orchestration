@@ -35,6 +35,7 @@ def store(tmp_path, monkeypatch):
 
     def put(state, value):
         state.mkdir(exist_ok=True)
+        (state / ".vnx-project-id").write_text("pr6h\n")
         with sqlite3.connect(state / "runtime_coordination.db") as conn:
             config_store_db.set_config(conn, "pr6h", KEY, value, actor="test", approval_id="pr6h")
     return put
@@ -89,7 +90,7 @@ def test_retired_flag_has_no_environment_readers():
 
 
 @pytest.mark.parametrize("has_project", [False, True])
-def test_explicit_store_receipts_have_no_config_noise(store, tmp_path, monkeypatch, capsys, caplog, has_project):
+def test_explicit_store_receipts_warn_only_without_project(store, tmp_path, monkeypatch, capsys, caplog, has_project):
     monkeypatch.delenv("VNX_PROJECT_ID")
     monkeypatch.setenv(KEY, "0")
     if has_project:
@@ -99,8 +100,10 @@ def test_explicit_store_receipts_have_no_config_noise(store, tmp_path, monkeypat
     with caplog.at_level("DEBUG", logger="config_runtime"):
         for n in range(2):
             _append_one(ledger, {"event_type": "test_event", "dispatch_id": f"pr6h-{n}"})
-    assert runtime.wire_status().cause == (None if has_project else "no_project")
-    assert not any(e["code"] == "receipt_config" for e in _assert_all_structured(capsys.readouterr().err))
+    warnings = [e for e in _assert_all_structured(capsys.readouterr().err) if e["code"] == "receipt_config"]
+    assert len(warnings) == (0 if has_project else 2)
+    if warnings:
+        assert all(KEY in e["message"] and str(tmp_path) in e["message"] for e in warnings)
     entries = [json.loads(line) for line in ledger.read_text().splitlines()]
     assert len(entries) == 2
     assert all(("prev_hash" in entry) is has_project for entry in entries)

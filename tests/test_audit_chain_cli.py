@@ -2,7 +2,7 @@
 
 Bug: ``verify_chain()`` reports ``status="unchained"`` for a ledger where no
 entry carries ``prev_hash`` — correct in isolation (chaining is default-off
-fleet-wide, VNX_CHAIN_RECEIPTS). But the CLI wrapper in audit_chain.py turned
+fleet-wide, VNX_HASH_CHAIN_REQUIRED). But the CLI wrapper in audit_chain.py turned
 that into ``{"verified": true, "status": "unchained"}`` with exit code 0. A
 caller that reads only the exit code or only the ``verified`` field sees a
 green "chain is fine" result for a ledger that was never chained at all —

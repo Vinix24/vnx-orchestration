@@ -219,7 +219,7 @@ def test_chain_survives_normal_append(tmp_path):
 def test_verify_chain_unchained_no_prev_hash_is_ok(tmp_path):
     """Plain NDJSON without any prev_hash → status 'unchained', exit 0 equivalent.
 
-    This is the default state when VNX_CHAIN_RECEIPTS is off.  Must NOT be
+    This is the default state when VNX_HASH_CHAIN_REQUIRED is off.  Must NOT be
     reported as broken or verified — it is simply not chained.
     """
     p = tmp_path / "plain.ndjson"
@@ -288,7 +288,7 @@ def test_verify_chain_partial_chain_is_broken(tmp_path):
 def test_verify_chain_first_unchained_rest_linked_is_broken(tmp_path):
     """ADR-029 naive-flip guard: first entry has no prev_hash, a later entry
     hash-links correctly to its predecessor, but there is NO chain_epoch_start
-    marker. This is exactly the 'flipped VNX_CHAIN_RECEIPTS without running the
+    marker. This is exactly the 'flipped VNX_HASH_CHAIN_REQUIRED without running the
     seal' footgun — it must be broken, not silently accepted as segmented."""
     p = tmp_path / "first-unchained.ndjson"
     first = {"seq": 0, "id": "plain-0"}
@@ -461,7 +461,7 @@ from append_receipt_internals.idempotency import (  # noqa: E402
 
 
 def test_t19_schema_version_transition_mid_chain_stays_verified(tmp_path, monkeypatch):
-    """T19: with VNX_CHAIN_RECEIPTS=1, a ledger transitioning from
+    """T19: with VNX_HASH_CHAIN_REQUIRED=1, a ledger transitioning from
     schema_version-absent to schema_version: 2 mid-chain stays
     verified/verified-segmented — the PR-3 writer unification does not change
     hash-chain behavior; ndjson_hash_chain.py itself is untouched (ADR-035 §7)."""
@@ -495,7 +495,7 @@ def test_t19_schema_version_transition_mid_chain_stays_verified(tmp_path, monkey
 
 
 def test_t21_path1_and_path2_concurrent_writes_never_fork(tmp_path, monkeypatch):
-    """T21: with VNX_CHAIN_RECEIPTS=1, a Path-1 write (governance_emit.
+    """T21: with VNX_HASH_CHAIN_REQUIRED=1, a Path-1 write (governance_emit.
     emit_dispatch_receipt) and a Path-2 write (_write_receipt_under_lock,
     the shape append_receipt_payload feeds it) firing concurrently never
     produce two entries sharing the same prev_hash — the shared-lock

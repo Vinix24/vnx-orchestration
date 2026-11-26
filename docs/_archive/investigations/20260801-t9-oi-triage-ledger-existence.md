@@ -8,7 +8,7 @@ Twaalf open items getoetst op een verse worktree vanaf origin/main, elk gereprod
 
 ## Verdicts
 
-- **OI-628 | ACHTERHAALD** — lokale sidecar-anchor vervangen door ADR-034 git-anchor (implementatie aanwezig, nog niet geactiveerd: VNX_CHAIN_RECEIPTS default-off, governance/ nog niet gevuld). De 3 codex-holes (deletion-fallback, append-forgery-last-match, seal-race) zijn structureel dicht.
+- **OI-628 | ACHTERHAALD** — lokale sidecar-anchor vervangen door ADR-034 git-anchor (implementatie aanwezig, nog niet geactiveerd: VNX_HASH_CHAIN_REQUIRED default-off, governance/ nog niet gevuld). De 3 codex-holes (deletion-fallback, append-forgery-last-match, seal-race) zijn structureel dicht.
 - **OI-655 | ACHTERHAALD** — contract-injectie live sinds 2026-06-23; post-OI (07-17 window, 07-27/28 govern-synthese + SynthesizedLaneReceipt) dicht de resterende gap. De 36x-telling zelf is alleen in de SEOcrawler-v2 store te her-meten (buiten scope).
 - **OI-645 | BESTAAT-KLEIN** — F821 `PrEnforcementResult` gereproduceerd (ruff + `get_type_hints` NameError); gefixt met module-level import; test `tests/test_tmux_pr_enforcement_annotation_resolves.py` rood op main, groen na fix.
 - **OI-561, OI-562 | BESTAAT-GROOT** — evidence-bound gate blijft advisory-default, signed-delegation blijft default-off (beide gemeten). Review-bij-flip-moment staat nog uit; operatorbeslissing.

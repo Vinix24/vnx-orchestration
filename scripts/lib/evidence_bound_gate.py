@@ -185,7 +185,7 @@ def verify_evidence_bound(
         return (False, detail, [detail])
 
     if chain_status == "unchained":
-        # Chaining was never enabled (VNX_CHAIN_RECEIPTS off).  The ledger may
+        # Chaining was never enabled (VNX_HASH_CHAIN_REQUIRED off).  The ledger may
         # still contain evidence entries, but we cannot assert chain integrity.
         # Continue with per-entry signature verification.
         if verbose:
