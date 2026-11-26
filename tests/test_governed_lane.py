@@ -125,6 +125,41 @@ def test_the_panel_reexports_the_same_dispatcher_and_reader():
     assert plan_gate_panel._read_report is governed_lane.read_report
 
 
+@pytest.mark.parametrize("gate", [glm_gate, kimi_gate])
+@pytest.mark.parametrize("pr", ["0", "3197"])
+def test_offline_diff_reaches_real_review_dispatcher_without_fetch(monkeypatch, tmp_path, gate, pr):
+    diff = tmp_path / "review.diff"
+    diff.write_text("diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -1 +1 @@\n-old\n+new\n")
+    calls = []
+
+    def child(cmd, **kwargs):
+        calls.append(cmd)
+        report = tmp_path / "unified_reports" / (cmd[cmd.index("--dispatch-id") + 1] + ".md")
+        report.parent.mkdir(exist_ok=True)
+        report.write_text("Review reached the provider boundary")
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(plan_gate_panel, "subprocess", SimpleNamespace(run=child, TimeoutExpired=subprocess.TimeoutExpired))
+    rc, state = governed_lane.run_gate_head(gate._PROVIDER, ["--pr", pr, "--diff-file", str(diff),
+                                          "--data-dir", str(tmp_path)], seams=gate._gate_seams())
+    assert rc is None and state.dispatch_error == ""
+    # The real fetch_branch("") always raises; reaching the child proves it was never called.
+    assert state.branch == "" and state.report_text == "Review reached the provider boundary"
+    assert len(calls) == 1 and "--base-ref" not in calls[0]
+    assert "Offline --diff-file review" in state.prompt
+    assert "Your working directory is a checkout of this PR's head" not in state.prompt
+
+
+@pytest.mark.parametrize("provider", ["glm", "kimi"])
+@pytest.mark.parametrize("offline", [{}, *({"test_run": value} for value in (False, None, {}, "unknown", 1))])
+def test_live_empty_branch_refuses_through_real_review_dispatcher(monkeypatch, tmp_path, provider, offline):
+    monkeypatch.setattr(plan_gate_panel, "subprocess", SimpleNamespace(run=lambda *a, **k: pytest.fail("seat launched")))
+    dispatch = governed_lane.review_dispatcher(provider, tmp_path, "", {}, 42,
+                                               dispatcher_factory=governed_lane._make_default_dispatcher, **offline)
+    with pytest.raises(RuntimeError, match="fetch_branch requires a non-empty branch"):
+        dispatch(provider, "model", "Review the PR", "live-empty-branch")
+
+
 def test_read_report_accepts_only_the_exact_dispatch_id_and_falls_back(tmp_path):
     reports = tmp_path / "unified_reports"
     reports.mkdir()
