@@ -261,6 +261,12 @@ def test_new_file_with_a_bare_vnx_dev_is_red(tmp_path, rel):
     assert len(problems) == 1 and problems[0].startswith(f"NEW {rel} {DEV} ")
 
 
+def test_ag2a1_packaged_worker_default_remains_in_scope(tmp_path):
+    rel = "scripts/lib/defaults/vnx_workers.default.yaml"
+    problems = _new_file_verdict(tmp_path, rel, f"project: {DEV}\n")
+    assert len(problems) == 1 and problems[0].startswith(f"NEW {rel} {DEV} ")
+
+
 @pytest.mark.parametrize("rel", ["dashboard/app.js", "dashboard/api/x.py", "configs/panel.yaml"])
 def test_new_file_with_a_quoted_vnx_dev_under_dashboard_or_configs_is_red(tmp_path, rel):
     problems = _new_file_verdict(tmp_path, rel, f'project: "{DEV}"\n')

@@ -23,7 +23,7 @@ import sys
 from pathlib import Path
 
 SCOPE = ("scripts", "vnx_cli", "schemas", "bin", "hooks", "dashboard", "configs",
-         ".vnx/vnx_workers.default.yaml", "install-central.sh", "install-remote.sh", "CODEOWNERS")
+         "install-central.sh", "install-remote.sh", "CODEOWNERS")
 # The names are built from halves so this module does not match itself.
 _SALES = "sales" + "minds"
 _NAMES = ("claude-" + _SALES, "kimi-" + "k3", "Vinix" + "24", "vincent" + "vandeth")
