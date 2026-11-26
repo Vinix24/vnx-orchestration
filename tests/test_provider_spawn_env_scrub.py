@@ -42,7 +42,7 @@ _FAKE_SMTP_PASS = "fake-test-smtp-secret-not-real"
 _FAKE_WORKER_TOKEN = "fake-test-worker-token-not-real"
 
 
-def _leaked_secrets_env() -> dict:
+def _leaked_secrets_env(tmp_path: Path) -> dict:
     """A fabricated (never-real) parent env carrying two secret shapes:
     an exact literal name (``VNX_SMTP_PASS``, listed explicitly in
     DEFAULT_SCRUB_KEY_PATTERNS) and a glob-matched name (``*_TOKEN``). ``PATH`` is a
@@ -50,6 +50,7 @@ def _leaked_secrets_env() -> dict:
     as an absent one.
     """
     return {
+        "HOME": str(tmp_path),  # clear=True must not restore the operator's config.
         "VNX_SMTP_PASS": _FAKE_SMTP_PASS,
         "SOME_SERVICE_TOKEN": _FAKE_WORKER_TOKEN,
         "PATH": "/usr/bin",
@@ -69,9 +70,9 @@ def _capture_env_via_not_found_popen(captured: dict):
 
 
 class TestKimiSpawnEnvScrub:
-    def test_leaked_secrets_absent_from_final_popen_env(self):
+    def test_leaked_secrets_absent_from_final_popen_env(self, tmp_path):
         captured: dict = {}
-        with patch.dict("os.environ", _leaked_secrets_env(), clear=True), \
+        with patch.dict("os.environ", _leaked_secrets_env(tmp_path), clear=True), \
                 patch("provider_spawns.kimi_spawn.subprocess.Popen", _capture_env_via_not_found_popen(captured)):
             result = ks.spawn_kimi(prompt="test", dispatch_id="d-scrub-kimi", terminal_id="T1")
 
@@ -84,9 +85,9 @@ class TestKimiSpawnEnvScrub:
 
 
 class TestCodexSpawnEnvScrub:
-    def test_leaked_secrets_absent_from_final_popen_env(self):
+    def test_leaked_secrets_absent_from_final_popen_env(self, tmp_path):
         captured: dict = {}
-        with patch.dict("os.environ", _leaked_secrets_env(), clear=True), \
+        with patch.dict("os.environ", _leaked_secrets_env(tmp_path), clear=True), \
                 patch("provider_spawns.codex_spawn.subprocess.Popen", _capture_env_via_not_found_popen(captured)):
             result = cs.spawn_codex(
                 prompt="test", model=None, dispatch_id="d-scrub-codex", terminal_id="T1",
@@ -101,9 +102,9 @@ class TestCodexSpawnEnvScrub:
 
 
 class TestGeminiSpawnEnvScrub:
-    def test_leaked_secrets_absent_from_final_popen_env(self):
+    def test_leaked_secrets_absent_from_final_popen_env(self, tmp_path):
         captured: dict = {}
-        with patch.dict("os.environ", _leaked_secrets_env(), clear=True), \
+        with patch.dict("os.environ", _leaked_secrets_env(tmp_path), clear=True), \
                 patch("provider_spawns.gemini_spawn.subprocess.Popen", _capture_env_via_not_found_popen(captured)):
             result = gs.spawn_gemini(
                 prompt="test", model="gemini-2.5-pro", dispatch_id="d-scrub-gemini", terminal_id="T1",
