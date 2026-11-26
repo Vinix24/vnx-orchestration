@@ -266,13 +266,15 @@ def _daily_step(module: ModuleType) -> int | None:
 
 
 def _run_daily_commands(args: argparse.Namespace, project_id: str, now: datetime,
-                        store: store_mod.DayStore) -> list[tuple[str, str]]:
+                        store: store_mod.DayStore) -> list[dict[str, Any]]:
     """Run every command module with an integer ``DAILY_STEP`` (decision 14).
 
-    Ordered by ``(DAILY_STEP, module __name__)``. Returns the import failures as
-    ``(stem, exception class name)`` pairs, so ``daily`` can report them and exit 1.
+    Ordered by ``(DAILY_STEP, module __name__)``. Return JSON-ready failures:
+    ``command_import_failed``/``exception`` for imports, ``command_failed``/``exit_code``
+    for nonzero exits. All steps run before ``daily`` reports these and exits 1.
     """
     modules, failures = discover_commands(commands_dir())
+    problems = [{"command_import_failed": stem, "exception": exception} for stem, exception in failures]
     stepped = [module for module in modules if _daily_step(module) is not None]
     stepped.sort(key=lambda module: (_daily_step(module), module.__name__))
     context = argparse.Namespace(
@@ -280,8 +282,10 @@ def _run_daily_commands(args: argparse.Namespace, project_id: str, now: datetime
         state_dir=_state_dir(args, project_id),
     )
     for module in stepped:
-        module.run(context)
-    return failures
+        code = module.run(context)
+        if code is not None and code != EXIT_OK:
+            problems.append({"command_failed": module.__name__.rsplit(".", 1)[-1], "exit_code": code})
+    return problems
 
 
 def _run_daily(args: argparse.Namespace) -> int:
@@ -298,9 +302,8 @@ def _run_daily(args: argparse.Namespace) -> int:
             return EXIT_OK
         _collect_window(store, project_id, now)
         failures = _run_daily_commands(args, project_id, now, store)
-        for stem, exception in failures:
-            print(json.dumps({"command_import_failed": stem, "exception": exception}),
-                  file=sys.stderr)
+        for failure in failures:
+            print(json.dumps(failure), file=sys.stderr)
         collect_mod.write_beacon(_state_dir(args, project_id), store, now)
     return EXIT_IMPORT_FAILURE if failures else EXIT_OK
 

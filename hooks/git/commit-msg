@@ -2,7 +2,7 @@
 # VNX Git Hook: commit-msg
 # Validates trace token presence in commit messages.
 #
-# Behavior depends on VNX_PROVENANCE_ENFORCEMENT:
+# Behavior follows VNX_PROVENANCE_ENFORCEMENT in the config chain:
 #   "0" (default/shadow): warn if no trace token, allow commit
 #   "1" (enforced): block commit if no trace token found
 #
@@ -14,8 +14,6 @@
 set -euo pipefail
 
 COMMIT_MSG_FILE="$1"
-ENFORCEMENT="${VNX_PROVENANCE_ENFORCEMENT:-0}"
-LEGACY_ACCEPTED="${VNX_PROVENANCE_LEGACY_ACCEPTED:-1}"
 
 # Read commit message
 COMMIT_MSG="$(cat "$COMMIT_MSG_FILE")"
@@ -26,12 +24,15 @@ if [ -z "${COMMIT_MSG// /}" ]; then
 fi
 
 # ── Find the validator script ────────────────────────────────────────
-_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# The installer symlinks this hook into the consumer's git directory.
+_HOOK="$(python3 -c 'from pathlib import Path; import sys; print(Path(sys.argv[1]).resolve(strict=True))' "${BASH_SOURCE[0]}")"
+_SCRIPT_DIR="$(cd "$(dirname "$_HOOK")" && pwd)"
 _VNX_ROOT="${_SCRIPT_DIR}/../.."
+source "$_VNX_ROOT/scripts/lib/provenance_config.sh"
+vnx_read_provenance_config "$_VNX_ROOT"
 _VALIDATOR=""
 
 for _candidate in \
-    "${VNX_HOME:-}/scripts/lib/trace_token_validator.py" \
     "$_VNX_ROOT/scripts/lib/trace_token_validator.py" \
     "$_VNX_ROOT/.claude/vnx-system/scripts/lib/trace_token_validator.py"; do
     if [ -f "$_candidate" ]; then
@@ -74,12 +75,12 @@ if [ -z "$_VALIDATOR" ]; then
 fi
 
 # ── Use Python validator ────────────────────────────────────────────
-RESULT="$(echo "$COMMIT_MSG" | python3 "$_VALIDATOR" validate - 2>/dev/null)" || true
+RESULT="$(echo "$COMMIT_MSG" | VNX_OVERRIDE_PROVENANCE_ENFORCEMENT="$ENFORCEMENT" \
+    VNX_OVERRIDE_PROVENANCE_LEGACY_ACCEPTED="$LEGACY_ACCEPTED" python3 "$_VALIDATOR" validate -)" || true
 
 if [ -z "$RESULT" ]; then
-    # Validator failed — don't block commits due to tooling errors
     echo "[VNX] WARNING: Trace token validator returned no result." >&2
-    exit 0
+    exit "$ENFORCEMENT"
 fi
 
 VALID="$(echo "$RESULT" | python3 -c "import json,sys; print(json.load(sys.stdin).get('valid', False))" 2>/dev/null)" || true

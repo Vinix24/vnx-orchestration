@@ -439,8 +439,6 @@ def fetch_intelligence_section(
     quality_db_path = state_dir / "quality_intelligence.db"
     try:
         project_id = resolve_stamp_project_id(project_id, quality_db_path)
-        if resolve_stamp_project_id() != project_id:
-            raise TenantUnresolved("intelligence source project differs from selected store")
     except TenantUnresolved:
         record_unresolved_injection(state_dir, "fetch_intelligence_section")
         return ""

@@ -2,6 +2,7 @@
 import ast
 import json
 import os
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -16,20 +17,25 @@ import config_registry as registry
 import config_runtime as runtime
 import config_store_db
 import project_root
+import trace_token_validator as trace
 import worker_permissions as worker
 from test_env_reads_t0_rotation_flag import python_reads
 from test_t0_context_guard import _logging_git
 from test_worker_scope_hook_registration import _load_hook_module
 
 READERS = [
+    ("VNX_PROVENANCE_ENFORCEMENT", lambda: trace.get_enforcement_mode() == trace.EnforcementMode.ENFORCED),
     ("VNX_SLUG_ENFORCEMENT", lambda: slug._build_parser().parse_args([]).enforce),
     ("VNX_ENFORCE_WORKER_PERMISSIONS", worker.worker_permission_enforcement_enabled),
+    ("VNX_PROVENANCE_LEGACY_ACCEPTED", trace.is_legacy_accepted),
 ]
 DELETED = ("VNX_DEFAULT_BRANCHES", "VNX_RECEIPT_FALLBACK")
 
 
 @pytest.fixture
 def store(tmp_path, monkeypatch):
+    monkeypatch.delenv("GITHUB_EVENT_NAME", raising=False)
+    monkeypatch.delenv("GITHUB_EVENT_PATH", raising=False)
     for key in [k for k, _ in READERS] + list(DELETED) + ["VNX_WORKER_ENFORCEMENT_SKIP"]:
         monkeypatch.delenv(key, raising=False)
         monkeypatch.delenv("VNX_OVERRIDE_" + key[4:], raising=False)
@@ -41,7 +47,7 @@ def store(tmp_path, monkeypatch):
     monkeypatch.setattr(registry, "_default_project_id", None)
 
     def put(key, value):
-        with sqlite3.connect(tmp_path / "runtime_coordination.db") as conn:
+        with sqlite3.connect(Path(os.environ["VNX_STATE_DIR"]) / "runtime_coordination.db") as conn:
             config_store_db.set_config(conn, "pr6h", key, value, actor="test", approval_id="pr6h")
     return put
 
@@ -65,7 +71,9 @@ def test_unreadable_wired_store_keeps_enforcement(store, monkeypatch, tmp_path, 
     monkeypatch.setenv(key, "0")
     assert runtime.autowire()
     (tmp_path / "runtime_coordination.db").write_bytes(b"not sqlite")
-    assert read() is True
+    assert read() is (key != "VNX_PROVENANCE_LEGACY_ACCEPTED")
+    if key == "VNX_PROVENANCE_LEGACY_ACCEPTED":
+        key = "VNX_PROVENANCE_ENFORCEMENT"  # First failed read of the complete pair.
     assert key in caplog.text and "project_config" in caplog.text
 
 
@@ -153,7 +161,7 @@ def test_hook_stored_switch(store, tmp_path, monkeypatch, value, pin, tool):
 
 def test_zero_environment_reads():
     counts = dict.fromkeys((*DELETED, *(k for k, _ in READERS)), 0)
-    modules = {"check_ci_slug_match.py", "worker_permissions.py",
+    modules = {"check_ci_slug_match.py", "worker_permissions.py", "trace_token_validator.py",
                "ndjson_hash_chain.py", "dispatch_govern.py"}
     for top in ("scripts", "vnx_cli", "dashboard"):
         for path in (ROOT / top).rglob("*.py"):
@@ -162,6 +170,133 @@ def test_zero_environment_reads():
                 if key in DELETED or path.name in modules:
                     counts[key] += python_reads(tree, key)
         for path in (ROOT / top).rglob("*.sh"):
-            for key in DELETED:
+            for key in (*DELETED, "VNX_PROVENANCE_ENFORCEMENT", "VNX_PROVENANCE_LEGACY_ACCEPTED"):
                 counts[key] += path.read_text().count("${" + key) + path.read_text().count("$" + key)
     assert counts == dict.fromkeys(counts, 0), counts
+    hook = (ROOT / "hooks/git/commit-msg").read_text()
+    for key in ("VNX_PROVENANCE_ENFORCEMENT", "VNX_PROVENANCE_LEGACY_ACCEPTED"):
+        assert "${" + key not in hook and "$" + key not in hook
+
+
+def test_unresolvable_python_store_stays_restrictive(store, monkeypatch, caplog):
+    monkeypatch.setenv("VNX_STATE_DIR", "x" * 1024)
+    monkeypatch.setenv("VNX_PROVENANCE_ENFORCEMENT", "0")
+    assert trace.get_enforcement_mode() == trace.EnforcementMode.ENFORCED
+    assert trace.is_legacy_accepted() is False
+    assert "project_config_error" in caplog.text
+
+
+@pytest.mark.parametrize("script", ["ci_trace_token_check.sh", "commands/install_git_hooks.sh"])
+@pytest.mark.parametrize("mode", ["env", "error", "missing", "store_error", "unresolvable",
+                                 "row1", "row0", "override1", "override0", "global1", "global0",
+                                 "empty", "null", "malformed", "unknown", "validator_error",
+                                 "validator_missing", "legacy0", "legacy1", "preferred",
+                                 "missing_legacy", "error_legacy", "unresolvable_legacy",
+                                 "bad_legacy_empty", "bad_legacy_null", "bad_legacy_malformed", "bad_legacy_unknown"])
+def test_bash_config_and_fallback(store, tmp_path, monkeypatch, script, mode):
+    consumer = tmp_path / "consumer"
+    subprocess.run(["git", "init", "-q", "-b", "main", str(consumer)], check=True)
+    message = ("feat: PR-9" if "legacy" in mode else "feat: no token")
+    mode = mode.removesuffix("_legacy")
+    if mode == "preferred":
+        message += "\n\nDispatch-ID: dlv-ac12ec2948bd-hd"
+    for commit_message in ("base", message):
+        subprocess.run(["git", "-c", "core.hooksPath=/dev/null", "-c", "user.name=Test",
+                        "-c", "user.email=test@example.org", "commit", "--allow-empty", "-m", commit_message],
+                       cwd=consumer, check=True, capture_output=True)
+    home = consumer / ".claude/vnx-system"
+    for directory in ("bin", "scripts", "hooks"):
+        shutil.copytree(ROOT / directory, home / directory, ignore=shutil.ignore_patterns("__pycache__"))
+    assert not (home / ".git").exists() and not (consumer / "bin/vnx").exists()
+    (tmp_path / "state").mkdir()
+    for key, value in {"VNX_HOME": home, "VNX_PROJECT_ROOT": consumer, "VNX_DATA_DIR": tmp_path,
+                       "VNX_STATE_DIR": tmp_path / "state", "VNX_PROVENANCE_ENFORCEMENT": "1"}.items():
+        monkeypatch.setenv(key, str(value))
+    monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+    if mode.startswith("legacy"):
+        store("VNX_PROVENANCE_LEGACY_ACCEPTED", mode[-1])
+        monkeypatch.setenv("VNX_PROVENANCE_LEGACY_ACCEPTED", str(1 - int(mode[-1])))
+    if mode.startswith(("row", "override")):
+        store("VNX_PROVENANCE_ENFORCEMENT", mode[-1] if mode.startswith("row") else str(1-int(mode[-1])))
+        if mode == "row1":
+            monkeypatch.delenv("VNX_PROVENANCE_ENFORCEMENT")
+        if mode.startswith("override"):
+            monkeypatch.setenv("VNX_OVERRIDE_PROVENANCE_ENFORCEMENT", mode[-1])
+    if mode in ("error", "global1", "global0"):
+        path = Path(os.environ["VNX_GLOBAL_CONFIG_FILE"])
+        path.parent.mkdir(parents=True)
+        path.write_text("invalid json" if mode == "error" else json.dumps(
+            {"version": 1, "values": {"VNX_PROVENANCE_ENFORCEMENT": {"value": mode[-1]}}}))
+        monkeypatch.setenv("VNX_PROVENANCE_ENFORCEMENT", "0" if mode != "global0" else "1")
+    if mode == "missing":
+        (home / "bin/vnx").rename(home / "bin/vnx.absent")
+    if mode == "store_error":
+        (tmp_path / "state/runtime_coordination.db").write_bytes(b"not sqlite")
+    if mode == "unresolvable":
+        monkeypatch.delenv("VNX_PROJECT_ID")
+    validator = home / "scripts/lib/trace_token_validator.py"
+    if mode == "validator_error":
+        validator.write_bytes(b"\xff")
+    if mode == "validator_missing":
+        validator.rename(validator.with_suffix(".absent"))
+    invalid = {"empty": "", "null": "null", "malformed": "0\n1", "unknown": "unknown"}
+    if mode in invalid:
+        monkeypatch.setenv("VNX_OVERRIDE_PROVENANCE_ENFORCEMENT", invalid[mode])
+    if mode.startswith("bad_legacy_"):
+        monkeypatch.setenv("VNX_PROVENANCE_ENFORCEMENT", "0")
+        monkeypatch.setenv("VNX_OVERRIDE_PROVENANCE_LEGACY_ACCEPTED", invalid[mode.removeprefix("bad_legacy_")])
+    command = ('bash "$1" HEAD~1' if script.startswith("ci_") else
+               'log() { echo "$*"; }; err() { echo "$*" >&2; }; source "$1"; cmd_install_git_hooks')
+    result = subprocess.run(["bash", "-c", command, "pr6h", str(home / "scripts" / script)],
+                            cwd=consumer, capture_output=True, text=True)
+    enforced = mode not in ("row0", "override0", "global0")
+    blocked = enforced and mode not in ("legacy1", "preferred")
+    if mode not in ("missing", "unresolvable"):
+        assert (trace.get_enforcement_mode() == trace.EnforcementMode.ENFORCED) is enforced
+    expected = ("ENFORCED" if enforced else "shadow") if script.startswith("ci_") else (
+        "ACTIVE" if enforced else "SHADOW")
+    assert "Enforcement: " + expected in result.stdout, result.stdout + result.stderr
+    if script.startswith("ci_"):
+        assert result.returncode == int(blocked), result.stdout + result.stderr
+    else:
+        assert result.returncode == 0, result.stdout + result.stderr
+        monkeypatch.delenv("VNX_HOME")  # The installed symlink must locate its own installation.
+        message_file = tmp_path / "message"
+        message_file.write_text(message)
+        hook = subprocess.run(["bash", str(consumer / ".git/hooks/commit-msg"), str(message_file)],
+                              cwd=consumer, capture_output=True, text=True)
+        assert hook.returncode == int(blocked), hook.stdout + hook.stderr
+    if mode in ("error", "missing", "store_error", "unresolvable", *invalid) or mode.startswith("bad_legacy_"):
+        assert "Config read failed" in result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("token", [False, True])
+@pytest.mark.parametrize("evidence", ["head", "missing", "null", "malformed", "unknown", "unavailable", "no_payload", "no_path"])
+def test_ci_pr_head_evidence(store, tmp_path, monkeypatch, token, evidence):
+    def git(*args, **kwargs):
+        return subprocess.run(["git", "-c", "core.hooksPath=/dev/null", "-c", "user.name=Test",
+                               "-c", "user.email=test@example.org", *args], cwd=tmp_path,
+                              check=True, capture_output=True, text=True, **kwargs).stdout.strip()
+    git("init", "-q")
+    git("commit", "--allow-empty", "-m", "base")
+    base = git("rev-parse", "HEAD")
+    git("commit", "--allow-empty", "-m", "feat: change" + ("\n\nDispatch-ID: dlv-ac12ec2948bd-hd" if token else ""))
+    head = git("rev-parse", "HEAD")
+    merge = git("commit-tree", "HEAD^{tree}", "-p", base, "-p", head, input="Synthetic merge\n")
+    git("checkout", "--detach", merge)
+    sha = {"head": head, "null": None, "malformed": [], "unknown": "unknown", "unavailable": "0" * 40}
+    event = tmp_path / "event.json"
+    if evidence not in ("no_payload", "no_path"):
+        event.write_text(json.dumps({"pull_request": {"head": {} if evidence == "missing" else {"sha": sha[evidence]}}}))
+    monkeypatch.setenv("GITHUB_EVENT_NAME", "pull_request")
+    monkeypatch.setenv("GITHUB_EVENT_PATH", str(event))
+    if evidence == "no_path":
+        monkeypatch.delenv("GITHUB_EVENT_PATH")
+    monkeypatch.setenv("VNX_PROVENANCE_ENFORCEMENT", "1")
+    result = subprocess.run(["bash", str(ROOT / "scripts/ci_trace_token_check.sh"), base],
+                            cwd=tmp_path, capture_output=True, text=True)
+    assert (result.returncode == 0) is (token and evidence == "head"), result.stdout + result.stderr
+    if evidence == "head":
+        assert "Total: 1" in result.stdout
+    else:
+        assert result.stderr and "RESULT: PASS" not in result.stdout

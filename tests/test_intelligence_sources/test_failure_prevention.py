@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import pytest
 import sys
 import unittest
 from pathlib import Path
@@ -264,3 +265,8 @@ class TestQueryFailurePrevention(unittest.TestCase):
         classes = {i.item_class for i in items}
         self.assertIn("failure_prevention", classes)
         db.close()
+
+
+@pytest.fixture(autouse=True)
+def _explicit_project_source(monkeypatch):
+    monkeypatch.setenv("VNX_PROJECT_ID", "vnx-dev")

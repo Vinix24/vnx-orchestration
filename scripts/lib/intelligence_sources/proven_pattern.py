@@ -17,6 +17,7 @@ from ._common import (
     _content_hash,
     _now_utc,
     _project_scope_clause,
+    _source_project_id,
     _scope_matches,
     _short_content_hash,
     _stable_item_id,
@@ -25,10 +26,7 @@ from ._common import (
     _merge_stored_tags,
 )
 from config_runtime import central_db_flag as _central_db_flag
-try:
-    from project_scope import current_project_id, project_filter_enabled
-except ImportError:
-    from project_scope import current_project_id, project_filter_enabled  # type: ignore
+from project_scope import project_filter_enabled
 
 try:
     import shadow_verifier as _shadow_verifier
@@ -96,20 +94,20 @@ def query_proven_patterns(
 ) -> List[IntelligenceItem]:
     """3-state dispatcher: per-project | central | shadow (metric 3, success_patterns)."""
     flag = _central_db_flag()
-    if flag == "":
-        return _query_per_project(db, task_class, scope_tags, has_column_fn, reconcile_fn)
     if flag == "1":
         return _query_central(task_class, scope_tags, central_conn_fn, project_id_fn=project_id_fn)
-    legacy = _query_per_project(db, task_class, scope_tags, has_column_fn, reconcile_fn)
+    project_id = _source_project_id(db, project_id_fn() if project_id_fn else None)
+    legacy = _query_per_project(db, task_class, scope_tags, has_column_fn, reconcile_fn, project_id=project_id)
+    if flag == "":
+        return legacy
     central = _query_central(task_class, scope_tags, central_conn_fn, project_id_fn=project_id_fn)
-    _maybe_shadow_compare(legacy, central, task_class)
+    _maybe_shadow_compare(legacy, central, task_class, project_id)
     return legacy
 
 
-def _maybe_shadow_compare(legacy, central, task_class):
+def _maybe_shadow_compare(legacy, central, task_class, project_id):
     if _shadow_verifier is None:
         return
-    project_id = current_project_id()
     try:
         cmp = _shadow_verifier.compare(
             [item.to_dict() for item in legacy],
@@ -133,8 +131,10 @@ def _query_per_project(
     scope_tags: List[str],
     has_column_fn: Callable[[str, str], bool],
     reconcile_fn: Callable[[], None],
+    project_id=None,
 ) -> List[IntelligenceItem]:
     """Query success_patterns from the per-project DB."""
+    project_id = _source_project_id(db, project_id)
     reconcile_fn()
     items: List[IntelligenceItem] = []
     has_pattern_cat = has_column_fn("success_patterns", "pattern_category")
@@ -153,8 +153,8 @@ def _query_per_project(
         select_cols += ", project_id"
     if has_tags_col:
         select_cols += ", tags"
-    scope_clause, scope_params = _project_scope_clause(has_project_id_col)
-    active_project_id = current_project_id() if has_project_id_col else None
+    scope_clause, scope_params = _project_scope_clause(has_project_id_col, project_id)
+    active_project_id = project_id if has_project_id_col else None
     try:
         rows = db.execute(
             f"""SELECT {select_cols} FROM success_patterns
@@ -247,7 +247,7 @@ def _query_central(
     if conn is None:
         return items
     try:
-        project_id = (project_id_fn or current_project_id)()
+        project_id = _source_project_id(conn, project_id_fn() if project_id_fn else None)
         has_pattern_cat = _table_has_column(conn, "success_patterns", "pattern_category")
         has_content_hash_col = _table_has_column(conn, "success_patterns", "content_hash")
         has_project_id_col = _table_has_column(conn, "success_patterns", "project_id")

@@ -418,7 +418,7 @@ class TestDispatchPatternOfferedIsolation:
 
         db_path = self._make_db(tmp_path)
 
-        selector = IntelligenceSelector(quality_db_path=db_path)
+        selector = IntelligenceSelector(quality_db_path=db_path, project_id="vnx-dev")
 
         from intelligence_selector import SuppressionRecord
         item = IntelligenceItem(

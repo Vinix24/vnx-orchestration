@@ -207,3 +207,108 @@ def test_ag1a_source_init_preserves_existing_identity_source(tmp_path, monkeypat
                  VNX_STATE_DIR=str(data / "state"))
     assert anchor_init_project_id(paths) == "anchored-project"
     assert (data / ".vnx-project-id").read_text() == "anchored-project\n"
+
+
+def test_init_marker_conflict_leaves_store_unmarked_and_retry_succeeds(tmp_path, monkeypatch):
+    from vnx_init import anchor_init_project_id
+
+    project = tmp_path / "project-a"
+    project.mkdir()
+    data = tmp_path / ".vnx-data/project-a"
+    state = data / "state"
+    state.mkdir(parents=True)
+    paths = dict(PROJECT_ROOT=str(project), VNX_DATA_DIR=str(data), VNX_STATE_DIR=str(state))
+    marker = data / ".vnx-project-id"
+    monkeypatch.setenv("VNX_PROJECT_ID", "project-b")
+
+    with pytest.raises((RuntimeError, ValueError), match="project_id conflict"):
+        anchor_init_project_id(paths)
+    assert not marker.exists()
+    assert not marker.with_name(marker.name + ".tmp").exists()
+    assert "VNX_PROJECT_ID" not in paths
+
+    monkeypatch.delenv("VNX_PROJECT_ID")
+    assert anchor_init_project_id(paths) == "project-a"
+    assert marker.read_text() == "project-a\n"
+    assert paths["VNX_PROJECT_ID"] == "project-a"
+
+
+@pytest.mark.parametrize("source", ["project", "explicit", "environment", "store"])
+def test_init_marker_existing_identity_survives_refusal(tmp_path, monkeypatch, source):
+    from vnx_init import FAIL, init_db
+
+    project = tmp_path / "renamed-project"
+    data = project / ".vnx-data"
+    state = data / "state"
+    state.mkdir(parents=True)
+    marker = data / ".vnx-project-id"
+    marker.write_text("project-a\nretained metadata\n")
+    original = marker.stat()
+    paths = dict(PROJECT_ROOT=str(project), VNX_HOME=str(ROOT),
+                 VNX_DATA_DIR=str(data), VNX_STATE_DIR=str(state))
+    if source == "project":
+        (project / ".vnx-project-id").write_text("project-b\n")
+    elif source == "explicit":
+        paths["VNX_PROJECT_ID"] = "project-b"
+    elif source == "environment":
+        monkeypatch.setenv("VNX_PROJECT_ID", "project-b")
+    else:
+        paths["VNX_STATE_DIR"] = str(tmp_path / ".vnx-data/project-b/state")
+
+    result = init_db(paths)
+    assert result.status == FAIL and "project_id conflict" in result.message
+    assert marker.read_text() == "project-a\nretained metadata\n"
+    assert (marker.stat().st_ino, marker.stat().st_mtime_ns) == (original.st_ino, original.st_mtime_ns)
+    assert not (Path(paths["VNX_STATE_DIR"]) / "quality_intelligence.db").exists()
+
+
+@pytest.mark.parametrize("source", ["derived", "project", "explicit", "store-marker"])
+def test_init_marker_unmarked_conflict_is_visible_without_publication(tmp_path, source):
+    from vnx_init import FAIL, init_db
+
+    project = tmp_path / ("project-b" if source == "derived" else "project-a")
+    project.mkdir()
+    data = tmp_path / ".vnx-data/project-a"
+    state = data / "state"
+    state.mkdir(parents=True)
+    paths = dict(PROJECT_ROOT=str(project), VNX_HOME=str(ROOT),
+                 VNX_DATA_DIR=str(data), VNX_STATE_DIR=str(state))
+    if source == "project":
+        (project / ".vnx-project-id").write_text("project-b\n")
+    elif source == "explicit":
+        paths["VNX_PROJECT_ID"] = "project-b"
+    elif source == "store-marker":
+        (state / ".vnx-project-id").write_text("project-b\n")
+
+    result = init_db(paths)
+    assert result.status == FAIL and "project_id conflict" in result.message
+    assert not (data / ".vnx-project-id").exists()
+    assert not (data / ".vnx-project-id.tmp").exists()
+    assert not (state / "quality_intelligence.db").exists()
+
+
+@pytest.mark.parametrize("candidate", ["", "../other", "/absolute", "INVALID"])
+def test_init_marker_invalid_candidate_refuses_without_a_store_source(tmp_path, candidate):
+    with pytest.raises(RuntimeError, match="not a valid VNX id"):
+        resolve_init_project_id(tmp_path / "state/quality_intelligence.db",
+                                candidate_project_id=candidate)
+
+
+@pytest.mark.parametrize("layout", ["local", "central"])
+def test_init_marker_agreeing_sources_publish_once(tmp_path, monkeypatch, layout):
+    from vnx_init import anchor_init_project_id
+
+    project = tmp_path / "renamed-project"
+    project.mkdir()
+    (project / ".vnx-project-id").write_text("project-a\n")
+    data = project / ".vnx-data" if layout == "local" else tmp_path / ".vnx-data/project-a"
+    (data / "state").mkdir(parents=True)
+    paths = dict(PROJECT_ROOT=str(project), VNX_DATA_DIR=str(data),
+                 VNX_STATE_DIR=str(data / "state"), VNX_PROJECT_ID="project-a")
+    monkeypatch.setenv("VNX_PROJECT_ID", "project-a")
+    assert anchor_init_project_id(paths) == "project-a"
+    marker = data / ".vnx-project-id"
+    original = marker.stat()
+    assert marker.read_text() == "project-a\n"
+    assert anchor_init_project_id(paths) == "project-a"
+    assert (marker.stat().st_ino, marker.stat().st_mtime_ns) == (original.st_ino, original.st_mtime_ns)

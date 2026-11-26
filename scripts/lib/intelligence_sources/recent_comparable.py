@@ -20,15 +20,12 @@ from ._common import (
     _content_hash,
     _now_utc,
     _project_scope_clause,
+    _source_project_id,
     _scope_matches,
     _stable_item_id,
     _table_has_column,
 )
 from config_runtime import central_db_flag as _central_db_flag
-try:
-    from project_scope import current_project_id
-except ImportError:
-    from project_scope import current_project_id  # type: ignore
 
 try:
     import shadow_verifier as _shadow_verifier
@@ -60,14 +57,14 @@ def query_recent_comparable(
 ) -> List[IntelligenceItem]:
     """3-state dispatcher: per-project | central | shadow (metric 4, dispatch_metadata)."""
     flag = _central_db_flag()
-    if flag == "":
-        return _query_per_project(db, task_class, scope_tags, has_column_fn)
     if flag == "1":
         return _query_central(task_class, scope_tags, central_conn_fn, project_id_fn=project_id_fn)
-    legacy = _query_per_project(db, task_class, scope_tags, has_column_fn)
+    project_id = _source_project_id(db, project_id_fn() if project_id_fn else None)
+    legacy = _query_per_project(db, task_class, scope_tags, has_column_fn, project_id=project_id)
+    if flag == "":
+        return legacy
     central = _query_central(task_class, scope_tags, central_conn_fn, project_id_fn=project_id_fn)
     if _shadow_verifier is not None:
-        project_id = current_project_id()
         try:
             cmp = _shadow_verifier.compare(
                 [item.to_dict() for item in legacy],
@@ -104,6 +101,7 @@ def _query_per_project(
     task_class: str,
     scope_tags: List[str],
     has_column_fn: Callable[[str, str], bool],
+    project_id=None,
 ) -> List[IntelligenceItem]:
     """Query dispatch_metadata for recent_comparable candidates."""
     items: List[IntelligenceItem] = []
@@ -111,7 +109,7 @@ def _query_per_project(
         datetime.now(timezone.utc) - timedelta(days=RECENT_COMPARABLE_DAYS)
     ).isoformat()
     dm_scope_clause, dm_scope_params = _project_scope_clause(
-        has_column_fn("dispatch_metadata", "project_id")
+        has_column_fn("dispatch_metadata", "project_id"), _source_project_id(db, project_id)
     )
     _dm_cols = _dm_column_set(db)
     provider_cols = (
@@ -201,7 +199,7 @@ def _query_central(
     if conn is None:
         return items
     try:
-        project_id = (project_id_fn or current_project_id)()
+        project_id = _source_project_id(conn, project_id_fn() if project_id_fn else None)
         cutoff = (
             datetime.now(timezone.utc) - timedelta(days=RECENT_COMPARABLE_DAYS)
         ).isoformat()

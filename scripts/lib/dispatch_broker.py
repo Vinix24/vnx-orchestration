@@ -35,7 +35,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from project_scope import current_project_id as _current_project_id
+from project_scope import resolve_stamp_project_id, TenantUnresolved
+from project_id_refusals import record_project_id_refusal
 from runtime_coordination import (
     ACCEPTED_OR_BEYOND_STATES,
     TERMINAL_DISPATCH_STATES,
@@ -686,11 +687,16 @@ class DispatchBroker:
         metadata: Optional[Dict[str, Any]],
     ) -> Dict[str, Any]:
         """Register dispatch in DB (idempotent). Returns the dispatch row dict."""
+        try:
+            project_id = resolve_stamp_project_id(db_path=self._state_dir / "runtime_coordination.db")
+        except TenantUnresolved:
+            record_project_id_refusal("dispatch_broker", self._state_dir, "project_id_unresolved")
+            raise
         with get_connection(self._state_dir) as conn:
             row = register_dispatch(
                 conn,
                 dispatch_id=dispatch_id,
-                project_id=_current_project_id(),
+                project_id=project_id,
                 terminal_id=terminal_id,
                 track=track,
                 priority=priority,

@@ -108,7 +108,9 @@ def _read_marker_from_path(db_path: Path) -> Optional[str]:
     return None
 
 
-def resolve_init_project_id(db_path: Path, strict: bool = False) -> str:
+def resolve_init_project_id(
+    db_path: Path, strict: bool = False, *, candidate_project_id: Optional[str] = None,
+) -> str:
     """Resolve the owning project_id for an init-time ADD COLUMN backfill.
 
     Anchor: the resolved DB file path (not cwd).  Resolution order:
@@ -118,6 +120,10 @@ def resolve_init_project_id(db_path: Path, strict: bool = False) -> str:
 
     All present sources must agree — any conflict raises RuntimeError
     (fail-closed: the real contamination guard).
+
+    Init may supply ``candidate_project_id`` to validate a proposed identity
+    before publishing its marker. It is an additional source, never an override;
+    invalid candidates raise RuntimeError even when no store source exists.
 
     ``strict`` is retained for call compatibility. With either value, no
     source raises :class:`project_scope.TenantUnresolved`. Conflicts and
@@ -132,6 +138,8 @@ def resolve_init_project_id(db_path: Path, strict: bool = False) -> str:
     env_pid = (os.environ.get("VNX_PROJECT_ID") or "").strip() or None
 
     sources: Dict[str, str] = {}
+    if candidate_project_id is not None:
+        sources["init:candidate"] = candidate_project_id
     if path_pid:
         sources["db-path"] = path_pid
     if marker_pid:

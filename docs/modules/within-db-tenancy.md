@@ -27,6 +27,13 @@ resolvable store; tests of those callers provide a marker or environment source.
 Commit reconciliation propagates `TenantUnresolved` for unresolved identity;
 only git errors return an empty scan.
 
+The dispatch broker, headless writer, PR queue, roadmap manager and dispatcher
+shell also resolve against their destination store using the same contract.
+Unresolved operations record ERROR `project_id_unresolved` with their component
+name; missing sources name `vnx init` and `VNX_PROJECT_ID`. Existing daemon
+error boundaries continue their loops; inbox processing returns a retry without
+registering a dispatch. The shell refuses startup with a non-zero exit.
+
 ## Entry points
 
 [`scripts/lib/tracks.py::get_track`](../../scripts/lib/tracks.py), [`scripts/lib/coordination_db.py::upsert_conflict_target`](../../scripts/lib/coordination_db.py).

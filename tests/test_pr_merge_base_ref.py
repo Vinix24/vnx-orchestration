@@ -1,6 +1,7 @@
 """OI-1572: the merge door checks the dispatch's intended PR base."""
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -130,6 +131,37 @@ def test_spec_read_failure_blocks(base_door, monkeypatch, capsys, error):
     monkeypatch.setattr(Path, "read_text", unreadable)
     assert run() == pr_merge.EXIT_ERROR
     assert "spec denied" in capsys.readouterr().err and calls == []
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root can read chmod(0) directories")
+@pytest.mark.parametrize("level", ["dispatches", "bucket", "dispatch"])
+@pytest.mark.parametrize("other_spec", [False, True])
+def test_unreadable_dispatch_scan_blocks(base_door, capsys, level, other_spec):
+    door, _, calls = base_door
+    path = stage(door, {"base_ref": "other"})
+    if other_spec:
+        stage(door, {"base_ref": "main"}, "completed")
+    denied = {"dispatches": path.parents[2], "bucket": path.parents[1], "dispatch": path.parent}[level]
+    mode = denied.stat().st_mode
+    denied.chmod(0)
+    try:
+        assert run() == pr_merge.EXIT_ERROR
+    finally:
+        denied.chmod(mode)
+    error = capsys.readouterr().err
+    assert "NO-GO" in error and "base_ref_unverifiable" in error
+    assert str(denied) in error and "PermissionError" in error
+    assert calls == [] and door.receipts("pr_merged") == []
+    receipt, = door.receipts("pr_merge_refused")
+    assert receipt["preflight_gates"][0]["reason_code"] == "base_ref_unverifiable"
+
+
+def test_absent_dispatches_warns(tmp_path):
+    assert not (tmp_path / "dispatches").exists()
+    result = pr_merge._check_dispatch_base_ref(PR, "main", DID, data_dir=tmp_path)
+    assert result["verdict"] == "GO"
+    assert result["reason_code"] == "base_ref_not_applied"
+    assert "WARNING:" in result["message"] and "no dispatch-spec.json" in result["message"]
 
 
 @pytest.mark.parametrize("dispatch_id", ["..", "/tmp/other", "other/dispatch"])
