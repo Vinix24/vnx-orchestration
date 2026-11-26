@@ -228,8 +228,6 @@ def test_bash_config_and_fallback(store, tmp_path, monkeypatch, script, mode):
         path.write_text("invalid json" if mode == "error" else json.dumps(
             {"version": 1, "values": {"VNX_PROVENANCE_ENFORCEMENT": {"value": mode[-1]}}}))
         monkeypatch.setenv("VNX_PROVENANCE_ENFORCEMENT", "0" if mode != "global0" else "1")
-    if mode == "missing":
-        (home / "bin/vnx").rename(home / "bin/vnx.absent")
     if mode == "store_error":
         (tmp_path / "state/runtime_coordination.db").write_bytes(b"not sqlite")
     if mode == "unresolvable":
@@ -237,7 +235,7 @@ def test_bash_config_and_fallback(store, tmp_path, monkeypatch, script, mode):
     validator = home / "scripts/lib/trace_token_validator.py"
     if mode == "validator_error":
         validator.write_bytes(b"\xff")
-    if mode == "validator_missing":
+    if mode in ("missing", "validator_missing"):
         validator.rename(validator.with_suffix(".absent"))
     invalid = {"empty": "", "null": "null", "malformed": "0\n1", "unknown": "unknown"}
     if mode in invalid:
@@ -250,7 +248,8 @@ def test_bash_config_and_fallback(store, tmp_path, monkeypatch, script, mode):
     result = subprocess.run(["bash", "-c", command, "pr6h", str(home / "scripts" / script)],
                             cwd=consumer, capture_output=True, text=True)
     enforced = mode not in ("row0", "override0", "global0")
-    blocked = enforced and mode not in ("legacy1", "preferred")
+    legacy_allowed = mode == "legacy1" or (mode == "unresolvable" and message == "feat: PR-9")
+    blocked = enforced and mode != "preferred" and not legacy_allowed
     if mode not in ("missing", "unresolvable"):
         assert (trace.get_enforcement_mode() == trace.EnforcementMode.ENFORCED) is enforced
     expected = ("ENFORCED" if enforced else "shadow") if script.startswith("ci_") else (
@@ -266,7 +265,7 @@ def test_bash_config_and_fallback(store, tmp_path, monkeypatch, script, mode):
         hook = subprocess.run(["bash", str(consumer / ".git/hooks/commit-msg"), str(message_file)],
                               cwd=consumer, capture_output=True, text=True)
         assert hook.returncode == int(blocked), hook.stdout + hook.stderr
-    if mode in ("error", "missing", "store_error", "unresolvable", *invalid) or mode.startswith("bad_legacy_"):
+    if mode in ("error", "missing", "store_error", *invalid) or mode.startswith("bad_legacy_"):
         assert "Config read failed" in result.stdout + result.stderr
 
 

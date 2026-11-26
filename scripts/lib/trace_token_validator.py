@@ -145,27 +145,36 @@ class ValidationResult:
 
 
 def _provenance_config() -> tuple[bool, bool]:
-    """Read the same complete pair as the shell readers; errors retain restrictive values."""
+    """Read the shared pair; errors retain restrictive values except for valid overrides."""
     import config_runtime
     import config_registry
     from enforcement_profile import enforced_storeless
     strict = config_runtime.strict_resolver() if config_runtime.autowire() else None
     status = config_runtime.wire_status()
-    values = []
-    for key in ("VNX_PROVENANCE_ENFORCEMENT", "VNX_PROVENANCE_LEGACY_ACCEPTED"):
+    values = [True, False]
+    overrides = {}
+    failed = False
+    for index, key in enumerate(("VNX_PROVENANCE_ENFORCEMENT", "VNX_PROVENANCE_LEGACY_ACCEPTED")):
         val, source = (config_registry.resolve_with_source(key, strict[1], strict[0], strict_resolver=True)
                        if strict else enforced_storeless(key))
-        if status is not None and status.cause == "resolver_failed":
+        if status is not None and status.cause == "resolver_failed" and source != "override":
             val, source = None, "project_config_error"
         if source in config_registry.ERROR_SOURCES or val not in ("0", "1"):
-            logging.getLogger(__name__).error("%s: %s value=%r; retaining restrictive mode", key, source, val)
-            return True, False
-        values.append(val == "1")
+            logging.getLogger(__name__).error(
+                "Config read failed for %s: %s value=%r; retaining restrictive values except valid overrides",
+                key, source, val)
+            failed = True
+        else:
+            values[index] = val == "1"
+            if source == "override":
+                overrides[index] = values[index]
+    if failed:
+        return overrides.get(0, True), overrides.get(1, False)
     return values[0], values[1]
 
 
 def get_enforcement_mode() -> EnforcementMode:
-    """Resolve enforcement from the config chain; config errors keep it on."""
+    """Resolve enforcement; config errors keep it on unless a valid override wins."""
     return EnforcementMode.ENFORCED if _provenance_config()[0] else EnforcementMode.SHADOW
 
 
@@ -414,7 +423,7 @@ def _cli_check_commits(args: List[str]) -> int:
 def main() -> int:
     if len(sys.argv) < 2:
         print(
-            "Usage: trace_token_validator.py <validate|inject|check-commits> [args...]",
+            "Usage: trace_token_validator.py <validate|inject|check-commits|config> [args...]",
             file=sys.stderr,
         )
         return 1
@@ -422,7 +431,10 @@ def main() -> int:
     command = sys.argv[1]
     args = sys.argv[2:]
 
-    if command == "validate":
+    if command == "config":
+        print("\n".join(str(int(value)) for value in _provenance_config()))
+        return 0
+    elif command == "validate":
         return _cli_validate(args)
     elif command == "inject":
         return _cli_inject(args)
