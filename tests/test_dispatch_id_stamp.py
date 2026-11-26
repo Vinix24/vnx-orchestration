@@ -268,6 +268,7 @@ class DispatchIdStampTests(unittest.TestCase):
 if __name__ == "__main__":
     unittest.main()
 
+
 @pytest.fixture(autouse=True)
 def _explicit_project_source(monkeypatch):
     monkeypatch.setenv("VNX_PROJECT_ID", "vnx-dev")

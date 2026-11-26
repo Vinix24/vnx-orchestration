@@ -37,7 +37,7 @@ def test_every_finding_has_a_table_row_and_every_row_a_finding():
 
 def test_table_rules_hold():
     rows = on.load_table()
-    assert len(rows) == 393 and sum(r["count"] for r in rows) == 424
+    assert len(rows) == 391 and sum(r["count"] for r in rows) == 422
     assert on.validate_table(rows) == []
 
 
@@ -234,7 +234,7 @@ def test_editing_an_allowed_quoted_line_is_red_both_ways(tmp_path):
 
 def test_table_rows_for_the_fourth_name_are_complete_and_valid():
     rows = [r for r in on.load_table() if r["name"] == DEV]
-    assert len(rows) == 311 and sum(r["count"] for r in rows) == 339
+    assert len(rows) == 309 and sum(r["count"] for r in rows) == 337
     migrations = [r for r in rows if r["path"].startswith("schemas/migrations/")]
     assert len(migrations) == 65 and sum(r["count"] for r in migrations) == 75
     assert all(r["category"] != "te_repareren" or r["group"] for r in rows)

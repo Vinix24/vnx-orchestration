@@ -51,7 +51,7 @@ class TestDeadMethodsRemoved(unittest.TestCase):
 
 
 class TestProjectIdFnPassed(unittest.TestCase):
-    """_query_candidates must pass project_id_fn=current_project_id to all query functions."""
+    """_query_candidates must pass a resolved project_id_fn to all query functions."""
 
     def setUp(self):
         self.tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
@@ -66,7 +66,7 @@ class TestProjectIdFnPassed(unittest.TestCase):
     @patch("intelligence_selector.query_proven_patterns", return_value=[])
     @patch("intelligence_selector.query_failure_prevention", return_value=[])
     @patch("intelligence_selector.query_recent_comparable", return_value=[])
-    @patch("intelligence_selector.current_project_id", return_value="test-project")
+    @patch("intelligence_selector.resolve_stamp_project_id", return_value="test-project")
     def test_project_id_fn_in_kwargs(self, mock_pid, mock_rc, mock_fp, mock_pp):
         selector = IntelligenceSelector(quality_db_path=self.db_path)
         selector._query_candidates("coding_interactive", ["backend-developer"])
@@ -106,7 +106,7 @@ class TestGetCentralQiConnDebugLog(unittest.TestCase):
     """_get_central_qi_conn must emit logger.debug on connection failure."""
 
     @patch("intelligence_selector._resolve_central_data_dir")
-    @patch("intelligence_selector.current_project_id", return_value="test-proj")
+    @patch("intelligence_selector.resolve_stamp_project_id", return_value="test-proj")
     def test_debug_logged_on_connect_failure(self, mock_pid, mock_resolve):
         mock_path = MagicMock()
         mock_path.__truediv__ = MagicMock(return_value=mock_path)

@@ -157,7 +157,6 @@ b8d60e8524cf7180	scripts/lib/dispatch_project_guard.sh	vnx-dev	1	te_repareren	Do
 a75f1268bd5bc9a6	scripts/lib/gate_findings_bridge.py	vnx-dev	1	legacy_tenant_reader	Comment or docstring stating that this path refuses to default to vnx-dev (ADR-007); prose, no behaviour	
 b513d5b3731c55b7	scripts/lib/harness_run_cost.py	vnx-dev	1	te_repareren	ledger_project_id falls back to vnx-dev when neither the store nor env names a tenant (stamps the cost row)	AG-1
 afa63c3cb59cdb1b	scripts/lib/hook_coverage.py	vnx-dev	1	te_repareren	Hook coverage identifies the fabric source repo by the literal project id vnx-dev	AG-5
-ac8222ca4f054c1a	scripts/lib/intelligence_injection.py	vnx-dev	1	te_repareren	Injection falls back to _pid='vnx-dev' when the dispatch context has no project	AG-1
 1c950cc09685c545	scripts/lib/migrate_schema.py	vnx-dev	1	legacy_tenant_reader	Comment on preserving the original DEFAULT clause (e.g. 'vnx-dev') when rebuilding a table	
 36388c51ffa330d5	scripts/lib/migration_inventory.py	vnx-dev	1	legacy_tenant_reader	Docstring describing the legacy column default the inventory looks for	
 b546d9907a58fde8	scripts/lib/migrations/apply_0015.py	vnx-dev	1	frozen_migration	Runner of a frozen numbered migration: it substitutes or references the file's vnx-dev placeholder; the runner resolves the owning project at apply time	
@@ -340,7 +339,6 @@ f983240e5d2a61d3	scripts/lib/harness_run_cost.py	vnx-dev	1	te_repareren	Docstrin
 1ed8d3451d7f8bc3	scripts/lib/hook_coverage.py	vnx-dev	1	te_repareren	Hook guard identifies the fabric source by the first vnx-dev entry of the user-owned project registry; sibling of the table rows for the shim	AG-5
 2df08ff34110214a	scripts/lib/hook_coverage.py	vnx-dev	1	te_repareren	Hook guard identifies the fabric source by the first vnx-dev entry of the user-owned project registry; sibling of the table rows for the shim	AG-5
 4a3dc714d70254b0	scripts/lib/hook_coverage.py	vnx-dev	1	te_repareren	Hook guard identifies the fabric source by the first vnx-dev entry of the user-owned project registry; sibling of the table rows for the shim	AG-5
-494a8575c553e0be	scripts/lib/intelligence_injection.py	vnx-dev	1	te_repareren	Debug line of the injection fallback to the vnx-dev project id when the dispatch context has none	AG-1
 243ac6452cf3f704	scripts/lib/migrations/apply_0020.py	vnx-dev	1	frozen_migration	Docstring of a migration runner naming the vnx-dev rows it bootstraps or measured; prose	
 42157072f0127760	scripts/lib/migrations/apply_0034.py	vnx-dev	1	frozen_migration	Docstring of a migration runner naming the vnx-dev rows it bootstraps or measured; prose	
 0524ff4b811e8939	scripts/lib/operator_queue_dream_analyzer.py	vnx-dev	1	te_repareren	Fleet routing of the dream analyzer labels and opens points in the vnx-dev ledger, the fabric source project	AG-5

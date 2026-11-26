@@ -695,6 +695,7 @@ class TestCaseIInjectionEventLogged:
         assert meta["items_injected"] >= 1
         assert meta["task_class"]
 
+
 @pytest.fixture(autouse=True)
 def _explicit_project_source(monkeypatch):
     monkeypatch.setenv("VNX_PROJECT_ID", "vnx-dev")

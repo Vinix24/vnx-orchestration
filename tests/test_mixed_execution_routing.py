@@ -564,3 +564,8 @@ class TestMixedRoutingResult:
         assert d["dispatch_id"] == "test"
         assert d["task_class"] == "coding_interactive"
         assert d["cutover_active"] is True
+
+
+@pytest.fixture(autouse=True)
+def _explicit_intelligence_project(monkeypatch):
+    monkeypatch.setenv("VNX_PROJECT_ID", "vnx-dev")
