@@ -212,7 +212,8 @@ vnx_resolve_project_root "${BASH_SOURCE[0]:-$0}"
 VNX_ROOT="$VNX_HOME_DEFAULT"  # Engine CLI; VNX_PROJECT_ROOT remains the consumer.
 # Config snapshot (one CLI call for both settings).
 if ! ANALYZER_CONFIG="$("$VNX_ROOT/bin/vnx" config get --raw VNX_ANALYZER_LLM VNX_DIGEST_EMAIL)"; then
-    echo "WARNING: VNX_ANALYZER_LLM/VNX_DIGEST_EMAIL snapshot unavailable; skipping conversation analysis (including DeepSeek) and digest email" >&2
+    log_msg "WARNING: VNX_ANALYZER_LLM/VNX_DIGEST_EMAIL snapshot unavailable; skipping conversation analysis (including DeepSeek) and digest email" >&2
+    record_failure "config_snapshot_unavailable"
     exit 1
 fi
 ANALYZER_LLM="${ANALYZER_CONFIG%%$'\n'*}"

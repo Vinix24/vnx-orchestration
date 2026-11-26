@@ -132,6 +132,7 @@ def test_snapshot_failure_only_skips_email(tmp_path, cli_status, recipient):
     engine = tmp_path / "consumer/.vnx"
     scripts = engine / "scripts"
     (scripts / "lib").mkdir(parents=True)
+    subprocess.run(['git', 'init', '-q', str(engine)], check=True)
     shutil.copy2(_PIPELINE_SCRIPT, scripts / _PIPELINE_SCRIPT.name)
     for name in ("vnx_paths.sh", "vnx_resolve_root.sh"):
         shutil.copy2(_REPO_ROOT / "scripts/lib" / name, scripts / "lib" / name)
@@ -144,7 +145,9 @@ def test_snapshot_failure_only_skips_email(tmp_path, cli_status, recipient):
     python = binaries / "python3"
     python.write_text(f'''#!/bin/bash
 case "$1" in
-    "$TEST_SCRIPTS/"*) printf 'EXECUTED:%s\\n' "${{1##*/}}" ;;
+    "$TEST_SCRIPTS/"*)
+        [ "$VNX_PROJECT_ROOT" = "$TEST_CONSUMER" ] || exit 9
+        printf 'EXECUTED:%s\\n' "${{1##*/}}" ;;
     *) exec {sys.executable!r} "$@" ;;
 esac
 ''')
@@ -158,6 +161,7 @@ esac
                             env={"PATH": f"{binaries}:{os.environ['PATH']}", "HOME": str(home),
                                  "VNX_HOME": str(engine), "VNX_PROJECT_ID": "consumer-test",
                                  "VNX_DATA_DIR": str(state.parent), "VNX_STATE_DIR": str(state),
+                                 "VNX_PROJECT_ROOT": str(engine.parent), "TEST_CONSUMER": str(engine.parent),
                                  "TEST_SCRIPTS": str(scripts)})
     # This completion marker must exist even when the CLI failed or was missing.
     assert "=== Pipeline complete:" in result.stdout, result.stdout + result.stderr

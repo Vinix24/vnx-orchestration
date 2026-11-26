@@ -59,7 +59,7 @@ export VNX_STATE_DIR="$VNX_DATA_DIR/state"
 
 # Read configuration before starting phases or acquiring the run lock.
 source "$SCRIPT_DIR/lib/vnx_resolve_root.sh"
-vnx_resolve_project_root "${BASH_SOURCE[0]:-$0}"
+[ -n "${VNX_PROJECT_ROOT:-}" ] || vnx_resolve_project_root "${BASH_SOURCE[0]:-$0}"
 VNX_ROOT="$VNX_HOME_DEFAULT"  # Engine CLI; preserve the consumer project context.
 # Config snapshot.
 DIGEST_SNAPSHOT_STATUS=0

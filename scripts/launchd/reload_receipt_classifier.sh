@@ -16,7 +16,9 @@ PLIST_DEST="$HOME/Library/LaunchAgents/${PLIST_LABEL}.plist"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PLIST_SRC="$SCRIPT_DIR/${PLIST_LABEL}.plist"
 
+CALLER_VNX_HOME="${VNX_HOME:-}"
 source "$SCRIPT_DIR/../lib/vnx_paths.sh"
+export VNX_HOME="${CALLER_VNX_HOME:-$VNX_HOME}"
 source "$SCRIPT_DIR/../lib/vnx_resolve_root.sh"
 vnx_resolve_project_root "${BASH_SOURCE[0]:-$0}"
 VNX_ROOT="$VNX_HOME_DEFAULT"  # Engine CLI; preserve the consumer project context.
