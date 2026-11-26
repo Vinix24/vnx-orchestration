@@ -297,3 +297,8 @@ def test_is_lock_timeout_error_is_content_based():
     assert is_lock_timeout_error(locked)
     assert is_lock_timeout_error(extended)
     assert not is_lock_timeout_error(real_bug)
+
+
+@pytest.fixture(autouse=True)
+def _explicit_intelligence_project(monkeypatch):
+    monkeypatch.setenv("VNX_PROJECT_ID", "vnx-dev")

@@ -29,7 +29,7 @@ if str(LIB_DIR) not in sys.path:
 
 from agent_directory_loader import load_agent_directory as _load_agent_directory
 from pattern_activation import injectable_clause
-from project_scope import current_project_id
+from project_scope import resolve_stamp_project_id
 
 EXIT_OK = 0
 EXIT_VALIDATION = 10
@@ -804,7 +804,7 @@ class T0IntelligenceGatherer:
         if not merged:
             return
 
-        project_id = current_project_id()
+        project_id = resolve_stamp_project_id(db_path=self.quality_db_path)
         now = datetime.now().isoformat()
 
         for pattern_id, meta in merged.items():

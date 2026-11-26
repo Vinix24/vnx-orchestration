@@ -11,6 +11,8 @@ Covers:
 """
 from __future__ import annotations
 
+import pytest
+
 import sqlite3
 import sys
 import tempfile
@@ -481,3 +483,8 @@ class TestDedupIdempotent(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@pytest.fixture(autouse=True)
+def _explicit_intelligence_project(monkeypatch):
+    monkeypatch.setenv("VNX_PROJECT_ID", "vnx-dev")

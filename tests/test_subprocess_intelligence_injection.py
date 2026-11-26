@@ -272,3 +272,8 @@ class TestInstructionCharsAccuracy:
         assembled = captured_instruction[0]
         assert "AP-title" in assembled
         assert "AP-content" in assembled
+
+
+@pytest.fixture(autouse=True)
+def _explicit_intelligence_project(monkeypatch):
+    monkeypatch.setenv("VNX_PROJECT_ID", "vnx-dev")

@@ -196,3 +196,8 @@ class TestPromptAssemblerReceivesBothPrKeys:
         assert captured_meta["pr"] == "CFX-W5-2", (
             f"Expected pr='CFX-W5-2', got {captured_meta.get('pr')!r}"
         )
+
+
+@pytest.fixture(autouse=True)
+def _explicit_intelligence_project(monkeypatch):
+    monkeypatch.setenv("VNX_PROJECT_ID", "vnx-dev")

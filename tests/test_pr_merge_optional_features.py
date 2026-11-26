@@ -122,6 +122,28 @@ def test_pinned_read_reused_and_snapshot_taken_once(features, monkeypatch):
     assert reads == [(MAIN, ".vnx/branch_protection.yaml"), (PR_DATA["headRefOid"], ".vnx/branch_protection.yaml")]
 
 
+@pytest.mark.parametrize("repermit", [False, True])
+def test_of8_summary_keeps_preflight_snapshot_after_config_change(features, monkeypatch, repermit):
+    import forge_gate_publisher as publisher
+    publish, snapshots, take = publisher.publish_door_permit, [], of.snapshot
+    monkeypatch.setattr(of, "snapshot", lambda *a, **k: snapshots.append(k) or take(*a, **k))
+    if repermit:
+        features.runs.append({"id": 900, "name": "vnx-gate/door", "app": {"id": 4869217},
+                              "conclusion": "failure"})
+    def changed(evidence, **kwargs):
+        monkeypatch.setenv("VNX_CI_GATE_REQUIRED", "1")
+        monkeypatch.setenv("VNX_PLAN_GATE_ENFORCE", "required")
+        return publish(evidence, **kwargs)
+    monkeypatch.setattr(publisher, "publish_door_permit", changed)
+    assert _run() == 0
+    rows = _merged(features)["preflight_gates"][0]["waived_guarantees"]
+    body = features.of("PATCH" if repermit else "POST")[0][2]
+    expected = "\n".join(f"- {r['feature']}: {r['key']}={r['value']} (source: {r['source']}); "
+                         f"waived: {r['guarantee']}" for r in rows)
+    assert body["output"]["summary"].split("Waived guarantees:\n")[1] == expected
+    assert any(r["feature"] == "ci" for r in rows) and len(snapshots) == 1
+
+
 @pytest.mark.parametrize("failure", [OSError("offline"), subprocess.TimeoutExpired("gh", 30), "", "bogus"])
 def test_main_unreadable_refuses(features, monkeypatch, failure):
     def gh(*a, **k):

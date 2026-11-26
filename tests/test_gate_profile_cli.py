@@ -120,16 +120,27 @@ def test_the_ci_env_flag_set_false_does_not_add_ci_gate(home, monkeypatch):
     assert "ci_gate" not in gate_profile.required_stack()[0]
 
 
-def test_config_search_order_is_vnx_home_dot_vnx_then_project_dot_vnx_then_vnx_home(home, tmp_path, monkeypatch):
+@pytest.mark.parametrize("explicit_root", [False, True])
+def test_config_search_order_is_vnx_home_dot_vnx_then_project_dot_vnx_then_vnx_home(
+        home, tmp_path, monkeypatch, explicit_root):
     project = tmp_path / "project"
     (project / ".vnx").mkdir(parents=True)
     monkeypatch.setenv("PROJECT_ROOT", str(project))
+    if explicit_root:
+        ambient = tmp_path / "ambient"
+        (ambient / ".vnx").mkdir(parents=True)
+        _dials(ambient, VNX_DEV_DIALS)
+        monkeypatch.setenv("PROJECT_ROOT", str(ambient))
+    root = str(project) if explicit_root else None
+    (project / "governance_enforcement.yaml").write_text(VNX_DEV_DIALS)
+    if not explicit_root:
+        assert gate_profile.enforcement_config_path(root) is None
     (home / "governance_enforcement.yaml").write_text("checks:\n  codex_gate_required:\n    level: 0\n")
-    assert gate_profile.enforcement_config_path() == home / "governance_enforcement.yaml"
+    assert gate_profile.enforcement_config_path(root) == home / "governance_enforcement.yaml"
     (project / ".vnx" / "governance_enforcement.yaml").write_text("checks:\n  codex_gate_required:\n    level: 1\n")
-    assert gate_profile.enforcement_config_path() == project / ".vnx" / "governance_enforcement.yaml"
+    assert gate_profile.enforcement_config_path(root) == project / ".vnx" / "governance_enforcement.yaml"
     _dials(home, "checks:\n  codex_gate_required:\n    level: 2\n")
-    assert gate_profile.enforcement_config_path() == home / ".vnx" / "governance_enforcement.yaml"
+    assert gate_profile.enforcement_config_path(root) == home / ".vnx" / "governance_enforcement.yaml"
 
 
 @pytest.mark.parametrize("body, reason", [
