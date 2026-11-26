@@ -368,8 +368,7 @@ def compile_plan(vspec: ValidatedSpec, snapshot: RuntimeSnapshot) -> ExecutionPl
         if lane_warning is not None:
             warnings.append(lane_warning)
     else:
-        lane = "provider"
-        adapter = "provider"
+        lane, adapter = "provider", "provider"
     fired.append("D1")
 
     # D2 — billing. Provider lanes are metered by default, with two exceptions:
@@ -384,13 +383,12 @@ def compile_plan(vspec: ValidatedSpec, snapshot: RuntimeSnapshot) -> ExecutionPl
     # compile_plan stays pure. A headless dispatch with no key of its own is
     # therefore "subscription", not "api_metered".
     billing = _resolve_billing(provider, is_claude_lane, snapshot)
-    fired.append("D2")
 
     # D4 — builders resolve through the registry; their pins only warn.
     model = _resolve_model(spec, snapshot, is_claude_lane, warnings)
     if isinstance(model, Reject):
         return model
-    fired.append("D4")
+    fired.extend(("D2", "D4"))
 
     # D5 — serialization class; the subscription is ONE account-wide resource,
     # so every claude dispatch shares the SAME slot class. OI-1417: headless
