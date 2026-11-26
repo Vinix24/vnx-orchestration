@@ -12,6 +12,7 @@ project's state dir + sets it as config_registry's default project, so read-site
 registry env-only — the runtime never breaks because the config DB is missing) — but fail-soft is
 LOUD (a WARNING naming the reason), not silent: a store that cannot be found reads identically to a
 flag the operator explicitly turned off unless the miss is logged (OI-1461).
+An explicit state dir with no project id is a normal pre-init/test-store fallback (DEBUG).
 """
 from __future__ import annotations
 
@@ -121,7 +122,8 @@ def autowire(state_dir: "str | Path | None" = None, project_id: Optional[str] = 
             return _failed(cause or ("store_missing" if pid else "no_project"), pid, None)
         pid = _resolve_project_id(sd, project_id)
         if not pid:
-            logger.warning(
+            logger.log(
+                logging.DEBUG if state_dir is not None else logging.WARNING,
                 "config_runtime: could not resolve a project_id for state_dir=%s; operator config "
                 "in project_config will NOT be read this process — reads fall back to env vars / "
                 "registry defaults only",
@@ -186,9 +188,12 @@ def get_with_source(key: str) -> tuple[Optional[str], str]:
     return config_registry.resolve_with_source(key)
 
 
-def get_bool(key: str) -> bool:
-    """Bool view of get() — true for any truthy spelling (1/true/yes/on), via config_registry.get_bool."""
-    autowire()
+def get_bool(key: str, *, state_dir: "str | Path | None" = None) -> bool:
+    """Bool view of get(); an explicit state_dir binds its store without git discovery."""
+    if not autowire(state_dir=state_dir) and state_dir is not None:
+        # An explicit missing store must never reuse a previously bound project.
+        config_registry.set_db_resolver(None)
+        config_registry.set_default_project_id(None)
     return config_registry.get_bool(key)
 
 

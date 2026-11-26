@@ -2388,7 +2388,7 @@ class TestCheckTrackLinkVerdict:
 
     def test_absent_flag_off_warns(self, tmp_path, monkeypatch):
         import config_runtime
-        monkeypatch.setattr(config_runtime, "get_bool", lambda key: False)
+        monkeypatch.setattr(config_runtime, "get_bool", lambda key, **kwargs: False)
         spec = DispatchSpec(
             schema_version=1, project_id="vnx-dev", dispatch_id="d1", staging_id="s1",
             instruction_file=Path("/fake"), role="backend-developer", target_slot="T1",
@@ -2401,7 +2401,7 @@ class TestCheckTrackLinkVerdict:
 
     def test_absent_flag_on_no_escape_rejects(self, tmp_path, monkeypatch):
         import config_runtime
-        monkeypatch.setattr(config_runtime, "get_bool", lambda key: True)
+        monkeypatch.setattr(config_runtime, "get_bool", lambda key, **kwargs: True)
         spec = DispatchSpec(
             schema_version=1, project_id="vnx-dev", dispatch_id="d1", staging_id="s1",
             instruction_file=Path("/fake"), role="backend-developer", target_slot="T1",
@@ -2414,7 +2414,7 @@ class TestCheckTrackLinkVerdict:
 
     def test_absent_flag_on_with_escape_passes(self, tmp_path, monkeypatch):
         import config_runtime
-        monkeypatch.setattr(config_runtime, "get_bool", lambda key: True)
+        monkeypatch.setattr(config_runtime, "get_bool", lambda key, **kwargs: True)
         spec = DispatchSpec(
             schema_version=1, project_id="vnx-dev", dispatch_id="d1", staging_id="s1",
             instruction_file=Path("/fake"), role="backend-developer", target_slot="T1",
@@ -2680,7 +2680,7 @@ class TestTrackIdEndToEnd:
         spec_file.write_text(json.dumps(spec_dict), encoding="utf-8")
 
         import config_runtime
-        monkeypatch.setattr(config_runtime, "get_bool", lambda key: True)
+        monkeypatch.setattr(config_runtime, "get_bool", lambda key, **kwargs: True)
 
         with patch("dispatch_cli._execute_claude_headless") as mock_execute:
             rc = run_dispatch(spec_file)
@@ -2719,7 +2719,7 @@ class TestTrackIdEndToEnd:
         spec_file.write_text(json.dumps(spec_dict), encoding="utf-8")
 
         import config_runtime
-        monkeypatch.setattr(config_runtime, "get_bool", lambda key: True)
+        monkeypatch.setattr(config_runtime, "get_bool", lambda key, **kwargs: True)
 
         with patch("dispatch_cli._execute_claude_headless", return_value=0) as mock_execute:
             rc = run_dispatch(spec_file)

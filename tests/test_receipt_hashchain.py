@@ -38,8 +38,7 @@ SCRIPTS_DIR = VNX_ROOT / "scripts"
 LIB_DIR = SCRIPTS_DIR / "lib"
 
 for _p in (str(SCRIPTS_DIR), str(LIB_DIR)):
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
+    sys.path.insert(0, _p)
 
 from append_receipt_internals.idempotency import (  # noqa: E402
     _cache_file_for,
@@ -76,7 +75,7 @@ def _read_lines(path: Path) -> list[dict]:
 # Flag OFF: byte-for-byte unchanged, no prev_hash field
 # --------------------------------------------------------------------------- #
 def test_flag_off_no_prev_hash(tmp_path, monkeypatch):
-    monkeypatch.delenv("VNX_CHAIN_RECEIPTS", raising=False)
+    monkeypatch.delenv("VNX_HASH_CHAIN_REQUIRED", raising=False)
     receipt_path = tmp_path / "t0_receipts.ndjson"
 
     for i in range(5):
@@ -89,7 +88,7 @@ def test_flag_off_no_prev_hash(tmp_path, monkeypatch):
 
 
 def test_flag_off_explicit_false(tmp_path, monkeypatch):
-    monkeypatch.setenv("VNX_CHAIN_RECEIPTS", "0")
+    monkeypatch.setenv("VNX_HASH_CHAIN_REQUIRED", "0")
     receipt_path = tmp_path / "t0_receipts.ndjson"
     _append_one(receipt_path, {"event_type": "test_event", "dispatch_id": "d0", "n": 0})
     entries = _read_lines(receipt_path)
@@ -100,7 +99,7 @@ def test_flag_off_explicit_false(tmp_path, monkeypatch):
 # Flag ON: chained, verify_chain passes
 # --------------------------------------------------------------------------- #
 def test_flag_on_chains_and_verifies(tmp_path, monkeypatch):
-    monkeypatch.setenv("VNX_CHAIN_RECEIPTS", "1")
+    monkeypatch.setenv("VNX_HASH_CHAIN_REQUIRED", "1")
     receipt_path = tmp_path / "t0_receipts.ndjson"
 
     for i in range(6):
@@ -120,7 +119,7 @@ def test_flag_on_chains_and_verifies(tmp_path, monkeypatch):
 
 
 def test_flag_on_genesis_only_first_line(tmp_path, monkeypatch):
-    monkeypatch.setenv("VNX_CHAIN_RECEIPTS", "true")
+    monkeypatch.setenv("VNX_HASH_CHAIN_REQUIRED", "true")
     receipt_path = tmp_path / "t0_receipts.ndjson"
     for i in range(4):
         _append_one(receipt_path, {"event_type": "test_event", "dispatch_id": f"d{i}", "n": i})
@@ -165,12 +164,13 @@ def _concurrent_worker(receipt_path_str: str, worker_id: int, n_workers: int) ->
 
     With ``VNX_TEST_NO_APPEND_LOCK=1`` the lock is a no-op here: the red run.
     """
-    os.environ["VNX_CHAIN_RECEIPTS"] = "1"
+    os.environ["VNX_HASH_CHAIN_REQUIRED"] = "1"
     # Re-resolve imports inside the spawned process.
     for _p in (str(SCRIPTS_DIR), str(LIB_DIR)):
-        if _p not in sys.path:
-            sys.path.insert(0, _p)
+        sys.path.insert(0, _p)
     from append_receipt_internals import idempotency
+    import config_runtime
+    assert Path(config_runtime.__file__).resolve() == LIB_DIR / "config_runtime.py", config_runtime.__file__
 
     receipt_path = Path(receipt_path_str)
     if os.environ.get(_NO_APPEND_LOCK_ENV) == "1":
@@ -192,8 +192,15 @@ def _concurrent_worker(receipt_path_str: str, worker_id: int, n_workers: int) ->
 # the same tail already fork the chain, and eight spawned processes interleave far more than
 # two; a sixteenth adds spawn time and no new interleaving the eight have not shown.
 @pytest.mark.parametrize("n_workers", [8])
-def test_concurrent_appends_no_fork(tmp_path, n_workers):
+@pytest.mark.parametrize("foreign_lib", [False, True])
+def test_concurrent_appends_no_fork(tmp_path, monkeypatch, n_workers, foreign_lib):
     receipt_path = tmp_path / f"t0_receipts_{n_workers}.ndjson"
+    if foreign_lib:
+        foreign = tmp_path / "foreign-lib"
+        foreign.mkdir()
+        (foreign / "config_runtime.py").write_text(
+            'raise AssertionError("foreign config_runtime imported")\n')
+        monkeypatch.syspath_prepend(str(foreign))
 
     ctx = mp.get_context("spawn")
     procs = [
@@ -232,7 +239,7 @@ def test_concurrent_appends_no_fork(tmp_path, n_workers):
 # Replay / idempotency: verify is stable across repeated runs
 # --------------------------------------------------------------------------- #
 def test_verify_is_stable_on_replay(tmp_path, monkeypatch):
-    monkeypatch.setenv("VNX_CHAIN_RECEIPTS", "1")
+    monkeypatch.setenv("VNX_HASH_CHAIN_REQUIRED", "1")
     receipt_path = tmp_path / "t0_receipts.ndjson"
     for i in range(5):
         _append_one(receipt_path, {"event_type": "test_event", "dispatch_id": f"d{i}", "n": i})
@@ -252,7 +259,7 @@ _PINNED_LINE = (b'{"event_type":"test_event","dispatch_id":"d1","n":1,'
 
 
 def _ledger(tmp_path: Path, monkeypatch, *, sealed: bool) -> tuple[Path, str]:
-    monkeypatch.delenv("VNX_CHAIN_RECEIPTS", raising=False)
+    monkeypatch.delenv("VNX_HASH_CHAIN_REQUIRED", raising=False)
     receipt_path = tmp_path / "t0_receipts.ndjson"
     receipt_path.write_bytes(b'{"a":1}\n')
     return receipt_path, (seal_ledger(receipt_path)["marker_hash"] if sealed else "")

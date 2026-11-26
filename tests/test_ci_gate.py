@@ -958,7 +958,7 @@ def test_request_ci_gate_stamps_requirement_mismatch_onto_obligation(gate_env, m
     )
 
     manager = rgm.ReviewGateManager()
-    monkeypatch.setattr("config_runtime.get_bool", lambda key: False)
+    monkeypatch.setattr("config_runtime.get_bool", lambda key, **kwargs: False)
 
     with patch("gate_request_handler.shutil.which", return_value="/usr/bin/gh"):
         manager._request_ci_gate(
@@ -1002,7 +1002,7 @@ def test_request_ci_gate_no_mismatch_when_resolutions_agree(gate_env, monkeypatc
     )
 
     manager = rgm.ReviewGateManager()
-    monkeypatch.setattr("config_runtime.get_bool", lambda key: False)
+    monkeypatch.setattr("config_runtime.get_bool", lambda key, **kwargs: False)
 
     with patch("gate_request_handler.shutil.which", return_value="/usr/bin/gh"):
         manager._request_ci_gate(
@@ -1033,7 +1033,7 @@ def test_request_ci_gate_writer_capture_failed_is_a_distinct_ledgered_finding(ga
     )
 
     manager = rgm.ReviewGateManager()
-    monkeypatch.setattr("config_runtime.get_bool", lambda key: True)
+    monkeypatch.setattr("config_runtime.get_bool", lambda key, **kwargs: True)
 
     with patch("gate_request_handler.shutil.which", return_value="/usr/bin/gh"):
         manager._request_ci_gate(

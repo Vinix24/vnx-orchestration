@@ -153,11 +153,11 @@ EXIT_ACK_REFUSED = 2
 
 def _chain_receipts_configured(ledger_path: Path) -> Tuple[bool, str]:
     """The append path's own decision (ADR-083, ``ndjson_hash_chain.append_chains``):
-    a ``chaining`` tail chains, otherwise ``VNX_CHAIN_RECEIPTS`` decides. Returns
+    a ``chaining`` tail chains, otherwise ``VNX_HASH_CHAIN_REQUIRED`` decides. Returns
     ``(configured, tail_state)`` so a sealed ledger reads as configured without the
     variable in this job's environment."""
     tail_state, _hash = read_ledger_tail(ledger_path)
-    return append_chains(tail_state), tail_state
+    return append_chains(tail_state, state_dir=ledger_path.parent), tail_state
 
 
 def _read_unique_dispatch_ids(

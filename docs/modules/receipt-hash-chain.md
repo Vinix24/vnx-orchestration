@@ -1,6 +1,6 @@
 # receipt-hash-chain
 
-Appends NDJSON entries with a previous-entry hash under the ledger lock and verifies continuity across explicit epochs. Receipt appends continue an already-chained tail; otherwise the current implementation consults `VNX_CHAIN_RECEIPTS`.
+Appends NDJSON entries with a previous-entry hash under the ledger lock and verifies continuity across explicit epochs. Receipt appends continue an already-chained tail; otherwise `config_runtime` resolves `VNX_HASH_CHAIN_REQUIRED` (default off).
 
 Background: [epoch rotation](../governance/decisions/ADR-029-hashchain-epoch-rotation.md), [external origin anchor](../governance/decisions/ADR-034-external-chain-origin-anchor.md).
 
@@ -18,4 +18,6 @@ Background: [epoch rotation](../governance/decisions/ADR-029-hashchain-epoch-rot
 
 ## Flag
 
-`VNX_HASH_CHAIN_REQUIRED` — registry metadata; the implemented append selector still reads `VNX_CHAIN_RECEIPTS`.
+`VNX_HASH_CHAIN_REQUIRED` — active append selector: override > project row > global config > env > default. The retired receipt-chain env flag has no effect (ADR-087 decision 9).
+
+The append writer and ledger-health reader bind `config_runtime` to the ledger directory explicitly, without git discovery. An explicit store without a project id uses the normal config fallback; its debug diagnostic adds no line to receipt stderr, even with debug logging enabled. Config warnings and errors (including a known project's missing database) use the receipt writer's structured JSON emitter.

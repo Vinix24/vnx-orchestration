@@ -1,0 +1,1 @@
+- Config PR-6h-c: `VNX_CHAIN_RECEIPTS` folds into `VNX_HASH_CHAIN_REQUIRED` (default off). Receipt appends and ledger health bind the ledger directory without git discovery; stored project rows beat exported values. Receipt config warnings remain structured JSON.

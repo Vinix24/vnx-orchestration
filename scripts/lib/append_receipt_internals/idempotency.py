@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
@@ -16,6 +17,7 @@ from .common import (
     AppendResult,
     EXIT_IO_ERROR,
     EXIT_LOCK_ERROR,
+    _emit,
     facade,
 )
 from .outcome_identity import (
@@ -136,6 +138,26 @@ def _close_a_torn_tail(receipt_path: Path) -> bool:
     return True
 
 
+@contextmanager
+def _structured_config_logs():
+    """Keep config warnings/errors visible through the receipt writer's JSON emitter."""
+    def emit(record):
+        if record.levelno < logging.WARNING:
+            return False  # Routine fallback diagnostics must not change a caller's stderr.
+        _emit("WARN" if record.levelname == "WARNING" else record.levelname,
+              "receipt_config", message=record.getMessage(), logger=record.name)
+        return False  # Already emitted; no plain-text handler may print it again.
+
+    loggers = [logging.getLogger(name) for name in ("config_runtime", "config_registry", "config_global")]
+    for logger in loggers:
+        logger.addFilter(emit)
+    try:
+        yield
+    finally:
+        for logger in loggers:
+            logger.removeFilter(emit)
+
+
 def _last_hash_under_lock(receipt_path: Path) -> Optional[str]:
     """The ``prev_hash`` this append stamps, or None when it stays unchained (ADR-083).
 
@@ -160,7 +182,9 @@ def _last_hash_under_lock(receipt_path: Path) -> Optional[str]:
             "receipt_tail_ambiguous", EXIT_IO_ERROR,
             f"refusing to append to {receipt_path}: over {_TORN_TAIL_WINDOW} bytes of tail debris "
             "before any parseable entry, so whether it chains is undecidable (ADR-083)")
-    if not append_chains(state):
+    with _structured_config_logs():
+        chains = append_chains(state, state_dir=receipt_path.parent)
+    if not chains:
         return None
     return entry_hash or GENESIS_HASH
 
