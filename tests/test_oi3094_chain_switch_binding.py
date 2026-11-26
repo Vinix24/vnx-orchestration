@@ -107,6 +107,33 @@ def test_unknown_project_warns_and_never_reuses_ambient_row(
         assert chain.chain_receipts_variable_on(state_dir=state) is (global_value == "1")
     assert any(KEY in r.message and str(state) in r.message and "project" in r.message
                for r in caplog.records if r.levelno == logging.WARNING)
+    assert "global and default layers only" in caplog.text
+    assert "existing override and env precedence preserved" in caplog.text
+    assert "override > global config > env > default" in caplog.text
+
+
+@pytest.mark.parametrize("global_value,env_value,override,expected", [
+    (None, None, None, False),
+    (None, "1", None, True),
+    ("0", "1", None, False),
+    ("1", "0", "0", False),
+    ("0", "0", "1", True),
+])
+def test_unknown_project_fallback_preserves_non_project_precedence(
+    tmp_path, monkeypatch, caplog, global_value, env_value, override, expected,
+):
+    state = tmp_path / "unidentified" / "state"
+    state.mkdir(parents=True)
+    if global_value is not None:
+        _global_config(tmp_path, monkeypatch, global_value)
+    if env_value is not None:
+        monkeypatch.setenv(KEY, env_value)
+    if override is not None:
+        monkeypatch.setenv("VNX_OVERRIDE_HASH_CHAIN_REQUIRED", override)
+    with caplog.at_level(logging.WARNING):
+        assert chain.chain_receipts_variable_on(state_dir=state) is expected
+    assert "ignoring project rows" in caplog.text
+    assert "override > global config > env > default" in caplog.text
 
 
 def test_missing_explicit_store_does_not_reuse_wired_project(tmp_path, monkeypatch, caplog):
@@ -136,7 +163,8 @@ def test_retired_key_only_remains_in_retirement_assertions_and_history():
                           text=True, capture_output=True)
     assert proc.returncode in (0, 1), proc.stderr
     retirement_tests = {"tests/test_env_reads_pr6h_hash_chain.py", Path(__file__).relative_to(ROOT).as_posix()}
+    # CHANGELOG.md is frozen release history; changelog.d/README.md forbids PR edits.
     unexpected = [p for p in proc.stdout.splitlines()
-                  if p not in retirement_tests and not p.startswith("changelog.d/")
+                  if p not in retirement_tests and p != "CHANGELOG.md" and not p.startswith("changelog.d/")
                   and not p.startswith("docs/governance/decisions/ADR-")]
     assert not unexpected, unexpected

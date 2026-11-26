@@ -341,6 +341,8 @@ def chain_receipts_variable_on(*, state_dir: Path | None = None) -> bool:
 
     With no explicit store, retain the process's normal config resolution. An explicit
     store never borrows the ambient project row. Config failures must not lose receipts.
+    Fallback uses global and default layers only: project rows are excluded, with
+    existing override and env precedence preserved (override > global config > env > default).
     """
     import config_registry
     import config_runtime
@@ -357,7 +359,9 @@ def chain_receipts_variable_on(*, state_dir: Path | None = None) -> bool:
             strict = config_runtime.strict_resolver()
     else:
         config_runtime.logger.warning(
-            "config_runtime: %s: could not derive project_id for state_dir=%s; ignoring project rows",
+            "config_runtime: %s: could not derive project_id for state_dir=%s; "
+            "ignoring project rows (global and default layers only); "
+            "existing override and env precedence preserved: override > global config > env > default",
             key, state_dir,
         )
 

@@ -28,7 +28,8 @@ The append writer and ledger-health reader derive the project from the explicit
 ledger directory, without git discovery. That identity wins over `VNX_PROJECT_ID`.
 If no project can be derived, a WARNING names the key and directory, and resolution
 excludes every project row (including a previously wired ambient store).
-The remaining config layers keep their normal precedence.
+Here "global and default layers only" excludes project rows and preserves existing
+override and env precedence: override > global config > env > default.
 
 Explicit project-store reads are strict. A corrupt or unreadable database produces
 a WARNING naming the key, state directory and underlying error before falling back
