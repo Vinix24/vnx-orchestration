@@ -100,14 +100,16 @@ class Pool:
     max_workers: int
     scaling_policy: str
     provider_mix: tuple
+    default_pair: Optional[tuple] = None
 
     def __init__(self, pool_id: str, min_workers: int, max_workers: int,
-                 scaling_policy: str, provider_mix: list) -> None:
+                 scaling_policy: str, provider_mix: list, default_pair=None) -> None:
         object.__setattr__(self, "pool_id", pool_id)
         object.__setattr__(self, "min_workers", min_workers)
         object.__setattr__(self, "max_workers", max_workers)
         object.__setattr__(self, "scaling_policy", scaling_policy)
         object.__setattr__(self, "provider_mix", tuple(provider_mix))
+        object.__setattr__(self, "default_pair", default_pair)
 
 
 # ---------------------------------------------------------------------------
@@ -288,12 +290,18 @@ def _build_registry(data: dict, valid_roles: Optional[FrozenSet[str]] = None) ->
     for p in raw_pools:
         policy = p.get("scaling_policy", "fixed")
         _validate_scaling_policy(policy)
+        pair = p.get("default_pair")
+        if "default_pair" in p:
+            if not isinstance(pair, dict) or not all(pair.get(k) for k in ("provider", "model")):
+                raise ValueError(f"Invalid default_pair for pool {p['pool_id']!r}")
+            pair = _worker_pair(pair["provider"], pair["model"])
         pools.append(Pool(
             pool_id=p["pool_id"],
             min_workers=int(p.get("min_workers", 1)),
             max_workers=int(p.get("max_workers", 1)),
             scaling_policy=policy,
             provider_mix=list(p.get("provider_mix", [])),
+            default_pair=pair,
         ))
 
     pool_ids = frozenset(p.pool_id for p in pools)
@@ -356,6 +364,111 @@ def _load_registry(repo_root: Optional[Path] = None) -> WorkerRegistry:
 # ---------------------------------------------------------------------------
 # Module-level singleton
 # ---------------------------------------------------------------------------
+
+def _worker_pair(provider, model):
+    """Validate/infer a pair using the fabric catalogue, never another source."""
+    if __package__:
+        from .providers import provider_registry as catalogue
+        from .provider_costs import registry_key_for_provider
+    else:
+        from providers import provider_registry as catalogue
+        from provider_costs import registry_key_for_provider
+    if not isinstance(provider, (str, type(None))):
+        raise ValueError(f"worker_pair_conflict: invalid provider {provider!r}")
+    configs = catalogue.load()
+    provider_key = registry_key_for_provider(provider) if provider else None
+    if model in (None, ""):
+        config = configs.get(provider_key)
+        if config is None or not config.default_model:
+            raise ValueError(f"worker_model_unresolved: {provider!r}")
+        model = config.default_model
+    if not isinstance(model, str):
+        raise ValueError(f"worker_model_unknown: {model!r}")
+    owners = set()
+    for key in configs:
+        try:
+            catalogue.resolve_model_identity(key, model)
+        except catalogue.RegistryLookupError:
+            continue  # A section miss is not success; require one owner below.
+        owners.add(key)
+    if not owners:
+        raise ValueError(f"worker_model_unknown: {model!r}")
+    if (provider and provider_key not in owners) or (not provider and len(owners) != 1):
+        raise ValueError(f"worker_pair_conflict: provider={provider!r} model={model!r}")
+    key = provider_key if provider else owners.pop()
+    inferred = configs[key].dispatch_enum or next(
+        (p for p in _VALID_PROVIDERS_BASE if registry_key_for_provider(p) == key), f"litellm:{key}")
+    return provider or inferred, model
+
+
+def _registry_pair(path, terminal_id, pool_id):
+    """Read a selected registry strictly; absent targets may use the next file."""
+    import yaml
+    data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict) or data.get("schema_version") != 1:
+        raise ValueError(f"Unsupported schema_version in {path}")
+    registry = _build_registry(data)
+    if terminal_id is not None:
+        worker = registry.by_id(terminal_id)
+        return _worker_pair(worker.provider, worker.model) if worker else None
+    pool = registry.pool(pool_id)
+    if pool is None:
+        return None
+    pairs = {(w.provider, w.model) for w in registry.by_pool(pool_id) if w.role not in _SYSTEM_ROLES}
+    if not pairs:
+        raise ValueError(f"worker_model_unresolved: pool {pool_id!r} has no builders")
+    if pool.default_pair is not None:
+        return pool.default_pair
+    if len(pairs) != 1:
+        raise ValueError(f"pool_default_ambiguous: {pool_id}")
+    return _worker_pair(*pairs.pop())
+
+
+def resolve_worker(terminal_id=None, *, pool_id="default", spec=None, repo_root=None, project_id=None):
+    """Return provider/model/source/overridden; ValueError refuses invalid choices.
+
+    None/empty fields are absent. Provider-only uses catalogue default_model.
+    A pool request has no terminal env. Overridden lists populated lower layers
+    (excluding the shipped baseline); files are only parsed when selected.
+    File/config errors propagate; the legacy loader's code fallback is untouched.
+    """
+    if __package__:
+        from . import config_registry
+    else:
+        import config_registry
+    if terminal_id is not None:
+        _validate_terminal_id(terminal_id)
+    spec = {} if spec is None else spec
+    if not isinstance(spec, dict):
+        raise ValueError("worker_pair_conflict: spec must be a mapping")
+    env = {}
+    for field_name in ("provider", "model") if terminal_id is not None else ():
+        value, source = config_registry.resolve_with_source(
+            f"VNX_{terminal_id}_{field_name.upper()}", project_id, strict_resolver=True)
+        if source in config_registry.ERROR_SOURCES:
+            raise ValueError(f"worker_config_unreadable: {source}")
+        env[field_name] = value
+    root = Path(repo_root) if repo_root is not None else resolve_project_root()
+    project = root / ".vnx" / "vnx_workers.yaml"
+    default = Path(__file__).resolve().parent / "defaults" / "vnx_workers.default.yaml"
+    sources = [("spec", spec), ("env", env)]
+    sources = [(name, value) for name, value in sources
+               if any(value.get(k) not in (None, "") for k in ("provider", "model"))]
+    if project.exists():
+        sources.append(("registry", project))
+    sources.append(("default", default))
+    for index, (source, value) in enumerate(sources):
+        pair = (_registry_pair(value, terminal_id, pool_id) if isinstance(value, Path)
+                else _worker_pair(value.get("provider"), value.get("model")))
+        if pair is None:
+            continue
+        overridden = [name for name, _ in sources[index + 1:] if name != "default"]
+        result = dict(provider=pair[0], model=pair[1], source=source, overridden=overridden)
+        logger.info("worker_resolution: provider=%s model=%s source=%s overridden=[%s]",
+                    *pair, source, ", ".join(overridden))
+        return result
+    raise ValueError(f"worker_model_unresolved: terminal={terminal_id!r} pool={pool_id!r}")
+
 
 WORKER_REGISTRY: WorkerRegistry = _load_registry()
 
