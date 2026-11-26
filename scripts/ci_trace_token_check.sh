@@ -8,8 +8,8 @@
 # Usage:
 #   ci_trace_token_check.sh [base_ref]
 #
-# Environment:
-#   VNX_PROVENANCE_ENFORCEMENT: "0" = warn, "1" = block (default: from env)
+# Config chain (override > project > global > env > default):
+#   VNX_PROVENANCE_ENFORCEMENT: "0" = warn, "1" = block (errors: block)
 #   VNX_PROVENANCE_LEGACY_ACCEPTED: "1" = accept legacy (default: "1")
 #   GITHUB_BASE_REF: used if base_ref not provided (GitHub Actions)
 #
@@ -21,7 +21,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VALIDATOR="$SCRIPT_DIR/lib/trace_token_validator.py"
-ENFORCEMENT="${VNX_PROVENANCE_ENFORCEMENT:-0}"
+source "$SCRIPT_DIR/lib/provenance_config.sh"
+vnx_read_provenance_config "$SCRIPT_DIR/.."
 
 # ── Determine base ref ──────────────────────────────────────────────
 BASE_REF="${1:-${GITHUB_BASE_REF:-main}}"
@@ -37,8 +38,22 @@ if ! git rev-parse --verify "$BASE_REF" >/dev/null 2>&1; then
 fi
 
 # ── Find commits to check ───────────────────────────────────────────
-MERGE_BASE="$(git merge-base "$BASE_REF" HEAD 2>/dev/null)" || MERGE_BASE="$BASE_REF"
-COMMITS="$(git log "$MERGE_BASE..HEAD" --format="%H" 2>/dev/null)" || true
+CHECK_REF=HEAD
+if [ "${GITHUB_EVENT_NAME:-}" = "pull_request" ]; then
+    # Checkout uses a synthetic merge; validate the event's exact PR head instead.
+    CHECK_REF="$(python3 - "${GITHUB_EVENT_PATH:?Missing GitHub event payload}" <<'PY'
+import json, re, sys
+from pathlib import Path
+sha = json.loads(Path(sys.argv[1]).read_text())["pull_request"]["head"]["sha"]
+if not isinstance(sha, str) or not re.fullmatch(r"[0-9a-f]{40}", sha):
+    raise ValueError("Invalid pull_request.head.sha")
+print(sha)
+PY
+    )"
+    git rev-parse --verify "$CHECK_REF^{commit}" >/dev/null
+fi
+MERGE_BASE="$(git merge-base "$BASE_REF" "$CHECK_REF" 2>/dev/null)" || MERGE_BASE="$BASE_REF"
+COMMITS="$(git log "$MERGE_BASE..$CHECK_REF" --format="%H" 2>/dev/null)" || true
 
 if [ -z "$COMMITS" ]; then
     echo "[VNX-CI] No new commits to check."
@@ -66,7 +81,8 @@ while IFS= read -r sha; do
 
     # Use Python validator if available
     if [ -f "$VALIDATOR" ]; then
-        RESULT="$(echo "$BODY" | python3 "$VALIDATOR" validate - 2>/dev/null)" || RESULT=""
+        RESULT="$(echo "$BODY" | VNX_OVERRIDE_PROVENANCE_ENFORCEMENT="$ENFORCEMENT" \
+            VNX_OVERRIDE_PROVENANCE_LEGACY_ACCEPTED="$LEGACY_ACCEPTED" python3 "$VALIDATOR" validate -)" || true
 
         if [ -n "$RESULT" ]; then
             IS_VALID="$(echo "$RESULT" | python3 -c "import json,sys; print(json.load(sys.stdin).get('valid', False))" 2>/dev/null)" || IS_VALID="unknown"
@@ -83,7 +99,7 @@ while IFS= read -r sha; do
         if echo "$BODY" | grep -qE '^Dispatch-ID:\s+\S+'; then
             IS_VALID="True"
             FORMAT="preferred"
-        elif [ "${VNX_PROVENANCE_LEGACY_ACCEPTED:-1}" = "1" ]; then
+        elif [ "$LEGACY_ACCEPTED" = "1" ]; then
             if echo "$BODY" | grep -qE 'dispatch:\S+|\\bPR-[0-9]+\\b|\\bFP-[A-Z]\\b'; then
                 IS_VALID="True"
                 FORMAT="legacy"
@@ -100,10 +116,6 @@ while IFS= read -r sha; do
             LEGACY=$((LEGACY + 1))
             ICON="~"
         fi
-    elif [ "$IS_VALID" = "unknown" ]; then
-        # Validator error — don't count as invalid
-        VALID=$((VALID + 1))
-        ICON="?"
     else
         INVALID=$((INVALID + 1))
         ICON="✗"

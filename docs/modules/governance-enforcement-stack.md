@@ -2,6 +2,10 @@
 
 Combines receipt chaining, signed attestations and evidence verification around PR attribution. The PR verifier checks feature changes using signers trusted by the base branch; docs/tests-only changes are exempt and evidence checking is advisory by default.
 
+Trace-token CI, `vnx install-git-hooks`, the installed `commit-msg` hook and the Python validator read provenance switches in order: emergency override, project row, global config, environment, registry default. A project row of `0` therefore overrides environment `1`; a row of `1` blocks tokenless commits without an environment export. Unreadable or malformed configuration retains enforcement and refuses legacy-only tokens. Shell readers locate `bin/vnx` in their own installation, including embedded installs and symlinked hooks.
+
+For GitHub pull requests, CI validates the exact head SHA in the event payload. Missing, malformed or unavailable head evidence blocks validation; GitHub's synthetic merge checkout is outside that commit range.
+
 Background: [attestation pipeline](../governance/ATTESTATION_ENFORCEMENT.md), [enforcement chain](../core/ENFORCEMENT_CHAIN.md).
 
 ## Entry points
