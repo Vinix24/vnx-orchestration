@@ -12,7 +12,6 @@ Two scenarios:
 
 from __future__ import annotations
 
-import importlib
 import os
 import sys
 from pathlib import Path
@@ -29,14 +28,11 @@ for _p in (SCRIPTS_DIR, SCRIPTS_LIB):
         sys.path.insert(0, str(_p))
 
 
-def _reload_modules():
-    """Reload all three modules so env-var changes take effect."""
+def _project_modules():
+    """Use the loaded modules; project resolution reads the environment per call."""
     import project_scope
     import headless_dispatch_writer
     import pr_queue_manager
-
-    importlib.reload(headless_dispatch_writer)
-    importlib.reload(pr_queue_manager)
 
     return project_scope, headless_dispatch_writer, pr_queue_manager
 
@@ -61,22 +57,22 @@ class TestProjectIdWithEnvSet:
 
     def test_project_scope_returns_env_value(self):
         os.environ[ENV_KEY] = "my-project"
-        ps, _, _ = _reload_modules()
+        ps, _, _ = _project_modules()
         assert ps.current_project_id() == "my-project"
 
     def test_headless_dispatch_writer_matches_project_scope(self):
         os.environ[ENV_KEY] = "my-project"
-        ps, hdw, _ = _reload_modules()
+        ps, hdw, _ = _project_modules()
         assert hdw._get_project_id() == ps.current_project_id()
 
     def test_pr_queue_manager_matches_project_scope(self):
         os.environ[ENV_KEY] = "my-project"
-        ps, _, pqm = _reload_modules()
+        ps, _, pqm = _project_modules()
         assert pqm._get_project_id() == ps.current_project_id()
 
     def test_all_three_stampers_agree(self):
         os.environ[ENV_KEY] = "vnx-seo-v2"
-        ps, hdw, pqm = _reload_modules()
+        ps, hdw, pqm = _project_modules()
         scope_val = ps.current_project_id()
         assert hdw._get_project_id() == scope_val
         assert pqm._get_project_id() == scope_val
@@ -87,24 +83,24 @@ class TestProjectIdWithEnvUnset:
 
     def test_project_scope_returns_default(self):
         os.environ.pop(ENV_KEY, None)
-        ps, _, _ = _reload_modules()
+        ps, _, _ = _project_modules()
         assert ps.current_project_id() == "vnx-dev"
 
     def test_headless_dispatch_writer_matches_project_scope(self):
         os.environ.pop(ENV_KEY, None)
-        ps, hdw, _ = _reload_modules()
+        ps, hdw, _ = _project_modules()
         with pytest.raises(ps.TenantUnresolved, match="vnx init"):
             hdw._get_project_id()
 
     def test_pr_queue_manager_matches_project_scope(self):
         os.environ.pop(ENV_KEY, None)
-        ps, _, pqm = _reload_modules()
+        ps, _, pqm = _project_modules()
         with pytest.raises(ps.TenantUnresolved, match="vnx init"):
             pqm._get_project_id()
 
     def test_all_three_stampers_agree_on_default(self):
         os.environ.pop(ENV_KEY, None)
-        ps, hdw, pqm = _reload_modules()
+        ps, hdw, pqm = _project_modules()
         scope_val = ps.current_project_id()
         assert scope_val == "vnx-dev"
         for stamper in (hdw, pqm):
