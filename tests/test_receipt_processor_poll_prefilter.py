@@ -130,6 +130,7 @@ def test_scan_problem_continues_cycle_logs_once_and_recovers(tmp_path, failure):
         broken.symlink_to(broken if failure == "loop" else tmp_path / "missing")
     try:
         result = run_cycle(tmp_path, f'''{setup}
+_run_receipt_converter_scan() {{ :; }}
 PS4='+ '; set -x
 for cycle in 6 12; do
     _poll_new_reports_cycle "$cycle" 6 || exit 1
