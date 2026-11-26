@@ -411,7 +411,9 @@ class TestDeepseekHarnessSubscriptionBlocked:
         )
 
     def test_deepseek_via_litellm_allowed(self, real_enforcer: ConstraintEnforcer):
-        real_enforcer.enforce(provider="litellm", sub_provider="deepseek", via="litellm")
+        # The allowed route requires a key marker; never depend on the operator's env.
+        real_enforcer.enforce(provider="litellm", sub_provider="deepseek", via="litellm",
+                              env={"DEEPSEEK_API_KEY": "not-a-real-key"})
 
 
 # ---------------------------------------------------------------------------
