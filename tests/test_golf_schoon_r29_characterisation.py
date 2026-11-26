@@ -65,7 +65,7 @@ def _snapshot(tmp_path, monkeypatch, *, violations=(), raise_exc=None, lag=0,
 
 def test_floor_pin_and_chain_fields(tmp_path, monkeypatch):
     snap, calls = _snapshot(tmp_path, monkeypatch, model="opus")
-    assert (calls[0]["model"], calls[0]["via"], calls[0]["terminal_id"]) == ("sonnet", "headless", "T1")
+    assert (calls[0]["model"], calls[0]["via"], calls[0]["terminal_id"]) == ("opus", "headless", "T1")
     assert calls[0]["check_registry"] is True
     assert snap.constraint_verdicts == () and snap.staging_promoted is True
     lane = dispatch_cli.HEADLESS_LANE_TERMINAL
@@ -106,7 +106,7 @@ def test_override_without_reason_prepends_refusal(tmp_path, monkeypatch):
     v = [NS(code="x", severity="warn", message="m", override_applied=False)]
     snap, calls = _snapshot(tmp_path, monkeypatch, model="opus", violations=v)
     assert [x.code for x in snap.constraint_verdicts] == ["worker-claude-override-reason-required", "x"]
-    assert snap.constraint_verdicts[0].severity == "blocking" and calls[0]["model"] == "sonnet"
+    assert snap.constraint_verdicts[0].severity == "blocking" and calls[0]["model"] == "opus"
     assert snap.model_pins == _PINS
 
 

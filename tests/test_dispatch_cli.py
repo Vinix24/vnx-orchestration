@@ -1255,7 +1255,7 @@ def test_claude_on_t1_without_model_and_without_override_dispatches_on_sonnet(
     mock_execute.assert_called_once()
     plan_arg = mock_execute.call_args[0][0]
     assert plan_arg.model == "sonnet", (
-        f"no explicit model must resolve to the sonnet pin, got {plan_arg.model!r}"
+        f"no explicit model must resolve to registry sonnet, got {plan_arg.model!r}"
     )
     assert plan_arg.lane == "claude_headless"
     err = capsys.readouterr().err
@@ -1454,10 +1454,7 @@ def _write_floor_semantics_workers_pin_yaml(providers_dir: Path) -> None:
 
 
 def test_build_runtime_snapshot_floor_ignores_explicit_differing_model(tmp_path):
-    """'floor' behavior: spec.model is ignored and the pin always wins, even when
-    spec.model is an explicit, differing claude model. Since WPFC PR-4 flips the
-    real YAML to default for workers, this test fabricates a floor SSOT to keep
-    the floor branch reachable."""
+    """Builder pins only check, even if configured with legacy floor semantics."""
     providers_dir = tmp_path / "lib" / "providers"
     _write_floor_semantics_workers_pin_yaml(providers_dir)
 
@@ -1479,10 +1476,7 @@ def test_build_runtime_snapshot_floor_ignores_explicit_differing_model(tmp_path)
 
     assert snapshot.model_pins["T1"] == ModelPin(model="kimi-k3", semantics="floor")
     kimi_blocks = [v for v in snapshot.constraint_verdicts if v.code == "kimi-via-cli-only"]
-    assert kimi_blocks and kimi_blocks[0].severity == "blocking", (
-        "floor semantics must ignore the explicit differing spec.model (sonnet) and "
-        "feed the pinned kimi-k3 into the constraint check, exactly like before PR-2"
-    )
+    assert not kimi_blocks, "builder pins must not replace explicit sonnet with kimi-k3"
 
 
 def test_build_runtime_snapshot_default_semantics_spec_model_wins(tmp_path):
@@ -1516,8 +1510,7 @@ def test_build_runtime_snapshot_default_semantics_spec_model_wins(tmp_path):
 
 
 def test_build_runtime_snapshot_default_semantics_fills_pin_when_model_absent(tmp_path):
-    """Under a fabricated 'default' pin, a spec that carries NO model at all still
-    gets the pin as a fallback -- 'default' is advisory, not 'no pin at all'."""
+    """A provider-only spec takes its registry model, never the differing pin."""
     providers_dir = tmp_path / "lib" / "providers"
     _write_default_semantics_workers_pin_yaml(providers_dir)
 
@@ -1538,10 +1531,7 @@ def test_build_runtime_snapshot_default_semantics_fills_pin_when_model_absent(tm
 
     assert snapshot.model_pins["T1"] == ModelPin(model="kimi-k3", semantics="default")
     kimi_blocks = [v for v in snapshot.constraint_verdicts if v.code == "kimi-via-cli-only"]
-    assert kimi_blocks and kimi_blocks[0].severity == "blocking", (
-        "no spec.model -> the pin (kimi-k3) must still be used as a fallback under "
-        "'default' semantics, tripping kimi-via-cli-only exactly like the floor case"
-    )
+    assert not kimi_blocks, "registry sonnet must win over the differing kimi-k3 pin"
 
 
 # ---------------------------------------------------------------------------
@@ -1744,7 +1734,7 @@ def test_default_semantics_explicit_sonnet_on_t1_routes_to_sonnet(tmp_path, monk
     )
 
 
-def test_default_semantics_no_model_on_t1_fills_pin_end_to_end(tmp_path, monkeypatch, capsys):
+def test_default_semantics_no_model_on_t1_uses_registry_end_to_end(tmp_path, monkeypatch, capsys):
     """dispatch-20260923-model-defaults-sonnet-opus55: the build-worker default is
     sonnet, so a claude-lane T1 dispatch with no explicit model resolves to sonnet
     and PASSES (no REJECT, no VNX_OVERRIDE_WORKER_CLAUDE). Before this dispatch the
@@ -1752,7 +1742,7 @@ def test_default_semantics_no_model_on_t1_fills_pin_end_to_end(tmp_path, monkeyp
     valid Claude registry key so the same path now dispatches."""
     data_dir, spec_file = _make_bundle_spec(
         tmp_path,
-        instruction_text="# Default semantics, no explicit model\n\nPin fills in to sonnet.\n",
+        instruction_text="# Default semantics, no explicit model\n\nRegistry supplies sonnet.\n",
         staging_id="20260923-staging-no-model-default",
         dispatch_id="20260923-no-model-default",
         provider="claude",
@@ -1766,13 +1756,13 @@ def test_default_semantics_no_model_on_t1_fills_pin_end_to_end(tmp_path, monkeyp
         rc = run_dispatch(spec_file)
 
     assert rc == 0, (
-        "default semantics without explicit model: pin (sonnet) must fill in and "
+        "default semantics without explicit model: registry (sonnet) must supply the model and "
         "dispatch, not reject"
     )
     mock_execute.assert_called_once()
     plan_arg = mock_execute.call_args[0][0]
     assert plan_arg.model == "sonnet", (
-        f"no explicit model on T1 must resolve to the sonnet pin, got {plan_arg.model!r}"
+        f"no explicit model on T1 must resolve to registry sonnet, got {plan_arg.model!r}"
     )
     assert plan_arg.lane == "claude_headless"
     err = capsys.readouterr().err

@@ -51,6 +51,7 @@ from dispatch_plan import (  # noqa: E402
     RuntimeSnapshot,
     claude_auth_is_api_metered,
     compile_plan,
+    _resolve_model,
 )
 from dispatch_internal import (  # noqa: E402
     ExecutionPermit,
@@ -3145,17 +3146,7 @@ def build_runtime_snapshot(
     # P1-#3: model_pins from SSOT
     model_pin_specs = _load_model_pins_from_yaml()  # dict[str, ModelPin]
 
-    # P0-1: effective model — same computation compile_plan uses in D4
-    #
-    # dispatch-20260923-model-defaults-sonnet-opus55: model_pin_specs resolves
-    # T1/T2/T3 to "sonnet" (workers-kimi-pinned, pin_semantics=default). A
-    # claude-lane build-worker dispatch with no explicit model therefore
-    # resolves to sonnet and PASSES (sonnet is a valid Claude registry key),
-    # where it used to resolve to kimi-k3 and hard-reject. The "sonnet"
-    # fallback below is unchanged and still fires when is_claude_lane is True
-    # and spec.model was not given. kimi-k3 remains an explicit per-dispatch
-    # choice: a spec that names model=kimi-k3 still hard-rejects on the claude
-    # lane (kimi-via-cli-only), exactly as before.
+    # The door and D4 share registry resolution; builder pins only check.
     is_claude_lane = spec.provider == Provider.CLAUDE
 
     # worker-claude-override gate (escape-hatch-worker-claude): evaluate the
@@ -3305,7 +3296,7 @@ def build_runtime_snapshot(
         staging_promoted=staging_promoted, waived_guarantees=tuple(waived_guarantees),
         target_health=target_health,
         target_capable=target_capable,
-        model_pins=snapshot_model_pins,
+        model_pins=snapshot_model_pins, effective_model=effective_model,
         valid_roles=valid_roles,
         valid_task_classes=valid_task_classes,
         parent_dispatch=chain_parent,
@@ -3349,30 +3340,19 @@ def _override_gate_and_effective_model(
                 ),
             ))
 
-    if is_claude_lane:
-        if worker_claude_override_reason is not None:
-            # Override granted: SKIP the kimi-k3 model_pins coercion for THIS
-            # dispatch only, so effective_model is the requested claude model. The
-            # constraint check below still runs against this model (registry,
-            # kimi-via-cli-only, etc.) — the override is claude->claude, never a
-            # bypass of the constraint engine.
-            effective_model = spec.model or "sonnet"
-        else:
-            # worker-provider-free-choice PR-2: honor ModelPin.semantics instead of
-            # always coercing to the pin. "floor" is today's behavior verbatim —
-            # spec.model is ignored, the pin always wins. "default" is advisory —
-            # spec.model wins when set, the pin only fills in when spec carries no
-            # model at all. The `or "sonnet"` tail stays the last-resort fallback
-            # on both branches.
-            pin = model_pin_specs.get(spec.target_slot)
-            if pin is None:
-                effective_model = spec.model or "sonnet"
-            elif pin.semantics == "floor":
-                effective_model = pin.model or "sonnet"
-            else:  # "default" — loader fails loud on any other value at load time
-                effective_model = spec.model or pin.model or "sonnet"
-    else:
-        effective_model = spec.model or "default"
+    try:
+        from dispatch_worktree_isolation import resolve_consumer_project_root
+        root = resolve_consumer_project_root()
+    except (OSError, RuntimeError, ValueError) as exc:
+        from provider_costs import registry_key_for_provider
+        override_gate_verdicts.append(ConstraintVerdict(
+            "worker_model_unresolved", "blocking", f"slot={spec.target_slot} provider={spec.provider.value} "
+            f"registry_key={registry_key_for_provider(spec.provider.value)!r}: {exc}"))
+        return override_gate_verdicts, worker_claude_override_reason, ""
+    effective_model = _resolve_model(spec, RuntimeSnapshot(model_pins=model_pin_specs, repo_root=root), is_claude_lane, [])
+    if isinstance(effective_model, Reject):
+        override_gate_verdicts.append(ConstraintVerdict(effective_model.code, "blocking", effective_model.reason))
+        effective_model = ""  # Blocking verdict above prevents planning/execution.
     return override_gate_verdicts, worker_claude_override_reason, effective_model
 
 

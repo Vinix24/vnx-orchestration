@@ -1,9 +1,8 @@
-"""dispatch_plan.py — compile_plan: pure, total routing decision function.
+"""dispatch_plan.py — compile_plan: registry-backed routing decision function.
 
 Maps a ValidatedSpec + RuntimeSnapshot to exactly one ExecutionPlan or one Reject.
-No env reads and no I/O beyond one existence probe (RS-2: the skill slug is
-resolved inside ``snapshot.repo_root``, the same checkout the door discovers the
-role registry from) — every other side-effectful input arrives via the snapshot.
+D4 resolves builder models through the worker registry (including project/env
+configuration). Skill existence is checked inside ``snapshot.repo_root``.
 
 PR-2 of the single-entry dispatch gate. Nothing imports this module yet.
 ADR-007 not triggered — pure in-process types only.
@@ -77,9 +76,9 @@ class ModelPin:
     """A model pin carrying enforcement semantics, not just a model name.
 
     floor:   coercive — spec.model is ignored, the pin always wins (today's
-             behavior for both t0-opus-only and workers-kimi-pinned).
-    default: advisory — spec.model wins when the caller set one; the pin is
-             only used as a fallback when spec.model is absent.
+             behavior for t0-opus-only).
+    default: advisory — builder models come from the worker registry; the pin
+             only warns when the resolved model differs.
 
     worker-provider-free-choice PR-1 added this type; PR-3 wired D4 to honour
     the semantics field.
@@ -139,6 +138,7 @@ class RuntimeSnapshot:
     # from. None = caller supplied no root; a declared skill is then REFUSED.
     repo_root: Optional[Path] = None
     waived_guarantees: tuple[Mapping[str, str], ...] = ()
+    effective_model: Optional[str] = None  # Door-checked model; D4 must not reread mutable config.
 
 
 # ---------------------------------------------------------------------------
@@ -368,8 +368,7 @@ def compile_plan(vspec: ValidatedSpec, snapshot: RuntimeSnapshot) -> ExecutionPl
         if lane_warning is not None:
             warnings.append(lane_warning)
     else:
-        lane = "provider"
-        adapter = "provider"
+        lane, adapter = "provider", "provider"
     fired.append("D1")
 
     # D2 — billing. Provider lanes are metered by default, with two exceptions:
@@ -384,25 +383,12 @@ def compile_plan(vspec: ValidatedSpec, snapshot: RuntimeSnapshot) -> ExecutionPl
     # compile_plan stays pure. A headless dispatch with no key of its own is
     # therefore "subscription", not "api_metered".
     billing = _resolve_billing(provider, is_claude_lane, snapshot)
-    fired.append("D2")
 
-    # D4 — model tier; warn-only pins are NOT a Reject
-    #
-    # worker-provider-free-choice PR-3: D4 honours ModelPin.semantics.
-    #   floor:   the pin always wins (coercive — today's behaviour for all slots).
-    #   default: spec.model wins when the caller set one; the pin is the fallback
-    #            when spec.model is absent.
-    #
-    # dispatch-20260923-model-defaults-sonnet-opus55: snapshot.model_pins resolves
-    # T1/T2/T3 to "sonnet" (workers-kimi-pinned, pin_semantics=default). This
-    # branch only runs when is_claude_lane is True (explicit provider=claude). The
-    # "sonnet" fallback below deliberately stays a valid Claude model name — it is
-    # the no-pin-found default for the claude lane specifically, not a worker-role
-    # default. A spec that names a kimi-branded model on the claude lane (e.g.
-    # model=kimi-k3) still hard-rejects via kimi-via-cli-only / the registry gate
-    # upstream, never a silent fallback.
+    # D4 — builders resolve through the registry; their pins only warn.
     model = _resolve_model(spec, snapshot, is_claude_lane, warnings)
-    fired.append("D4")
+    if isinstance(model, Reject):
+        return model
+    fired.extend(("D2", "D4"))
 
     # D5 — serialization class; the subscription is ONE account-wide resource,
     # so every claude dispatch shares the SAME slot class. OI-1417: headless
@@ -511,11 +497,50 @@ def _resolve_billing(provider: Provider, is_claude_lane: bool, snapshot: Runtime
     return billing
 
 
+def _provider_model_override(provider: str) -> Optional[str]:
+    """Read provider overrides through their existing resolvers; None means unset."""
+    from provider_dispatch import _resolve_codex_model, _kimi_resolve_requested_key, _litellm_resolve_model
+    if provider == "codex":
+        return _resolve_codex_model(override_only=True)
+    if provider == "kimi":
+        return _kimi_resolve_requested_key(None, override_only=True)
+    if provider.startswith("litellm:"):
+        from argparse import Namespace
+        return _litellm_resolve_model(Namespace(model=None), provider.split(":", 1)[1], None, override_only=True)
+    return None
+
+
 def _resolve_model(
     spec: DispatchSpec, snapshot: RuntimeSnapshot, is_claude_lane: bool, warnings: list[str],
-) -> str:
+) -> "str | Reject":
     """D4: the model tier, appending a model-tier warning when a pin and a request differ."""
     target_slot = spec.target_slot
+    if target_slot != "T0":
+        from provider_costs import registry_key_for_provider
+        import yaml
+
+        model = spec.model or snapshot.effective_model
+        if not model:
+            provider = spec.provider.value
+            try:
+                from worker_registry import resolve_worker
+                model = _provider_model_override(provider)
+                if model is None:
+                    pair = resolve_worker(None if target_slot == "pool" else target_slot,
+                                          repo_root=snapshot.repo_root, project_id=spec.project_id)
+                    if provider != "auto" and provider != pair["provider"]:
+                        pair = resolve_worker(None if target_slot == "pool" else target_slot,
+                                              spec={"provider": provider}, repo_root=snapshot.repo_root,
+                                              project_id=spec.project_id)
+                    model = pair["model"]
+            except (OSError, ValueError, RuntimeError, KeyError, TypeError, AttributeError, yaml.YAMLError) as exc:
+                return Reject("worker_model_unresolved", f"slot={target_slot} provider={provider} "
+                              f"registry_key={registry_key_for_provider(provider)!r}: {exc}")
+        pin = snapshot.model_pins.get(target_slot)
+        if pin and model != pin.model:
+            warnings.append(f"model-tier: requested {model} over pinned {pin.model}"
+                            f" for {target_slot} (default semantics — request honoured)")
+        return model
     if is_claude_lane:
         pin = snapshot.model_pins.get(target_slot)
         pinned = pin.model if pin is not None else None

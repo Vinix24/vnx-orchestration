@@ -9,13 +9,8 @@ e5ab7a676dd36fe0	scripts/lib/append_receipt_internals/payload.py	kimi-k3	1	model
 094fe9de1ad79547	scripts/lib/deliberation_panel.py	kimi-k3	1	model_catalog	Default panel roster pairs provider kimi with its catalogue model; the roster composition itself is PR-10 (phase 2), the name is the catalogue key	
 5ebd553219efd4be	scripts/lib/dispatch_bridge.py	kimi-k3	1	model_catalog	Comment on the provider='' -> AUTO fix, quoting the old kimi-k3 pin rejection; prose	
 753ba93170bedf23	scripts/lib/dispatch_cli.py	kimi-k3	1	model_catalog	Comment on the door's pin handling (sonnet is the default; kimi-k3 stays an explicit per-dispatch choice); prose about the pin, no value is set	
-f35fe97e4ed6d870	scripts/lib/dispatch_cli.py	kimi-k3	1	model_catalog	Comment on the door's pin handling (sonnet is the default; kimi-k3 stays an explicit per-dispatch choice); prose about the pin, no value is set	
-6daf78be68d1c152	scripts/lib/dispatch_cli.py	kimi-k3	1	model_catalog	Comment on the door's pin handling (sonnet is the default; kimi-k3 stays an explicit per-dispatch choice); prose about the pin, no value is set	
-550c126447341332	scripts/lib/dispatch_cli.py	kimi-k3	1	model_catalog	Comment on the door's pin handling (sonnet is the default; kimi-k3 stays an explicit per-dispatch choice); prose about the pin, no value is set	
 b603cbbfaa326fe6	scripts/lib/dispatch_cli.py	kimi-k3	1	model_catalog	Comment on the door's pin handling (sonnet is the default; kimi-k3 stays an explicit per-dispatch choice); prose about the pin, no value is set	
-f825ee6ae0a69300	scripts/lib/dispatch_cli.py	kimi-k3	1	model_catalog	Comment on the door's pin handling (sonnet is the default; kimi-k3 stays an explicit per-dispatch choice); prose about the pin, no value is set	
 9e9f8f2127dba6ca	scripts/lib/dispatch_cli.py	kimi-k3	1	model_catalog	Comment on the door's pin handling (sonnet is the default; kimi-k3 stays an explicit per-dispatch choice); prose about the pin, no value is set	
-efc69096a0df164d	scripts/lib/dispatch_plan.py	kimi-k3	1	model_catalog	Comment on step D4: a spec naming kimi-k3 still hard-rejects on the claude lane; prose	
 650c25cb5164e680	scripts/lib/dispatch_prepare.py	kimi-k3	1	te_repareren	Signature default model='kimi-k3' makes every caller that omits the model a kimi-k3 dispatch	AG-2
 c2ec10395f8dd227	scripts/lib/dispatch_spec.py	kimi-k3	1	model_catalog	Known-model allowlist entry for spec validation; a catalogue member, not a default	
 839c01e0e9298ff0	scripts/lib/gate_lane_contract.py	kimi-k3	1	model_catalog	Comment listing model context windows including kimi-k3; catalogue prose	
