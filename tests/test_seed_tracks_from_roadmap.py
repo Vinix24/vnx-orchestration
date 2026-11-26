@@ -377,5 +377,5 @@ def test_cli_imports_the_named_file(tmp_path):
     p = _write_roadmap(tmp_path, [
         {"feature_id": "feat-x", "title": "X", "status": "planned"},
     ])
-    assert seeder.main(["--roadmap", str(p), "--state-dir", str(state_dir), "--apply"]) == 0
+    assert seeder.main(["--roadmap", str(p), "--state-dir", str(state_dir), "--apply", "--project-id", "vnx-dev"]) == 0
     assert {t["track_id"] for t in tracks_lib.list_tracks(state_dir, "vnx-dev")} == {"feat-x"}

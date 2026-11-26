@@ -38,6 +38,7 @@ sys.path[:] = [p for p in sys.path if os.path.realpath(p or '.') != os.path.real
 sys.path.insert(0, str(_LIB))
 
 from crash_recovery_sweep import DEFAULT_MAX_ORPHANS, sweep  # noqa: E402
+from project_scope import TenantUnresolved, resolve_stamp_project_id
 
 
 def _default_data_dir() -> Path:
@@ -47,7 +48,7 @@ def _default_data_dir() -> Path:
     return _HERE.parent / ".vnx-data"
 
 
-def main(argv: "list[str] | None" = None) -> int:
+def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="crash_recovery_sweep",
         description=(
@@ -67,8 +68,8 @@ def main(argv: "list[str] | None" = None) -> int:
     )
     parser.add_argument(
         "--project-id",
-        default=os.environ.get("VNX_PROJECT_ID", "vnx-dev"),
-        help="Project id for the lease PID lookup (default: $VNX_PROJECT_ID or vnx-dev).",
+        default=None,
+        help="Project id for the lease PID lookup (default: $VNX_PROJECT_ID or store marker/layout).",
     )
     parser.add_argument(
         "--max-orphans",
@@ -91,6 +92,11 @@ def main(argv: "list[str] | None" = None) -> int:
         action="store_true",
         help="Enable INFO logging to stderr.",
     )
+    return parser
+
+
+def main(argv: "list[str] | None" = None) -> int:
+    parser = _build_parser()
     args = parser.parse_args(argv)
 
     logging.basicConfig(
@@ -104,6 +110,12 @@ def main(argv: "list[str] | None" = None) -> int:
 
     data_dir = Path(args.data_dir).expanduser() if args.data_dir else _default_data_dir()
     state_dir = Path(args.state_dir).expanduser() if args.state_dir else None
+    try:
+        args.project_id = resolve_stamp_project_id(
+            args.project_id or os.environ.get("VNX_PROJECT_ID"),
+            (state_dir or data_dir / "state") / "runtime_coordination.db")
+    except TenantUnresolved as exc:
+        parser.error(str(exc))
 
     result = sweep(
         data_dir,

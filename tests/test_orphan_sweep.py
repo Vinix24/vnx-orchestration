@@ -174,6 +174,7 @@ def test_dead_pane_session_killed(env):
         list_sessions=lambda: ["vnx-abc-1", "NotVnx"],
         probe_liveness=lambda s: False,
         kill_session=lambda s: (killed.append(s), True)[1],
+        project_id="vnx-dev",
     )
     assert res.tmux_killed == ["vnx-abc-1"]
     assert killed == ["vnx-abc-1"]
@@ -188,6 +189,7 @@ def test_alive_session_left_alone(env):
         list_sessions=lambda: ["vnx-abc-1"],
         probe_liveness=lambda s: True,
         kill_session=lambda s: True,
+        project_id="vnx-dev",
     )
     assert res.tmux_killed == []
     assert res.tmux_skipped_alive == ["vnx-abc-1"]
@@ -200,6 +202,7 @@ def test_unknown_liveness_fails_open(env):
         list_sessions=lambda: ["vnx-abc-1"],
         probe_liveness=lambda s: None,
         kill_session=lambda s: True,
+        project_id="vnx-dev",
     )
     assert res.tmux_killed == []
     assert res.tmux_skipped_alive == ["vnx-abc-1"]
@@ -212,6 +215,7 @@ def test_protected_session_left_alone(env):
         list_sessions=lambda: ["vnx-abc-1"],
         probe_liveness=lambda s: False,  # even provably dead
         kill_session=lambda s: True,
+        project_id="vnx-dev",
     )
     assert res.tmux_killed == []
     assert res.tmux_skipped_protected == ["vnx-abc-1"]
@@ -226,7 +230,7 @@ def test_clean_orphan_worktree_reaped(env, tmp_path):
     handle = _alloc(local, "clean-1")
     assert handle.path.is_dir()
 
-    res = osweep.sweep(repo_root=local, data_dir=env, list_sessions=lambda: [])
+    res = osweep.sweep(project_id="vnx-dev", repo_root=local, data_dir=env, list_sessions=lambda: [])
 
     assert str(handle.path) in res.worktrees_removed
     assert not handle.path.exists()
@@ -246,6 +250,7 @@ def test_live_worktree_left_alone(env, tmp_path):
         data_dir=env,
         list_sessions=lambda: ["vnx-live-1"],
         probe_liveness=lambda s: True,
+        project_id="vnx-dev",
     )
 
     assert str(handle.path) in res.worktrees_skipped_live
@@ -258,7 +263,7 @@ def test_dirty_orphan_worktree_marked_not_deleted(env, tmp_path):
     handle = _alloc(local, "dirty-1")
     (handle.path / "uncommitted.txt").write_text("wip\n")
 
-    res = osweep.sweep(repo_root=local, data_dir=env, list_sessions=lambda: [])
+    res = osweep.sweep(project_id="vnx-dev", repo_root=local, data_dir=env, list_sessions=lambda: [])
 
     # Marked (locked), never deleted: uncommitted work is preserved verbatim.
     assert str(handle.path) in res.worktrees_preserved
@@ -281,6 +286,7 @@ def test_protected_worktree_left_alone(env, tmp_path):
         data_dir=env,
         current_dispatch_id="prot-1",
         list_sessions=lambda: [],  # no session -> would be orphan without the fence
+        project_id="vnx-dev",
     )
 
     assert str(handle.path) in res.worktrees_skipped_live
@@ -291,10 +297,10 @@ def test_sweep_is_idempotent(env, tmp_path):
     local = _git_repo(tmp_path)
     handle = _alloc(local, "idem-1")
 
-    first = osweep.sweep(repo_root=local, data_dir=env, list_sessions=lambda: [])
+    first = osweep.sweep(project_id="vnx-dev", repo_root=local, data_dir=env, list_sessions=lambda: [])
     assert str(handle.path) in first.worktrees_removed
 
-    second = osweep.sweep(repo_root=local, data_dir=env, list_sessions=lambda: [])
+    second = osweep.sweep(project_id="vnx-dev", repo_root=local, data_dir=env, list_sessions=lambda: [])
     assert second.worktrees_scanned == []
     assert second.worktrees_removed == []
     assert second.errors == []
@@ -326,6 +332,7 @@ def test_headless_inflight_worktree_survives_sweep_without_tmux_session(env, tmp
         repo_root=local,
         data_dir=env,
         list_sessions=lambda: [],  # headless dispatch opens NO tmux session, ever
+        project_id="vnx-dev",
     )
 
     assert str(handle.path) in res.worktrees_skipped_live
@@ -343,7 +350,7 @@ def test_headless_worktree_reaped_once_register_shows_terminal(env, tmp_path):
     _write_register_event(env, "dispatch_created", "headless-done-1")
     _write_register_event(env, "dispatch_completed", "headless-done-1")
 
-    res = osweep.sweep(repo_root=local, data_dir=env, list_sessions=lambda: [])
+    res = osweep.sweep(project_id="vnx-dev", repo_root=local, data_dir=env, list_sessions=lambda: [])
 
     assert str(handle.path) in res.worktrees_removed
     assert not handle.path.exists()
@@ -357,7 +364,7 @@ def test_headless_unknown_worktree_unaffected_by_new_criterion(env, tmp_path):
     local = _git_repo(tmp_path)
     handle = _alloc(local, "never-registered-1")
 
-    res = osweep.sweep(repo_root=local, data_dir=env, list_sessions=lambda: [])
+    res = osweep.sweep(project_id="vnx-dev", repo_root=local, data_dir=env, list_sessions=lambda: [])
 
     assert str(handle.path) in res.worktrees_removed
     assert not handle.path.exists()
@@ -375,7 +382,7 @@ def test_headless_register_unmeasurable_fails_open_on_worktree(env, tmp_path, mo
     local = _git_repo(tmp_path)
     handle = _alloc(local, "unmeasurable-1")
 
-    res = osweep.sweep(repo_root=local, data_dir=env, list_sessions=lambda: [])
+    res = osweep.sweep(project_id="vnx-dev", repo_root=local, data_dir=env, list_sessions=lambda: [])
 
     assert str(handle.path) in res.worktrees_skipped_live
     assert handle.path.is_dir()
@@ -396,6 +403,7 @@ def test_headless_control_tmux_session_still_protects_worktree(env, tmp_path):
         data_dir=env,
         list_sessions=lambda: ["vnx-tmux-ctrl-1"],
         probe_liveness=lambda s: True,
+        project_id="vnx-dev",
     )
 
     assert str(handle.path) in res.worktrees_skipped_live
@@ -412,6 +420,7 @@ def test_active_manifest_recovered_via_delegation(env):
 
     res = osweep.sweep(
         data_dir=env, list_sessions=lambda: [], pid_alive=lambda pid: False,
+        project_id="vnx-dev",
     )
 
     assert res.active_recovered == ["act-1"]
@@ -427,6 +436,7 @@ def test_active_manifest_protected(env):
         current_dispatch_id="act-1",
         list_sessions=lambda: [],
         pid_alive=lambda pid: False,  # even provably dead
+        project_id="vnx-dev",
     )
 
     assert res.active_skipped_protected == ["act-1"]
@@ -599,6 +609,7 @@ def test_sweep_kills_completed_orphan_via_register_event(env, tmp_path):
         probe_liveness=lambda s: True,
         kill_session=lambda s: (killed.append(s), True)[1],
         capture_pane=lambda s: "",
+        project_id="vnx-dev",
     )
 
     assert killed == ["vnx-done-1"]
@@ -624,6 +635,7 @@ def test_sweep_kills_completed_orphan_via_terminal_receipt(env, tmp_path):
         probe_liveness=lambda s: True,
         kill_session=lambda s: True,
         capture_pane=lambda s: "",
+        project_id="vnx-dev",
     )
 
     assert len(res.tmux_completed_orphans_killed) == 1
@@ -641,6 +653,7 @@ def test_sweep_preserves_alive_orphan_with_live_worktree(env, tmp_path):
         list_sessions=lambda: ["vnx-wt-1"],
         probe_liveness=lambda s: True,
         capture_pane=lambda s: "",
+        project_id="vnx-dev",
     )
 
     assert res.tmux_completed_orphans_killed == []
@@ -660,6 +673,7 @@ def test_sweep_preserves_alive_known_but_not_completed(env, tmp_path):
         list_sessions=lambda: ["vnx-inflight-1"],
         probe_liveness=lambda s: True,
         capture_pane=lambda s: "",
+        project_id="vnx-dev",
     )
 
     assert res.tmux_completed_orphans_killed == []
@@ -679,6 +693,7 @@ def test_sweep_preserves_alive_session_unknown_to_project(env, tmp_path):
         list_sessions=lambda: ["vnx-other-project-1"],
         probe_liveness=lambda s: True,
         capture_pane=lambda s: "",
+        project_id="vnx-dev",
     )
 
     assert res.tmux_completed_orphans_killed == []
@@ -695,6 +710,7 @@ def test_sweep_preserves_alive_completed_orphan_awaiting_permission(env, tmp_pat
         list_sessions=lambda: ["vnx-perm-1"],
         probe_liveness=lambda s: True,
         capture_pane=lambda s: "Do you want to proceed?\n1. Yes\n2. No",
+        project_id="vnx-dev",
     )
 
     assert res.tmux_completed_orphans_killed == []
@@ -712,6 +728,7 @@ def test_sweep_preserves_alive_completed_orphan_pane_unmeasurable(env, tmp_path)
         list_sessions=lambda: ["vnx-unmeas-1"],
         probe_liveness=lambda s: True,
         capture_pane=lambda s: None,
+        project_id="vnx-dev",
     )
 
     assert res.tmux_completed_orphans_killed == []
@@ -731,6 +748,7 @@ def test_sweep_preserves_protected_completed_dispatch(env, tmp_path):
         list_sessions=lambda: ["vnx-prot-done-1"],
         probe_liveness=lambda s: True,
         capture_pane=lambda s: "",
+        project_id="vnx-dev",
     )
 
     assert res.tmux_completed_orphans_killed == []
@@ -751,6 +769,7 @@ def test_sweep_dry_run_completed_orphan_shows_ground_no_mutation(env, tmp_path):
         probe_liveness=lambda s: True,
         kill_session=lambda s: (killed.append(s), True)[1],
         capture_pane=lambda s: "",
+        project_id="vnx-dev",
     )
 
     assert res.dry_run
@@ -771,6 +790,7 @@ def test_sweep_completed_orphan_kill_is_idempotent(env, tmp_path):
         probe_liveness=lambda s: True,
         kill_session=lambda s: (killed.append(s), True)[1],
         capture_pane=lambda s: "",
+        project_id="vnx-dev",
     )
     assert killed == ["vnx-idem-done-1"]
     assert len(first.tmux_completed_orphans_killed) == 1
@@ -782,6 +802,7 @@ def test_sweep_completed_orphan_kill_is_idempotent(env, tmp_path):
         probe_liveness=lambda s: True,
         kill_session=lambda s: (killed.append(s), True)[1],
         capture_pane=lambda s: "",
+        project_id="vnx-dev",
     )
     assert second.tmux_completed_orphans_killed == []
     assert second.tmux_sessions_scanned == []
@@ -789,7 +810,7 @@ def test_sweep_completed_orphan_kill_is_idempotent(env, tmp_path):
 
 
 def test_to_dict_includes_completed_orphan_keys(env):
-    res = osweep.sweep(data_dir=env, list_sessions=lambda: [])
+    res = osweep.sweep(project_id="vnx-dev", data_dir=env, list_sessions=lambda: [])
     d = res.to_dict()
     assert d["tmux_completed_orphans_killed"] == []
     assert d["tmux_completed_orphans_preserved"] == []
@@ -852,6 +873,7 @@ def test_sweep_resolves_register_from_central_store_when_dirs_omitted(env, tmp_p
         list_sessions=lambda: ["vnx-central-1"],
         probe_liveness=lambda s: True,
         capture_pane=lambda s: "",
+        project_id="vnx-dev",
     )
 
     assert len(res.tmux_completed_orphans_killed) == 1
@@ -873,6 +895,7 @@ def test_sweep_preserves_unknown_project_when_dirs_omitted_and_register_elsewher
         list_sessions=lambda: ["vnx-never-registered-1"],
         probe_liveness=lambda s: True,
         capture_pane=lambda s: "",
+        project_id="vnx-dev",
     )
 
     assert res.tmux_completed_orphans_killed == []
@@ -890,7 +913,7 @@ def test_sweep_records_error_when_central_resolver_fails(tmp_path, monkeypatch):
     monkeypatch.delenv("VNX_DATA_DIR", raising=False)
     local = _git_repo(tmp_path)
 
-    res = osweep.sweep(repo_root=local, list_sessions=lambda: [])
+    res = osweep.sweep(project_id="vnx-dev", repo_root=local, list_sessions=lambda: [])
 
     matches = [e for e in res.errors if e.get("kind") == "data_dir_resolution"]
     assert matches, (
@@ -925,6 +948,7 @@ def test_explicit_state_dir_wins_over_central_resolution(monkeypatch, tmp_path):
         list_sessions=lambda: ["vnx-explicit-1"],
         probe_liveness=lambda s: True,
         capture_pane=lambda s: "",
+        project_id="vnx-dev",
     )
 
     assert len(res.tmux_completed_orphans_killed) == 1
@@ -953,6 +977,7 @@ def test_explicit_data_dir_still_derives_state_dir_unchanged(env, monkeypatch, t
         list_sessions=lambda: ["vnx-explicit-data-1"],
         probe_liveness=lambda s: True,
         capture_pane=lambda s: "",
+        project_id="vnx-dev",
     )
 
     assert len(res.tmux_completed_orphans_killed) == 1
@@ -972,7 +997,7 @@ def test_worktree_kind_stays_repo_relative_when_central_store_differs(monkeypatc
         lambda: {"VNX_DATA_DIR": str(central_dir), "VNX_STATE_DIR": str(central_dir / "state")},
     )
 
-    res = osweep.sweep(repo_root=local, list_sessions=lambda: [])
+    res = osweep.sweep(project_id="vnx-dev", repo_root=local, list_sessions=lambda: [])
 
     assert len(res.worktrees_scanned) == 1
     assert str(handle.path) in res.worktrees_removed
@@ -1005,6 +1030,7 @@ def test_dry_run_mutates_nothing(env, tmp_path):
         probe_liveness=lambda s: False,
         kill_session=lambda s: (killed.append(s), True)[1],
         pid_alive=lambda pid: False,
+        project_id="vnx-dev",
     )
 
     assert res.dry_run
@@ -1099,6 +1125,7 @@ def test_sweep_cross_project_owner_killed_and_inflight_preserved(env, tmp_path, 
         probe_liveness=lambda s: True,
         kill_session=lambda s: (killed.append(s), True)[1],
         capture_pane=lambda s: "",
+        project_id="vnx-dev",
     )
 
     killed_ids = {e["dispatch_id"] for e in res.tmux_completed_orphans_killed}
@@ -1356,6 +1383,7 @@ def test_sweep_cross_project_errors_recorded_and_fail_open(env, tmp_path, monkey
         list_sessions=lambda: ["vnx-broken-1"],
         probe_liveness=lambda s: True,
         capture_pane=lambda s: "",
+        project_id="vnx-dev",
     )
 
     assert res.tmux_completed_orphans_killed == []

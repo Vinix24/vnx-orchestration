@@ -97,6 +97,7 @@ def _run(store, caplog, *, dry_run, sessions=_SESSIONS):
         pid_alive=lambda pid: False,
         capture_pane=lambda s: "",
         account_data_root=account,
+        project_id="vnx-dev",
     )
     logs = [
         (r.levelname, r.getMessage())

@@ -132,7 +132,7 @@ def test_tmux_not_installed_worktree_survives_and_is_errored(env, tmp_path, monk
 
     monkeypatch.setattr(osweep.shutil, "which", lambda name: None)
 
-    res = osweep.sweep(repo_root=local, data_dir=env)
+    res = osweep.sweep(project_id="vnx-dev", repo_root=local, data_dir=env)
 
     assert handle.path.is_dir(), (
         "worktree was reaped even though the tmux listing was never "
@@ -157,7 +157,7 @@ def test_tmux_runner_oserror_worktree_survives_and_is_errored(env, tmp_path, mon
     monkeypatch.setattr(osweep.shutil, "which", lambda name: "/usr/local/bin/tmux")
     monkeypatch.setattr(osweep, "_adapter_run_tmux", fake_run_tmux)
 
-    res = osweep.sweep(repo_root=local, data_dir=env)
+    res = osweep.sweep(project_id="vnx-dev", repo_root=local, data_dir=env)
 
     assert handle.path.is_dir(), (
         "worktree was reaped even though the tmux runner raised OSError — "
@@ -182,7 +182,7 @@ def test_tmux_runner_timeout_worktree_survives_and_is_errored(env, tmp_path, mon
     monkeypatch.setattr(osweep.shutil, "which", lambda name: "/usr/local/bin/tmux")
     monkeypatch.setattr(osweep, "_adapter_run_tmux", fake_run_tmux)
 
-    res = osweep.sweep(repo_root=local, data_dir=env)
+    res = osweep.sweep(project_id="vnx-dev", repo_root=local, data_dir=env)
 
     assert handle.path.is_dir(), (
         "worktree was reaped even though the tmux runner raised "
@@ -223,7 +223,7 @@ def test_unrecognized_nonzero_rc_worktree_survives_and_is_errored(env, tmp_path,
     monkeypatch.setattr(osweep.shutil, "which", lambda name: "/usr/local/bin/tmux")
     monkeypatch.setattr(osweep, "_adapter_run_tmux", fake_run_tmux)
 
-    res = osweep.sweep(repo_root=local, data_dir=env)
+    res = osweep.sweep(project_id="vnx-dev", repo_root=local, data_dir=env)
 
     assert handle.path.is_dir(), (
         "worktree was reaped even though the tmux listing returned an "
@@ -258,7 +258,7 @@ def test_no_server_running_is_real_zero_sessions_worktree_still_reaped(env, tmp_
     monkeypatch.setattr(osweep.shutil, "which", lambda name: "/usr/local/bin/tmux")
     monkeypatch.setattr(osweep, "_adapter_run_tmux", fake_run_tmux)
 
-    res = osweep.sweep(repo_root=local, data_dir=env)
+    res = osweep.sweep(project_id="vnx-dev", repo_root=local, data_dir=env)
 
     assert str(handle.path) in res.worktrees_removed
     assert not handle.path.exists()

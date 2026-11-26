@@ -248,7 +248,7 @@ def test_build_parser_parses_and_binds_handlers(monkeypatch):
     p = planning_cli._build_parser()
     a = p.parse_args(["objective", "show", "T1", "--json"])
     assert a.func is planning_cli.cmd_objective_show
-    assert (a.track_id, a.json, a.project_id, a.state_dir) == ("T1", True, "vnx-dev", "")
+    assert (a.track_id, a.json, a.project_id, a.state_dir) == ("T1", True, None, "")
     a = p.parse_args(["horizon", "sync", "--apply", "--roadmap", "R.yaml"])
     assert a.func is planning_cli.cmd_objective_sync and a.apply and a.roadmap == "R.yaml"
     a = p.parse_args(["objective", "drift", "--repo-root", "/x"])
@@ -271,10 +271,10 @@ def test_build_parser_parses_and_binds_handlers(monkeypatch):
     assert a.func is planning_cli.cmd_objective_reconcile_streak
 
 
-def test_build_parser_project_id_default_from_env(monkeypatch):
+def test_build_parser_leaves_project_id_unset_until_command_resolution(monkeypatch):
     monkeypatch.setenv("VNX_PROJECT_ID", "from-env")
     a = planning_cli._build_parser().parse_args(["objective", "show", "T1"])
-    assert a.project_id == "from-env"
+    assert a.project_id is None
 
 
 @pytest.mark.parametrize("argv", [

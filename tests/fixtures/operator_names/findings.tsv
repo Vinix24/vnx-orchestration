@@ -140,13 +140,11 @@ f72c9a1214b445ac	scripts/backfill_dispatch_metadata.py	vnx-dev	1	te_repareren	He
 d94f52d9499667e2	scripts/ci/test_exclusions.txt	vnx-dev	1	legacy_tenant_reader	Comment quoting a measured ADR-007 init-backfill conflict (env value) for an excluded test; prose in a CI list	
 f0fe2fe1c4e5f186	scripts/ci/test_exclusions.txt	vnx-dev	1	legacy_tenant_reader	Comment quoting a measured ADR-007 init-backfill conflict (env value) for an excluded test; prose in a CI list	
 633705d1f8f11068	scripts/conversation_analyzer/runner.py	vnx-dev	1	legacy_tenant_reader	Comment or docstring stating that this path refuses to default to vnx-dev (ADR-007); prose, no behaviour	
-74da2524e00d01ad	scripts/crash_recovery_sweep.py	vnx-dev	1	te_repareren	CLI --project-id default is env or vnx-dev	AG-1
 3510281b6cdf3022	scripts/fleet_role_drift.py	vnx-dev	1	te_repareren	Fleet role drift takes the canon source from the registry entry named vnx-dev	AG-5
 1deff95b46e74135	scripts/hooks/vnx_hook_shim.sh	vnx-dev	1	te_repareren	Hook shim prefers the in-repo hook scripts only for the registry entry whose project_id is vnx-dev, i.e. the operator's fabric checkout	AG-5
 ceba80628ecc8347	scripts/hooks/vnx_hook_shim.sh	vnx-dev	1	te_repareren	Hook shim prefers the in-repo hook scripts only for the registry entry whose project_id is vnx-dev, i.e. the operator's fabric checkout	AG-5
 398eb9c02fa29d4d	scripts/index_adrs.py	vnx-dev	1	legacy_tenant_reader	Comment or docstring stating that this path refuses to default to vnx-dev (ADR-007); prose, no behaviour	
 2a4474ace24708c1	scripts/intelligence_backfill.py	vnx-dev	1	legacy_tenant_reader	Comment or docstring stating that this path refuses to default to vnx-dev (ADR-007); prose, no behaviour	
-53ccc8dcb6f37c81	scripts/lib/crash_recovery_sweep.py	vnx-dev	1	te_repareren	Library signature default project_id='vnx-dev' for the sweep	AG-1
 6342078068775165	scripts/lib/dispatch_cli.py	vnx-dev	1	te_repareren	_resolve_data_dir resolves the store of ~/.vnx-data/<pid> with a vnx-dev fallback when neither argument nor env names a project	AG-1
 7b3abb4e9f671577	scripts/lib/dispatch_cli.py	vnx-dev	1	legacy_tenant_reader	Comment or docstring stating that this path refuses to default to vnx-dev (ADR-007); prose, no behaviour	
 8e19c3fa19c9a1e6	scripts/lib/dispatch_metadata_db.py	vnx-dev	1	legacy_tenant_reader	Comment or docstring stating that this path refuses to default to vnx-dev (ADR-007); prose, no behaviour	
@@ -166,7 +164,6 @@ af9e0cf7532f60c7	scripts/lib/migrations/apply_0017.py	vnx-dev	1	frozen_migration
 eae6031e02467c76	scripts/lib/migrations/apply_0026.py	vnx-dev	1	frozen_migration	Runner of a frozen numbered migration: it substitutes or references the file's vnx-dev placeholder; the runner resolves the owning project at apply time	
 a31cf1138573bd69	scripts/lib/migrations/apply_0031.py	vnx-dev	1	frozen_migration	Runner of a frozen numbered migration: it substitutes or references the file's vnx-dev placeholder; the runner resolves the owning project at apply time	
 775cb30658c03167	scripts/lib/morning_round_routing.py	vnx-dev	1	te_repareren	FLEET_PROJECT constant names the fabric ledger by the operator project id; the fleet ledger id belongs in the registry	AG-5
-53ccc8dcb6f37c81	scripts/lib/orphan_sweep.py	vnx-dev	1	te_repareren	Library signature default project_id='vnx-dev' for the sweep	AG-1
 243ebead13135458	scripts/lib/pattern_dedup.py	vnx-dev	1	legacy_tenant_reader	Comment on the table default 'vnx-dev' of migration 0010 that a tenant-blind write would hit; prose	
 bf9402960b1521da	scripts/lib/project_id_migration.py	vnx-dev	1	legacy_tenant_reader	Comment or docstring stating that this path refuses to default to vnx-dev (ADR-007); prose, no behaviour	
 ebd617fc17ba1e2e	scripts/lib/project_id_migration.py	vnx-dev	1	legacy_tenant_reader	Comment or docstring stating that this path refuses to default to vnx-dev (ADR-007); prose, no behaviour	
@@ -226,11 +223,7 @@ fc6084e3f92b2101	scripts/migrate_future_system.py	vnx-dev	1	legacy_tenant_reader
 2dc415b697046803	scripts/migrate_to_central_vnx.py	vnx-dev	3	frozen_migration	Rebuild DDL of the legacy central-migration tool, a frozen schema text	
 a7a0a1c68e3219f0	scripts/migrate_to_central_vnx.py	vnx-dev	1	legacy_tenant_reader	Comment on how legacy vnx-dev-stamped rows interact with the composite unique keys during central migration	
 f0d79e1a68a67d98	scripts/migrate_to_central_vnx.py	vnx-dev	1	legacy_tenant_reader	Comment on how legacy vnx-dev-stamped rows interact with the composite unique keys during central migration	
-74da2524e00d01ad	scripts/orphan_sweep.py	vnx-dev	1	te_repareren	CLI --project-id default is env or vnx-dev	AG-1
-53ccc8dcb6f37c81	scripts/planning_cli.py	vnx-dev	1	te_repareren	planning_cli argument or signature default falls back to vnx-dev (sign / track commands)	AG-1
-81317781cfeb4315	scripts/planning_cli.py	vnx-dev	1	te_repareren	planning_cli argument or signature default falls back to vnx-dev (sign / track commands)	AG-1
 b94ee0e18a109ba9	scripts/planning_cli.py	vnx-dev	1	legacy_tenant_reader	Comment or docstring stating that this path refuses to default to vnx-dev (ADR-007); prose, no behaviour	
-dfc0c06e249950dd	scripts/planning_cli.py	vnx-dev	1	te_repareren	planning_cli argument or signature default falls back to vnx-dev (sign / track commands)	AG-1
 040b8e2107a57fd4	scripts/quality_db_init.py	vnx-dev	1	legacy_tenant_reader	QI bootstrap reconcile: runs the three-phase tenant migration only when the owning pid is not the vnx-dev sentinel	
 11144b8f1e1bcfe2	scripts/quality_db_init.py	vnx-dev	1	frozen_migration	Python-embedded QI migration step (v10-v29) that stamps the vnx-dev sentinel; for a non-vnx-dev pid run_qi_three_phase_migration re-stamps and drops it at the end of bootstrap	
 1ed4f6ed27b49252	scripts/quality_db_init.py	vnx-dev	1	frozen_migration	Python-embedded QI migration step (v10-v29) that stamps the vnx-dev sentinel; for a non-vnx-dev pid run_qi_three_phase_migration re-stamps and drops it at the end of bootstrap	
@@ -243,7 +236,6 @@ c43e3f9fb39d41a1	scripts/receipt_query.py	vnx-dev	1	te_repareren	COHORT_PROJECTS
 00edc6fedfc34f4d	scripts/runtime_coordination_init.py	vnx-dev	1	legacy_tenant_reader	Comment or docstring stating that this path refuses to default to vnx-dev (ADR-007); prose, no behaviour	
 4dbb6e2ef184aa0b	scripts/runtime_coordination_init.py	vnx-dev	1	legacy_tenant_reader	Comment or docstring stating that this path refuses to default to vnx-dev (ADR-007); prose, no behaviour	
 8d4c5d894d779e6c	scripts/runtime_coordination_init.py	vnx-dev	1	legacy_tenant_reader	Comment or docstring stating that this path refuses to default to vnx-dev (ADR-007); prose, no behaviour	
-9b6e44bbd55691e5	scripts/seed_tracks_from_roadmap.py	vnx-dev	1	te_repareren	--project-id default is env or vnx-dev when seeding tracks	AG-1
 eb55bbd9933eb9d7	scripts/setup/install_local_gemma.sh	vnx-dev	1	te_repareren	Usage example in the installer comment hardcodes the operator's project id	AG-5
 238c2ec8ec22c014	scripts/vnx_structural_doctor.py	vnx-dev	1	frozen_migration	Embedded copy of the frozen 0024 tenant-scoped DDL used by the structural repair; same text as the migration	
 2dc415b697046803	scripts/vnx_structural_doctor.py	vnx-dev	3	frozen_migration	Embedded copy of the frozen 0024 tenant-scoped DDL used by the structural repair; same text as the migration	
@@ -295,7 +287,6 @@ b245c8afeca37bd9	scripts/check_installer_no_template_leak.sh	vincentvandeth	1	le
 5ce83b231e0a3cf2	scripts/ci/xdist_expected_skips.txt	vnx-dev	1	legacy_tenant_reader	Comment or docstring that mentions the vnx-dev project in prose (measurement, ADR-007 note or history); no behaviour	
 31a5abd6a742573b	scripts/cli/vnx_status.py	vnx-dev	1	legacy_tenant_reader	Comment or docstring that mentions the vnx-dev project in prose (measurement, ADR-007 note or history); no behaviour	
 389d822d936a9fed	scripts/control_centre_projects.yaml.example	vnx-dev	1	te_repareren	Example project list names the operator's project vnx-dev instead of a placeholder id	AG-1
-21ae39cc1329f9d5	scripts/crash_recovery_sweep.py	vnx-dev	1	te_repareren	Help text states the --project-id default is env or vnx-dev, the default the code applies	AG-1
 d9a62d46409534f3	scripts/fleet_role_drift.py	vnx-dev	1	te_repareren	Failure message of fleet role drift naming the vnx-dev registry entry it takes the canon source from	AG-5
 332d2340093f8328	scripts/gate_dispatch_identity_purge.py	vnx-dev	1	te_repareren	Usage example or docstring command that names the operator's project vnx-dev or its store ~/.vnx-data/vnx-dev; reword with a placeholder	AG-1
 f0f6aa1c614c566e	scripts/gate_dispatch_identity_purge.py	vnx-dev	1	te_repareren	Usage example or docstring command that names the operator's project vnx-dev or its store ~/.vnx-data/vnx-dev; reword with a placeholder	AG-1
@@ -382,8 +373,6 @@ f21f74c57072a17a	scripts/lib/vnx_paths.py	vnx-dev	1	te_repareren	Usage example o
 c8ed2a1c8013ec16	scripts/migrate_to_central_vnx.py	vnx-dev	1	legacy_tenant_reader	Comment or docstring that mentions the vnx-dev project in prose (measurement, ADR-007 note or history); no behaviour	
 f988293fddacc321	scripts/migrate_to_central_vnx.py	vnx-dev	1	legacy_tenant_reader	Comment or docstring that mentions the vnx-dev project in prose (measurement, ADR-007 note or history); no behaviour	
 a6887d7721272e68	scripts/open_items_manager.py	vnx-dev	1	legacy_tenant_reader	Comment or docstring that mentions the vnx-dev project in prose (measurement, ADR-007 note or history); no behaviour	
-21ae39cc1329f9d5	scripts/orphan_sweep.py	vnx-dev	1	te_repareren	Help text states the --project-id default is env or vnx-dev, the default the code applies	AG-1
-3b4957424364cd3a	scripts/permission_posture_report.py	vnx-dev	1	te_repareren	Help text states the --project-id default is env or vnx-dev, the default the code applies	AG-1
 348e3b32fa585d83	scripts/quality_db_init.py	vnx-dev	1	legacy_tenant_reader	Comment or docstring that mentions the vnx-dev project in prose (measurement, ADR-007 note or history); no behaviour	
 568afce7395ce5e8	scripts/quality_db_init.py	vnx-dev	1	te_repareren	Docstring of the helper that stamps the vnx-dev project id on session_analytics rows whose project_id is NULL	AG-1
 8f347c16c276d2b0	scripts/quality_db_init.py	vnx-dev	1	legacy_tenant_reader	Comment or docstring that mentions the vnx-dev project in prose (measurement, ADR-007 note or history); no behaviour	
