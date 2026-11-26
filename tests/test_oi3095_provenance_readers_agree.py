@@ -119,12 +119,20 @@ def test_no_project_defaults(checkout):
     read_pair(checkout, [False, True], "no_project")
 
 
-def test_shell_missing_reader_fails_closed(checkout):
+@pytest.mark.parametrize("failure", ["reader_missing", "python_missing", "nonzero"])
+def test_shell_reader_failure_stays_restrictive(checkout, failure):
     repo, env = checkout
-    result = subprocess.run(["bash", "-euc", 'source "$1/scripts/lib/provenance_config.sh"; '
+    prefix = ""
+    if failure == "python_missing":
+        env["PATH"] = str(repo)
+    if failure == "nonzero":
+        # Run the real reader, then fail after its otherwise usable answer.
+        prefix = 'PYTHON="$3"; python3() { "$PYTHON" "$@"; return 23; }; '
+    result = subprocess.run(["/bin/bash", "-euc", prefix + 'source "$1/scripts/lib/provenance_config.sh"; '
                              'vnx_read_provenance_config "$2"; '
                              'printf "%s %s" "$ENFORCEMENT" "$LEGACY_ACCEPTED"',
-                             "oi3095", str(ROOT), str(repo)], cwd=repo, env=env,
+                             "oi3095", str(ROOT), str(repo if failure == "reader_missing" else ROOT),
+                             sys.executable], cwd=repo, env=env,
                             capture_output=True, text=True, check=True)
     assert result.stdout == "1 0"
     assert "Config read failed" in result.stderr

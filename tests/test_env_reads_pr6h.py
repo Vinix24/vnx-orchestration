@@ -191,6 +191,7 @@ def test_unresolvable_python_store_stays_restrictive(store, monkeypatch, caplog)
                                  "row1", "row0", "override1", "override0", "global1", "global0",
                                  "empty", "null", "malformed", "unknown", "validator_error",
                                  "validator_missing", "legacy0", "legacy1", "preferred",
+                                 "python_missing", "python_missing_legacy",
                                  "missing_legacy", "error_legacy", "unresolvable_legacy",
                                  "bad_legacy_empty", "bad_legacy_null", "bad_legacy_malformed", "bad_legacy_unknown"])
 def test_bash_config_and_fallback(store, tmp_path, monkeypatch, script, mode):
@@ -243,6 +244,14 @@ def test_bash_config_and_fallback(store, tmp_path, monkeypatch, script, mode):
     if mode.startswith("bad_legacy_"):
         monkeypatch.setenv("VNX_PROVENANCE_ENFORCEMENT", "0")
         monkeypatch.setenv("VNX_OVERRIDE_PROVENANCE_LEGACY_ACCEPTED", invalid[mode.removeprefix("bad_legacy_")])
+    if mode == "python_missing":
+        bin_dir = tmp_path / "without-python"
+        bin_dir.mkdir()
+        for name in ("bash", "cat", "dirname", "git", "mkdir", "ln", "chmod", "grep"):
+            (bin_dir / name).symlink_to(shutil.which(name))
+        monkeypatch.setenv("PATH", str(bin_dir))
+        monkeypatch.setenv("VNX_PROVENANCE_ENFORCEMENT", "0")
+        monkeypatch.setenv("VNX_PROVENANCE_LEGACY_ACCEPTED", "1")
     command = ('bash "$1" HEAD~1' if script.startswith("ci_") else
                'log() { echo "$*"; }; err() { echo "$*" >&2; }; source "$1"; cmd_install_git_hooks')
     result = subprocess.run(["bash", "-c", command, "pr6h", str(home / "scripts" / script)],
@@ -250,7 +259,7 @@ def test_bash_config_and_fallback(store, tmp_path, monkeypatch, script, mode):
     enforced = mode not in ("row0", "override0", "global0")
     legacy_allowed = mode == "legacy1" or (mode == "unresolvable" and message == "feat: PR-9")
     blocked = enforced and mode != "preferred" and not legacy_allowed
-    if mode not in ("missing", "unresolvable"):
+    if mode not in ("missing", "unresolvable", "python_missing"):
         assert (trace.get_enforcement_mode() == trace.EnforcementMode.ENFORCED) is enforced
     expected = ("ENFORCED" if enforced else "shadow") if script.startswith("ci_") else (
         "ACTIVE" if enforced else "SHADOW")
@@ -264,8 +273,9 @@ def test_bash_config_and_fallback(store, tmp_path, monkeypatch, script, mode):
         message_file.write_text(message)
         hook = subprocess.run(["bash", str(consumer / ".git/hooks/commit-msg"), str(message_file)],
                               cwd=consumer, capture_output=True, text=True)
-        assert hook.returncode == int(blocked), hook.stdout + hook.stderr
-    if mode in ("error", "missing", "store_error", *invalid) or mode.startswith("bad_legacy_"):
+        # commit-msg needs Python to resolve its installed symlink and aborts first.
+        assert hook.returncode == (127 if mode == "python_missing" else int(blocked)), hook.stdout + hook.stderr
+    if mode in ("error", "missing", "store_error", "python_missing", *invalid) or mode.startswith("bad_legacy_"):
         assert "Config read failed" in result.stdout + result.stderr
 
 
