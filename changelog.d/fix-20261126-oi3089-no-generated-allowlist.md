@@ -1,0 +1,1 @@
+- Operator-name guard (OI-3089): derive allowances from the findings table in memory; remove the generated file and fixed totals so independent row removals merge cleanly.

@@ -76,7 +76,7 @@ def scan(
     of a listed finding is one too. ``table`` defaults to the guard's table.
     """
     rows = _guard.load_table() if table is None else table
-    allowed = {(r["path"], r["name"], r["fingerprint"]): r["count"] for r in rows}
+    allowed = {(p, n, f): c for p, n, f, c in _guard.generate(rows)["entries"]}
     violations: list[dict] = []
     for (rel, name, fp), (count, _line) in sorted(_guard.scan(project_root).items()):
         if name != _DEV_NAME:
