@@ -230,9 +230,8 @@ def check_pipeline_connected(db_path: Path) -> Dict[str, object]:
             result["connected"] = sel_result.items_injected > 0
         finally:
             selector.close()
-    except Exception:
-        # Selector unavailable — fall back to "patterns exist" heuristic
-        result["connected"] = patterns_exist
+    except Exception as exc:
+        result["error"] = f"selector probe failed: {exc}"
 
     return result
 

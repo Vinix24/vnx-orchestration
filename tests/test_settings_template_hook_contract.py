@@ -324,6 +324,7 @@ def _stage_worker_engine(tmp_path: Path, intelligence: dict) -> Tuple[Path, Path
     engine = tmp_path / "engine"
     (engine / "scripts").mkdir(parents=True)
     shutil.copy(SCRIPTS / WORKER_INJECT, engine / "scripts" / WORKER_INJECT)
+    (engine / "scripts" / "lib").symlink_to(SCRIPTS / "lib")
     (engine / "scripts" / "gather_intelligence.py").write_text(
         "import json\nprint(json.dumps(" + repr(intelligence) + "))\n", encoding="utf-8"
     )
@@ -351,6 +352,7 @@ def _run_worker(engine: Path, state: Path, cwd: Path) -> subprocess.CompletedPro
             "HOME": str(cwd),
             "VNX_TERMINAL": "T1",
             "VNX_STATE_DIR": str(state),
+            "VNX_PROJECT_ID": "vnx-dev",
         },
         capture_output=True,
         text=True,

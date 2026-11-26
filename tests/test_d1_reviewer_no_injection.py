@@ -26,6 +26,8 @@ enriched prompt.
 
 from __future__ import annotations
 
+import pytest
+
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -369,3 +371,8 @@ class TestVerifyRoleAppliedSuppressedReviewer:
         verdict = verify_role_applied(final_prompt, "T1", "quality-engineer")
         assert verdict.role_applied is True
         assert verdict.tier == "agents"
+
+
+@pytest.fixture(autouse=True)
+def _explicit_intelligence_project(monkeypatch):
+    monkeypatch.setenv("VNX_PROJECT_ID", "vnx-dev")

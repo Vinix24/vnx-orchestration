@@ -20,7 +20,16 @@ import sqlite3
 from pathlib import Path
 from typing import List, Optional
 
+from project_scope import TenantUnresolved, resolve_stamp_project_id
+from project_id_refusals import record_project_id_refusal
+
 logger = logging.getLogger(__name__)
+
+
+def record_unresolved_injection(state_dir: Path, hook: str) -> None:
+    """Keep refusal visible while allowing the original prompt through."""
+    logger.warning("intelligence: skipped (project_id_unresolved)")
+    record_project_id_refusal("intelligence_injection", state_dir, "project_id_unresolved", hook=hook)
 
 # ---------------------------------------------------------------------------
 # Wave-5 ADR injection — constants and helpers (INT-2)
@@ -216,18 +225,13 @@ def fetch_adr_context_section(
     if not _adr_injection_triggered(role, dispatch_paths):
         return ""
 
-    _pid: str
-    if project_id:
-        _pid = project_id
-    else:
-        try:
-            from project_scope import current_project_id  # noqa: PLC0415
-            _pid = current_project_id()
-        except (KeyError, AttributeError) as e:
-            logger.debug('project_id not in dispatch context, using vnx-dev default: %s', e)
-            _pid = "vnx-dev"
-
     quality_db_path = state_dir / "quality_intelligence.db"
+    try:
+        _pid = resolve_stamp_project_id(project_id, quality_db_path)
+    except TenantUnresolved:
+        record_unresolved_injection(state_dir, "fetch_adr_context_section")
+        return ""
+
     if not quality_db_path.exists():
         return ""
 
@@ -258,6 +262,7 @@ def build_intelligence_section(
     role: Optional[str],
     state_dir: Path,
     *,
+    project_id: Optional[str] = None,
     pr_id: Optional[str] = None,
     dispatch_paths: Optional[List[str]] = None,
 ) -> str:
@@ -278,6 +283,7 @@ def build_intelligence_section(
         pr_id=pr_id,
         dispatch_paths=dispatch_paths,
         instruction_text=instruction,
+        project_id=project_id,
     )
     if not section:
         return instruction
@@ -346,8 +352,7 @@ def _emit_then_record(selector, result, arm: Optional[str], state_dir: Path) -> 
         except Exception as exc:
             logger.debug("emit_event failed for %s: %s", dispatch_id, exc)
     else:
-        from project_scope import current_project_id  # noqa: PLC0415
-        result.project_id = current_project_id()
+        result.project_id = selector.project_id
         recorded = _record_arm_decision(result, state_dir)
         try:
             # no coordination store (state_dir None) = no event to write, not a failed one
@@ -370,10 +375,10 @@ def _arm_result(selector, dispatch_id, role, pr_id, dispatch_paths, instruction_
 
     arm None = no active window: today's injection, row unstamped.
     """
+    project_id = selector.project_id
     try:
         from intelligence_selector import arm_for_dispatch, load_window_config  # noqa: PLC0415
-        from project_scope import current_project_id  # noqa: PLC0415
-        arm, ab_window = arm_for_dispatch(dispatch_id, current_project_id(), load_window_config())
+        arm, ab_window = arm_for_dispatch(dispatch_id, project_id, load_window_config())
     except Exception as exc:
         logger.warning("A/B arm undecidable for %s, no arm assigned: %s", dispatch_id, exc)
         arm, ab_window = None, None
@@ -407,6 +412,7 @@ def fetch_intelligence_section(
     role: Optional[str],
     state_dir: Path,
     *,
+    project_id: Optional[str] = None,
     pr_id: Optional[str] = None,
     dispatch_paths: Optional[List[str]] = None,
     instruction_text: Optional[str] = None,
@@ -430,6 +436,15 @@ def fetch_intelligence_section(
     OSError from ADR event-write propagates (ADR-005: raise on event-write failure).
     Other exceptions are caught and logged; callers receive empty string.
     """
+    quality_db_path = state_dir / "quality_intelligence.db"
+    try:
+        project_id = resolve_stamp_project_id(project_id, quality_db_path)
+        if resolve_stamp_project_id() != project_id:
+            raise TenantUnresolved("intelligence source project differs from selected store")
+    except TenantUnresolved:
+        record_unresolved_injection(state_dir, "fetch_intelligence_section")
+        return ""
+
     # ADR context injection (INT-2) — runs before existing intelligence
     # OSError propagates; other exceptions are handled below
     adr_section: str = ""
@@ -439,6 +454,7 @@ def fetch_intelligence_section(
             role=role,
             dispatch_paths=dispatch_paths,
             state_dir=state_dir,
+            project_id=project_id,
         )
     except OSError:
         raise  # per ADR-005: event-write failure must propagate
@@ -447,10 +463,10 @@ def fetch_intelligence_section(
 
     try:
         from intelligence_selector import IntelligenceSelector  # noqa: PLC0415
-        quality_db_path = state_dir / "quality_intelligence.db"
         selector = IntelligenceSelector(
             quality_db_path=quality_db_path,
             coord_db_state_dir=state_dir,
+            project_id=project_id,
         )
         try:
             result, arm = _arm_result(
@@ -467,6 +483,9 @@ def fetch_intelligence_section(
         finally:
             selector.close()
         intel_section = format_intelligence_items(result.items) if result.items else ""
+    except TenantUnresolved:
+        record_unresolved_injection(state_dir, "fetch_intelligence_section")
+        return ""
     except Exception as exc:
         logger.warning("intelligence injection failed (%s); proceeding without", exc)
         intel_section = ""

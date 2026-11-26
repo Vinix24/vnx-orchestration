@@ -244,7 +244,7 @@ def test_disabled_or_invalid_window_records_no_arm(monkeypatch, tmp_path, captur
 
 
 def test_assignment_returning_none_records_no_arm(monkeypatch, tmp_path, captured):
-    monkeypatch.setattr(sel, "_resolve_arm", lambda dispatch_id: (None, None))
+    monkeypatch.setattr(sel, "_resolve_arm", lambda dispatch_id, project_id: (None, None))
     direct, ctx = _run_both(tmp_path)
     assert direct.ab_arm is None and ctx.ab_arm is None
     assert captured and all(arm is None for _, arm in captured)
@@ -262,3 +262,8 @@ def test_valid_window_records_assigned_arm(monkeypatch, tmp_path, captured):
     direct, ctx = _run_both(tmp_path)
     assert direct.ab_arm == expected and ctx.ab_arm == expected
     assert captured and all(arm == expected for _, arm in captured)
+
+
+@pytest.fixture(autouse=True)
+def _explicit_intelligence_project(monkeypatch):
+    monkeypatch.setenv("VNX_PROJECT_ID", "vnx-dev")

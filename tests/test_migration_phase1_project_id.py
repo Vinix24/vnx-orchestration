@@ -288,7 +288,7 @@ def test_case_d_selector_filters_to_current_project(tmp_path):
     import intelligence_selector  # noqa: PLC0415
 
     # Default tenant — sees only its own project rows.
-    with _env(**{ENV_VAR: None, FILTER_ENV_VAR: None}):
+    with _env(**{ENV_VAR: "vnx-dev", FILTER_ENV_VAR: "vnx-dev"}):
         sel = intelligence_selector.IntelligenceSelector(quality_db_path=db)
         try:
             result = sel.select(
@@ -304,7 +304,7 @@ def test_case_d_selector_filters_to_current_project(tmp_path):
     assert "foo-pattern" not in titles
 
     # Foreign tenant — sees its rows, not vnx-dev's.
-    with _env(**{ENV_VAR: "tenant-foo", FILTER_ENV_VAR: None}):
+    with _env(**{ENV_VAR: "tenant-foo", FILTER_ENV_VAR: "vnx-dev"}):
         sel = intelligence_selector.IntelligenceSelector(quality_db_path=db)
         try:
             result = sel.select(
@@ -329,7 +329,7 @@ def test_case_d_filter_holds_when_the_environment_says_0(tmp_path):
 
     import intelligence_selector  # noqa: PLC0415
 
-    with _env(**{ENV_VAR: None, FILTER_ENV_VAR: "0"}):
+    with _env(**{ENV_VAR: "vnx-dev", FILTER_ENV_VAR: "0"}):
         sel = intelligence_selector.IntelligenceSelector(quality_db_path=db)
         try:
             result = sel.select(
@@ -371,7 +371,7 @@ def test_case_e_phase0_default_rows_readable_for_default_tenant(tmp_path):
 
     import intelligence_selector  # noqa: PLC0415
 
-    with _env(**{ENV_VAR: None}):
+    with _env(**{ENV_VAR: "vnx-dev"}):
         sel = intelligence_selector.IntelligenceSelector(quality_db_path=db)
         try:
             result = sel.select(

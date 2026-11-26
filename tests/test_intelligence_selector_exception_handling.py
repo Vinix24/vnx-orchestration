@@ -8,6 +8,8 @@ intelligence_sources submodules, so tests now reach them directly.
 
 from __future__ import annotations
 
+import pytest
+
 import sqlite3
 import sys
 import tempfile
@@ -276,3 +278,8 @@ class TestShadowVerifierExceptionSilenced(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@pytest.fixture(autouse=True)
+def _explicit_intelligence_project(monkeypatch):
+    monkeypatch.setenv("VNX_PROJECT_ID", "vnx-dev")

@@ -694,3 +694,8 @@ class TestCaseIInjectionEventLogged:
         meta = json.loads(ev["metadata_json"])
         assert meta["items_injected"] >= 1
         assert meta["task_class"]
+
+
+@pytest.fixture(autouse=True)
+def _explicit_intelligence_project(monkeypatch):
+    monkeypatch.setenv("VNX_PROJECT_ID", "vnx-dev")

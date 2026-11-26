@@ -267,3 +267,8 @@ class TestStampSourceDispatchIdsAllCallers:
         ap_ids = _read_source_ids(conn, "antipatterns", ap_id)
         assert "dispatch-multitype" in sp_ids, f"SP not stamped; got {sp_ids}"
         assert "dispatch-multitype" in ap_ids, f"AP not stamped; got {ap_ids}"
+
+
+@pytest.fixture(autouse=True)
+def _explicit_intelligence_project(monkeypatch):
+    monkeypatch.setenv("VNX_PROJECT_ID", "vnx-dev")

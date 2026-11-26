@@ -14,6 +14,8 @@ If any layer regresses, this test fails with a layer-specific assertion.
 
 from __future__ import annotations
 
+import pytest
+
 import json
 import sqlite3
 import sys
@@ -241,3 +243,8 @@ class FailureDecayE2ETest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@pytest.fixture(autouse=True)
+def _explicit_intelligence_project(monkeypatch):
+    monkeypatch.setenv("VNX_PROJECT_ID", "vnx-dev")
