@@ -1,13 +1,11 @@
 #!/usr/bin/env bash
 # dispatch_project_guard.sh — OI-1067 cross-project contamination guard.
 #
-# Provides two pure-bash helpers used by dispatcher_minimal.sh:
+# Provides project guards used by dispatcher_minimal.sh:
 #
-#   vnx_dispatch_resolve_project_id [default]
-#       Print the dispatcher's bound project_id from $VNX_PROJECT_ID, or the
-#       supplied default ('vnx-dev' if omitted). Validates against allowlist
-#       (^[a-z][a-z0-9-]{1,31}$ — same regex as scripts/lib/project_scope.py).
-#       Returns 1 + non-zero exit if the env value is malformed.
+#   vnx_dispatch_resolve_project_id [explicit]
+#       Resolve through project_scope using the state store, marker and env.
+#       Without a valid source, record the refusal and return non-zero.
 #
 #   vnx_dispatch_assert_dir_under <child> <parent>
 #       Return 0 if canonicalized <child> is the same directory as <parent>
@@ -33,15 +31,22 @@
 
 # Strict allowlist for project_id values (mirrors project_scope.py §3.2).
 _VNX_PROJECT_ID_RE='^[a-z][a-z0-9-]{1,31}$'
+_VNX_PROJECT_GUARD_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 vnx_dispatch_resolve_project_id() {
-    local default_pid="${1:-vnx-dev}"
-    local raw="${VNX_PROJECT_ID:-$default_pid}"
-    if ! [[ "$raw" =~ $_VNX_PROJECT_ID_RE ]]; then
-        return 1
-    fi
-    printf '%s\n' "$raw"
-    return 0
+    python3 - "$_VNX_PROJECT_GUARD_LIB" "${1:-}" "${VNX_STATE_DIR:-${VNX_DATA_DIR:-.}/state}" <<'PY'
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from project_scope import resolve_stamp_project_id, TenantUnresolved
+from project_id_refusals import record_project_id_refusal
+anchor = Path(sys.argv[3])
+try:
+    print(resolve_stamp_project_id(explicit=sys.argv[2], db_path=anchor / "runtime_coordination.db"))
+except TenantUnresolved as exc:
+    record_project_id_refusal("dispatcher_minimal", anchor, "project_id_unresolved")
+    sys.exit(str(exc))
+PY
 }
 
 # Canonicalize a directory path by resolving symlinks. For non-existent paths,

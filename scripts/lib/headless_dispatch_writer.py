@@ -33,7 +33,8 @@ _lib_dir = str(Path(__file__).resolve().parent)
 if _lib_dir not in sys.path:
     sys.path.insert(0, _lib_dir)
 
-from project_scope import current_project_id as _current_project_id  # noqa: E402
+from project_scope import resolve_stamp_project_id, TenantUnresolved
+from project_id_refusals import record_project_id_refusal
 
 # ---------------------------------------------------------------------------
 # Path resolution
@@ -101,9 +102,13 @@ VALID_TERMINALS = {"T1", "T2", "T3"}
 VALID_TRACKS = {"A", "B", "C"}
 
 
-def _get_project_id() -> str:
-    """Return project ID — delegates to project_scope.current_project_id (OI-1342)."""
-    return _current_project_id()
+def _get_project_id(state_dir: Path = Path(".")) -> str:
+    """Resolve against the destination store; raise TenantUnresolved without a source."""
+    try:
+        return resolve_stamp_project_id(db_path=state_dir / "runtime_coordination.db")
+    except TenantUnresolved:
+        record_project_id_refusal("headless_dispatch_writer", state_dir, "project_id_unresolved")
+        raise
 
 
 # ---------------------------------------------------------------------------
@@ -205,6 +210,7 @@ def write_dispatch(
 
     # --- resolve dispatch directory ---
     dispatch_base = _dispatch_dir()
+    project_id = _get_project_id(dispatch_base.parent / "state")
     pending_dir = dispatch_base / "pending" / dispatch_id
     pending_dir.mkdir(parents=True, exist_ok=True)
 
@@ -225,7 +231,7 @@ def write_dispatch(
         "instruction": instruction,
         "context_files": context_files or [],
         "created_at": datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "project_id": _get_project_id(),
+        "project_id": project_id,
     }
 
     # --- write atomically ---

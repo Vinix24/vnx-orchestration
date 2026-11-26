@@ -301,10 +301,11 @@ class TestHeadlessDispatchWriterDocumented:
             f"Module docstring must document consumers; got: {doc[:200]!r}"
         )
 
-    def test_write_dispatch_returns_path(self, tmp_path):
+    def test_write_dispatch_returns_path(self, tmp_path, monkeypatch):
         """write_dispatch creates pending/<id>/dispatch.json and returns its path."""
         import headless_dispatch_writer as hdw
 
+        monkeypatch.setenv("VNX_PROJECT_ID", "vnx-dev")
         dispatch_id = hdw.generate_dispatch_id("test-w5c", "B")
         import os
         os.environ["VNX_DISPATCH_DIR"] = str(tmp_path / "dispatches")

@@ -50,6 +50,7 @@ def _setup_dirs(tmp: tempfile.TemporaryDirectory) -> tuple[str, str]:
     dispatch_dir = str(base / "dispatches")
     Path(state_dir).mkdir(parents=True, exist_ok=True)
     Path(dispatch_dir).mkdir(parents=True, exist_ok=True)
+    (Path(state_dir) / ".vnx-project-id").write_text("vnx-dev\n")
     init_schema(state_dir)
     return state_dir, dispatch_dir
 

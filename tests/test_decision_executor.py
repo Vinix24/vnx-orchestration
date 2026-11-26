@@ -134,6 +134,7 @@ class TestExecuteDispatchWritesPending:
 
         state_dir = tmp_path / "state"
         state_dir.mkdir()
+        (state_dir / ".vnx-project-id").write_text("vnx-dev\n")
 
         decision = _dispatch_decision(target="T1", task="Build the auth module")
         status = execute_decision(decision, "test_trigger", state_dir=state_dir)
@@ -165,6 +166,7 @@ class TestDuplicateDispatchBlocked:
 
         state_dir = tmp_path / "state"
         state_dir.mkdir()
+        (state_dir / ".vnx-project-id").write_text("vnx-dev\n")
 
         task_text = "Implement duplicate detection"
         decision = _dispatch_decision(task=task_text)
@@ -194,6 +196,7 @@ class TestMaxDispatchesEnforced:
 
         state_dir = tmp_path / "state"
         state_dir.mkdir()
+        (state_dir / ".vnx-project-id").write_text("vnx-dev\n")
 
         reset_cycle_counter()
 

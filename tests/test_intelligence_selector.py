@@ -845,6 +845,7 @@ class TestBrokerIntelligenceIntegration(unittest.TestCase):
         self._dispatch_dir = str(self._base / "dispatches")
         Path(self._state_dir).mkdir()
         Path(self._dispatch_dir).mkdir()
+        (Path(self._state_dir) / ".vnx-project-id").write_text("vnx-dev\n")
         init_schema(self._state_dir)
 
         db = _setup_quality_db(self._quality_db_path)
