@@ -100,10 +100,13 @@ def test_shell_config_snapshot(tmp_path, script, output, variable, expected, sta
     if status is not None:
         binary.write_text(f'#!/bin/bash\n[ "$1 $2 $3" = "config get --raw" ] || exit 9\nprintf "%s\\n" "{output}"\nexit {status}\n')
         binary.chmod(0o755)
-    result = subprocess.run(['bash', '-eu', '-c', block + f'\nprintf "%s" "${variable}"'],
+    pipeline = script == 'nightly_intelligence_pipeline.sh'
+    probe = '\nprintf "STATUS:%s" "$DIGEST_SNAPSHOT_STATUS"' if pipeline else ''
+    result = subprocess.run(['bash', '-eu', '-c', block + f'\nprintf "%s" "${variable}"' + probe],
                             env={**os.environ, 'VNX_ROOT': str(tmp_path)}, text=True, capture_output=True)
-    assert result.returncode == (0 if status == 0 else 1), result.stderr
-    assert result.stdout == (expected if status == 0 else "")
+    assert result.returncode == (0 if status == 0 or pipeline else 1), result.stderr
+    value = expected if status == 0 or (pipeline and status is not None) else ""
+    assert result.stdout == value + (f'STATUS:{int(status != 0)}' if pipeline else '')
     assert ('WARNING:' in result.stderr) == (status != 0)
 
 
@@ -225,7 +228,8 @@ fi' DEBUG
         assert f'SNAPSHOT:{expected}' in result.stdout
         assert 'WARNING:' not in result.stderr
     else:
-        assert result.returncode == 1, result.stdout + result.stderr
+        pipeline = script == 'nightly_intelligence_pipeline.sh'
+        assert result.returncode == (0 if pipeline else 1), result.stdout + result.stderr
         assert 'WARNING:' in result.stderr and 'snapshot unavailable' in result.stderr
-        assert 'SNAPSHOT:' not in result.stdout
+        assert ('SNAPSHOT:' in result.stdout) == pipeline
         assert 'using ollama-only' not in result.stderr

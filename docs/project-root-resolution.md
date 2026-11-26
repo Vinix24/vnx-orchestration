@@ -121,12 +121,16 @@ from the engine's own location. `VNX_PROJECT_ROOT` and the project id still
 identify the consumer. This also works when the engine is installed at
 `consumer/.claude/vnx-system` or `consumer/.vnx`; the consumer needs no `bin/vnx`.
 
-If a configuration snapshot fails, each runner emits a `WARNING` and exits 1
-before starting analysis, pipeline phases or the classifier reload. The analyzer
-explicitly skips conversation analysis (including DeepSeek) and digest email;
-it does not substitute `ollama-only`. A successfully read empty recipient still
-means email is unconfigured, and a successfully read classifier value of `0`
-still means disabled.
+If a configuration snapshot fails, each runner emits a `WARNING` naming the key.
+The intelligence pipeline still runs phases 0–10, records `11-email-digest` as
+`skipped` with detail `config_snapshot_unavailable` in
+`state/nightly_pipeline_phases.ndjson`, marks its health `partial`, then exits 1
+after completion. A successfully read empty recipient instead records
+`no_recipient_configured` and does not cause a nonzero exit.
+The analyzer exits 1 before its phases, explicitly skipping conversation analysis
+(including DeepSeek) and digest email; it does not substitute `ollama-only`.
+The classifier runner exits 1 before reloading the agent; a successfully read
+classifier value of `0` still means disabled.
 
 ## Escape Hatch: `VNX_DATA_DIR_EXPLICIT=1`
 
