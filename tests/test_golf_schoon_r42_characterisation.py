@@ -10,6 +10,10 @@ a real EventStore; only Popen / process-group calls are patched.
 
 from __future__ import annotations
 
+import pytest
+
+pytestmark = pytest.mark.usefixtures("receipt_project")
+
 import logging
 import signal
 import subprocess

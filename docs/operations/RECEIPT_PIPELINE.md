@@ -173,6 +173,18 @@ Common causes: processor not running; report predates monitor-mode startup (use 
 
 There is no pane push: T0 reads `open_outcomes` instead: `python3 scripts/receipt_query.py open-outcomes --state-dir <state-dir>` (rationale: `docs/core/DISPATCH_RULES.md` §13). If receipts are on disk (`tail .vnx-data/state/t0_receipts.ndjson`) but T0 shows nothing, check `open_outcomes` before suspecting the pipeline — the audit write already succeeded.
 
+### Unresolved project identity
+
+Receipt stamping uses `resolve_stamp_project_id`, anchored to the destination
+store. A canonical store layout, `.vnx-project-id` marker, or `VNX_PROJECT_ID`
+must supply an agreeing project identity; there is no guessed `vnx-dev`.
+An unresolved converter report remains in place without either processed
+watermark. The scan counts an error, logs `project_id_unresolved` with the
+report path, and records that reason in the converter health beacon's
+`details.errors` and `skip_metrics.ndjson` for `vnx doctor` (context
+`receipt_processor`). Once the source is available, the next scan retries
+the same report. A dry run reports the error without writing the counter.
+
 ### Stranded reports — refused for a missing/invalid model
 
 `append_receipt_internals/validation.py::_validate_model_present` fail-closed

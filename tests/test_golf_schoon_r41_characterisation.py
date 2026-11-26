@@ -16,6 +16,8 @@ from pathlib import Path
 
 import pytest
 
+pytestmark = pytest.mark.usefixtures("receipt_project")
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts" / "lib"))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
