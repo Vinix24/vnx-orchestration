@@ -116,15 +116,19 @@ def run(args: Any) -> int:
         proposal_ledger.append_expiries(path, now=now)
         deliveries = proposal_ledger.create_deliverables(path, project_id=project_id,
             state_dir=getattr(args, "state_dir", None), now=now)
+        problems = proposal_ledger.append_applications(path, project_id=project_id,
+            state_dir=getattr(args, "state_dir", None), now=now)
     except (proposal_ledger.LedgerUnreadable, OSError, ValueError, TypeError, sqlite3.Error) as exc:
         print(f"error: unreadable ledger {path}: {exc}", file=sys.stderr)
         return EXIT_FAILURE
     if deliveries:
         _emit({"deliverables": deliveries})
+    for pid, reason in problems:
+        print(f"error: {pid}: {reason}", file=sys.stderr)
     day = days.latest_settled_day(now)
     if store.base_status(day.isoformat()) != days.FINAL_STATUS:
         _emit({"metric_day": day.isoformat(), "proposed": [], "reason": proposal_rules.DAY_NOT_FINAL})
-        return EXIT_OK
+        return EXIT_FAILURE if problems else EXIT_OK
     evaluation = proposal_rules.evaluate(day, _window(store, day))
     try:
         written = proposal_ledger.append_proposals(
@@ -142,4 +146,4 @@ def run(args: Any) -> int:
     _emit({"metric_day": day.isoformat(), "proposed": written,
            "candidates": len(evaluation.candidates),
            "skipped": dict(evaluation.skipped)})
-    return EXIT_OK
+    return EXIT_FAILURE if problems else EXIT_OK

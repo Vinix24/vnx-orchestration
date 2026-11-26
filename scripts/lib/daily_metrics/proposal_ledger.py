@@ -2,7 +2,7 @@
 
 One file per project store, ``proposals.ndjson``, one JSON object per line,
 never rewritten and never truncated. It holds ``proposed``, ``approved``,
-``expired``, ``rejected``, ``deliverable_created`` and ``verdict`` events. The day files stay untouched by a verdict; they
+``expired``, ``rejected``, ``deliverable_created``, ``applied`` and ``verdict`` events. The day files stay untouched by a verdict; they
 only ever refer to proposal ids, so yesterday's measurement cannot change
 because today's verdict landed.
 
@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import Any
 
 from atomic_io import slot_lock
+from schema_manifest import is_round_of
 
 from .proposal_rules import Candidate
 from .github_fetch import parse_timestamp
@@ -51,6 +52,7 @@ VERDICT = "verdict"
 UNDETERMINED = "undetermined"
 DELIVERABLE_CREATED = "deliverable_created"
 REJECTED = "rejected"
+APPLIED = "applied"
 
 
 class LedgerUnreadable(Exception):
@@ -78,7 +80,13 @@ def proposal_id(project_id: str, key: str, metric_day: date, rule_version: str) 
 
 def _validate_deliverable(event: Mapping[str, Any]) -> None:
     """Optional means absent; a present but malformed specification is refused."""
-    if event.get("event") == DELIVERABLE_CREATED:
+    if event.get("event") == APPLIED:
+        stamp = parse_timestamp(event.get("applied_at"))
+        if (stamp is None or event.get("application_day") != stamp.date().isoformat()
+                or type(event.get("pr_number")) is not int or event["pr_number"] <= 0
+                or not isinstance(event.get("merge_sha"), str) or not re.fullmatch(r"[0-9a-f]{40}", event["merge_sha"])):
+            raise LedgerUnreadable(f"{event.get('proposal_id')}: invalid applied merge evidence")
+    if event.get("event") in (DELIVERABLE_CREATED, APPLIED):
         if not isinstance(event.get("deliverable_id"), str) or not re.fullmatch(r"dlv-[0-9a-f]{12}", event["deliverable_id"]):
             raise LedgerUnreadable(f"{event.get('proposal_id')}: invalid deliverable_created id")
     if event.get("event") != PROPOSED or "deliverable" not in event:
@@ -263,7 +271,7 @@ def append_expiries(path: Path, *, now: datetime) -> None:
                   if e.get("event") in (APPROVED, EXPIRED, VERDICT, REJECTED)}
         fresh = []
         for event in events:
-            if event.get("event") not in (PROPOSED, APPROVED, EXPIRED, VERDICT, REJECTED, DELIVERABLE_CREATED):
+            if event.get("event") not in (PROPOSED, APPROVED, EXPIRED, VERDICT, REJECTED, DELIVERABLE_CREATED, APPLIED):
                 raise LedgerUnreadable(f"{path}: unknown proposal event")
             identity = (event.get("project_id"), event.get("proposal_id"))
             if event.get("event") != PROPOSED or identity in closed:
@@ -315,6 +323,84 @@ def create_deliverables(path: Path, *, project_id: str, state_dir: Path | None, 
     return outcomes
 
 
+def _merge_receipts(path: Path) -> list[dict[str, Any]]:
+    """Read complete candidate objects; missing means none, other read/parse errors raise."""
+    receipts = []
+    try:
+        with path.open("rb") as handle:
+            for raw in handle:
+                if b"pr_merged" not in raw or not raw.endswith(b"\n"):
+                    continue  # Unrelated line or a writer still appending, as in read_merged.
+                receipt = json.loads(raw)
+                if isinstance(receipt, dict) and receipt.get("event_type") == "pr_merged":
+                    receipts.append(receipt)
+    except FileNotFoundError:
+        return []  # No receipt file is no merge evidence; proposals remain pending.
+    return receipts
+
+
+def _application(event: Mapping[str, Any], receipts: Sequence[Mapping[str, Any]], now: datetime) -> dict[str, Any] | None:
+    """Return complete matching evidence, None for no match; unusable/conflicting matches raise."""
+    did = event["deliverable_id"]
+    applications, problems = [], []
+    for receipt in receipts:
+        if receipt.get("project_id") != event["project_id"] or not (
+                receipt.get("dispatch_id") == did or is_round_of(did, receipt.get("dispatch_id"))):
+            continue
+        stamp = parse_timestamp(receipt.get("timestamp"))
+        if receipt.get("conclusion") != "merged" or stamp is None or stamp > now:
+            problems.append("invalid merge conclusion/timestamp")
+            continue
+        applied = dict(event, event=APPLIED, pr_number=receipt.get("pr_number"),
+            merge_sha=receipt.get("merge_sha"), applied_at=stamp.isoformat(),
+            application_day=stamp.date().isoformat(), recorded_at=now.isoformat())
+        try:
+            _validate_deliverable(applied)
+        except LedgerUnreadable as exc:
+            problems.append(str(exc))
+            continue
+        applications.append(applied)
+    if len({(a["pr_number"], a["merge_sha"], a["application_day"]) for a in applications}) > 1:
+        raise LedgerUnreadable(f"{did}: conflicting merge receipts")
+    if applications:
+        return applications[0]
+    if problems:
+        raise LedgerUnreadable(f"{did}: no usable merge receipt: {'; '.join(sorted(set(problems)))}")
+    return None
+
+
+def append_applications(path: Path, *, project_id: str, state_dir: Path | None, now: datetime) -> list[tuple[str, str]]:
+    """Link receipts under the proposal lock; return per-proposal problems, raise on ledger I/O."""
+    from .store import default_store_dir
+    evidence = Path(state_dir or default_store_dir(project_id).parent.parent) / "t0_receipts.ndjson"
+    with slot_lock(path):
+        events = [e for e in read_events(path) if e.get("project_id") == project_id]
+        pending = [e for e in events if e.get("event") == DELIVERABLE_CREATED
+                   and not _has_event(events, APPLIED, e["proposal_id"])]
+        if not pending:
+            return []
+        try:
+            receipts = _merge_receipts(evidence)
+        except (OSError, ValueError) as exc:
+            return [(e["proposal_id"], f"merge evidence {evidence}: {exc}") for e in pending]
+        problems = []
+        for event in pending:
+            pid = event["proposal_id"]
+            if _has_event(events, APPLIED, pid):
+                continue
+            try:
+                if not _has_event(events, APPROVED, pid):
+                    raise LedgerUnreadable("not approved")
+                applied = _application(event, receipts, now)
+            except LedgerUnreadable as exc:
+                problems.append((pid, f"merge evidence {evidence}: {exc}"))
+                continue
+            if applied is not None:
+                _write(path, [applied])
+                events.append(applied)
+        return problems
+
+
 def approval_refusal(events: Sequence[Mapping[str, Any]], proposal_id_value: Any) -> str | None:
     """The reason an approval is refused, or ``None`` when the proposal is open.
 
@@ -352,16 +438,18 @@ def append_approval(path: Path, event: Mapping[str, Any]) -> None:
 def append_verdict(path: Path, event: Mapping[str, Any]) -> None:
     """Append one ``verdict`` event, or raise :class:`ApprovalRefused` and write nothing.
 
-    Only an approved proposal is judged, and only once. The approval is read
+    Only an approved, applied proposal is judged, and only once. The approval is read
     again under the ledger's lock; anything but a string id never matches one.
     """
     path = Path(path)
     with slot_lock(path):
-        events = read_events(path)
+        events = [e for e in read_events(path) if e.get("project_id") == event.get("project_id")]
         proposal_id_value = event.get("proposal_id")
         if not isinstance(proposal_id_value, str) or not _has_event(
                 events, APPROVED, proposal_id_value):
             raise ApprovalRefused("not_approved")
         if _has_event(events, VERDICT, proposal_id_value):
             raise ApprovalRefused("already_judged")
+        if not _has_event(events, APPLIED, proposal_id_value):
+            raise ApprovalRefused("not_applied")
         _write(path, [event])

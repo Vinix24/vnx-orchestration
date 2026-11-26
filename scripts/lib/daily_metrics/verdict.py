@@ -1,7 +1,7 @@
 """The verdict: an approved proposal judged on its seven post days (decision 26).
 
-An approval freezes the baseline and names the approval day ``a`` (PR-12a). The
-verdict pools ``a+1`` to ``a+7`` with :func:`daily_metrics.baseline.baseline`,
+Approval freezes the baseline; merge evidence supplies application day ``p``. The
+verdict pools ``p+1`` to ``p+7`` with :func:`daily_metrics.baseline.baseline`,
 so a quantile pools the raw samples and a count averages the day values.
 
 ``unknown`` never reads as ``not_helped``: a ``None`` frozen baseline or post
@@ -40,20 +40,20 @@ MIN_FINAL_DAYS = 5
 MIN_IMPROVEMENT = 0.10
 
 
-def approval_day(approved: Mapping[str, Any]) -> date:
-    """The approval day ``a`` the approved event records; unreadable is a ``ValueError``."""
-    value = approved.get("approval_day")
+def approval_day(approved: Mapping[str, Any], field: str = "approval_day") -> date:
+    """Read a named calendar day; absent or malformed evidence raises ``ValueError``."""
+    value = approved.get(field)
     if isinstance(value, str):
         try:
             return date.fromisoformat(value)
         except ValueError:
             pass
-    raise ValueError(f"approved event has no usable approval_day: {value!r}")
+    raise ValueError(f"approved event has no usable {field}: {value!r}")
 
 
 def window(approved: Mapping[str, Any]) -> list[date]:
-    """The seven post days ``a+1`` to ``a+7``, oldest first."""
-    return [approval_day(approved) + timedelta(days=offset)
+    """The seven post days ``p+1`` to ``p+7``, oldest first."""
+    return [approval_day(approved, "application_day") + timedelta(days=offset)
             for offset in range(1, POST_DAYS + 1)]
 
 
@@ -89,11 +89,11 @@ def _schema_unknown(approved: Mapping[str, Any], finals: list[date],
 
 
 def judge(approved: Mapping[str, Any], post_days: Mapping[date, Mapping]) -> dict[str, Any]:
-    """Judge one approved event over ``a+1`` to ``a+7``; see the module doc."""
+    """Judge one approved event over ``p+1`` to ``p+7``; see the module doc."""
     rule = RULES.get(approved.get("metric_id"))
     if rule is None:
         raise ValueError(f"no rule for metric id: {approved.get('metric_id')!r}")
-    approval = approval_day(approved)
+    approval = approval_day(approved, "application_day")
     post = baseline(approved["metric_id"], approval + timedelta(days=POST_DAYS + 1),
                     post_days, key=approved.get("seat"))
     finals = _final_days(approved, post_days)
