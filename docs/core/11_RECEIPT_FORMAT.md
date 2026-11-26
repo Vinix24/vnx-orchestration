@@ -293,7 +293,7 @@ Rejected outright (fail-closed) if present on a `schema_version >= 2` record, pe
 
 ## Optional hash-chain field: `prev_hash` (ADR-023, experimental opt-in)
 
-When `VNX_CHAIN_RECEIPTS=1`, the shared append primitive (`_write_receipt_under_lock`) stamps one additional field on **both** write paths — this is new in v2 (ADR-035 §7.1):
+When enabled with `vnx config set VNX_HASH_CHAIN_REQUIRED 1 --approval-id <approval-id> --reason "<why>"` (project row, or add `--global`), the shared append primitive (`_write_receipt_under_lock`) stamps one additional field on **both** write paths — this is new in v2 (ADR-035 §7.1):
 
 ```json
 { "...": "...", "prev_hash": "9f2c1ab4...e07d" }
@@ -303,7 +303,7 @@ When `VNX_CHAIN_RECEIPTS=1`, the shared append primitive (`_write_receipt_under_
 |---|---|---|
 | `prev_hash` | string (64 hex) | SHA-256 entry hash of the immediately preceding ledger entry. Genesis sentinel (`"0" * 64`) for the first entry in a chain. |
 
-**Corrected from v1.0.0 of this document:** `emit_dispatch_receipt` (Path 1) previously did **not** honor `VNX_CHAIN_RECEIPTS` — it opened and locked `t0_receipts.ndjson` itself, a separate lock from Path 2's `append_receipt.lock`, and never stamped `prev_hash`. As of ADR-035 §7.1 (PR-3), both paths write through the **same** lock file and the **same** chain-stamping code, so a concurrent Path-1/Path-2 write can no longer read the same tail hash under two different locks and fork the chain. Full per-path enforcement, previously deferred to 1.0.1, is done. Default is still OFF; `prev_hash` is absent when chaining is off and the ledger verifies as `unchained`.
+**Corrected from v1.0.0 of this document:** `emit_dispatch_receipt` (Path 1) previously did **not** honor the hash-chain switch (now `VNX_HASH_CHAIN_REQUIRED`) — it opened and locked `t0_receipts.ndjson` itself, a separate lock from Path 2's `append_receipt.lock`, and never stamped `prev_hash`. As of ADR-035 §7.1 (PR-3), both paths write through the **same** lock file and the **same** chain-stamping code, so a concurrent Path-1/Path-2 write can no longer read the same tail hash under two different locks and fork the chain. Full per-path enforcement, previously deferred to 1.0.1, is done. Default is still OFF; `prev_hash` is absent when chaining is off and the ledger verifies as `unchained`.
 
 ## `open_items_created` — see "Fields kept, unchanged" above.
 
@@ -397,7 +397,7 @@ The tmux worker receipt omits `events_path` entirely — the key is absent, not 
 
 - **T0 Orchestrator** — reads `verdict.decision` (v2) or `status` (v1) to decide gate advancement, `report_path` to open the unified report, `pr_id` to track PRs, `warnings[]`/`findings` for quality signals. Reads the dispatches it still has to decide on via `scripts/receipt_query.py open-outcomes` (or `open_outcomes` in `t0_index.json`) and records its decision with `receipt_query.py decide` — see `docs/core/DISPATCH_RULES.md` §13.
 - **Cost tracker** (`scripts/cost_tracker.py`, `vnx cost-report`) — aggregates receipts by `model`, `terminal_id`, and provider from `token_usage` + `cost_usd`. Missing fields are counted as `unknown`.
-- **Audit chain** (`scripts/audit_chain.py`) — verifies the `prev_hash` chain when `VNX_CHAIN_RECEIPTS=1`, across both write paths since ADR-035 §7.1.
+- **Audit chain** (`scripts/audit_chain.py`) — verifies the `prev_hash` chain when `VNX_HASH_CHAIN_REQUIRED` is enabled through `vnx config set`, across both write paths since ADR-035 §7.1.
 
 ## See also
 

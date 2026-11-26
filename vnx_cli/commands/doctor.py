@@ -1116,7 +1116,7 @@ def _ledger_check_findings(beacon: dict) -> list[str]:
     chain = checks.get("chain_status") or {}
     if chain.get("status") == "finding":
         findings.append(
-            f"receipts ledger is {chain.get('chain_state', '?')} while VNX_CHAIN_RECEIPTS "
+            f"receipts ledger is {chain.get('chain_state', '?')} while VNX_HASH_CHAIN_REQUIRED "
             "is configured on"
         )
     elif chain.get("status") == "SKIPPED_UNVERIFIED":
@@ -1127,7 +1127,7 @@ def _ledger_check_findings(beacon: dict) -> list[str]:
 def _check_ledger_health(data_root: Path, project_id: str = "") -> Check:
     """WARN from the ledger_health beacon: dispatches without a receipt, open
     outcomes waiting past the threshold for a T0 decision, or a ledger that is
-    unchained while VNX_CHAIN_RECEIPTS is configured on.
+    unchained while VNX_HASH_CHAIN_REQUIRED is configured on.
 
     Delegates entirely to two existing modules instead of a third resolver
     or threshold set: ``health_beacon.all_beacons`` (the same staleness/

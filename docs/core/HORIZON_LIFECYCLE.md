@@ -119,7 +119,7 @@ pass, a tiebreaker START or STOP, and an operator `attest`. The record holds the
 id, the project id, the resolver (`run` or `attest`), the time, and when known the seats,
 the scope, the approval id, the reason and the governance variant. Each line is
 hash-chained to the one before it (`prev_hash`, appended under the ADR-034 flock), whatever
-`VNX_CHAIN_RECEIPTS` says. The planning CLI passes no signing key, so a real record is
+`VNX_HASH_CHAIN_REQUIRED` says. The planning CLI passes no signing key, so a real record is
 chained and unsigned: it shows tampering, it does not prove who wrote it. Nothing is
 written for a REVISE, BLOCK, infrastructure failure or refused run. A failed ledger write
 prints a warning and the blocker stays resolved. A companion file,

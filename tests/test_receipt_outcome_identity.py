@@ -265,7 +265,7 @@ def test_rebuild_dry_run_does_not_write_index(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# 6. VNX_CHAIN_RECEIPTS=0/unset -> existing chain tests stay green, and the
+# 6. VNX_HASH_CHAIN_REQUIRED=0/unset -> existing chain tests stay green, and the
 #    append path writes no chain fields (outcome_id is the one deliberate new
 #    field, independent of the chain flag).
 # ---------------------------------------------------------------------------
@@ -281,5 +281,5 @@ def test_flag_off_no_chain_fields_but_has_outcome_id(tmp_path, monkeypatch):
 
     lines = _read_lines(receipt_path)
     assert len(lines) == 1
-    assert "prev_hash" not in lines[0], "VNX_CHAIN_RECEIPTS is off — no chain field must be stamped"
+    assert "prev_hash" not in lines[0], "VNX_HASH_CHAIN_REQUIRED is off — no chain field must be stamped"
     assert lines[0]["outcome_id"] == compute_outcome_id(r)

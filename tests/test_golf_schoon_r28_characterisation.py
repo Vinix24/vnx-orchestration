@@ -251,7 +251,15 @@ def test_reanchor_failures(env, capsys, monkeypatch):
     monkeypatch.setattr(cli.state_writer, "append_locked", _disk_full)
     assert cli.main(env.argv + ["--apply"]) == cli.EXIT_WRITE_FAILED
     captured = capsys.readouterr()
-    assert captured.out == "" and captured.err.startswith(
+    # The unidentified receipt store warns before the CLI reports the register failure.
+    *warnings, error = captured.err.splitlines()
+    assert warnings
+    for line in warnings:
+        warning = json.loads(line)
+        assert (warning["code"], warning["level"]) == ("receipt_config", "WARN")
+        assert "VNX_HASH_CHAIN_REQUIRED" in warning["message"]
+        assert str(env.register.parent) in warning["message"]
+    assert captured.out == "" and error.startswith(
         f"gate-reanchor: the record was written to {env.result} but the register line failed: disk full.")
     env.result.unlink()
     assert cli.main(env.argv) == cli.EXIT_BAD_INPUT

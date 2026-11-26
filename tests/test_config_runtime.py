@@ -111,9 +111,25 @@ def test_autowire_failsoft_without_db(tmp_path):
 def test_autowire_is_idempotent(tmp_path):
     sd = _state_dir_with(tmp_path, "VNX_SCOUT_PREPASS", "1")
     assert crt.autowire(state_dir=sd, project_id=PID) is True
-    # A second call with the same (state_dir, project_id) is a fast no-op and still returns True.
+    # A second call restores the same binding and still returns True.
     assert crt.autowire(state_dir=sd, project_id=PID) is True
     assert crt.get_bool("VNX_SCOUT_PREPASS") is True
+
+
+def test_strict_resolver_follows_rewired_store_for_same_project(tmp_path):
+    for name in ("a", "b"):
+        (tmp_path / name).mkdir()
+    a = _state_dir_with(tmp_path / "a", "VNX_SCOUT_PREPASS", "1")
+    b = _state_dir_with(tmp_path / "b", "VNX_SCOUT_PREPASS", "0")
+
+    for state, expected in ((a, "1"), (b, "0"), (a, "1")):
+        assert crt.autowire(state_dir=state, project_id=PID) is True
+        strict = crt.strict_resolver()
+        assert strict is not None
+        resolver, project = strict
+        assert project == PID
+        assert resolver(project, "VNX_SCOUT_PREPASS") == expected
+        assert cr.get("VNX_SCOUT_PREPASS") == expected
 
 
 # ---------------------------------------------------------------------------

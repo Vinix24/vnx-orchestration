@@ -20,4 +20,23 @@ Background: [epoch rotation](../governance/decisions/ADR-029-hashchain-epoch-rot
 
 `VNX_HASH_CHAIN_REQUIRED` — active append selector: override > project row > global config > env > default. The retired receipt-chain env flag has no effect (ADR-087 decision 9).
 
-The append writer and ledger-health reader bind `config_runtime` to the ledger directory explicitly, without git discovery. An explicit store without a project id uses the normal config fallback; its debug diagnostic adds no line to receipt stderr, even with debug logging enabled. Config warnings and errors (including a known project's missing database) use the receipt writer's structured JSON emitter.
+Enable it with `vnx config set VNX_HASH_CHAIN_REQUIRED 1 --approval-id <approval-id> --reason "<why>"`
+for the ledger's project, or add `--global` for the global value. Seal an existing
+unchained ledger first (ADR-029); changing the switch alone does not seal its history.
+
+The append writer and ledger-health reader derive the project from the explicit
+ledger directory, without git discovery. That identity wins over `VNX_PROJECT_ID`.
+Successful `config_runtime.autowire` calls make `strict_resolver()` select the
+just-bound store, including A → B → A switches with the same project id.
+Directory identity requires `~/.vnx-data/<id>/state` or a `.vnx-project-id` marker.
+If no project can be derived, a WARNING names the key and directory, and resolution
+excludes every project row, even with `VNX_PROJECT_ID` set (including a previously
+wired ambient store).
+Here "global and default layers only" excludes project rows and preserves existing
+override and env precedence: override > global config > env > default.
+
+Explicit project-store reads are strict. A corrupt or unreadable database produces
+a WARNING naming the key, state directory and underlying error before falling back
+to the remaining config layers. The receipt writer emits warnings as `receipt_config`
+JSON lines and still appends the receipt; with the default off it stays unchained.
+An already chained tail continues chaining regardless of the switch (ADR-083).

@@ -77,7 +77,7 @@ closing line ``ledger_health: <ok|finding|unmeasurable|crash> (exit N)``
       checks and never folded into ``overall_status``/``exit_code``.
 
 Out of scope (by dispatch instruction, not an oversight): does not enable
-``VNX_CHAIN_RECEIPTS``, does not decide open outcomes, does not
+``VNX_HASH_CHAIN_REQUIRED``, does not decide open outcomes, does not
 write receipts. Read-only on state; the only writes this module performs are
 its own atomic health beacons under ``<data_dir>/health/ledger_health.json``
 and ``<data_dir>/health/lifecycle_count.json``, and, for the ``acknowledge``
@@ -413,9 +413,9 @@ def check_chain_status(state_dir: Path) -> Dict[str, Any]:
     """Wraps ndjson_hash_chain.verify_chain; ``unchained`` is its own class.
 
     A ledger with no ``prev_hash`` entries is the current, accepted, fleet-wide
-    default (``VNX_CHAIN_RECEIPTS`` off) — that alone is not a finding, or
+    default (``VNX_HASH_CHAIN_REQUIRED`` off) — that alone is not a finding, or
     every project would fail this check by default. It becomes a finding only
-    when ``VNX_CHAIN_RECEIPTS`` is configured on for THIS process yet the
+    when ``VNX_HASH_CHAIN_REQUIRED`` is configured on for this ledger's project yet the
     ledger still carries no chain: the config and the ledger disagree.
     """
     ledger_path = state_dir / LEDGER_NAME
@@ -444,11 +444,11 @@ def check_chain_status(state_dir: Path) -> Dict[str, Any]:
             "chain_state": chain_state,
             "chain_receipts_configured": configured,
             "reason": (
-                "VNX_CHAIN_RECEIPTS is configured on but the ledger carries no prev_hash "
+                "VNX_HASH_CHAIN_REQUIRED is configured on but the ledger carries no prev_hash "
                 "entries — chaining is not actually active on this ledger"
                 if configured else
                 "no entry carries prev_hash; integrity cannot be verified from this ledger "
-                "alone. Not a defect while VNX_CHAIN_RECEIPTS stays fleet-default off — "
+                "alone. Not a defect while VNX_HASH_CHAIN_REQUIRED stays fleet-default off — "
                 "absence of evidence is not evidence of absence, so this is its own class, "
                 "never folded into 'ok'"
             ),

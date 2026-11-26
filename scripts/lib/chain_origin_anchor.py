@@ -13,7 +13,7 @@ same actor who edits the ledger can also edit; all three were HELD by codex
 review for that reason. This ADR moves the anchor's source of truth outside
 that boundary. Implement literally — do not redesign.
 
-``VNX_CHAIN_RECEIPTS`` stays default-OFF. Nothing in this module runs unless a
+``VNX_HASH_CHAIN_REQUIRED`` stays default-OFF. Nothing in this module runs unless a
 caller explicitly invokes it; landing this file changes no runtime behavior.
 """
 from __future__ import annotations

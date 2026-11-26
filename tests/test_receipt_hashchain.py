@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""GAP 3b: per-append hash-chain wiring tests (flag-gated VNX_CHAIN_RECEIPTS).
+"""GAP 3b: per-append hash-chain wiring tests (flag-gated VNX_HASH_CHAIN_REQUIRED).
 
 Covers:
   - flag OFF: append behavior unchanged (no prev_hash field) — byte-for-byte.

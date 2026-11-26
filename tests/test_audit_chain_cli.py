@@ -2,7 +2,7 @@
 
 Bug: ``verify_chain()`` reports ``status="unchained"`` for a ledger where no
 entry carries ``prev_hash`` — correct in isolation (chaining is default-off
-fleet-wide, VNX_CHAIN_RECEIPTS). But the CLI wrapper in audit_chain.py turned
+fleet-wide, VNX_HASH_CHAIN_REQUIRED). But the CLI wrapper in audit_chain.py turned
 that into ``{"verified": true, "status": "unchained"}`` with exit code 0. A
 caller that reads only the exit code or only the ``verified`` field sees a
 green "chain is fine" result for a ledger that was never chained at all —
@@ -16,9 +16,13 @@ CLI must stop asserting a positive that it never measured.
 from __future__ import annotations
 
 import json
+import re
+import shlex
 import subprocess
 import sys
 from pathlib import Path
+
+import pytest
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _AUDIT_CHAIN = _REPO_ROOT / "scripts" / "audit_chain.py"
@@ -68,6 +72,44 @@ def test_missing_ledger_is_not_reported_verified_true(tmp_path: Path) -> None:
     payload = json.loads(result.stdout)
     assert payload.get("status") == "unchained"
     assert payload.get("verified") is not True
+
+
+@pytest.mark.parametrize("source", [
+    "audit_chain verify",
+    "docs/core/11_RECEIPT_FORMAT.md",
+    "docs/modules/receipt-hash-chain.md",
+    "docs/operations/RECEIPT_PIPELINE.md",
+])
+@pytest.mark.parametrize("global_scope", [False, True], ids=["project", "global"])
+def test_enable_chaining_guidance_parses(source, global_scope, tmp_path, monkeypatch):
+    monkeypatch.syspath_prepend(str(_REPO_ROOT / "scripts"))
+    import config_cli
+
+    if source == "audit_chain verify":
+        ledger = tmp_path / "t0_receipts.ndjson"
+        ledger.write_text('{"dispatch_id":"oi3094"}\n', encoding="utf-8")
+        result = _run_verify(ledger)
+        assert result.returncode == 2, result.stderr
+        guidance = json.loads(result.stdout)["warning"]
+        prefix, separator, rest = guidance.partition("vnx config set ")
+        assert separator, guidance
+        command, separator, rest = rest.partition(" for the ledger's project")
+        assert separator, guidance
+        commands = ["vnx config set " + command]
+    else:
+        guidance = (_REPO_ROOT / source).read_text(encoding="utf-8")
+        commands = re.findall(r"`(vnx config set VNX_HASH_CHAIN_REQUIRED\b[^`\n]*)`", guidance)
+        assert commands, source
+    assert "--global" in guidance, source
+    for command in commands:
+        argv = shlex.split(command.replace("<approval-id>", "oi3094")
+                           .replace("<why>", "enable receipt chaining"))
+        assert argv[:2] == ["vnx", "config"]
+        args = config_cli.build_parser().parse_args(argv[2:] + (["--global"] if global_scope else []))
+        assert (args.verb, args.key, args.value) == ("set", "VNX_HASH_CHAIN_REQUIRED", "1")
+        assert args.approval_id == "oi3094"
+        assert args.reason == "enable receipt chaining"
+        assert args.glob is global_scope
 
 
 def test_genuinely_verified_chain_still_exits_zero(tmp_path: Path) -> None:
