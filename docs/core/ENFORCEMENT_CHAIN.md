@@ -57,11 +57,18 @@ The initial `ci` preflight also checks the PR's `baseRefName` against every stag
 dispatch spec's `base_ref` for the supplied `--dispatch-id` (OI-1572). Both sides
 lose leading `origin/` and `refs/heads/` prefixes. A mismatch or conflicting specs
 refuses with `base_ref_mismatch`, naming the bases; unreadable or malformed evidence
-refuses with `base_ref_unverifiable`. No spec or an absent `base_ref` field prints
+refuses with `base_ref_unverifiable`. This includes directory scan errors in
+`dispatches/`, its buckets, or the matching dispatch folder (OI-3090); a readable
+spec cannot hide another folder's scan failure. A missing `dispatches/` directory
+still counts as no spec. No spec or an absent `base_ref` field prints
 one WARNING naming the dispatch and lets the other checks proceed. A missing field
 does not hide a mismatch in another spec. `--dry-run` makes the same decision.
 There is no override: retarget the PR with `gh pr edit --base` or correct the spec.
 A refusal writes no `pr_merged` receipt and makes no merge call.
+
+The shared spec lookup also retains scan errors for its other callers: builder
+vendor stays unknown with its reason, review risk treats the irreversible flag as
+unknown and requires high risk, and blast-radius scope stays unknown.
 
 After the preflights, `merge_pr` calls `_do_merge`, which runs `gh pr merge --match-head-commit <sha>` so GitHub refuses any other commit. Only when GitHub reports `MERGED` (`_pr_actually_merged`) does `_emit_receipt` write the binding `pr_merged` receipt. A raw `gh pr merge` runs none of these preflights. Branch protection is the answer to that (section 5).
 
