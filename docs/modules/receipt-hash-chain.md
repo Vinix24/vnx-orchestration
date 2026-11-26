@@ -20,7 +20,7 @@ Background: [epoch rotation](../governance/decisions/ADR-029-hashchain-epoch-rot
 
 `VNX_HASH_CHAIN_REQUIRED` — active append selector: override > project row > global config > env > default. The retired receipt-chain env flag has no effect (ADR-087 decision 9).
 
-Enable it with `vnx config set VNX_HASH_CHAIN_REQUIRED 1 --approval-id <approval-id>`
+Enable it with `vnx config set VNX_HASH_CHAIN_REQUIRED 1 --approval-id <approval-id> --reason "<why>"`
 for the ledger's project, or add `--global` for the global value. Seal an existing
 unchained ledger first (ADR-029); changing the switch alone does not seal its history.
 

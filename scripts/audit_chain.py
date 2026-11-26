@@ -67,7 +67,7 @@ def _verify_report(path, ok, violations, status):
             "warning": (
                 "Hash-chain verification not possible: no entries carry prev_hash. "
                 "After sealing an existing ledger's epoch, enable chaining with "
-                "vnx config set VNX_HASH_CHAIN_REQUIRED 1 --approval-id <approval-id> "
+                'vnx config set VNX_HASH_CHAIN_REQUIRED 1 --approval-id <approval-id> --reason "<why>" '
                 "for the ledger's project (add --global for all projects without a project row)."
             ),
         }, 2

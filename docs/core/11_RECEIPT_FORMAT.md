@@ -293,7 +293,7 @@ Rejected outright (fail-closed) if present on a `schema_version >= 2` record, pe
 
 ## Optional hash-chain field: `prev_hash` (ADR-023, experimental opt-in)
 
-When enabled with `vnx config set VNX_HASH_CHAIN_REQUIRED 1 --approval-id <approval-id>` (project row, or add `--global`), the shared append primitive (`_write_receipt_under_lock`) stamps one additional field on **both** write paths — this is new in v2 (ADR-035 §7.1):
+When enabled with `vnx config set VNX_HASH_CHAIN_REQUIRED 1 --approval-id <approval-id> --reason "<why>"` (project row, or add `--global`), the shared append primitive (`_write_receipt_under_lock`) stamps one additional field on **both** write paths — this is new in v2 (ADR-035 §7.1):
 
 ```json
 { "...": "...", "prev_hash": "9f2c1ab4...e07d" }

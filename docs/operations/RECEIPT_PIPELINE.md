@@ -140,7 +140,7 @@ Governed-path receipts (written by `emit_dispatch_receipt`) always carry `events
 
 ## Hash-chain integrity (ADR-023, experimental opt-in)
 
-`vnx config set VNX_HASH_CHAIN_REQUIRED 1 --approval-id <approval-id>` enables an experimental hash-chain on receipt appends for the current project; add `--global` for the global value. Seal an existing unchained ledger before enabling it (ADR-029). **As of ADR-035 §7.1, both write paths honor the flag identically** — the shared append primitive (`_write_receipt_under_lock`) is the one place that checks it and stamps `prev_hash`, under the one lock file both Path 1 and Path 2 now share. This closes what was previously documented as a gap ("Path 1 does NOT chain, full per-path enforcement DEFERRED to 1.0.1") — that deferral is done, not by teaching Path 1 its own chain-awareness in isolation, but by removing the second independent writer entirely. Default is still OFF. See ADR-023.
+`vnx config set VNX_HASH_CHAIN_REQUIRED 1 --approval-id <approval-id> --reason "<why>"` enables an experimental hash-chain on receipt appends for the current project; add `--global` for the global value. Seal an existing unchained ledger before enabling it (ADR-029). **As of ADR-035 §7.1, both write paths honor the flag identically** — the shared append primitive (`_write_receipt_under_lock`) is the one place that checks it and stamps `prev_hash`, under the one lock file both Path 1 and Path 2 now share. This closes what was previously documented as a gap ("Path 1 does NOT chain, full per-path enforcement DEFERRED to 1.0.1") — that deferral is done, not by teaching Path 1 its own chain-awareness in isolation, but by removing the second independent writer entirely. Default is still OFF. See ADR-023.
 
 ## Downstream consumers
 
