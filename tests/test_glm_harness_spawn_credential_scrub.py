@@ -86,10 +86,6 @@ class TestFinalPopenEnvScrub:
         assert env.get("ANTHROPIC_AUTH_TOKEN") == gh._proxy_key()
 
 
-if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
-
-
 @pytest.mark.parametrize("lane_name", ["glm", "deepseek"])
 @pytest.mark.parametrize("role", ["review-gate", "backend-developer"])
 @pytest.mark.parametrize("role_source", ["argument", "environment"])
@@ -113,3 +109,7 @@ def test_gate_tools_are_read_only_and_build_scope_is_unchanged(lane_name, role, 
         assert "--dangerously-skip-permissions" not in capture.argv
     else:
         assert scope == _build_worker_scope_args(role if role_source == "argument" else None)
+
+
+if __name__ == "__main__":
+    sys.exit(pytest.main([__file__, "-v"]))
