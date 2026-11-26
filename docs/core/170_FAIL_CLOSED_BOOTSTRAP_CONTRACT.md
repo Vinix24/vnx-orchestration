@@ -95,7 +95,7 @@ fi
 
 This check MUST execute before the main dispatch loop, before any `rc_*` function calls, and before any file operations against `$STATE_DIR`.
 
-**BOOT-4 (Database Initialization)**: When `VNX_RUNTIME_PRIMARY=1`, the dispatcher MUST verify that `runtime_coordination.db` exists in `$VNX_STATE_DIR` and is a valid SQLite database before entering the dispatch loop. If the database does not exist, the dispatcher MUST call `init_schema()` (via `runtime_core_cli.py init-db` or equivalent) to create it. If initialization fails, the dispatcher MUST exit.
+**BOOT-4 (Database Initialization)**: The dispatcher MUST verify that `runtime_coordination.db` exists in `$VNX_STATE_DIR` and is a valid SQLite database before entering the dispatch loop. If the database does not exist, the dispatcher MUST call `init_schema()` (via `runtime_core_cli.py init-db` or equivalent) to create it. If initialization fails, the dispatcher MUST exit. Runtime and broker cutover are unconditional; rollback is `git revert`.
 
 ### 2.3 Worktree Isolation
 
