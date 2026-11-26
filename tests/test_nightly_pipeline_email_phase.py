@@ -35,9 +35,9 @@ def _extract_phase_11_block() -> str:
     start = text.index(_START_MARKER)
     end = text.index(_END_MARKER, start)
     block = text[start:end]
-    # Root resolution is covered separately; retain the real config read and phase body.
-    return "\n".join(line for line in block.splitlines()
-                     if not line.startswith(('source ', 'vnx_resolve_project_root ', 'VNX_ROOT=')))
+    # The startup snapshot now precedes phases; execute it before the email gate.
+    snapshot = text[text.index("# Config snapshot."):text.index("# End config snapshot.")]
+    return snapshot + block
 
 
 def _run_phase_11_block(env_overrides: dict) -> tuple[str, bool]:

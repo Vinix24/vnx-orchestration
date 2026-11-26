@@ -57,6 +57,17 @@ done
 # VNX_STATE_DIR must equal VNX_DATA_DIR/state so all writers and readers use the same db.
 export VNX_STATE_DIR="$VNX_DATA_DIR/state"
 
+# Read configuration before starting phases or acquiring the run lock.
+source "$SCRIPT_DIR/lib/vnx_resolve_root.sh"
+vnx_resolve_project_root "${BASH_SOURCE[0]:-$0}"
+VNX_ROOT="$VNX_HOME_DEFAULT"  # Engine CLI; preserve the consumer project context.
+# Config snapshot.
+if ! DIGEST_EMAIL="$("$VNX_ROOT/bin/vnx" config get --raw VNX_DIGEST_EMAIL)"; then
+    echo "WARNING: VNX_DIGEST_EMAIL snapshot unavailable; skipping nightly pipeline and digest email" >&2
+    exit 1
+fi
+# End config snapshot.
+
 LOG_FILE="$VNX_DATA_DIR/state/nightly_pipeline.log"
 LOCK_FILE="$VNX_DATA_DIR/state/nightly_pipeline.lock"
 PHASES_LOG="$VNX_DATA_DIR/state/nightly_pipeline_phases.ndjson"
@@ -260,15 +271,6 @@ run_phase "10-recommendations" python3 "$SCRIPT_DIR/generate_t0_recommendations.
 # The sender resolves its own credential (VNX_SMTP_PASS, else the macOS
 # keychain item "vnx-smtp-pass") and fails loudly if both are empty — that
 # failure must reach run_phase as a failed phase, not be pre-empted here.
-source "$SCRIPT_DIR/lib/vnx_resolve_root.sh"
-vnx_resolve_project_root "${BASH_SOURCE[0]:-$0}"
-VNX_ROOT="$VNX_PROJECT_ROOT"
-# Config snapshot.
-if ! DIGEST_EMAIL="$("$VNX_ROOT/bin/vnx" config get --raw VNX_DIGEST_EMAIL)"; then
-    echo "WARNING: VNX_DIGEST_EMAIL unavailable; using empty recipient" >&2
-    DIGEST_EMAIL=""
-fi
-# End config snapshot.
 if [ -n "$DIGEST_EMAIL" ]; then
     run_phase "11-email-digest" python3 "$SCRIPT_DIR/send_digest_email.py"
 else
