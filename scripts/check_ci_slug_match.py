@@ -31,8 +31,7 @@ Environment (GitHub Actions compatible)
   GITHUB_REF_NAME      ref name for ``push`` events (e.g. ``main``)
   GITHUB_BASE_REF      target/base branch name
   VNX_SLUG_ENFORCEMENT "1" = block on failure (default shadow/warn)
-  VNX_DEFAULT_BRANCHES comma-separated list of default branches to skip on
-                       push events (default: ``main,master``)
+  Push events on ``main`` and ``master`` are skipped.
 """
 from __future__ import annotations
 
@@ -368,6 +367,17 @@ def run_gate(
 
 def _build_parser() -> argparse.ArgumentParser:
     import os
+    import logging
+    import config_runtime
+    import config_registry
+    from enforcement_profile import enforced_storeless
+    key = "VNX_SLUG_ENFORCEMENT"
+    strict = config_runtime.strict_resolver() if config_runtime.autowire() else None
+    value, source = (config_registry.resolve_with_source(key, strict[1], strict[0], strict_resolver=True)
+                     if strict else enforced_storeless(key))
+    unreadable = source in config_registry.ERROR_SOURCES
+    if unreadable:
+        logging.getLogger(__name__).error("%s: %s; retaining enforcement", key, source)
 
     parser = argparse.ArgumentParser(
         description="CI gate: Dispatch-ID present + slug-match in branch commits"
@@ -385,7 +395,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--enforce",
         action="store_true",
-        default=os.environ.get("VNX_SLUG_ENFORCEMENT", "0") == "1",
+        default=unreadable or value.strip().lower() in ("1", "true", "yes", "on"),
         help="Exit 1 on failure instead of warning (also: VNX_SLUG_ENFORCEMENT=1)",
     )
     return parser
@@ -395,11 +405,7 @@ DEFAULT_BRANCH_NAMES = ("main", "master")
 
 
 def _default_branches() -> tuple[str, ...]:
-    import os
-    raw = os.environ.get("VNX_DEFAULT_BRANCHES", "")
-    if not raw.strip():
-        return DEFAULT_BRANCH_NAMES
-    return tuple(b.strip() for b in raw.split(",") if b.strip())
+    return DEFAULT_BRANCH_NAMES
 
 
 def resolve_branch_name(args_branch_name: str | None) -> tuple[str, bool]:

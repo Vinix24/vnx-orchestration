@@ -5,12 +5,7 @@ VNX Runtime Core — PR-5 cutover coordinator.
 Combines dispatch_broker + lease_manager + tmux_adapter into a unified
 high-level interface for dispatcher integration.
 
-Feature flags (PR-5 defaults — all enabled after cutover):
-  VNX_RUNTIME_PRIMARY      "1" = runtime core active (default after PR-5)
-                           "0" = legacy dispatcher path only (rollback)
-  VNX_BROKER_SHADOW        "0" = broker is authoritative (PR-5 default)
-                           "1" = shadow mode, broker registers but does not own delivery
-  VNX_CANONICAL_LEASE_ACTIVE "1" = canonical lease manager active (PR-5 default)
+Runtime coordination is always active. Roll back code with git revert.
 
 Governance invariants preserved:
   - T0 completion authority: broker only tracks delivery -> accepted.
@@ -22,7 +17,6 @@ Governance invariants preserved:
 from __future__ import annotations
 
 import json
-import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -35,17 +29,16 @@ from failure_classifier import classify_failure
 from runtime_state_reconciler import ZOMBIE_LEASE, RuntimeStateReconciler
 from tmux_adapter import TmuxAdapter, load_adapter
 
-_RUNTIME_PRIMARY_FLAG = "VNX_RUNTIME_PRIMARY"
 _DEFAULT_LEASE_TTL = 600
 
 
 # ---------------------------------------------------------------------------
-# Feature flag helpers
+# Compatibility helpers
 # ---------------------------------------------------------------------------
 
 def runtime_primary_active() -> bool:
-    """Return True when VNX_RUNTIME_PRIMARY=1 (default after PR-5 cutover)."""
-    return os.environ.get(_RUNTIME_PRIMARY_FLAG, "1").strip() != "0"
+    """Runtime coordination is always active."""
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -598,7 +591,7 @@ class RuntimeCore:
             return {
                 "ok": broker is not None,
                 "shadow_mode": broker.shadow_mode if broker else None,
-                "reason": "disabled (VNX_BROKER_ENABLED=0)" if broker is None else "ok",
+                "reason": "broker unavailable" if broker is None else "ok",
             }
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
@@ -620,8 +613,8 @@ class RuntimeCore:
             adapter = load_adapter(state_path)
             return {
                 "ok": True,
-                "primary_path": adapter.primary_path if adapter else None,
-                "reason": "disabled (VNX_TMUX_ADAPTER_ENABLED=0)" if adapter is None else "ok",
+                "primary_path": adapter.primary_path,
+                "reason": "ok",
             }
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
@@ -680,13 +673,6 @@ class RuntimeCore:
         return {
             "compatible": all_ok,
             "components": results,
-            "flags": {
-                "VNX_RUNTIME_PRIMARY": os.environ.get("VNX_RUNTIME_PRIMARY", "1"),
-                "VNX_BROKER_SHADOW": os.environ.get("VNX_BROKER_SHADOW", "0"),
-                "VNX_CANONICAL_LEASE_ACTIVE": os.environ.get("VNX_CANONICAL_LEASE_ACTIVE", "1"),
-                "VNX_TMUX_ADAPTER_ENABLED": os.environ.get("VNX_TMUX_ADAPTER_ENABLED", "1"),
-                "VNX_ADAPTER_PRIMARY": os.environ.get("VNX_ADAPTER_PRIMARY", "1"),
-            },
         }
 
 
@@ -698,35 +684,14 @@ def load_runtime_core(
     state_dir: str | Path,
     dispatch_dir: str | Path,
 ) -> Optional[RuntimeCore]:
-    """Return a RuntimeCore if VNX_RUNTIME_PRIMARY=1 (default after PR-5).
-
-    When VNX_RUNTIME_PRIMARY=0 (rollback mode), returns None so the caller
-    falls through to the legacy dispatcher path unmodified.
-
-    Side effect: if runtime_primary is active but VNX_BROKER_ENABLED/SHADOW
-    are still set to shadow-mode defaults, this function overrides them to
-    authoritative mode so the full cutover path is active.
-    """
-    if not runtime_primary_active():
-        return None
-
+    """Load runtime coordination; return None when initialization fails."""
     state_path = Path(state_dir)
     dispatch_path = Path(dispatch_dir)
-
-    # Ensure broker runs in non-shadow (authoritative) mode after cutover
-    if os.environ.get("VNX_BROKER_SHADOW", "0") == "1":
-        os.environ["VNX_BROKER_SHADOW"] = "0"
-
-    # Ensure canonical lease is active after cutover
-    if os.environ.get("VNX_CANONICAL_LEASE_ACTIVE", "1") != "1":
-        os.environ["VNX_CANONICAL_LEASE_ACTIVE"] = "1"
 
     try:
         broker = load_broker(state_path, dispatch_path)
         if broker is None:
-            os.environ["VNX_BROKER_ENABLED"] = "1"
-            os.environ["VNX_BROKER_SHADOW"] = "0"
-            broker = load_broker(state_path, dispatch_path)
+            return None
 
         lease_mgr = LeaseManager(state_path)
         adapter = load_adapter(state_path)

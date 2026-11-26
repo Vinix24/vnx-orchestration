@@ -105,6 +105,7 @@ def trial_env(tmp_path, monkeypatch):
     state_dir.mkdir(parents=True, exist_ok=True)
     dispatch_dir.mkdir(parents=True, exist_ok=True)
 
+    monkeypatch.setenv("VNX_PROJECT_ID", "vnx-dev")
     monkeypatch.setenv("VNX_HOME", str(fake_vnx_home))
     monkeypatch.setenv("PROJECT_ROOT", str(project_root))
     monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))

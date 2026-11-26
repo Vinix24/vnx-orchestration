@@ -39,7 +39,8 @@ def test_missing_file_then_round_trip_with_audit(cfg):
     assert cg.get_with_meta(PLAIN)["reason"] == "try it"
     cg.unset_global(PLAIN, actor="op", reason="back")
     assert cg.get(PLAIN) is None
-    first, second = _audit(cfg)
+    first, commit1, second, commit2 = _audit(cfg)
+    assert commit1["txn"] == first["txn"] and commit2["txn"] == second["txn"]
     assert {"ts", "actor", "cwd", "pid", "argv", "approval_id"} <= set(first)
     assert (first["operation"], first["key"], first["old"], first["new"]["value"]) == ("set", PLAIN, None, "1")
     assert (second["operation"], second["old"]["value"], second["new"]) == ("unset", "1", None)
@@ -57,8 +58,9 @@ def test_failed_replace_leaves_audit_then_abort_and_file_unchanged(cfg, monkeypa
         cg.set_global(PLAIN, "0", actor="op", reason="second")
     assert cfg.read_text() == before
     records = _audit(cfg)
-    assert [r["operation"] for r in records] == ["set", "set", "abort"]
-    assert records[1]["new"]["value"] == "0" and "disk full" in records[2]["error"]
+    assert [r["operation"] for r in records] == ["set", "commit", "set", "abort"]
+    assert records[2]["new"]["value"] == "0" and "disk full" in records[3]["error"]
+    assert records[2]["txn"] == records[3]["txn"]
 
 
 @pytest.mark.parametrize("content", [
@@ -82,7 +84,7 @@ def test_approval_key_needs_approval_id_for_set_and_unset(cfg):
             call()
     cg.set_global(APPROVAL, "1", actor="op", reason="r", approval_id="A-1")
     cg.unset_global(APPROVAL, actor="op", reason="r", approval_id="A-2")
-    assert [r["approval_id"] for r in _audit(cfg)] == ["A-1", "A-2"]
+    assert [r["approval_id"] for r in _audit(cfg) if r["operation"] in ("set", "unset")] == ["A-1", "A-2"]
 
 
 @pytest.mark.parametrize("key, value, reason, error", [
@@ -122,4 +124,4 @@ def test_concurrent_writers_lose_no_update(cfg, monkeypatch):
         t.start()
     for t in threads:
         t.join()
-    assert set(json.loads(cfg.read_text())["values"]) == {PLAIN, PLAIN2} and len(_audit(cfg)) == 2
+    assert set(json.loads(cfg.read_text())["values"]) == {PLAIN, PLAIN2} and len(_audit(cfg)) == 4

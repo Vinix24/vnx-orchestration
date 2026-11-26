@@ -42,6 +42,7 @@ class _DBTestCase(unittest.TestCase):
         self._tmpdir = tempfile.mkdtemp()
         self.state_dir = Path(self._tmpdir) / "state"
         self.state_dir.mkdir()
+        (self.state_dir / ".vnx-project-id").write_text("vnx-dev\n")
         schemas_dir = Path(__file__).resolve().parent.parent / "schemas"
         init_schema(self.state_dir, schemas_dir / "runtime_coordination.sql")
 

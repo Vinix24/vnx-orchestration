@@ -37,8 +37,6 @@ import pattern_upsert
 import schema_migration
 from coordination_db import _migrate_v11_composite_keys
 
-DEFAULT_PROJECT_ID = "vnx-dev"
-
 log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -51,12 +49,7 @@ log = logging.getLogger(__name__)
 #   3. VNX_PROJECT_ID environment variable.
 #
 # All present sources MUST agree.  Any conflict → RuntimeError (fail-closed).
-# No sources at all → default to 'vnx-dev' with a warning (backward-compat).
-#
-# Rationale for the fallback: real central stores ALWAYS have a
-# ~/.vnx-data/<pid>/ path and therefore resolve via (1); only genuinely
-# contextless calls (tests, default installs) reach the fallback, and
-# 'vnx-dev' is the correct legacy default for those.
+# No sources at all → refuse; run vnx init in the project.
 #
 # This is intentionally a stripped-down resolver — it avoids importing the
 # full vnx_identity chain (which requires the vnx_paths bootstrap) so that
@@ -115,7 +108,9 @@ def _read_marker_from_path(db_path: Path) -> Optional[str]:
     return None
 
 
-def resolve_init_project_id(db_path: Path, strict: bool = False) -> str:
+def resolve_init_project_id(
+    db_path: Path, strict: bool = False, *, candidate_project_id: Optional[str] = None,
+) -> str:
     """Resolve the owning project_id for an init-time ADD COLUMN backfill.
 
     Anchor: the resolved DB file path (not cwd).  Resolution order:
@@ -126,17 +121,13 @@ def resolve_init_project_id(db_path: Path, strict: bool = False) -> str:
     All present sources must agree — any conflict raises RuntimeError
     (fail-closed: the real contamination guard).
 
-    ``strict`` (default ``False``): when no source resolves, the legacy
-    behavior returns ``'vnx-dev'`` with a warning (backward-compat for
-    init-backfill callers). When ``strict=True`` — the QI-write-tier stamp
-    path (:func:`project_scope.resolve_stamp_project_id`) — a total absence
-    raises :class:`project_scope.TenantUnresolved` instead, so the caller
-    refuses to stamp a guessed default. Source conflicts and invalid ids
-    raise ``RuntimeError`` regardless of ``strict`` (the stamp resolver casts
-    those to ``TenantUnresolved``).
+    Init may supply ``candidate_project_id`` to validate a proposed identity
+    before publishing its marker. It is an additional source, never an override;
+    invalid candidates raise RuntimeError even when no store source exists.
 
-    Rationale (non-strict default): real non-vnx-dev central stores always
-    carry their pid in the path (source 1) so they never reach the default.
+    ``strict`` is retained for call compatibility. With either value, no
+    source raises :class:`project_scope.TenantUnresolved`. Conflicts and
+    invalid ids raise ``RuntimeError`` (the stamp resolver casts these).
 
     ADR-007 compliance: callers may invoke this and pass the returned value
     as ``default_project_id`` to ``run_runtime_coordination_migration`` /
@@ -147,6 +138,8 @@ def resolve_init_project_id(db_path: Path, strict: bool = False) -> str:
     env_pid = (os.environ.get("VNX_PROJECT_ID") or "").strip() or None
 
     sources: Dict[str, str] = {}
+    if candidate_project_id is not None:
+        sources["init:candidate"] = candidate_project_id
     if path_pid:
         sources["db-path"] = path_pid
     if marker_pid:
@@ -162,22 +155,13 @@ def resolve_init_project_id(db_path: Path, strict: bool = False) -> str:
             "All sources must agree. Resolve the conflict before running init."
         )
     if not distinct:
-        if strict:
-            # QI-write-tier stamp path: refuse to guess a default — fail-closed.
-            from project_scope import TenantUnresolved  # noqa: PLC0415 — function-local: avoids a project_scope↔project_id_migration import cycle
-            raise TenantUnresolved(
-                "resolve_init_project_id(strict=True): no project_id source for "
-                f"db_path {db_path!r} (no .vnx-data path layout, no .vnx-project-id "
-                "marker, VNX_PROJECT_ID unset). Refusing to stamp a guessed default."
-            )
-        log.warning(
-            "resolve_init_project_id: no project_id source found (no .vnx-data path "
-            "layout, no .vnx-project-id marker walking up from '%s', VNX_PROJECT_ID "
-            "unset). Defaulting to 'vnx-dev'. Real central stores always resolve via "
-            "path layout — this default is safe only for local/test contexts.",
-            Path(db_path).resolve().parent,
+        from project_scope import TenantUnresolved
+        message = (
+            f"No project_id source for {db_path!r}: no store layout, marker or "
+            "VNX_PROJECT_ID. Run `vnx init` in the project before initializing its store."
         )
-        return DEFAULT_PROJECT_ID
+        log.error(message)
+        raise TenantUnresolved(message)
 
     pid = distinct.pop()
     if not _INIT_PID_RE.match(pid):
@@ -303,7 +287,7 @@ def apply_project_id_migration(
     conn: sqlite3.Connection,
     tables: Iterable[str],
     *,
-    default_project_id: str = DEFAULT_PROJECT_ID,
+    default_project_id: str,
 ) -> Dict[str, str]:
     """Apply project_id column + index to each table that exists. Idempotent.
 

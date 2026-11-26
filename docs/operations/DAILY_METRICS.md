@@ -1,27 +1,46 @@
 # Daily Metrics
 
 **Status**: Active
-**Last Updated**: 2026-11-25
+**Last Updated**: 2026-11-26
 **Owner**: track `doorloop-en-effectiviteit-dagelijks`
 **Purpose**: Install, read and check the daily lead-time measurement of one project.
 
-The contract (ten metric ids, unknown is never 0, the settled day, proven coverage, the approval gate, opt-in) is [ADR-063](../governance/decisions/ADR-063-dagelijkse-doorloopmeting.md). This page is the runbook. The verbs run as `python3 scripts/daily_metrics.py <verb>`. The `vnx daily-metrics <verb>` wrapper, `install` and `uninstall` come with PR-13 of the track and are not merged yet. The commands below use the script form, except where marked PR-13.
+The contract (ten metric ids, unknown is never 0, the settled day, proven coverage, the approval gate, required nightly jobs) is [ADR-063](../governance/decisions/ADR-063-dagelijkse-doorloopmeting.md). This page is the runbook. `vnx daily-metrics install` installs the job; other verbs pass through to `python3 scripts/daily_metrics.py <verb>`. The reporting examples below use that script form.
 
-## Install (opt-in per project)
+## Install (required per project, ADR-063 amendment 2026-11-25)
 
 ```
-# PR-13, not merged yet:
 vnx daily-metrics install --project-id <id>
-# on main:
+# Optional manual collection through the project's pin:
 bash scripts/launchd/vnx_pinned_launcher.sh <id> scripts/daily_metrics.py daily
 python3 scripts/daily_metrics.py report --check --project-id <id>; echo "exit=$?"
 ```
 
-`install` (PR-13) writes the job `com.vnx.daily-metrics.<id>` (04:10 local, through the pinned launcher) for that one project. `vnx init` never installs it and `vnx doctor` does not expect it. Until PR-13 merges there is no `install`: the job `com.vnx.daily-metrics.<id>` does not exist and `report --check` cannot report `stale`.
+`install` writes and loads `~/Library/LaunchAgents/com.vnx.daily-metrics.<id>.plist` for that one registered project. The job runs on load and at 04:10 local through the pinned launcher. `vnx init` prepares `<project store>/launchd/com.vnx.daily-metrics.<id>.plist` with the validated project id and resolved engine path. It never calls launchctl for this family or writes its definition to LaunchAgents. It prints one request for Vincent's operating session: what, why, the install command above, rollback, verification and class `reversible`. `vnx doctor` reports a missing job as FAIL with that exact install command. The other four required families retain their existing init installation behavior. `report --check` can report `stale` when the job is loaded but the newest settled day has no fresh file.
 
-The `bash` line is the first manual run. It fills the last 14 settled days, oldest first. Those days are `backfilled`: they count in the baseline, never in freshness. The check therefore turns green only after seven nights of real runs.
+The first run collects missing final days from the last 14 settled days, oldest first. Collections later than `day end + 30 h` are `backfilled`: they count in the baseline, never in freshness. `report --check` needs seven consecutive fresh days and all the checks below; a catch-up run alone does not prove that.
+
+The repository's launchd template guard checks XML and interpreter compatibility.
+Its shell scanner ignores full-line comments when selecting an interpreter:
+historical interpreter paths in comments are not executable commands.
 
 The day files live in `~/.vnx-data/<id>/state/daily_metrics/<id>/`: one `<YYYY-MM-DD>.json` per UTC day, `<YYYY-MM-DD>.r<N>.json` per revision, and `proposals.ndjson` as the append-only proposal ledger.
+
+## Proposal inbox lifecycle
+
+`propose` opens one `besluit` point per proposal, with ref `proposal:<id>`, the project, metric, value, baseline and metric day. Its copy block is `vnx daily-metrics approve <id> --action "<intervention>"`; the operator fills in the intervention and runs it in their own terminal. Inbox answers never approve. Notification failures leave proposals in the ledger, report an inbox error on stderr and exit 1; rerunning retries open proposals without duplicate points.
+
+Before proposing, even when the newest day is not final, `propose` appends one `expired` event for each proposal at least seven full days past `recorded_at`, unless already approved, expired, rejected or judged. Expired and rejected proposals cannot be approved and release their metric key for future proposals. The inbox reads the project's ledger: `approved` closes as `beantwoord`, `expired` as `vervallen`, using `recorded_at` as evidence. Missing, unreadable or invalid timestamp evidence keeps the point open. Existing `afgewezen` and `later` answers still close their points. Approval now records `recorded_at`; older approvals without that field remain open with a reason.
+
+After expiry and before new proposals, `propose` creates one deliverable for each approved proposal naming `deliverable: {track, title, output_kind, task_class}` in its `proposed` event. All four fields must be nonempty strings; `output_kind` is `pr` or `doc`, and `task_class` uses the planning/smart-router vocabulary. Invalid objects (including null) are named ledger refusals. Existing proposals without the field remain valid: an approval produces `no deliverable named` in the JSON output and writes nothing. Current rules name no deliverables; M4b supplies them.
+
+Creation uses the planning layer in the named project/track with status `proposed`; it never promotes, fires or calls the door. The proposal lock covers the check, creation and single `deliverable_created` append (project id, proposal id, deliverable id, recorded_at). A deterministic project/proposal ID and planning metadata make a retry after a failed append recover the existing deliverable; conflicting metadata is refused. An unknown track or unreadable planning store exits nonzero with a named stderr error and no creation event, so a later run retries. `--state-dir` selects the planning store explicitly; otherwise the project's central state directory is used. A JSON `deliverables` line reports creations or missing specifications before the usual proposal summary.
+
+After deliverable creation, `propose` records `applied` once under the proposal lock from the project's native `t0_receipts.ndjson`: an exact deliverable dispatch (or its numbered rework round), `pr_merged` with `conclusion: merged`, PR number, merge SHA and UTC merge-receipt timestamp. An unusable match (missing SHA, invalid PR number, conclusion or timestamp) is skipped; a complete receipt wins over an incomplete one. Only disagreeing complete receipts conflict. With only unusable matches or a conflict, that proposal stays pending and its id and reason appear on stderr; other applications, new proposals and inbox notifications still run before exit 1. `--state-dir` selects this evidence store. No PR titles are matched.
+
+A missing receipt file or no matching merge leaves proposals pending without error. Non-candidate lines, non-object lines and an unfinished last line are skipped, as in the predecessor reader. An unreadable file or corrupt complete `pr_merged` candidate remains a named error for pending proposals; the shared receipt log is never rewritten. The proposal ledger itself remains strict: damaged lines stop processing.
+
+`daily` runs this application step before `verdict` and continues all steps after a nonzero exit. It reports `{"command_failed": "<step>", "exit_code": 1}` separately from `{"command_import_failed": "<module>", "exception": "<class>"}`; either makes `daily` exit 1. Without application, `verdict` lists `{proposal_id, reason: not_applied}` under `waiting`. Application day `p` starts the observation window `p+1..p+7`; it waits until `p+7` settles (next day at 02:00 UTC). The approval's frozen baseline, sample sufficiency and schema checks still apply; unknown yields `undetermined`. Each verdict opens one acknowledgment point through `inbox ask` (`bron: vraag`, stable `antwoord:` ref derived from `proposal verdict <id>` so display wording changes cannot reopen answered points). Judgment runs before notification replay: an unreadable inbox, refused ask or malformed old notification reports an error and exits 1 without blocking new due verdicts. Reruns recover failed notifications without reopening answered points.
 
 ## What `report --check` checks
 
@@ -47,16 +66,18 @@ The `daily_metrics` health beacon has a separate 36-hour deadline (ADR-097).
 Readers measure the age of its last completed collection run (`last_run_ts`,
 the epoch form of `last_run_iso`), including legacy beacons with a null interval.
 After 36 hours it reads `fail`, reason `no_measurement_36h`, with `age_hours`.
-Participation remains opt-in per project (ADR-063 decision 29): the presence of
-that project's beacon is the signal used by health readers. `daily_metrics` is
-excluded from the universal expected-component set, so a project without a beacon
-gets no `never_measured` row and no health downgrade. Both supported beacon paths
-are read directly; an unreadable or corrupt signal, including a dangling symlink,
-stays a named `corrupt` row. Another project's beacon cannot opt this project in.
-A caller that explicitly expects `daily_metrics` still gets `fail` with
-`never_measured` when its beacon is absent. This signal cannot detect an installed
-job that has never written its first beacon, or a removed beacon; requiring the
-family for every project is the separate M7a operator decision.
+The job is required for every registered project. Init seeds
+`state/health/daily_metrics.json` with status `fail`, reason `never_measured`,
+and the project id, so T0 session start names the project before its first run.
+The seed timestamp marks preparation, not a measurement; the failure remains
+until the collector writes a new beacon. Reinitialization preserves an existing
+beacon under the same lock as the collector, including stale or corrupt evidence.
+Preparation failures abort init with a visible error.
+Health readers still discover participation through the project's beacon (or an
+explicit expectation). Both supported paths are read directly; unreadable signals
+stay named `corrupt` rows. Another project's beacon cannot satisfy this project.
+A project never initialized, or whose beacon was removed, needs init to seed it;
+doctor independently reports its missing required launchd job.
 The existing content rule is unchanged: no final file in the last three settled
 days gives `fail` (`no_final_settled_day`), even with a fresh heartbeat.
 Readers include `state/health/daily_metrics.json` under the supplied project data
@@ -86,9 +107,12 @@ It reads every day file and every revision. Exit 0 needs `violations: 0`, no `un
 
 ## Rollback
 
+There is no `vnx daily-metrics uninstall` verb. To stop the installed job manually, ask operating to substitute the project id and boot out that one Label:
+
 ```
-# PR-13, not merged yet:
-vnx daily-metrics uninstall --project-id <id>
+launchctl bootout gui/$(id -u)/com.vnx.daily-metrics.<id>
+# Check after installation (the Label must appear):
+launchctl list | grep com.vnx.daily-metrics.<id>
 ```
 
-`uninstall` (PR-13) removes only that project's job. The day files and the ledger stay: a `final` day is never overwritten and nothing in the measurement deletes data. There is no schema change and no migration to undo. Removing the store itself is deleting data, and that waits for the operator's approval.
+This leaves the plist, day files, ledger and health beacon in place. The beacon's age rule still applies; stopping the job does not clear its health signal. There is no schema change or migration to undo. Removing the store itself is deleting data, and that waits for the operator's approval.

@@ -26,6 +26,7 @@ ROW = 7
 
 def _bootstrap(tmp_path: Path) -> Path:
     db = tmp_path / "qi.db"
+    (tmp_path / ".vnx-project-id").write_text(PID + "\n")
     assert qdi.bootstrap_qi_db(db) is True
     return db
 

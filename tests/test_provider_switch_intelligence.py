@@ -312,7 +312,7 @@ def _analyze(project_origin):
     metrics = SimpleNamespace(session_id="s", total_output_tokens=5000, tool_calls_total=20)
     with patch.object(DeepAnalyzer, "_build_session_summary", return_value="summary"), \
          patch.object(DeepAnalyzer, "_routes_restricted", return_value=False), \
-         patch.object(da_module, "LLM_STRATEGY", "deepseek-harness"):
+         patch.object(da_module, 'llm_strategy', return_value='deepseek-harness'):
         result = analyzer.analyze_session(Path("x.jsonl"), metrics, None, origin=project_origin)
     return analyzer, result
 
@@ -361,7 +361,7 @@ def test_ollama_lane_is_skipped_when_local_is_off(switch, monkeypatch):
     with patch("urllib.request.urlopen") as urlopen, \
          patch.object(DeepAnalyzer, "_build_session_summary", return_value="summary"), \
          patch.object(DeepAnalyzer, "_routes_restricted", return_value=False), \
-         patch.object(da_module, "LLM_STRATEGY", "ollama-only"):
+         patch.object(da_module, 'llm_strategy', return_value='ollama-only'):
         assert analyzer.analyze_session(Path("x.jsonl"), metrics, None, origin=_origin(PROJECT_X)) is None
     urlopen.assert_not_called()
     assert analyzer.deep_disabled_skips == 1 and analyzer.deep_attempts == 0
@@ -406,7 +406,7 @@ def world(tmp_path, monkeypatch, switch, harness):
     projects = tmp_path / "projects"
     projects.mkdir()
     monkeypatch.setattr(ca_pkg, "CLAUDE_PROJECTS_DIR", projects)
-    monkeypatch.setattr(da_module, "LLM_STRATEGY", "deepseek-harness")
+    monkeypatch.setattr(da_module, 'llm_strategy', lambda: 'deepseek-harness')
     monkeypatch.setattr(runner_module, "resolve_stamp_project_id", lambda *a, **k: TENANT)
     db_path = tmp_path / "state" / "quality_intelligence.db"
     db_path.parent.mkdir()

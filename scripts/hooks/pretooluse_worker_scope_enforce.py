@@ -116,7 +116,6 @@ try:
         resolve_worker_profile,
         worker_permission_enforcement_enabled,
     )
-    import project_root  # noqa: E402
     from atomic_io import audit_event_append  # noqa: E402
 
     _DEPS_AVAILABLE = True
@@ -180,6 +179,12 @@ def _relative_to_cwd(file_path: str, cwd: str) -> str:
     return rel
 
 
+def _hook_data_dir() -> Path:
+    """Use the fabric resolver; only an explicit data pin bypasses git discovery."""
+    import project_root
+    return project_root.resolve_data_dir(__file__)
+
+
 def _is_within_report_dir(file_path: str) -> bool:
     """Return True when *file_path* targets the unified report directory.
 
@@ -192,7 +197,7 @@ def _is_within_report_dir(file_path: str) -> bool:
     if not file_path or not _DEPS_AVAILABLE:
         return False
     try:
-        data_dir = project_root.resolve_data_dir(__file__)
+        data_dir = _hook_data_dir()
         reports_dir = (data_dir / "unified_reports").resolve()
         target = Path(file_path).resolve()
         # Must be a direct child of reports_dir (not a subdirectory or sibling).
@@ -250,7 +255,8 @@ def evaluate(payload: dict) -> "tuple[str, str | None]":
     """Return (decision, reason) for one PreToolUse payload. decision is 'allow' or 'block'."""
     if not _DEPS_AVAILABLE:
         return "allow", None
-    if not worker_permission_enforcement_enabled():
+    state_dir = Path(os.environ.get("VNX_STATE_DIR") or _hook_data_dir() / "state")
+    if not worker_permission_enforcement_enabled(state_dir=state_dir):
         return "allow", None
 
     tool_name = payload.get("tool_name")
@@ -328,7 +334,7 @@ def _emit_audit(tool_name: object, decision: str, reason: "str | None") -> None:
     if not _DEPS_AVAILABLE:
         return
     try:
-        data_dir = project_root.resolve_data_dir(__file__)
+        data_dir = _hook_data_dir()
         events_dir = data_dir / "events"
         audit_event_append(
             events_dir,

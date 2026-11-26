@@ -1,0 +1,1 @@
+- `vnx doctor` and the `vnx-gate/door` check-run list the guarantees an optional feature waives.

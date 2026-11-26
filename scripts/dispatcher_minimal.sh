@@ -46,13 +46,9 @@ fi
 PROJECT_ROOT="${PROJECT_ROOT}"
 VNX_DIR="$VNX_HOME"
 
-# --- Runtime Core defaults (PR-5 cutover) ---
-# VNX_RUNTIME_PRIMARY=1: broker + canonical lease are the authoritative path.
-# Set VNX_RUNTIME_PRIMARY=0 to revert to legacy-only mode (rollback).
-VNX_RUNTIME_PRIMARY="${VNX_RUNTIME_PRIMARY:-1}"
-VNX_BROKER_SHADOW="${VNX_BROKER_SHADOW:-0}"
+# Retained until canonical expiry runs by default without a dispatcher (Q1bb).
 VNX_CANONICAL_LEASE_ACTIVE="${VNX_CANONICAL_LEASE_ACTIVE:-1}"
-export VNX_RUNTIME_PRIMARY VNX_BROKER_SHADOW VNX_CANONICAL_LEASE_ACTIVE
+export VNX_CANONICAL_LEASE_ACTIVE
 
 # Source the singleton enforcer (save/restore SCRIPT_DIR — singleton chain
 # overwrites it via process_lifecycle.sh which resolves to scripts/lib/)
@@ -93,8 +89,7 @@ fi
 # OI-1067: Resolve the dispatcher's bound project_id once at startup.
 # Validates against the same allowlist regex as scripts/lib/project_scope.py.
 if ! _VNX_DISPATCHER_PROJECT_ID="$(vnx_dispatch_resolve_project_id)"; then
-    echo "FATAL: Invalid VNX_PROJECT_ID='${VNX_PROJECT_ID:-}'" >&2
-    echo "Must match /^[a-z][a-z0-9-]{1,31}$/ — see scripts/lib/project_scope.py" >&2
+    echo "ERROR: project_id_unresolved — run vnx init or set a valid VNX_PROJECT_ID." >&2
     exit 1
 fi
 export _VNX_DISPATCHER_PROJECT_ID

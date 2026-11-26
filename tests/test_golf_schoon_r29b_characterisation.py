@@ -31,7 +31,7 @@ _Plan = dataclasses.make_dataclass("_Plan", [(k, object, dataclasses.field(defau
 
 def _door(mp, tmp_path, *, plan=None, track_id="trk", scout_exc=None, **over):
     calls, sd = [], tmp_path / "state"
-    spec = NS(dispatch_id="d-r29b", dispatch_paths=[NS(path="a.py")], task_class="03_refactoring",
+    spec = NS(dispatch_id="d-r29b", project_id="vnx-dev", dispatch_paths=[NS(path="a.py")], task_class="03_refactoring",
               track_id=track_id, role="backend-developer")
     vspec = NS(spec=spec, instruction_text="do it")
     def rec(name, result=None):
@@ -102,7 +102,8 @@ def test_headless_fire_order_env_and_output(monkeypatch, tmp_path, capsys, caplo
         "claude", "d-r29b")
     assert _get(calls, "headless")[2] == {"state_dir": sd, "data_dir": tmp_path / "data",
                                           "role": "backend-developer", "handover": "H", "base_sha": "base"}
-    assert _get(calls, "finish")[1:] == (("d-r29b", "att-1"), {"state_dir": sd, "success": True, "failure_reason": None})
+    assert _get(calls, "finish")[1:] == (("d-r29b", "att-1"), {
+        "state_dir": sd, "project_id": "vnx-dev", "success": True, "failure_reason": None})
     assert capsys.readouterr().err == "[dispatch_cli] [WARN] iso-warn\n"
     assert [r.getMessage() for r in caplog.records] == ["[dispatch_cli] permit fingerprint: fp-1", "[dispatch_cli] iso-warn"]
 
@@ -114,7 +115,7 @@ def test_headless_nonzero_bare_env_gate_reject_scout_failure(monkeypatch, tmp_pa
                      _execute_claude_headless=7)
     assert _run() == 7 and _env() == {"VNX_CURRENT_MODEL": "opus"} and "track" not in [c[0] for c in calls]
     assert _get(calls, "finish")[2] == {"state_dir": tmp_path / "state", "success": False,
-                                        "failure_reason": "claude_headless lane returned non-zero"}
+                                        "project_id": "vnx-dev", "failure_reason": "claude_headless lane returned non-zero"}
     _door(monkeypatch, tmp_path, _register_gate_obligation=NS(code="obl", message="none"))
     assert _run() == 1 and _env() == {}
     assert capsys.readouterr().err == "[dispatch_cli] REJECT [obl]: none\n"
@@ -130,10 +131,12 @@ def test_provider_lanes_and_dry_run(monkeypatch, tmp_path, capsys):
     assert _run() == 3 and os.environ["VNX_CURRENT_PROVIDER"] == "kimi"
     assert [c[0] for c in calls][-3:] == ["run_envelope_plan", "escalate", "finish"]
     assert _get(calls, "finish")[2]["failure_reason"] == "provider lane status=failed"
+    assert _get(calls, "finish")[2]["project_id"] == "vnx-dev"
     assert capsys.readouterr().err == "[dispatch_cli] provider lane failed: (no error captured)\n"
     calls, _ = _door(monkeypatch, tmp_path, plan=_Plan(lane="provider"))
     assert _run() == 0 and "escalate" not in [c[0] for c in calls]
     assert _get(calls, "envelope")[2]["base_sha"] == "base" and _get(calls, "finish")[2]["success"] is True
+    assert _get(calls, "finish")[2]["project_id"] == "vnx-dev"
     assert capsys.readouterr().err == ""
     calls, _ = _door(monkeypatch, tmp_path, _fill_gate_and_check_required=lambda v, r: (None, v, ""),
                      _headless_isolation_guard=None)
@@ -160,7 +163,7 @@ def test_invariant_and_lock_wait_exits(monkeypatch, tmp_path, capsys, caplog):
     assert _run() == 1 and [c[0] for c in calls][-3:] == ["serialize_lane", "finalize", "finish"]
     assert _get(calls, "finalize")[1:] == (("H",), {"state_dir": sd, "reason": dispatch_exit.REASON_SLOT_TIMEOUT})
     assert _get(calls, "finish")[1:] == (("d-r29b", "att-1"), {
-        "state_dir": sd, "success": False, "failure_reason": "lock-wait timeout: slot busy"})
+        "state_dir": sd, "project_id": "vnx-dev", "success": False, "failure_reason": "lock-wait timeout: slot busy"})
     assert capsys.readouterr().err == "[dispatch_cli] REJECT [lock-wait-timeout]: slot busy\n"
     assert [r.getMessage() for r in caplog.records] == ["[dispatch_cli] LOCK-WAIT TIMEOUT dispatch=d-r29b: slot busy"]
 

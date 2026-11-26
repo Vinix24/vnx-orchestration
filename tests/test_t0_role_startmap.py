@@ -84,12 +84,27 @@ def _env(tmp_path: Path) -> dict:
     env = {k: v for k, v in os.environ.items() if not k.startswith("VNX_")}
     env["HOME"] = str(home)
     env["VNX_DATA_HOME"] = str(tmp_path / "vnx-data")
+    # HOME does not isolate tmux: both an inherited socket and its default need isolating.
+    env.pop("TMUX", None)
+    tmux_dir = tmp_path / "tmux"
+    tmux_dir.mkdir(exist_ok=True)
+    env["TMUX_TMPDIR"] = str(tmux_dir)
     return env
 
 
 def _run_in(cwd: Path, cmd: str, env: dict) -> subprocess.CompletedProcess:
     return subprocess.run(["bash", "-c", cmd], cwd=str(cwd), env=env,
                           capture_output=True, text=True, timeout=60)
+
+
+def test_command_environment_isolates_the_operator_tmux_socket(tmp_path, monkeypatch):
+    monkeypatch.setenv("TMUX", "/operator/tmux/socket,123,0")
+    monkeypatch.setenv("TMUX_TMPDIR", "/operator/tmux")
+    env = _env(tmp_path)
+    socket = env.get("TMUX")
+    assert socket is None
+    assert Path(env["TMUX_TMPDIR"]).is_relative_to(tmp_path)
+    assert Path(env["TMUX_TMPDIR"]).is_dir()
 
 
 @pytest.mark.parametrize("cmd", READ_ONLY_COMMANDS)

@@ -18,7 +18,6 @@ FP-C introduces mixed execution routing: dispatches can now route to either inte
 | `VNX_MIXED_EXECUTION` | `0` | Master switch. `0` = all-interactive (pre-FPC behavior). `1` = mixed routing active. |
 | `VNX_HEADLESS_ROUTING` | `0` | Headless target selection. `0` = headless targets never selected. `1` = eligible task classes may route headless. |
 | `VNX_HEADLESS_ENABLED` | `0` | Headless subprocess execution. `0` = headless adapter disabled. `1` = CLI subprocess execution active. |
-| `VNX_BROKER_SHADOW` | `1` | Broker mode. `1` = shadow (registers but does not replace tmux delivery). `0` = authoritative. |
 | `VNX_INTELLIGENCE_INJECTION` | `1` | Intelligence injection. `1` = bounded injection at create/resume. `0` = disabled. |
 | `VNX_HEADLESS_TIMEOUT` | `600` | Headless subprocess timeout in seconds. |
 | `VNX_HEADLESS_CLI` | `claude` | CLI binary for headless execution. |
@@ -31,7 +30,6 @@ FP-C introduces mixed execution routing: dispatches can now route to either inte
 export VNX_MIXED_EXECUTION=1
 export VNX_HEADLESS_ROUTING=1
 export VNX_HEADLESS_ENABLED=0
-export VNX_BROKER_SHADOW=1
 ```
 
 In this phase, routing decisions are made and logged but headless execution does not occur. All dispatches still flow through tmux. Review routing_decision events in coordination_events to verify correct task class resolution.
@@ -46,11 +44,11 @@ Now headless-eligible dispatches (research_structured, docs_synthesis) will exec
 
 ### Phase 3: Full Cutover
 
-```bash
-export VNX_BROKER_SHADOW=0
-```
-
-The broker becomes the authoritative dispatch registration path.
+Q1b fixes production broker authority and the mixed-router `broker_shadow`
+diagnostic to false. `VNX_BROKER_ENABLED` and `VNX_BROKER_SHADOW` are removed.
+Registration still only writes the queued dispatch and immutable bundle; delivery
+requires explicit lifecycle/transport calls. Standalone certification gains no
+delivery side effect. The way back for broker cutover is `git revert`.
 
 ## Rollback
 

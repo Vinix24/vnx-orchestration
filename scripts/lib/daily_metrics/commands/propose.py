@@ -4,7 +4,7 @@ Decision 26: only the newest settled day yields proposals, so a catch-up over
 five days proposes for one day and never for fifteen. The metric day must be
 ``final`` in its base file; anything else (an ``incomplete`` day, a missing
 day, an unreadable status) prints one JSON line with ``reason
-"day_not_final"`` and writes nothing.
+"day_not_final"`` and proposes nothing. Expiry still runs before that check.
 
 The command is discovered like every other command module (decision 4): this
 file exposes ``register(subparsers)``, ``run(args)`` and ``DAILY_STEP = 10``.
@@ -18,11 +18,13 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import sys
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+import operator_queue_ask
 from daily_metrics import days, proposal_ledger, proposal_rules
 from daily_metrics.store import DayStore, default_store_dir
 
@@ -91,27 +93,57 @@ def _emit(payload: dict[str, Any]) -> None:
     print(json.dumps(payload))
 
 
+def _notify(path: Path, project_id: str, state_dir: Path | None) -> None:
+    """Replay open proposals so a failed notification can recover; ask deduplicates."""
+    events = [e for e in proposal_ledger.read_events(path) if e.get("project_id") == project_id]
+    for event in events:
+        pid = event.get("proposal_id")
+        if event.get("event") == proposal_ledger.PROPOSED and proposal_ledger.approval_refusal(events, pid) is None:
+            operator_queue_ask.ask(project_id, bron="besluit", ref=f"proposal:{pid}",
+                vraag=f"{event['project_id']}: {event['metric_id']} = {event['value']} vs baseline {event['baseline']} on {event['metric_day']}. Apply?",
+                sluit_bij="approved, expired, rejected or deferred", opened_by="lezer",
+                kopieerblok=f'vnx daily-metrics approve {pid} --action "<intervention>"', state_dir=state_dir)
+
+
 def run(args: Any) -> int:
     """Propose for the newest settled day and print one JSON line; see the module doc."""
     project_id, now, store = _resolve(args)
     if project_id is None:
         print("error: --project-id or VNX_PROJECT_ID is required", file=sys.stderr)
         return EXIT_USAGE
+    path = proposal_ledger.ledger_path(store.root)
+    try:
+        proposal_ledger.append_expiries(path, now=now)
+        deliveries = proposal_ledger.create_deliverables(path, project_id=project_id,
+            state_dir=getattr(args, "state_dir", None), now=now)
+        problems = proposal_ledger.append_applications(path, project_id=project_id,
+            state_dir=getattr(args, "state_dir", None), now=now)
+    except (proposal_ledger.LedgerUnreadable, OSError, ValueError, TypeError, sqlite3.Error) as exc:
+        print(f"error: unreadable ledger {path}: {exc}", file=sys.stderr)
+        return EXIT_FAILURE
+    if deliveries:
+        _emit({"deliverables": deliveries})
+    for pid, reason in problems:
+        print(f"error: {pid}: {reason}", file=sys.stderr)
     day = days.latest_settled_day(now)
     if store.base_status(day.isoformat()) != days.FINAL_STATUS:
         _emit({"metric_day": day.isoformat(), "proposed": [], "reason": proposal_rules.DAY_NOT_FINAL})
-        return EXIT_OK
+        return EXIT_FAILURE if problems else EXIT_OK
     evaluation = proposal_rules.evaluate(day, _window(store, day))
-    path = proposal_ledger.ledger_path(store.root)
     try:
         written = proposal_ledger.append_proposals(
             path, project_id=project_id, metric_day=day,
             candidates=evaluation.candidates, rule_version=proposal_rules.RULE_VERSION,
             recorded_at=now.isoformat())
-    except proposal_ledger.LedgerUnreadable as exc:
+    except (proposal_ledger.LedgerUnreadable, OSError) as exc:
         print(f"error: unreadable ledger {path}: {exc}", file=sys.stderr)
+        return EXIT_FAILURE
+    try:
+        _notify(path, project_id, getattr(args, "state_dir", None))
+    except (proposal_ledger.LedgerUnreadable, OSError, ValueError, KeyError) as exc:
+        print(f"error: proposal inbox: {exc}", file=sys.stderr)
         return EXIT_FAILURE
     _emit({"metric_day": day.isoformat(), "proposed": written,
            "candidates": len(evaluation.candidates),
            "skipped": dict(evaluation.skipped)})
-    return EXIT_OK
+    return EXIT_FAILURE if problems else EXIT_OK

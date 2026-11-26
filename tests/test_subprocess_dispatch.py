@@ -162,3 +162,8 @@ class TestCliPrIdFlag:
         assert "pr_id" in sig.parameters, (
             f"pr_id not in deliver_with_recovery signature: {list(sig.parameters)}"
         )
+
+
+@pytest.fixture(autouse=True)
+def _explicit_intelligence_project(monkeypatch):
+    monkeypatch.setenv("VNX_PROJECT_ID", "vnx-dev")

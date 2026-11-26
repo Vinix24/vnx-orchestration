@@ -39,6 +39,7 @@ class World:
         self.state = self.data / "state"
         (self.state / "review_gates").mkdir(parents=True)
         self.db = self.state / "quality_intelligence.db"
+        (self.state / ".vnx-project-id").write_text(PID + "\n")
         assert qdi.bootstrap_qi_db(self.db) is True
         self.lines: list = []
         self.seq = 0

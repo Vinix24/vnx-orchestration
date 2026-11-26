@@ -8,6 +8,8 @@ intelligence_sources submodules, so tests now reach them directly.
 
 from __future__ import annotations
 
+import pytest
+
 import sqlite3
 import sys
 import tempfile
@@ -155,7 +157,7 @@ class TestCentralDbQueryExceptionSilenced(unittest.TestCase):
             items = _query_central(
                 "backend-developer", [],
                 lambda: _broken_central_conn(),
-                project_id_fn=lambda: None,
+                project_id_fn=lambda: "vnx-dev",
             )
         self.assertEqual(items, [])
         self.assertTrue(any("proven-patterns" in line for line in cm.output))
@@ -166,7 +168,7 @@ class TestCentralDbQueryExceptionSilenced(unittest.TestCase):
             items = _query_central(
                 "backend-developer", [],
                 lambda: _broken_central_conn(),
-                project_id_fn=lambda: None,
+                project_id_fn=lambda: "vnx-dev",
             )
         self.assertEqual(items, [])
         self.assertTrue(any("failure-prevention" in line for line in cm.output))
@@ -177,7 +179,7 @@ class TestCentralDbQueryExceptionSilenced(unittest.TestCase):
             items = _query_central(
                 "backend-developer", [],
                 lambda: _broken_central_conn(),
-                project_id_fn=lambda: None,
+                project_id_fn=lambda: "vnx-dev",
             )
         self.assertEqual(items, [])
         self.assertTrue(any("recent-comparable" in line for line in cm.output))
@@ -276,3 +278,8 @@ class TestShadowVerifierExceptionSilenced(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@pytest.fixture(autouse=True)
+def _explicit_intelligence_project(monkeypatch):
+    monkeypatch.setenv("VNX_PROJECT_ID", "vnx-dev")

@@ -367,3 +367,7 @@ def test_shadow_missing_db(tmp_path):
 
     assert report["summary"]["total_dispatches"] == 0
     assert report["dispatches"] == []
+
+@pytest.fixture(autouse=True)
+def _explicit_project_source(monkeypatch):
+    monkeypatch.setenv("VNX_PROJECT_ID", "vnx-dev")

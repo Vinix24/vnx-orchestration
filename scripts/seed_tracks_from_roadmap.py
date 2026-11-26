@@ -424,7 +424,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                     "(dry-run default; --roadmap is required).",
     )
     parser.add_argument("--apply", action="store_true", help="write rows (default: dry-run, no writes)")
-    parser.add_argument("--project-id", default=os.environ.get("VNX_PROJECT_ID", "vnx-dev"))
+    parser.add_argument("--project-id", default=None)
     parser.add_argument(
         "--roadmap", required=True, metavar="FILE",
         help="the ROADMAP-shaped file to import (required: nothing is autodetected)",
@@ -440,6 +440,12 @@ def main(argv: Optional[list[str]] = None) -> int:
         from project_root import resolve_project_root
         state_dir = resolve_project_root(__file__) / ".vnx-data" / "state"
 
+    from project_scope import TenantUnresolved, resolve_stamp_project_id
+    try:
+        args.project_id = resolve_stamp_project_id(
+            args.project_id or os.environ.get("VNX_PROJECT_ID"), state_dir / "runtime_coordination.db")
+    except TenantUnresolved as exc:
+        parser.error(str(exc))
     roadmap_path = Path(args.roadmap)
 
     try:

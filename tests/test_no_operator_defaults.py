@@ -7,6 +7,7 @@ same (path, name, fingerprint) and count. The allowlist is generated from that t
 runs on this matcher and this table.
 """
 import copy
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -24,8 +25,8 @@ def _tree_findings(root=on.REPO):
 
 
 def test_allowlist_equals_generator_output_on_the_table():
-    expected = on.render(on.generate(on.load_table()))
-    assert on.ALLOWLIST.read_text(encoding="utf-8") == expected
+    expected = on.generate(on.load_table())
+    assert json.loads(on.ALLOWLIST.read_text(encoding="utf-8")) == expected
 
 
 def test_every_finding_has_a_table_row_and_every_row_a_finding():
@@ -37,7 +38,7 @@ def test_every_finding_has_a_table_row_and_every_row_a_finding():
 
 def test_table_rules_hold():
     rows = on.load_table()
-    assert len(rows) == 409 and sum(r["count"] for r in rows) == 440
+    assert len(rows) == 379 and sum(r["count"] for r in rows) == 410
     assert on.validate_table(rows) == []
 
 
@@ -234,7 +235,7 @@ def test_editing_an_allowed_quoted_line_is_red_both_ways(tmp_path):
 
 def test_table_rows_for_the_fourth_name_are_complete_and_valid():
     rows = [r for r in on.load_table() if r["name"] == DEV]
-    assert len(rows) == 327 and sum(r["count"] for r in rows) == 355
+    assert len(rows) == 297 and sum(r["count"] for r in rows) == 325
     migrations = [r for r in rows if r["path"].startswith("schemas/migrations/")]
     assert len(migrations) == 65 and sum(r["count"] for r in migrations) == 75
     assert all(r["category"] != "te_repareren" or r["group"] for r in rows)
@@ -254,9 +255,17 @@ def _new_file_verdict(tmp_path, rel, text):
     return on.compare(on.scan(repo), allow)
 
 
-def test_new_file_with_a_bare_vnx_dev_is_red(tmp_path):
-    problems = _new_file_verdict(tmp_path, "scripts/hooks/guard.sh", f'[ "$P" = {DEV} ] && exit 1\n')
-    assert len(problems) == 1 and problems[0].startswith(f"NEW scripts/hooks/guard.sh {DEV} ")
+@pytest.mark.parametrize("rel", ["scripts/hooks/guard.sh", "scripts/lib/project_id_migration.py",
+                                 "scripts/quality_db_init.py"])
+def test_new_file_with_a_bare_vnx_dev_is_red(tmp_path, rel):
+    problems = _new_file_verdict(tmp_path, rel, f'[ "$P" = {DEV} ] && exit 1\n')
+    assert len(problems) == 1 and problems[0].startswith(f"NEW {rel} {DEV} ")
+
+
+def test_ag2a1_packaged_worker_default_remains_in_scope(tmp_path):
+    rel = "scripts/lib/defaults/vnx_workers.default.yaml"
+    problems = _new_file_verdict(tmp_path, rel, f"project: {DEV}\n")
+    assert len(problems) == 1 and problems[0].startswith(f"NEW {rel} {DEV} ")
 
 
 @pytest.mark.parametrize("rel", ["dashboard/app.js", "dashboard/api/x.py", "configs/panel.yaml"])

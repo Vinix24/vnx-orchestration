@@ -138,6 +138,7 @@ class RuntimeSnapshot:
     # a declared ``spec.skill`` must exist in — the root the agents/ registry comes
     # from. None = caller supplied no root; a declared skill is then REFUSED.
     repo_root: Optional[Path] = None
+    waived_guarantees: tuple[Mapping[str, str], ...] = ()
 
 
 # ---------------------------------------------------------------------------
@@ -202,6 +203,8 @@ class ExecutionPlan:
                                         # the policy. Omitted from canonical_dict() when None: a spec
                                         # without it keeps the digest it had before P4.
 
+    waived_guarantees: tuple[Mapping[str, str], ...] = ()
+
     def canonical_dict(self) -> dict:
         """Return the canonical, order-independent decision dict.
 
@@ -213,6 +216,7 @@ class ExecutionPlan:
         before permissions P4.
         """
         canonical = {
+            "waived_guarantees": list(self.waived_guarantees),
             "dispatch_id": self.dispatch_id,
             "project_id": self.project_id,
             "provider": self.provider.value,
@@ -476,7 +480,7 @@ def compile_plan(vspec: ValidatedSpec, snapshot: RuntimeSnapshot) -> ExecutionPl
         parent_dispatch=snapshot.parent_dispatch,
         task_class=snapshot.task_class,
         tier_from=snapshot.tier_from, tier_to=snapshot.tier_to,
-        difficulty=snapshot.difficulty,
+        difficulty=snapshot.difficulty, waived_guarantees=snapshot.waived_guarantees,
         instruction_sha256=vspec.instruction_sha256,
         warnings=tuple(warnings),
     )

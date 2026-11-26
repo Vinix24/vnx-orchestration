@@ -30,6 +30,7 @@ BASE = "dlv-abc123"
 
 @pytest.fixture
 def store(tmp_path):
+    (tmp_path / ".vnx-project-id").write_text(PID + "\n")
     assert qdi.bootstrap_qi_db(tmp_path / "state" / "quality_intelligence.db") is True
     return tmp_path
 
@@ -107,6 +108,7 @@ class World:
     def __init__(self, tmp: Path):
         self.tmp = tmp
         self.receipts, self.rounds, self.db = tmp / "t0_receipts.ndjson", tmp / "rounds.ndjson", tmp / "qi.db"
+        (tmp / ".vnx-project-id").write_text(PID + "\n")
         assert qdi.bootstrap_qi_db(self.db) is True
         self.lines: list = []
 

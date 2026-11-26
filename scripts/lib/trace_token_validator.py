@@ -4,15 +4,18 @@
 Implements the trace token spec from docs/core/42_FPD_PROVENANCE_CONTRACT.md.
 Used by git hooks, CI checks, and receipt validation.
 
-Environment variables:
+Config chain (override > project > global > env > default):
     VNX_PROVENANCE_ENFORCEMENT: "0" = shadow (warn), "1" = enforced (block)
     VNX_PROVENANCE_LEGACY_ACCEPTED: "1" = accept legacy formats (default), "0" = preferred only
+
+Process context:
     VNX_CURRENT_DISPATCH_ID: current dispatch context for prepare-commit-msg
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import sys
@@ -141,15 +144,34 @@ class ValidationResult:
         }
 
 
+def _provenance_config() -> tuple[bool, bool]:
+    """Read the same complete pair as the shell readers; errors retain restrictive values."""
+    import config_runtime
+    import config_registry
+    from enforcement_profile import enforced_storeless
+    strict = config_runtime.strict_resolver() if config_runtime.autowire() else None
+    status = config_runtime.wire_status()
+    values = []
+    for key in ("VNX_PROVENANCE_ENFORCEMENT", "VNX_PROVENANCE_LEGACY_ACCEPTED"):
+        val, source = (config_registry.resolve_with_source(key, strict[1], strict[0], strict_resolver=True)
+                       if strict else enforced_storeless(key))
+        if status is not None and status.cause == "resolver_failed":
+            val, source = None, "project_config_error"
+        if source in config_registry.ERROR_SOURCES or val not in ("0", "1"):
+            logging.getLogger(__name__).error("%s: %s value=%r; retaining restrictive mode", key, source, val)
+            return True, False
+        values.append(val == "1")
+    return values[0], values[1]
+
+
 def get_enforcement_mode() -> EnforcementMode:
-    """Read enforcement mode from environment."""
-    val = os.environ.get("VNX_PROVENANCE_ENFORCEMENT", "0")
-    return EnforcementMode.ENFORCED if val == "1" else EnforcementMode.SHADOW
+    """Resolve enforcement from the config chain; config errors keep it on."""
+    return EnforcementMode.ENFORCED if _provenance_config()[0] else EnforcementMode.SHADOW
 
 
 def is_legacy_accepted() -> bool:
     """Check if legacy trace token formats are accepted."""
-    return os.environ.get("VNX_PROVENANCE_LEGACY_ACCEPTED", "1") == "1"
+    return _provenance_config()[1]
 
 
 def get_current_dispatch_id() -> Optional[str]:
@@ -189,8 +211,8 @@ def validate_trace_token(
 
     Args:
         commit_message: Full commit message text
-        enforcement_mode: Override enforcement mode (defaults to env var)
-        legacy_accepted: Override legacy acceptance (defaults to env var)
+        enforcement_mode: Override enforcement mode (defaults to config chain)
+        legacy_accepted: Override legacy acceptance (defaults to config chain)
 
     Returns:
         ValidationResult with validity, format, severity, and diagnostics

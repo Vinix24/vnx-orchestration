@@ -40,7 +40,7 @@ def _doc(value, *, metric=METRIC, n=8, schema=1, status="final"):
 def _approved(frozen=50.0, *, metric=METRIC, schema=1, proposal_id=PID, day=A):
     event = {"event": "approved", "proposal_id": proposal_id, "project_id": "p",
              "key": metric, "metric_id": metric, "seat": None,
-             "approval_day": day.isoformat(), "approved_at": f"{day.isoformat()}T09:00:00Z",
+             "application_day": day.isoformat(), "approval_day": day.isoformat(), "approved_at": f"{day.isoformat()}T09:00:00Z",
              "approved_by": "operator", "evidence": {"tty": True},
              "frozen_baseline": {"value": frozen, "sample_size": 40, "unknown_reason": None}}
     if schema is not OMIT:
@@ -63,13 +63,19 @@ def _events(tmp_path):
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
 
 
+def _applied(event):
+    return dict(event="applied", project_id="p", proposal_id=event["proposal_id"],
+                deliverable_id="dlv-0123456789ab", pr_number=123, merge_sha="a" * 40,
+                application_day=event["approval_day"], applied_at=event["approved_at"])
+
+
 def _seed_ledger(tmp_path, *approved):
     rows = []
     for event in approved:
         rows.append({"event": "proposed", "proposal_id": event["proposal_id"],
                      "project_id": "p", "key": event["key"], "metric_id": event["metric_id"],
                      "seat": None, "metric_day": "2026-10-31", "value": 60.0})
-        rows.append(event)
+        rows.extend([event, _applied(event)])
     path = _ledger(tmp_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("".join(json.dumps(row, sort_keys=True) + "\n" for row in rows),
@@ -154,7 +160,7 @@ def test_append_verdict_refuses_not_approved_and_already_judged(tmp_path):
     path.parent.mkdir(parents=True, exist_ok=True)
     proposed = {"event": "proposed", "proposal_id": PID, "key": METRIC}
     path.write_text(json.dumps(proposed) + "\n", encoding="utf-8")
-    event = {"event": "verdict", "proposal_id": PID, "key": METRIC, "verdict": "helped"}
+    event = {"event": "verdict", "project_id": "p", "proposal_id": PID, "key": METRIC, "verdict": "helped"}
 
     def refused(payload):
         before = path.read_bytes()
@@ -165,6 +171,18 @@ def test_append_verdict_refuses_not_approved_and_already_judged(tmp_path):
 
     assert refused(event) == "not_approved"
     with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps({"event": "approved", "proposal_id": PID}) + "\n")
+        handle.write(json.dumps({"event": "approved", "project_id": "p", "proposal_id": PID}) + "\n")
+    assert refused(event) == "not_applied"
+    proposal_ledger._write(path, [_applied(_approved())])
     proposal_ledger.append_verdict(path, event)
     assert refused(event) == "already_judged"
+
+
+@pytest.mark.parametrize("bad", [None, [], "unknown", "absent"])
+def test_application_day_is_required_by_the_judge(bad):
+    approved = _approved()
+    approved.pop("application_day")
+    if bad != "absent":
+        approved["application_day"] = bad
+    with pytest.raises(ValueError, match="application_day"):
+        verdict.judge(approved, _post())

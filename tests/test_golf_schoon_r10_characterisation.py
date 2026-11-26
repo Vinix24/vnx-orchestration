@@ -32,7 +32,7 @@ def calls(monkeypatch):
 
     monkeypatch.setattr(cli, "sweep", fake_sweep)
     monkeypatch.delenv("VNX_CURRENT_DISPATCH_ID", raising=False)
-    monkeypatch.delenv("VNX_PROJECT_ID", raising=False)
+    monkeypatch.setenv("VNX_PROJECT_ID", "vnx-dev")
     return seen, result
 
 
@@ -134,6 +134,7 @@ def test_paths_expand_user_and_empty_is_none(calls, monkeypatch, tmp_path):
 
 
 def test_sweep_exception_propagates_and_prints_nothing(monkeypatch, capsys):
+    monkeypatch.setenv("VNX_PROJECT_ID", "vnx-dev")
     def boom(**kwargs):
         raise RuntimeError("sweep failed")
 

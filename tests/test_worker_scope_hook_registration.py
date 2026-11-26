@@ -3,7 +3,7 @@
 The worker scope hook (``scripts/hooks/pretooluse_worker_scope_enforce.sh``) is
 registered in this repo's ``.claude/settings.json`` for the four tools it
 enforces. Registration must be inert while ``VNX_ENFORCE_WORKER_PERMISSIONS`` is
-off: ``evaluate()`` returns allow without reading a file, also in a session
+off: ``evaluate()`` returns allow without writing a file, also in a session
 with no dispatch environment (a T0 session).
 """
 
@@ -98,24 +98,33 @@ def test_the_registered_wrapper_exists_and_is_executable():
         {},
     ],
 )
-def test_flag_off_allows_without_touching_the_filesystem(monkeypatch, flag, payload):
+def test_flag_off_allows_without_filesystem_writes(monkeypatch, tmp_path, flag, payload):
     hook = _load_hook_module()
     for name in DISPATCH_ENV:
         monkeypatch.delenv(name, raising=False)
     if flag is not None:
         monkeypatch.setenv("VNX_ENFORCE_WORKER_PERMISSIONS", flag)
+    monkeypatch.setenv("VNX_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+    monkeypatch.setenv("VNX_STATE_DIR", str(tmp_path / "state"))
+    real_open = builtins.open
+
+    def _read_only_open(file, mode="r", *args, **kwargs):
+        if any(char in mode for char in "wax+"):
+            pytest.fail("flag-off hook tried to write")
+        return real_open(file, mode, *args, **kwargs)
 
     def _refuse(*args, **kwargs):
-        raise AssertionError("evaluate() touched the filesystem with the flag off")
+        pytest.fail("evaluate() wrote to the filesystem with the flag off")
 
-    monkeypatch.setattr(builtins, "open", _refuse)
-    monkeypatch.setattr(Path, "read_text", _refuse)
-    monkeypatch.setattr(Path, "open", _refuse)
-    monkeypatch.setattr(Path, "exists", _refuse)
-    monkeypatch.setattr(Path, "resolve", _refuse)
-    monkeypatch.setattr(os, "stat", _refuse)
+    monkeypatch.setattr(builtins, "open", _read_only_open)
+    monkeypatch.setattr("io.open", _read_only_open)
+    monkeypatch.setattr(os, "mkdir", _refuse)
 
-    assert hook.evaluate(payload) == ("allow", None)
+    try:
+        assert hook.evaluate(payload) == ("allow", None)
+    finally:
+        monkeypatch.undo()  # Restore filesystem calls before the launchctl audit teardown.
 
 
 def test_explicit_skip_beats_an_enabled_flag(monkeypatch):

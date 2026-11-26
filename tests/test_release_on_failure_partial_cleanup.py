@@ -43,6 +43,7 @@ def _make_core(tmp_path: Path):
     dispatch_dir = tmp_path / "dispatches"
     state_dir.mkdir(parents=True)
     dispatch_dir.mkdir(parents=True)
+    (Path(state_dir) / ".vnx-project-id").write_text("vnx-dev\n")
     init_schema(state_dir)
     broker = DispatchBroker(str(state_dir), str(dispatch_dir), shadow_mode=False)
     lease_mgr = LeaseManager(state_dir, auto_init=False)

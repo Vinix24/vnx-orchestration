@@ -177,6 +177,20 @@ Stopregels uit het plan blijven gelden: een levering waarin een punt sluit terwi
 
 De wachtrij leest alleen en schrijft alleen in eigen bestanden. Terugdraaien is de twee regels uit `role-orchestrator.md` halen, het blok `operator_inbox` uit `build_t0_state.py` halen en `operator_queue.ndjson` en `operator_queue.json` laten staan of verwijderen; niemand anders leest ze. Geen bron wordt gewijzigd, dus er is geen datamigratie terug.
 
+## Amendment (2026-11-25): proposal answers preserve the approval gate
+
+Under [ADR-063's proposal-flow amendment, step 3](ADR-063-dagelijkse-doorloopmeting.md#b-amendment-the-proposal-flow),
+M5a extends decisions 4 and 6 with `proposal:<id>` (12 lowercase hexadecimal characters, the daily-metrics
+proposal id). Together with ADR-088's `pr:<n>` this makes eight accepted ref forms. A proposal point opens
+only with `bron=besluit`. `answer --by vincent` records the quote in the inbox ledger, including from an agent.
+The reader closes only on the exact quote `afgewezen` (rejection → `beantwoord`) or `later` (deferral →
+`vervallen`); the closure evidence includes the quote and answer timestamp. Every other quote, including
+`ja`, leaves the point open. The existing one-answer-per-point rule remains; missing or unreadable evidence
+never closes it. Neither the answer nor the reader writes to the proposal ledger or invokes approval.
+Approval remains `vnx daily-metrics approve <id> --action "<intervention>"` in the operator's terminal,
+with both stdin and stdout TTY checks, the agent refusal and the retyped id. Closing on an approved event,
+expiry and automatic creation of proposal points belong to M5b; M5a does not implement those steps.
+
 ## Amendment (2026-11-22): the session start reads a summary the ledger writer keeps
 
 **Decided by:** Operator plan-gate of 2026-11-22, track `session-start`, OI-3057. Measured 2026-11-21: `vnx inbox --json --limit 5` took 12.8 s because `show()` runs every source reader first, so the SessionStart budget of 0.5 s always expired and every T0 session started without the open questions.

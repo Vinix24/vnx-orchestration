@@ -21,30 +21,33 @@ try:
     import tracks as tracks_lib
     from forge_project_target import project_checkout_path
     from project_root import resolve_central_data_dir
+    from daily_metrics.proposal_ledger import LedgerUnreadable, ledger_path, read_events
 except ImportError:  # vnx-silent-except: imported as scripts.lib.operator_queue_ask
     from scripts.lib import operator_queue as oq
     from scripts.lib import operator_queue_steering_verdict as steering
     from scripts.lib import tracks as tracks_lib
     from scripts.lib.forge_project_target import project_checkout_path
     from scripts.lib.project_root import resolve_central_data_dir
+    from scripts.lib.daily_metrics.proposal_ledger import LedgerUnreadable, ledger_path, read_events
 
 BRON = {"promote": 1, "besluit": 2, "vraag": 8}
-FORMS = ("dlv:<id>", "oi:<id>", "track:<id>:<fase>", "config:<sleutel>", "verdict:<id>", "antwoord:<hash>", "pr:<n>")
+FORMS = ("dlv:<id>", "oi:<id>", "track:<id>:<fase>", "config:<sleutel>", "verdict:<id>", "antwoord:<hash>", "pr:<n>", "proposal:<id>")
 _ID = r"[A-Za-z0-9][A-Za-z0-9._-]*"
 _REF = {
     "dlv": re.compile(rf"^dlv:({_ID})$"), "oi": re.compile(rf"^oi:({_ID})$"),
     "track": re.compile(rf"^track:({_ID}):([a-z]+)$"), "config": re.compile(r"^config:([A-Za-z0-9_.-]+)$"),
     "verdict": re.compile(rf"^verdict:({_ID})$"), "antwoord": re.compile(r"^antwoord:([0-9a-f]{12})$"),
     "pr": re.compile(r"^pr:([1-9][0-9]{0,8})$"),
+    "proposal": re.compile(r"^proposal:([0-9a-f]{12})\Z"),
 }
 OI_ANSWERED = frozenset({"closed", "done", "deferred", "wontfix"})
 MAX_QUOTE = 300
 
 class RefRefused(ValueError):
-    """The ref is not one of the six forms of ADR-076 decision 4."""
+    """The ref is not one of the eight forms of ADR-076 and its amendments."""
 
 def parse_ref(text: Any) -> Tuple[str, Tuple[str, ...]]:
-    """``(kind, parts)`` of a ref; raises RefRefused naming the six forms for anything else."""
+    """``(kind, parts)`` of a ref; raises RefRefused naming the eight forms for anything else."""
     if isinstance(text, str):
         for kind, pattern in _REF.items():
             found = pattern.match(text)
@@ -74,6 +77,8 @@ def ask(project_id: str, *, bron: str, ref: str, vraag: str, sluit_bij: str, kop
     kind, _ = parse_ref(ref)
     if bron == "promote" and kind != "dlv":
         raise RefRefused("bron promote takes only a dlv:<id> ref")
+    if kind == "proposal" and bron != "besluit":
+        raise RefRefused("a proposal:<id> ref opens only with bron besluit")
     if kind == "pr":
         if bron != "besluit":
             raise RefRefused("a pr:<n> ref opens only with bron besluit")
@@ -120,7 +125,7 @@ def _answer_refusal(points: Dict[str, Any], lines: List[Dict[str, Any]], point_i
     for failed, why in ((not point, "the point does not exist"), (point.get("state") != "open", "the point is closed"),
                         (any(ln["kind"] == "answer" for ln in mine), "the point is already answered"),
                         (grant and not ref.startswith("pr:"), "--grant needs a pr:<n> point"),
-                        (not ref.startswith(("antwoord:", "pr:")), "only an antwoord: or pr: point is answered here; the source decides the others"),
+                        (not ref.startswith(("antwoord:", "pr:", "proposal:")), "only an antwoord:, pr: or proposal: point is answered here; the source decides the others"),
                         (bool(newer), f"revision {max(newer or [0])} of {ref} replaces this point"),
                         (not isinstance(quote, str) or not quote.strip() or len(quote) > MAX_QUOTE, f"the quote is empty or over {MAX_QUOTE} characters"),
                         (grant and not shown, "--grant needs the point presented to the operator on a channel other than cli"),
@@ -133,7 +138,7 @@ def _answer_refusal(points: Dict[str, Any], lines: List[Dict[str, Any]], point_i
 def answer(project_id: str, point_id: str, *, quote: str, vastgelegd_door: str, now: Optional[str] = None,
            state_dir: Optional[Path] = None, grant: bool = False, env: Optional[Dict[str, str]] = None,
            isatty: Optional[bool] = None) -> Dict[str, Any]:
-    """Record Vincent's own words for a chat question or a ``pr:`` point: one ``answer`` line, nothing else
+    """Record Vincent's own words for an ``antwoord:``, ``pr:`` or ``proposal:`` point: one ``answer`` line, nothing else
     (decision 6, ADR-088 decisions 5 and 6); ``grant`` puts the PR-size exception on it (``operator_queue_grant``).
     Refused (QueueRefused, nothing written) on an answered point or once a higher ``pr:`` revision exists."""
     if grant:
@@ -152,6 +157,36 @@ def answer(project_id: str, point_id: str, *, quote: str, vastgelegd_door: str, 
 
 def _answer_ts(project_id: str, pid: str, state_dir: Optional[Path]) -> Optional[str]:
     return next((r["ts"] for r in oq.answers(project_id, state_dir=state_dir) if r.get("point_id") == pid), None)
+
+def _eval_proposal(src: _Source, pid: str, proposal_id: str) -> tuple:
+    """Read approval/expiry evidence; only the terminal CLI can approve (ADR-063)."""
+    project_id, state_dir = src.project_id, src.state_dir
+    for record in oq.answers(project_id, state_dir=state_dir):
+        if record["point_id"] == pid:
+            quote = record["citaat"]
+            outcome = {"afgewezen": "beantwoord", "later": "vervallen"}.get(quote)
+            if outcome is not None:  # Every other answer stays open; no approval is inferred.
+                return ("closed", outcome, f"{record['ts']}: {quote}", "t0_namens_operator")
+            break
+    if not re.fullmatch(_ID, project_id):
+        raise ValueError("invalid proposal project id")
+    store = (Path(state_dir) if state_dir is not None else src.sdir).resolve() / "daily_metrics" / project_id
+    path = ledger_path(store).resolve()
+    if path.parent != store:
+        raise ValueError("proposal ledger escapes project store")
+    events = [e for e in read_events(path)
+              if e.get("project_id") == project_id and e.get("proposal_id") == proposal_id]
+    if not any(e.get("event") == "proposed" for e in events):
+        return ("unknown", f"proposal {proposal_id} missing from {path}")
+    for event in events:
+        if event.get("event") not in ("proposed", "approved", "expired", "verdict"):
+            return ("unknown", f"proposal {proposal_id}: invalid event")
+        outcome = {"approved": "beantwoord", "expired": "vervallen"}.get(event.get("event"))
+        if outcome is not None:
+            if oq.parse_ts(event.get("recorded_at")) is None:
+                return ("unknown", f"proposal {proposal_id}: invalid recorded_at")
+            return ("closed", outcome, event["recorded_at"], "onbekend")
+    return _OPEN
 
 class _Source:
     def __init__(self, project_id: str, sdir: Path, *, now: Optional[str] = None,
@@ -306,6 +341,8 @@ def _evaluate(src: _Source, project_id: str, point: Dict[str, Any], state_dir: O
     except RefRefused:
         return ("unknown", "ref is not readable")
     try:
+        if kind == "proposal":
+            return _eval_proposal(src, point["point_id"], parts[0])
         if kind == "antwoord":
             ts = _answer_ts(project_id, point["point_id"], state_dir)
             return _OPEN if ts is None else ("closed", "beantwoord", ts, "t0_namens_operator")
@@ -315,7 +352,7 @@ def _evaluate(src: _Source, project_id: str, point: Dict[str, Any], state_dir: O
             return evaluator(src, *parts, point)
         if evaluator:
             return evaluator(src, *parts)
-    except (OSError, ValueError, KeyError, TypeError, sqlite3.Error, oq.QueueRefused, oq.QueueUnreadable) as exc:  # vnx-silent-except: an unreadable source is an unknown line
+    except (OSError, ValueError, KeyError, TypeError, sqlite3.Error, oq.QueueRefused, oq.QueueUnreadable, LedgerUnreadable) as exc:  # vnx-silent-except: an unreadable source is an unknown line
         return ("unknown", f"source unreadable ({type(exc).__name__}: {exc})")
     return _OPEN
 

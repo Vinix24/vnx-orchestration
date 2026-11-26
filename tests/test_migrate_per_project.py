@@ -107,6 +107,7 @@ def _build_fixture(
 
     Returns (registry_path, backup_base).
     """
+    (tmp_path / ".vnx-project-id").write_text("test-project\n")
     specs = []
     for pid in project_ids:
         proj_dir = tmp_path / pid

@@ -875,11 +875,20 @@ cmd_init() {
   # Refuse to bootstrap into the immutable central code tree (mis-detection).
   _guard_not_vnx_home "$PROJECT_ROOT" || return 1
 
-  # Parse --starter / --operator flags before forwarding to Python init.
+  # Handle help before either init path can write project state.
+  local init_script="$VNX_HOME/scripts/vnx_init.py"
   local mode_flag=""
   local init_args=()
   for arg in "$@"; do
     case "$arg" in
+      -h|--help)
+        if command -v "$VNX_PYTHON" >/dev/null 2>&1 && [ -f "$init_script" ]; then
+          PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" "$VNX_PYTHON" "$init_script" --help
+        else
+          usage
+        fi
+        return $?
+        ;;
       --starter)  mode_flag="starter" ;;
       --operator) mode_flag="operator" ;;
       *)          init_args+=("$arg") ;;
@@ -888,7 +897,6 @@ cmd_init() {
 
   # PR-1: Python-led init orchestrator (unified bootstrap).
   # Falls back to inline bash if Python entrypoint is unavailable.
-  local init_script="$VNX_HOME/scripts/vnx_init.py"
   if command -v "$VNX_PYTHON" >/dev/null 2>&1 && [ -f "$init_script" ]; then
     PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" "$VNX_PYTHON" "$init_script" "${init_args[@]+"${init_args[@]}"}"
     local rc=$?

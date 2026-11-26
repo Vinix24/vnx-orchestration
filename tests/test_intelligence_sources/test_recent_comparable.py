@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import pytest
 import sys
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -229,3 +230,8 @@ class TestQueryRecentComparable(unittest.TestCase):
         )
         self.assertEqual(items, [])
         db.close()
+
+
+@pytest.fixture(autouse=True)
+def _explicit_project_source(monkeypatch):
+    monkeypatch.setenv("VNX_PROJECT_ID", "vnx-dev")

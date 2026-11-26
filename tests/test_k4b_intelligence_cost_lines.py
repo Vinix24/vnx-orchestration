@@ -121,7 +121,7 @@ def _analyze_one_session(store, tmp_path, monkeypatch, project: str | None) -> d
     are the production code. ``store`` pins ``VNX_PROJECT_ID`` in its caller's test.
     """
     _preflight(monkeypatch, "ok")
-    monkeypatch.setattr(da_module, "LLM_STRATEGY", "deepseek-harness")
+    monkeypatch.setattr(da_module, 'llm_strategy', lambda: 'deepseek-harness')
     monkeypatch.setattr(DeepAnalyzer, "_routes_restricted", lambda self, *_a, **_kw: False)
     metrics = da_module.SessionMetrics(session_id=f"{project or 'unprojected'}-session",
                                        total_output_tokens=5000, tool_calls_total=20)

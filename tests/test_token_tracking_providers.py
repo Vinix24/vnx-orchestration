@@ -21,6 +21,8 @@ from unittest import mock
 
 import pytest
 
+pytestmark = pytest.mark.usefixtures("receipt_project")
+
 TESTS_DIR = Path(__file__).resolve().parent
 VNX_ROOT = TESTS_DIR.parent
 SCRIPTS_DIR = VNX_ROOT / "scripts"

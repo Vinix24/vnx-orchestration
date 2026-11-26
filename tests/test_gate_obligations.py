@@ -263,7 +263,7 @@ def test_door_stamps_gate_requirement_resolution_on_registration(tmp_path, monke
     real_get_bool = config_runtime.get_bool
     monkeypatch.setattr(
         config_runtime, "get_bool",
-        lambda key: True if key == "VNX_CI_GATE_REQUIRED" else real_get_bool(key),
+        lambda key, **kwargs: True if key == "VNX_CI_GATE_REQUIRED" else real_get_bool(key, **kwargs),
     )
 
     with patch("dispatch_cli._execute_claude_headless", return_value=0):
@@ -299,10 +299,10 @@ def test_door_stamps_capture_failure_as_a_distinct_state_not_none(tmp_path, monk
 
     real_get_bool = config_runtime.get_bool
 
-    def _boom(key):
+    def _boom(key, **kwargs):
         if key == "VNX_CI_GATE_REQUIRED":
             raise RuntimeError("config store unreachable")
-        return real_get_bool(key)
+        return real_get_bool(key, **kwargs)
 
     monkeypatch.setattr(config_runtime, "get_bool", _boom)
 

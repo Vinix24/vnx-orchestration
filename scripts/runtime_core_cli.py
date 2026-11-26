@@ -35,8 +35,7 @@ Usage:
 All commands output a single JSON line to stdout.
 Exit codes: 0 = success, 1 = failure/unavailable.
 
-When VNX_RUNTIME_PRIMARY=0, commands that require runtime core output
-a disabled marker and exit 0 (non-blocking for legacy path compatibility).
+Runtime initialization failures exit 1; canonical coordination is mandatory.
 """
 from __future__ import annotations
 
@@ -87,11 +86,11 @@ def _out(data: dict, exit_code: int = 0) -> None:
 
 
 def _require_core() -> RuntimeCore:
-    """Return RuntimeCore or emit legacy disabled marker (exit 0) if not available."""
+    """Return RuntimeCore or report initialization failure with exit 1."""
     state_dir, dispatch_dir = _get_dirs()
     core = load_runtime_core(state_dir, dispatch_dir)
     if core is None:
-        _out({"status": "legacy_disabled", "reason": "VNX_RUNTIME_PRIMARY=0, runtime core disabled"}, 0)
+        _out({"status": "failed", "error": "runtime_core_unavailable"}, 1)
     return core  # type: ignore[return-value]  # _out exits
 
 
@@ -104,8 +103,8 @@ def cmd_register(args: argparse.Namespace) -> None:
     state_dir, dispatch_dir = _get_dirs()
     core = load_runtime_core(state_dir, dispatch_dir)
     if core is None:
-        # Non-blocking when runtime core is disabled — legacy path continues
-        _out({"registered": False, "reason": "runtime_core_disabled"}, 0)
+        # Initialization failure must block registration.
+        _out({"registered": False, "reason": "runtime_core_unavailable"}, 1)
 
     prompt = ""
     if args.prompt_file:
@@ -172,8 +171,8 @@ def cmd_check_terminal(args: argparse.Namespace) -> None:
     state_dir, dispatch_dir = _get_dirs()
     core = load_runtime_core(state_dir, dispatch_dir)
     if core is None:
-        # When runtime core off, terminals are considered available (legacy decides)
-        _out({"available": True, "terminal_id": args.terminal, "reason": "runtime_core_disabled"})
+        # Missing canonical evidence must block dispatch.
+        _out({"available": False, "terminal_id": args.terminal, "reason": "runtime_core_unavailable"}, 1)
 
     result = core.check_terminal(
         terminal_id=args.terminal,
@@ -257,7 +256,7 @@ def cmd_chain_closeout(args: argparse.Namespace) -> None:
         return  # unreachable — _out exits
     core = load_runtime_core(state_dir, dispatch_dir)
     if core is None:
-        _out({"ok": False, "error": "VNX_RUNTIME_PRIMARY=0, runtime core disabled"}, 1)
+        _out({"ok": False, "error": "runtime_core_unavailable"}, 1)
     result = core.chain_closeout(force=args.force)
     blocked = result.get("blocked", False)
     all_idle = result.get("all_idle", False)

@@ -86,6 +86,7 @@ from runtime_coordination import (  # noqa: E402
     InvalidStateError as _RcInvalidStateError,
     InvalidTransitionError as _RcInvalidTransitionError,
 )
+from runtime_state_machine import _PROJECT_ID_UNSET, _dispatch_row, _resolve_project_scope
 
 
 class _InvariantViolation(Exception):
@@ -357,6 +358,7 @@ def _print_plan(plan: ExecutionPlan, fp: str, *, spec: "Optional[DispatchSpec]" 
     print(f"  target_id:    {plan.target_id}")
     print(f"  billing:      {plan.billing}")
     print(f"  requires_mcp: {plan.requires_mcp}")
+    print(f"  waived_guarantees: {json.dumps(plan.waived_guarantees)}")
     print(f"  route_reason: {plan.route_reason}")
     # Chain-link (dispatch-20260802-model-ssot-en-ketenlink): printed so a dry-run
     # proves the spec fields landed on the plan.
@@ -1268,16 +1270,43 @@ def _lookup_track_phase(db_path: Path, track_id: str, project_id: str) -> Option
         conn.close()
 
 
-def _check_track_link_verdict(spec: DispatchSpec, *, state_dir: Path) -> Optional[ConstraintVerdict]:
+def _plan_gate_evidence_refusal(code: str, message: str, waived: list) -> ConstraintVerdict:
+    import plan_gate_enforcement as pge
+    overridden = pge.override_active()
+    if overridden:
+        waived.append(dict(feature="plan_gate", key="VNX_OVERRIDE_PLAN_GATE", value="1",
+                           source="override", reason=code))
+    return ConstraintVerdict(code=code, severity="warn" if overridden else "blocking",
+                             message=message, override_applied=overridden)
+
+
+def _dispatch_feature_mode(spec, waived_guarantees):
+    import optional_features as of
+    import plan_gate_enforcement as pge
+    if waived_guarantees is None:
+        return pge.enforce_mode()
+    taken = of.snapshot(spec.project_id, project_root=Path(os.environ.get("PROJECT_ROOT") or _resolve_repo_root()))
+    waived_guarantees.extend(of.waived_guarantees(spec.project_id, snapshot=taken))
+    return taken[of.PLAN_GATE].value
+
+
+def _check_track_link_verdict(spec: DispatchSpec, *, state_dir: Path, waived_guarantees=None) -> Optional[ConstraintVerdict]:
     """Validate spec.track_id at the door.
 
     - track_id present, references a nonexistent or already-done track -> blocking Reject
       (the tag-vs-link mistake becomes impossible).
     - track_id present, references a live track -> None (passes clean).
-    - tracks DB unavailable while checking a present track_id -> WARN, never crash.
+    - tracks DB unavailable -> blocking under required, otherwise WARN.
     - track_id absent -> staged advisory (VNX_REQUIRE_DISPATCH_TRACK OFF, default) WARN,
       or required (ON) blocking Reject unless tags carries a 'no-track:<reason>' escape.
     """
+    import optional_features as of
+    import plan_gate_enforcement as _pge
+    waived = waived_guarantees if waived_guarantees is not None else []
+    try:
+        mode = _dispatch_feature_mode(spec, waived_guarantees)
+    except of.OptionalFeatureRefused as exc:
+        return ConstraintVerdict(code=exc.code, severity="blocking", message=str(exc))
     track_id = (spec.track_id or "").strip()
     db_path = _tracks_db_path(state_dir)
 
@@ -1285,6 +1314,9 @@ def _check_track_link_verdict(spec: DispatchSpec, *, state_dir: Path) -> Optiona
         try:
             phase = _lookup_track_phase(db_path, track_id, spec.project_id)
         except Exception as exc:
+            if mode == "required":
+                return _plan_gate_evidence_refusal("plan_gate_evidence_unreadable",
+                    f"track_id={track_id!r}: {exc}; retry the tracks DB read", waived)
             return ConstraintVerdict(
                 code="tracks-db-unavailable",
                 severity="warn",
@@ -1293,62 +1325,51 @@ def _check_track_link_verdict(spec: DispatchSpec, *, state_dir: Path) -> Optiona
                     "degrading to warn"
                 ),
             )
-        if phase is None:
-            return ConstraintVerdict(
-                code="bad-track-link",
-                severity="blocking",
-                message=(
-                    f"track_id={track_id!r} does not reference an existing track "
-                    f"for project_id={spec.project_id!r}"
-                ),
-            )
-        if phase == "done":
-            return ConstraintVerdict(
-                code="bad-track-link",
-                severity="blocking",
-                message=f"track_id={track_id!r} references a track already in phase='done'",
-            )
+        if phase is None or phase == "done":
+            return ConstraintVerdict(code="bad-track-link", severity="blocking",
+                message=f"track_id={track_id!r} does not reference an existing live track "
+                        f"for project_id={spec.project_id!r} (phase={phase!r})")
 
         # Plan-first-gate enforcement (advisory-first). A live track whose OI-PLAN
         # plan-first gate is unresolved must not be dispatched: building before
         # planning is exactly what the gate exists to prevent, yet the gate used to
         # bind only closure bookkeeping. Shared read-only check lives in
         # plan_gate_enforcement so the merge gate applies the same rule.
-        import plan_gate_enforcement as _pge  # noqa: PLC0415
-        mode = _pge.enforce_mode()
         if mode != "off":
             try:
                 pg_state = _pge.plan_gate_state(db_path, track_id, spec.project_id)
-            except Exception:
-                # DB race between the phase read and here; already fail-open above.
+            except Exception as exc:
+                if mode == "required":
+                    return _plan_gate_evidence_refusal("plan_gate_evidence_unreadable",
+                        f"track_id={track_id!r}: {exc}; retry the plan-gate read", waived)
                 pg_state = _pge.UNSUPPORTED
             if pg_state == _pge.UNRESOLVED:
                 run_cmd = f"vnx horizon plan-gate run {track_id} --doc <plan-doc>"
-                if mode == "required" and not _pge.override_active():
-                    return ConstraintVerdict(
-                        code="plan-gate-unresolved",
-                        severity="blocking",
-                        message=(
-                            f"track_id={track_id!r} has not passed its plan-first gate "
-                            f"(OI-PLAN-{track_id} unresolved). Plan before work: run "
-                            f"`{run_cmd}` (or `vnx horizon plan-gate attest {track_id}`), or "
-                            f"operator-override with VNX_OVERRIDE_PLAN_GATE=1."
-                        ),
-                    )
                 overridden = mode == "required" and _pge.override_active()
+                if overridden:
+                    waived.append(dict(feature="plan_gate", key="VNX_OVERRIDE_PLAN_GATE", value="1",
+                                       source="override", reason="plan-gate-unresolved"))
                 return ConstraintVerdict(
                     code="plan-gate-unresolved",
-                    severity="warn",
+                    severity="blocking" if mode == "required" and not overridden else "warn",
                     message=(
                         f"track_id={track_id!r} plan-first gate unresolved "
                         f"(VNX_PLAN_GATE_ENFORCE={mode}"
                         + (", operator override applied" if overridden else "")
-                        + f"); advisory. Run `{run_cmd}` before dispatching."
+                        + f"). Run `{run_cmd}` before dispatching, or set VNX_OVERRIDE_PLAN_GATE=1."
                     ),
                     override_applied=overridden,
                 )
+            if pg_state == _pge.PASSED:
+                return None
+            if mode == "required":
+                return _plan_gate_evidence_refusal("plan_gate_evidence_unsupported",
+                    f"track_id={track_id!r}: unsupported plan-gate evidence {pg_state!r}", waived)
         return None
 
+    source = next((t for t in spec.tags if _NO_TRACK_ESCAPE_RE.match(t)), "track_unlinked")
+    waived.append(dict(feature="plan_gate", key="track_id", value="none", source=source,
+                       guarantee="this build hangs on no plan"))
     import config_runtime
     required = config_runtime.get_bool("VNX_REQUIRE_DISPATCH_TRACK")
     if not required:
@@ -1489,7 +1510,7 @@ def _record_bookkeeping_failure(
 _REFIRE_RECOVERABLE_STATES = frozenset({"failed_delivery", "timed_out"})
 
 
-def _recover_for_refire(conn, row: dict, refire_reason: Optional[str]) -> None:
+def _recover_for_refire(conn, row: dict, refire_reason: Optional[str], *, project_id: str) -> None:
     """OI-1814/OI-2482: move a refired row out of a recoverable failure to ``recovered``.
 
     Without this the claim below met a ``failed_delivery``/``timed_out`` row, was
@@ -1508,6 +1529,7 @@ def _recover_for_refire(conn, row: dict, refire_reason: Optional[str]) -> None:
         conn, dispatch_id=row["dispatch_id"], to_state="recovered", actor="door",
         reason=f"door refire of a {row['state']} row as a new attempt: {reason}",
         metadata={"refire_reason": reason, "recovered_from": row["state"]},
+        project_id=project_id,
     )
 
 
@@ -1653,7 +1675,7 @@ def _persist_dispatch_row_once(
                 },
                 actor="door",
             )
-            _recover_for_refire(conn, row, refire_reason)
+            _recover_for_refire(conn, row, refire_reason, project_id=spec.project_id)
             try:
                 _rc_transition_dispatch(
                     conn,
@@ -1662,6 +1684,7 @@ def _persist_dispatch_row_once(
                     actor="door",
                     reason="door executes synchronously (single-entry dispatch)",
                     metadata={"target_slot": spec.target_slot},
+                    project_id=spec.project_id,
                 )
             except (_RcInvalidTransitionError, _RcInvalidStateError):
                 # Expected idempotent no-op — see docstring. Not a bookkeeping
@@ -2667,12 +2690,12 @@ def _check_b3_cap_verdict(spec: DispatchSpec, *, state_dir: Path) -> Optional[Co
 
 
 def _project_state_verdicts(
-    spec: DispatchSpec, *, state_dir: Path, predecessor_override_reason: Optional[str] = None, dry_run: bool = False,
+    spec: DispatchSpec, *, state_dir: Path, predecessor_override_reason: Optional[str] = None, dry_run: bool = False, waived_guarantees=None,
 ) -> "tuple[ConstraintVerdict, ...]":
     """The door's checks against this project's own state: the track link (TL-D1), the B3 cap (R1) and the
     hard predecessors of the fire's deliverable (ADR-096 B2, per candidate: not a stop condition)."""
     verdicts = (
-        _check_track_link_verdict(spec, state_dir=state_dir),
+        _check_track_link_verdict(spec, state_dir=state_dir, waived_guarantees=waived_guarantees),
         _check_b3_cap_verdict(spec, state_dir=state_dir),
         _check_predecessor_verdict(dispatch_id=spec.dispatch_id, project_id=spec.project_id, state_dir=state_dir,
                                    override_reason=predecessor_override_reason, dry_run=dry_run),
@@ -3202,7 +3225,8 @@ def build_runtime_snapshot(
     # branch of a PR at the B3 cap is refused early (_check_b3_cap_verdict). The
     # B3 override DECISION rides the ``b3-cap-override-applied`` verdict and is
     # booked only at the commit-to-fire point (R1d), never here.
-    constraint_verdicts = constraint_verdicts + _project_state_verdicts(spec, state_dir=data_dir / "state", predecessor_override_reason=predecessor_override_reason, dry_run=dry_run)
+    waived_guarantees = []
+    constraint_verdicts += _project_state_verdicts(spec, state_dir=data_dir / "state", predecessor_override_reason=predecessor_override_reason, dry_run=dry_run, waived_guarantees=waived_guarantees)
 
     # golf 2A: T0 autonomous-chain stop-conditions, measured live on every fire.
     # OI-1694: scoped to THIS dispatch's own provider/gate — see
@@ -3278,7 +3302,7 @@ def build_runtime_snapshot(
 
     return RuntimeSnapshot(
         constraint_verdicts=constraint_verdicts,
-        staging_promoted=staging_promoted,
+        staging_promoted=staging_promoted, waived_guarantees=tuple(waived_guarantees),
         target_health=target_health,
         target_capable=target_capable,
         model_pins=snapshot_model_pins,
@@ -3286,8 +3310,7 @@ def build_runtime_snapshot(
         valid_task_classes=valid_task_classes,
         parent_dispatch=chain_parent,
         task_class=chain_task_class,
-        tier_from=chain_tier_from, tier_to=chain_tier_to,
-        difficulty=spec.difficulty,
+        tier_from=chain_tier_from, tier_to=chain_tier_to, difficulty=spec.difficulty,
         worker_claude_override_reason=worker_claude_override_reason,
         # RS-2: the same root the role registry above came from, so a declared
         # skill is resolved against the checkout the dispatch will run in.
@@ -4084,6 +4107,7 @@ def _refire_guard_verdict(
 def _owner_transition(
     dispatch_id: str, to_state: str, *, state_dir: Path,
     reason: Optional[str] = None, metadata: Optional[dict] = None,
+    project_id: Any = _PROJECT_ID_UNSET,
 ) -> None:
     """Best-effort: drive the door-owned dispatch row to to_state.
 
@@ -4105,6 +4129,7 @@ def _owner_transition(
             _rc_transition_dispatch_idempotent(
                 conn, dispatch_id=dispatch_id, to_state=to_state,
                 actor="door", reason=reason, metadata=metadata,
+                project_id=project_id,
             )
             conn.commit()
     except _RcDuplicateTransitionError as exc:  # vnx-silent-except: a terminal row is not the door's to move (OI-2482)
@@ -4244,7 +4269,7 @@ def _owner_hand_over(
     """
     _owner_transition(
         spec.dispatch_id, "delivering", state_dir=state_dir,
-        reason="handing off to lane executor",
+        reason="handing off to lane executor", project_id=spec.project_id,
     )
     try:
         _consumer_root, base_sha = _resolve_start_base_sha(plan)
@@ -4262,7 +4287,7 @@ def _owner_hand_over(
             booked_as="start_line_refusal_receipt")
         if attempt_id is not None:
             _owner_finish(spec.dispatch_id, attempt_id, state_dir=state_dir,
-                          success=False, failure_reason=exc.code)
+                          success=False, failure_reason=exc.code, project_id=spec.project_id)
         return None, None
     if handover.mode_write != dispatch_start.MODE_WRITE_OK:
         # The ledger line landed (dispatch_start already logged the failure); the
@@ -4279,6 +4304,7 @@ def _owner_hand_over(
 def _owner_update_attempt(
     attempt_id: Optional[str], state: str, *, dispatch_id: str, state_dir: Path,
     failure_reason: Optional[str] = None,
+    project_id: Any = _PROJECT_ID_UNSET,
 ) -> None:
     """Best-effort: close out the dispatch_attempts row for attempt_id. No-op
     when attempt_id is None (registration/claim never produced one)."""
@@ -4289,6 +4315,7 @@ def _owner_update_attempt(
             _rc_update_attempt(
                 conn, attempt_id=attempt_id, state=state,
                 failure_reason=failure_reason, actor="door",
+                project_id=project_id,
             )
             conn.commit()
     except Exception as exc:  # vnx-silent-except: attempt bookkeeping is best-effort; door must never block on it
@@ -4297,7 +4324,9 @@ def _owner_update_attempt(
         )
 
 
-def _owner_row_closed_by_finalizer(dispatch_id: str, *, state_dir: Path) -> bool:
+def _owner_row_closed_by_finalizer(
+    dispatch_id: str, *, state_dir: Path, project_id: Any = _PROJECT_ID_UNSET,
+) -> bool:
     """True when the lifecycle finalizer already took the row to its end state.
 
     The finalizer leaves a row on completed, failed_delivery or timed_out
@@ -4306,9 +4335,8 @@ def _owner_row_closed_by_finalizer(dispatch_id: str, *, state_dir: Path) -> bool
     """
     try:
         from dispatch_lifecycle import END_STATE_TARGET
-        from coordination_db import get_dispatch
         with _rc_get_connection(state_dir) as conn:
-            row = get_dispatch(conn, dispatch_id)
+            row = _dispatch_row(conn, dispatch_id, _resolve_project_scope(project_id))
         state = row["state"] if row else None
         return state in _RC_TERMINAL_DISPATCH_STATES or state in END_STATE_TARGET.values()
     except Exception:  # vnx-silent-except: state read is best-effort; the door walks the hops as before
@@ -4318,6 +4346,7 @@ def _owner_row_closed_by_finalizer(dispatch_id: str, *, state_dir: Path) -> bool
 def _owner_finish(
     dispatch_id: str, attempt_id: Optional[str], *, state_dir: Path,
     success: bool, failure_reason: Optional[str] = None,
+    project_id: Any = _PROJECT_ID_UNSET,
 ) -> None:
     """Best-effort: drive the door-owned row from delivering through the
     terminal outcome (accepted -> running -> completed on success,
@@ -4333,32 +4362,33 @@ def _owner_finish(
     A row the lifecycle finalizer already closed (OI-2592) is left alone: no
     hops, no bookkeeping failure. The attempt is still closed.
     """
-    owned = _owner_row_closed_by_finalizer(dispatch_id, state_dir=state_dir)
+    owned = _owner_row_closed_by_finalizer(dispatch_id, state_dir=state_dir, project_id=project_id)
     if not owned:
         _owner_transition(
             dispatch_id, "accepted", state_dir=state_dir,
-            reason="lane executor returned",
+            reason="lane executor returned", project_id=project_id,
         )
         _owner_transition(
             dispatch_id, "running", state_dir=state_dir,
-            reason="lane executor returned",
+            reason="lane executor returned", project_id=project_id,
         )
     if success:
         if not owned:
             _owner_transition(
                 dispatch_id, "completed", state_dir=state_dir,
-                reason="lane execution succeeded",
+                reason="lane execution succeeded", project_id=project_id,
             )
-        _owner_update_attempt(attempt_id, "succeeded", dispatch_id=dispatch_id, state_dir=state_dir)
+        _owner_update_attempt(attempt_id, "succeeded", dispatch_id=dispatch_id, state_dir=state_dir,
+                              project_id=project_id)
     else:
         if not owned:
             _owner_transition(
                 dispatch_id, "failed_delivery", state_dir=state_dir,
-                reason=failure_reason or "lane execution failed",
+                reason=failure_reason or "lane execution failed", project_id=project_id,
             )
         _owner_update_attempt(
             attempt_id, "failed", dispatch_id=dispatch_id, state_dir=state_dir,
-            failure_reason=failure_reason,
+            failure_reason=failure_reason, project_id=project_id,
         )
 
 
@@ -4820,6 +4850,7 @@ def _lock_wait_timeout_exit(vspec, handover, attempt_id, exc: Exception, *, stat
     if dispatch_id:
         _owner_finish(
             dispatch_id, attempt_id, state_dir=state_dir,
+            project_id=vspec.spec.project_id,
             success=False, failure_reason=f"lock-wait timeout: {exc}",
         )
     logger.error(
@@ -4913,6 +4944,7 @@ def _run_lane(plan: ExecutionPlan, permit, vspec, *, state_dir: Path, data_dir: 
                 )
             _owner_finish(
                 vspec.spec.dispatch_id, attempt_id, state_dir=state_dir,
+                project_id=vspec.spec.project_id,
                 success=(result.status == "success"),
                 failure_reason=(
                     None if result.status == "success"
@@ -4940,6 +4972,7 @@ def _run_lane(plan: ExecutionPlan, permit, vspec, *, state_dir: Path, data_dir: 
             )
             _owner_finish(
                 vspec.spec.dispatch_id, attempt_id, state_dir=state_dir,
+                project_id=vspec.spec.project_id,
                 success=(rc == 0),
                 failure_reason=None if rc == 0 else "claude_headless lane returned non-zero",
             )

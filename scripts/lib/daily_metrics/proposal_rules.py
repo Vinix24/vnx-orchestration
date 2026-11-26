@@ -93,6 +93,7 @@ class Candidate:
     baseline_n: int
     day_n: int
     exceedance: float
+    deliverable: dict[str, str] | None = None
 
 
 @dataclass(frozen=True)

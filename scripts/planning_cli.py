@@ -78,6 +78,7 @@ import deliverable_dependencies as dlv_deps
 import deliverable_fireable as dlv_fireable
 from delivery_identity import delivery_identity_fields
 import plan_scope
+from project_scope import TenantUnresolved, resolve_stamp_project_id
 import plan_gaps
 import provider_switch
 import schema_manifest
@@ -2376,7 +2377,7 @@ def _append_coordination_event(
     to_state: Optional[str],
     actor: str,
     reason: Optional[str] = None,
-    project_id: str = "vnx-dev",
+    project_id: str,
     metadata: Optional[dict] = None,
 ) -> None:
     if not _has_table(conn, "coordination_events"):
@@ -2920,7 +2921,7 @@ def _deliverable_metadata(args: argparse.Namespace) -> dict[str, Any]:
     itself names no paths (the schema/security/irreversible case for the second seat).
     """
     meta: dict[str, Any] = {"title": args.title, "deliverable": True}
-    for key in ("task_class", "routing_floor"):
+    for key in ("task_class", "routing_floor", "proposal_id"):
         if getattr(args, key, None):
             meta[key] = getattr(args, key)
     paths = _split_dispatch_paths(getattr(args, "dispatch_paths", None))
@@ -2980,12 +2981,26 @@ def _apply_deliverable_scope_rule(
     return True
 
 
+def _existing_proposal_deliverable(conn, dispatch_id, project_id, track_id, output_kind, metadata) -> bool:
+    """Internal proposal retries match the exact tenant/id and original specification under the DB lock."""
+    if "proposal_id" not in metadata:
+        return False
+    row = conn.execute("SELECT * FROM dispatches WHERE dispatch_id = ? AND project_id = ?",
+                       (dispatch_id, project_id)).fetchone()
+    if row is None:
+        return False
+    stored = json.loads(row["metadata_json"])
+    if (not isinstance(stored, dict) or row["track"] != track_id or row["output_kind"] != output_kind
+            or any(stored.get(k) != v for k, v in metadata.items())):
+        raise ValueError(f"{dispatch_id}: proposal deliverable conflict")
+    return True
+
+
 def cmd_deliverable_add(args: argparse.Namespace) -> int:
     state_dir = _resolve_state_dir(args.state_dir)
     project_id = args.project_id
     track_id = args.objective
     output_kind = args.output_kind
-    title = args.title
     task_class = getattr(args, "task_class", None)
 
     try:
@@ -3003,7 +3018,7 @@ def cmd_deliverable_add(args: argparse.Namespace) -> int:
         )
         return 1
 
-    dispatch_id = f"dlv-{uuid.uuid4().hex[:12]}"
+    dispatch_id = getattr(args, "dispatch_id", None) or f"dlv-{uuid.uuid4().hex[:12]}"
     output_ref = f"{output_kind}:{dispatch_id}"
     metadata_dict = _deliverable_metadata(args)
     metadata = json.dumps(metadata_dict)
@@ -3013,6 +3028,8 @@ def cmd_deliverable_add(args: argparse.Namespace) -> int:
     try:
         # The insert and every dependency edge share one write lock: a refused edge rolls back the deliverable.
         conn.execute("BEGIN IMMEDIATE")
+        if _existing_proposal_deliverable(conn, dispatch_id, project_id, track_id, output_kind, metadata_dict):
+            return 0
         has_oaa = _has_col(conn, "dispatches", "operator_approved_at")
         has_ok = _has_col(conn, "dispatches", "output_kind")
         has_or = _has_col(conn, "dispatches", "output_ref")
@@ -3040,7 +3057,7 @@ def cmd_deliverable_add(args: argparse.Namespace) -> int:
             dispatch_id=dispatch_id,
             from_state=None,
             to_state="proposed",
-            reason=f"deliverable add: {title!r}",
+            reason=f"deliverable add: {args.title!r}",
             project_id=project_id,
             **_derived_actor("operator", metadata=delivery_identity_fields(dispatch_id, project_id)),
         )
@@ -7082,7 +7099,7 @@ def _add_plan_gate_attest_parser(pg_sub: Any, common: Callable[[Any], None]) -> 
 def _add_plan_gate_sign_parser(pg_sub: Any, common: Callable[[Any], None]) -> None:
     """`plan-gate sign`: the operator signs the latest plan-gate pass of a track (OI-2849)."""
     p_sign = pg_sub.add_parser("sign", help="operator only: sign the latest plan-gate pass so a T0 may promote (ADR-056)")
-    p_sign.add_argument("--project-id", default=os.environ.get("VNX_PROJECT_ID", "vnx-dev"))  # no --state-dir/--json: unused
+    p_sign.add_argument("--project-id", default=None)  # no --state-dir/--json: unused
     p_sign.add_argument("track_id")
     p_sign.add_argument("--key", required=True, help="the operator's SSH private key path")
     p_sign.add_argument("--identity", required=True, help="signer identity, as in allowed_signers")
@@ -7458,7 +7475,7 @@ def _build_parser() -> argparse.ArgumentParser:
     obj_sub = obj.add_subparsers(dest="action", required=True)
 
     def _common(p: argparse.ArgumentParser) -> None:
-        p.add_argument("--project-id", default=os.environ.get("VNX_PROJECT_ID", "vnx-dev"))
+        p.add_argument("--project-id", default=None)
         p.add_argument("--state-dir", default="")
         p.add_argument("--json", action="store_true", help="emit JSON instead of a table")
 
@@ -7596,6 +7613,13 @@ def _add_objective_hint_and_review_parsers(obj_sub, _common) -> None:
 def main(argv: Optional[list[str]] = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
+    try:
+        args.project_id = resolve_stamp_project_id(
+            args.project_id or os.environ.get("VNX_PROJECT_ID"),
+            _resolve_state_dir(getattr(args, "state_dir", "")) / "runtime_coordination.db")
+    except TenantUnresolved as exc:
+        print(f"{exc} (ADR-007). No change made.", file=sys.stderr)
+        return 2
     return args.func(args)
 
 

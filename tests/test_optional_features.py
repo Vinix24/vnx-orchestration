@@ -78,7 +78,9 @@ def test_plan_gate_modes(tmp_path, monkeypatch, mode, expected):
 
 
 def _broken(_pid, _key):
-    raise OSError("store gone")
+    if _key == of.PLAN_GATE_KEY:
+        raise OSError("store gone")
+    return None
 
 
 @pytest.mark.parametrize("env, files, resolver, code, named", [

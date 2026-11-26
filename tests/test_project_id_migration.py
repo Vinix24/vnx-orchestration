@@ -51,6 +51,7 @@ def _init_runtime_db(state_dir: Path) -> Path:
     """Initialise a fresh runtime_coordination.db at the canonical path."""
     from runtime_coordination import init_schema  # local import (sys.path set above)
 
+    (state_dir / ".vnx-project-id").write_text("vnx-dev\n")
     init_schema(state_dir, _SCHEMAS_DIR / "runtime_coordination.sql")
     return state_dir / "runtime_coordination.db"
 
@@ -63,6 +64,7 @@ def _init_qi_db(state_dir: Path) -> Path:
     plus arbitrary other columns; the migration only cares about
     ``project_id`` semantics.
     """
+    (state_dir / ".vnx-project-id").write_text("vnx-dev\n")
     qi_path = state_dir / "quality_intelligence.db"
     conn = sqlite3.connect(str(qi_path))
     try:
@@ -387,7 +389,7 @@ def test_apply_skips_missing_table(tmp_path: Path) -> None:
         # Only one of the runtime tables exists in this minimal DB.
         conn.execute("CREATE TABLE dispatches (id INTEGER, state TEXT)")
         conn.commit()
-        results = apply_project_id_migration(conn, RUNTIME_COORDINATION_TABLES)
+        results = apply_project_id_migration(conn, RUNTIME_COORDINATION_TABLES, default_project_id="vnx-dev")
         conn.commit()
     finally:
         conn.close()
@@ -482,6 +484,7 @@ def _build_desynced_runtime_db(
     runtime_schema_version table and PRAGMA user_version are stamped to the
     given values so version-independence can be asserted.
     """
+    (db_path.parent / ".vnx-project-id").write_text("vnx-dev\n")
     conn = sqlite3.connect(str(db_path))
     try:
         conn.executescript(

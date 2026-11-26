@@ -352,3 +352,7 @@ def test_grounding_source_column_absent_is_graceful(tmp_path, grounding_on):
     ).fetchone()
     conn.close()
     assert row == ("success", 1)
+
+@pytest.fixture(autouse=True)
+def _explicit_project_source(monkeypatch):
+    monkeypatch.setenv("VNX_PROJECT_ID", "vnx-dev")

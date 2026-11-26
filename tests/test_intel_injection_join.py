@@ -15,9 +15,21 @@ import sys
 from pathlib import Path
 
 import pytest
+from test_operator_tool_stores import operator_project
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _SCRIPT = _REPO_ROOT / "scripts" / "intel_injection_join.py"
+
+
+def test_project_store(operator_project):
+    project, data, resolved = operator_project
+    assert _run("--help", cwd=project).returncode == 0
+    state = data / "state"
+    state.mkdir(parents=True)
+    _make_store(state)
+    result = _run("join", cwd=project)
+    assert result.returncode == (0 if resolved else 2), result.stderr
+    assert ("offers: 3" in result.stdout) if resolved else ("vnx init" in result.stderr)
 
 
 def _make_store(tmp_path: Path) -> Path:

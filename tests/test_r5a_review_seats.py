@@ -134,14 +134,15 @@ class TestSeatResolver:
         import review_gate_manager
         from review_seats import SOURCE_CONFIG, resolve_review_seats
 
-        snapshot = list(review_gate_manager.DEFAULT_REVIEW_STACK)
+        # An earlier test may have imported the manager under another stack.
+        monkeypatch.setattr(review_gate_manager, "DEFAULT_REVIEW_STACK", ["codex_gate", "kimi_gate"])
         monkeypatch.setenv("VNX_OVERRIDE_DEFAULT_REVIEW_STACK", "glm_gate,deepseek_gate")
 
         seats = resolve_review_seats()
 
         assert seats.seats == ("glm_gate", "deepseek_gate")
         assert seats.source == SOURCE_CONFIG and seats.value == "glm_gate,deepseek_gate"
-        assert "glm_gate" not in snapshot, "the import-time snapshot still names the old stack"
+        assert review_gate_manager.DEFAULT_REVIEW_STACK == ["codex_gate", "kimi_gate"]
 
     def test_ci_gate_and_optional_gates_are_requested_but_are_no_seat(self, env, monkeypatch):
         from review_seats import resolve_review_seats

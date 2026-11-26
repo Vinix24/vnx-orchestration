@@ -8,7 +8,8 @@ runner fulfils them:
 
   1. Resolve the dispatch's PR number — from the obligation itself (rework
      dispatches carry spec.pr_id), from the dispatch_metadata row the receipt
-     pipeline stamps, or from GitHub by head branch (``dispatch/<id>``).
+     pipeline stamps, from a review-gate request naming the builder dispatch,
+     or from GitHub by head branch (``dispatch/<id>``).
   2. Invoke ``review_gate_manager.request_and_execute`` for exactly the
      declared gate — the same path ``vnx gate`` / ``t0_gate_enforcement.sh``
      use — so the request record and the result record land in
@@ -1477,20 +1478,70 @@ def _pr_from_registration(state_dir: Path, record: Dict[str, Any]) -> Optional[i
     return _pr_from_dispatch_metadata(state_dir, dispatch_id) if dispatch_id else None
 
 
+def _pr_from_gate_requests(state_dir: Path, dispatch_id: str) -> Optional[int]:
+    """One unambiguous builder PR in this project's requests; warn on bad files."""
+    numbers: Set[int] = set()
+    for path in sorted((Path(state_dir) / "review_gates" / "requests").glob("*.json")):
+        try:
+            request = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(request, dict):
+                raise ValueError("request is not an object")
+            builder = request.get("builder_vendor", {})
+            if not isinstance(builder, dict):
+                raise ValueError("builder_vendor is not an object")
+            if builder.get("dispatch_id") != dispatch_id:
+                continue
+            number = request.get("pr_number")
+            if type(number) is not int or number <= 0:
+                raise ValueError("pr_number is not a positive integer")
+        except (OSError, ValueError) as exc:
+            _LOG.warning("skipping review-gate request %s: %s", path, exc)
+            continue
+        numbers.add(number)
+    if len(numbers) > 1:
+        _LOG.warning("conflicting review-gate request PR numbers for %s: %s", dispatch_id, sorted(numbers))
+        return None
+    return next(iter(numbers), None)
+
+
+def _pr_resolution_from_gate_request(
+    state_dir: Path, dispatch_id: str, owner_repo: str, snapshot: Optional[_GithubSnapshot],
+) -> Optional[PrResolution]:
+    """Accept only a live OPEN PR; unknown/deferred state must block retirement."""
+    number = _pr_from_gate_requests(state_dir, dispatch_id)
+    if number is None:
+        return None
+    if _snapshot_pr_state(number, _snapshot_for(snapshot, owner_repo)) is not None:
+        state = _confirm_pr_state_live(number, owner_repo, snapshot)
+    else:
+        state = _pr_state_from_github(number, owner_repo, snapshot=snapshot)
+    if state == "OPEN":
+        return PrResolution(RESOLUTION_RESOLVED, pr_number=number, owner_repo=owner_repo)
+    if state in ("MERGED", "CLOSED"):
+        return None
+    status = RESOLUTION_DEFERRED if state is DEFERRED else RESOLUTION_UNRESOLVABLE
+    return PrResolution(status, owner_repo=owner_repo, reason=(
+        f"review-gate request PR #{number} state lookup "
+        + ("deferred to the next tick (budget)" if state is DEFERRED else "could not confirm an open PR")
+    ))
+
+
 def resolve_pr_number(
     state_dir: Path, record: Dict[str, Any], snapshot: Optional[_GithubSnapshot] = None,
 ) -> PrResolution:
     """Resolve the obligation's PR number from every available source.
 
-    Returns a :class:`PrResolution` carrying one of three statuses so the caller
+    Returns a :class:`PrResolution` carrying one of four statuses so the caller
     can record the distinction in the obligation's state:
 
-      - ``resolved``   — a PR number is known (dispatch registration first, then
-                         the ``dispatch/<id>`` head branch on GitHub).
+      - ``resolved``   — a PR number is known (registration, builder gate
+                         request, then the ``dispatch/<id>`` head on GitHub).
       - ``awaiting``   — the repo resolves and ``gh`` works, but no PR exists yet
                          for the head branch: a genuine wait, stays ``pending``.
       - ``unresolvable`` — the environment is wrong (no GitHub owner/repo, no
-                         checkout, gh missing): a fault, recorded distinctly.
+                         checkout, gh missing), or a request PR's state is
+                         unknown: a fault, recorded distinctly.
+      - ``deferred``   — a lookup was skipped by the tick's GitHub budget.
     """
     from_registration = _pr_from_registration(state_dir, record)
     if from_registration:
@@ -1501,10 +1552,6 @@ def resolve_pr_number(
             RESOLUTION_UNRESOLVABLE,
             reason="obligation has no dispatch_id to resolve a PR for",
         )
-    _LOG.info(
-        "no dispatch registration names a PR for %s; falling back to head branch dispatch/%s",
-        dispatch_id, dispatch_id,
-    )
     owner_repo = _resolve_github_owner_repo(state_dir)
     if not owner_repo:
         return PrResolution(
@@ -1517,6 +1564,13 @@ def resolve_pr_number(
                 "for a central install is a release-time temp checkout (OI-1253)"
             ),
         )
+    from_request = _pr_resolution_from_gate_request(state_dir, dispatch_id, owner_repo, snapshot)
+    if from_request is not None:
+        return from_request
+    _LOG.info(
+        "no dispatch registration or gate request resolves a PR for %s; falling back to head branch dispatch/%s",
+        dispatch_id, dispatch_id,
+    )
     from_github = _pr_from_github(dispatch_id, owner_repo, snapshot=snapshot)
     if from_github is DEFERRED:
         # OI-2461: the tick had no budget for this lookup. Nothing was asked,

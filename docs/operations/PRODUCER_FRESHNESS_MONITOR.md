@@ -58,11 +58,20 @@ De derde producentgroep in de registry, `review_gate_obligations`
    declaratie verdween zonder dat iets hem las.
 2. **De runner vervult.** `scripts/gate_obligation_runner.py` (launchd, elke
    15 min) resolveert de PR van de dispatch (obligatie → `dispatch_metadata`
-   → `gh pr list --head dispatch/<id>`) en draait exact de gedeclareerde gate
+   → review-gate-request → `gh pr list --head dispatch/<id>`) en draait exact de gedeclareerde gate
    via `review_gate_manager.request_and_execute`. Kan de gate niet draaien,
    dan is dat een **luide, geregistreerde uitkomst**: request- én
    result-record met status `not_executable` plus skip-rationale-audit.
    Stilte is geen eindtoestand meer.
+   **OI-3085:** de runner leest `<state_dir>/review_gates/requests/*.json`
+   op exact `builder_vendor.dispatch_id` en een positief geheel `pr_number`.
+   Alleen een open PR telt; snapshotgegevens worden live bevestigd binnen
+   de bestaande budgetten. Uitstel schrijft niets; onbekende PR-status blijft
+   `unresolvable`. Gesloten/merged PRs vallen terug op de branchroute.
+   Onleesbare of misvormde bestanden worden met een WARNING overgeslagen.
+   Verschillende PR-nummers voor dezelfde builder geven een WARNING met de
+   nummers en laten de branchroute beslissen. Bestaande `retired`-records
+   worden hierdoor niet heropend.
    **D2e (30-08): de overname-keten telt mee als bewijs.** De review-gate
    overname-keten (`codex_gate -> kimi_gate -> deepseek_gate -> glm_gate`,
    `gate_request_handler._build_review_gate_takeover_chain`, BETA3-E1)

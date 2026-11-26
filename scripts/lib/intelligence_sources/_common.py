@@ -16,12 +16,12 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 try:
-    from project_scope import current_project_id, project_filter_enabled
+    from project_scope import TenantUnresolved, resolve_stamp_project_id, project_filter_enabled
 except ImportError:
     import sys as _sys
     from pathlib import Path as _Path
     _sys.path.insert(0, str(_Path(__file__).resolve().parent.parent))
-    from project_scope import current_project_id, project_filter_enabled
+    from project_scope import TenantUnresolved, resolve_stamp_project_id, project_filter_enabled
 
 # ---------------------------------------------------------------------------
 # FP-C Intelligence Contract constants
@@ -357,11 +357,22 @@ def _table_has_column(conn: sqlite3.Connection, table: str, column: str) -> bool
     return False
 
 
-def _project_scope_clause(column_present: bool) -> Tuple[str, tuple]:
+def _source_project_id(db: sqlite3.Connection, project_id: Optional[str] = None) -> str:
+    """Adapt a connection to the canonical resolver; unresolved scope raises TenantUnresolved."""
+    if project_id:
+        return project_id  # Caller scope is bound as SQL data, never used as a path.
+    try:
+        db_path = next(row[2] for row in db.execute("PRAGMA database_list") if row[1] == "main")
+    except sqlite3.Error as exc:
+        raise TenantUnresolved(f"cannot read intelligence store identity: {exc}") from exc
+    return resolve_stamp_project_id(db_path=db_path or None)
+
+
+def _project_scope_clause(column_present: bool, project_id: str) -> Tuple[str, tuple]:
     """Return the AND project_id = ? fragment + bind params, or empty."""
     if not column_present or not project_filter_enabled():
         return "", ()
-    return "AND project_id = ?", (current_project_id(),)
+    return "AND project_id = ?", (project_id,)
 
 
 

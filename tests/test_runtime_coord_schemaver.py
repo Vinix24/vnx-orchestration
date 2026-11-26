@@ -40,6 +40,7 @@ def _make_bare_coordination_db(path: Path) -> None:
     wrong schema directory and never applies the base SQL that creates the
     table, but PRAGMA user_version is set (e.g. by auto_apply runners).
     """
+    (path.parent / ".vnx-project-id").write_text("test-project\n")
     conn = sqlite3.connect(str(path))
     try:
         conn.execute("PRAGMA journal_mode = WAL")

@@ -24,7 +24,8 @@ if _lib_dir not in sys.path:
 from vnx_paths import resolve_paths as _resolve_vnx_paths
 from vnx_paths import refuse_real_central_store_write_under_test_runner as _refuse_real_store_write
 from pr_queue_state_snapshot import build_vnx_state_snapshot
-from project_scope import current_project_id as _current_project_id
+from project_scope import resolve_stamp_project_id, TenantUnresolved
+from project_id_refusals import record_project_id_refusal
 import tracks as tracks_lib
 from track_reconciler import ADVISORY_DEPENDENCY_KINDS
 from result_contract import (
@@ -36,9 +37,13 @@ from result_contract import (
 )
 
 
-def _get_project_id() -> str:
-    """Return project ID — delegates to project_scope.current_project_id (OI-1342)."""
-    return _current_project_id()
+def _get_project_id(state_dir: Path = Path(".")) -> str:
+    """Resolve against the destination store; raise TenantUnresolved without a source."""
+    try:
+        return resolve_stamp_project_id(db_path=state_dir / "runtime_coordination.db")
+    except TenantUnresolved:
+        record_project_id_refusal("pr_queue_manager", state_dir, "project_id_unresolved")
+        raise
 
 
 PR_QUEUE_RESULT_EXIT_CODE_MAP = {
@@ -411,7 +416,7 @@ class PRQueueManager:
         if not track_id:
             return False, f"Cannot resolve the track of PR {pr_id}"
 
-        project_id = _get_project_id()
+        project_id = _get_project_id(self.vnx_state_dir)
         db_path = Path(self.vnx_state_dir) / tracks_lib.DB_FILENAME
         if not db_path.exists():
             return False, f"Cannot check track dependencies: tracks DB not found at {db_path}"

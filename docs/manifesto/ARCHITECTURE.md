@@ -6,6 +6,8 @@
 **Verified against `origin/main` at c41411fea on 2026-11-12.**
 **Usage**: extended daily use on a local system · governed receipts accumulate in the audit trail · ephemeral per-dispatch workers (the fixed 4-terminal layout is only the rollback route)
 
+This is the architecture story. The [core architecture](../core/00_VNX_ARCHITECTURE.md) describes the implementation.
+
 ---
 
 ## The Problem Nobody Talks About
@@ -66,9 +68,9 @@ VNX enforces human approval on **every** dispatch through one entry point, `vnx 
 2. **Review**: A human reads the compiled plan and permit with `vnx dispatch <dispatch-id> --dry-run`, which spawns nothing.
 3. **Fire**: `vnx dispatch <dispatch-id>` starts one ephemeral worker in its own git worktree. The door picks the lane from the provider (`docs/core/DISPATCH_RULES.md` section 5).
 
-The staged bundle is the staging gate (ADR-006). An older PR-queue path (`FEATURE_PLAN.md` to staging to promote) is still live for the roadmap autopilot; `docs/core/00_VNX_ARCHITECTURE.md` (Staging Workflow) describes both paths.
+The staged bundle is the staging gate (ADR-006). The tracks database is the only planning source (`vnx objective list`, ADR-047); `FEATURE_PLAN.md` is retired, and the roadmap autopilot no longer stages plan-based dispatches. See [Staging Workflow](../core/00_VNX_ARCHITECTURE.md#staging-workflow).
 
-Both paths enforce the same principle: **nothing executes without human approval**. The gate prevents the **"Cascade of Doom"**: one hallucinated output triggering a chain of downstream agent actions, each compounding the error.
+The staging gate separates proposing work from executing it, so a proposed dispatch does not itself start a worker.
 
 Review is gated the same way. A pull request needs one distinct reviewer per **review seat** of the project's review stack (default `codex_gate,deepseek_gate` since 2026-11-11), and a rejection from any reviewer blocks the merge. A reviewer that is out is absence, not a vote (ADR-037), and the seat passes along the takeover chain (`codex_gate,deepseek_gate,claude_gate`). The merge happens only through `scripts/pr_merge.py`. See `docs/core/00_VNX_ARCHITECTURE.md` (Review Seats) and `docs/core/PROVIDER_LANES.md` (Takeover chain).
 

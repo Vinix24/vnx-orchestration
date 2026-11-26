@@ -43,7 +43,7 @@ def _parser() -> argparse.ArgumentParser:
     ask.add_argument("--opened-by", default="T0")
     ask.add_argument("--ceiling", type=int, default=None, help="pr:<n> only: the line ceiling asked for (above 0)")
     ask.add_argument("--reason", default=None, help="pr:<n> only: " + ", ".join(sorted(oq.GRANT_REASONS)))
-    ans = sub.add_parser("answer", help="record the operator's own words for an antwoord: or pr: point")
+    ans = sub.add_parser("answer", help="record the operator's own words for an antwoord:, pr: or proposal: point")
     ans.add_argument("point_id")
     ans.add_argument("--quote", required=True)
     ans.add_argument("--by", default="T0")
@@ -186,7 +186,7 @@ def main(argv: list) -> int:
         elif args.cmd == "answer":
             line = qa.answer(project_id, args.point_id, quote=args.quote, vastgelegd_door=args.by, state_dir=sdir,
                              grant=args.grant)
-            print(f"answer recorded for {line['point_id']}; the reader closes the point")
+            print(f"answer recorded for {line['point_id']}; the reader evaluates whether the point closes")
             if "grant" in line:
                 print("grant: ceiling {ceiling} over {lines} measured lines at {head_sha}".format(**line["grant"]))
             _sync_decision(args, project_id, sdir, line["point_id"])

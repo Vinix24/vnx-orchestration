@@ -1272,11 +1272,15 @@ def _check_launchd_agents(project_dir: Path) -> list[Check]:
     for family in lps.REQUIRED_PER_PROJECT_FAMILIES:
         expected_label = f"{family}.{project_id}"
         if family in missing_families:
+            remedy = (
+                f"send operating the request `vnx daily-metrics install --project-id {project_id}`"
+                if family == "com.vnx.daily-metrics" else
+                f"run `vnx init` or `bash scripts/launchd/reload_plist.sh {family}` to install it"
+            )
             checks.append(Check(
                 f"launchd:{family}",
                 FAIL,
-                f"{expected_label} is not loaded — run `vnx init` or "
-                f"`bash scripts/launchd/reload_plist.sh {family}` to install it",
+                f"{expected_label} is not loaded — {remedy}",
             ))
         else:
             checks.append(Check(f"launchd:{family}", PASS, f"{expected_label} is loaded"))
@@ -1565,6 +1569,43 @@ def _check_dream(project_dir: Path) -> list[Check]:
     return [_dream_check(name, doc) for name in _DREAM_NAMES]
 
 
+def _check_optional_features(project_dir: Path, data_root: Path | None = None) -> list[Check]:
+    """Fresh state, not evidence of an earlier merge or dispatch."""
+    _engine.ensure_engine_on_path()
+    import config_runtime
+    import config_store_db
+    import gate_profile
+    import optional_features
+
+    try:
+        project_id = _engine.derive_project_id(project_dir)
+        state_dir = (data_root if data_root is not None else _engine.resolve_data_root(project_dir)) / "state"
+        store = state_dir / "runtime_coordination.db"
+        if not store.exists() and not store.is_symlink():
+            return [Check("optional_features", WARN, f"store_missing: {store} — run `vnx init`")]
+        if config_runtime.autowire(state_dir, project_id) is not True:
+            status = config_runtime.wire_status()
+            raise optional_features.OptionalFeatureRefused("config_store_unreadable", f"{state_dir}: {status}")
+        resolver = config_store_db.make_db_resolver(lambda _pid: state_dir, raise_on_error=True)
+        # Check readability even when an override would bypass the DB layer.
+        resolver(project_id, gate_profile.CI_GATE_KEY)
+        taken = optional_features.snapshot(project_id, project_root=project_dir, resolver=resolver)
+        rows = optional_features.waived_guarantees(project_id, snapshot=taken)
+    except optional_features.OptionalFeatureRefused as exc:
+        return [Check("optional_features", FAIL, f"OptionalFeatureRefused: {exc}")]
+    except (OSError, sqlite3.Error) as exc:
+        return [Check("optional_features", FAIL, f"config_store_unreadable: {exc}")]
+    # Explicit, readable choices are informational; only refused state changes doctor health.
+    checks = [Check("optional_features", PASS,
+                    f"{r['feature']}: {r['key']}={r['value']} (source: {r['source']}); waived: {r['guarantee']}")
+              for r in rows]
+    if not rows:
+        checks.append(Check("optional_features", PASS, "nothing waived"))
+    if taken["ci"].conflict is not None:
+        checks.append(Check("optional_features:ci", PASS, taken["ci"].conflict))
+    return checks
+
+
 def vnx_doctor(args) -> int:
     project_dir = Path(args.project_dir).resolve()
     emit_json = getattr(args, "json", False)
@@ -1606,6 +1647,8 @@ def vnx_doctor(args) -> int:
     checks.extend(_check_t0_state_freshness(project_dir, data_root))
     checks.extend(_check_dream(project_dir))
     checks.append(_check_steering(data_root))
+    optional_checks = _check_optional_features(project_dir, data_root)
+    checks.extend(optional_checks)
 
     passed = sum(1 for c in checks if c.status == PASS)
     warned = sum(1 for c in checks if c.status == WARN)
@@ -1624,6 +1667,8 @@ def vnx_doctor(args) -> int:
         print(json.dumps(output, indent=2))
     else:
         for c in checks:
+            if c is optional_checks[0]:
+                print("\n  current state")
             marker = {"PASS": "[PASS]", "WARN": "[WARN]", "FAIL": "[FAIL]"}[c.status]
             print(f"  {marker}  {c.name:<28}  {c.detail}")
         print()

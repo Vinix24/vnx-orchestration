@@ -1,8 +1,8 @@
 # Migration Rollback Runbook
 
 Wave 2a safety companion. Covers the rollback chain for migrations 0010
-through 0021 only. The schema has since grown to 0034 (14 further migrations,
-2 with their own `_down.sql`), which this runbook does not cover. Use when one
+through 0021 and the dated migrations listed below. Later numbered migrations
+are outside this runbook; inspect `schemas/migrations/` before proceeding. Use when one
 of the 0010-0021 migrations must be reversed, or after an accidental apply of
 one of them.
 
@@ -435,8 +435,8 @@ there before treating this section as the source of truth:
 
 - OI-ROLLBACK-1: Wire `--rollback-fts5` flag into `migrate_to_central_vnx.py` for
   Python-driven 0016 rollback (current _down.sql drops FTS5 data without repopulation).
-- OI-ROLLBACK-2: Create helper script `scripts/rollback_migration.py` that reads
-  `schema_meta.schema_version`, determines which _down.sql to apply, and updates
+- OI-ROLLBACK-2: A rollback helper is not implemented. It would need to read
+  `schema_meta.schema_version`, determine which _down.sql to apply, and update
   schema_meta atomically.
 - OI-ROLLBACK-3: Add 0010_down / 0015_down section split to a helper that correctly
   routes QI vs RC SQL sections without manual cut-paste.

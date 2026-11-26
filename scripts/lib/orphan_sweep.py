@@ -696,7 +696,7 @@ def sweep(
     data_dir: Optional[Path] = None,
     *,
     state_dir: Optional[Path] = None,
-    project_id: str = "vnx-dev",
+    project_id: str,
     current_dispatch_id: Optional[str] = None,
     max_orphans: int = DEFAULT_MAX_ORPHANS,
     dry_run: bool = False,

@@ -54,14 +54,35 @@ CREATE TABLE coordination_events (
 """
 
 
-def _state_dir(tmp_path) -> Path:
+def _state_dir(tmp_path, *, marker=True) -> Path:
     sd = tmp_path / "state"
     sd.mkdir()
+    if marker:
+        (sd / ".vnx-project-id").write_text("vnx-dev\n")
     conn = sqlite3.connect(sd / "runtime_coordination.db")
     conn.executescript(_REGISTRY_SCHEMA)
     conn.commit()
     conn.close()
     return sd
+
+
+def test_receipt_project_reaches_event_without_store_source(tmp_path, monkeypatch):
+    monkeypatch.setenv("VNX_PROJECT_ID", "foreign-project")
+    sd = _state_dir(tmp_path, marker=False)
+    enrichment._register_provenance_link({"dispatch_id": "D-explicit", "project_id": "receipt-project"}, sd)
+    with sqlite3.connect(sd / "runtime_coordination.db") as conn:
+        assert conn.execute("SELECT project_id FROM coordination_events").fetchall() == [("receipt-project",)]
+
+
+@pytest.mark.parametrize("project_id", [None, "", "INVALID", "../other", "/other"])
+def test_receipt_unresolved_project_records_failure(tmp_path, monkeypatch, capsys, project_id):
+    monkeypatch.delenv("VNX_PROJECT_ID", raising=False)
+    sd = _state_dir(tmp_path, marker=False)
+    enrichment._register_provenance_link({"dispatch_id": "D-unresolved", "project_id": project_id}, sd)
+    assert "provenance_register_failed" in capsys.readouterr().err
+    with sqlite3.connect(sd / "runtime_coordination.db") as conn:
+        assert conn.execute("SELECT COUNT(*) FROM provenance_registry").fetchone() == (0,)
+        assert conn.execute("SELECT COUNT(*) FROM coordination_events").fetchone() == (0,)
 
 
 def test_append_registers_provenance_link(tmp_path):

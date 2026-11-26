@@ -83,6 +83,23 @@ if [[ ! -f "$GATHER_SCRIPT" ]]; then
   safe_exit
 fi
 
+# Refuse an unresolved tenant before the gatherer queries any source.
+if ! PYTHONPATH="$SCRIPT_DIR/lib${PYTHONPATH:+:$PYTHONPATH}" python3 - "$STATE_DIR" 2>>"$STATE_DIR/intelligence_hook.log" <<'PYCODE'
+import sys
+from pathlib import Path
+from project_scope import TenantUnresolved, resolve_stamp_project_id
+from intelligence_injection import record_unresolved_injection
+state = Path(sys.argv[1])
+try:
+    project_id = resolve_stamp_project_id(db_path=state / "quality_intelligence.db")
+except TenantUnresolved:
+    record_unresolved_injection(state, "userpromptsubmit_worker_intelligence_inject.sh")
+    sys.exit(1)
+PYCODE
+then
+  safe_exit
+fi
+
 INTELLIGENCE_JSON=$(python3 "$GATHER_SCRIPT" gather \
   "$TASK" \
   "${TERMINAL_ID}" \

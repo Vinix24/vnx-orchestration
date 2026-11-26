@@ -1,0 +1,14 @@
+{
+  "VNX_OVERRIDE_PAID_LANE_DAILY_BUDGET": {
+    "class": "operator_bypass",
+    "reason": "operator bypass, one window"
+  },
+  "VNX_OVERRIDE_WORKER_CLAUDE": {
+    "class": "operator_bypass",
+    "reason": "operator bypass, one window"
+  },
+  "VNX_STATE_DIR": {
+    "class": "bootstrap",
+    "reason": "state-dir resolution precedes config_runtime store access"
+  }
+}

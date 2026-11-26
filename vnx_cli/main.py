@@ -1767,12 +1767,12 @@ def _register_daily_metrics_subparser(subparsers: argparse.Action) -> None:
     daily_metrics_parser = subparsers.add_parser(
         "daily-metrics",
         help=(
-            "daily metrics: install the opt-in 04:10 job, every other "
+            "daily metrics: install the required per-project 04:10 job, every other "
             "verb passes through to scripts/daily_metrics.py"
         ),
         description=(
-            "Daily metrics. `install --project-id ID` installs the opt-in "
-            "per-project launchd job (04:10 local). Removal of that job follows "
+            "Daily metrics. `install --project-id ID` installs the job required per project "
+            "(ADR-063 amendment 2026-11-25, 04:10 local). Removal of that job follows "
             "as a verb in a later change. Every other verb (collect, daily, "
             "propose, approve, verdict, report) is passed to "
             "scripts/daily_metrics.py unchanged."

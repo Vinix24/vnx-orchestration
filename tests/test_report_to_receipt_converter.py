@@ -28,6 +28,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+
+pytestmark = pytest.mark.usefixtures("receipt_project")
 import yaml
 
 SCRIPTS_LIB = Path(__file__).resolve().parent.parent / "scripts" / "lib"

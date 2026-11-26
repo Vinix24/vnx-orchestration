@@ -12,6 +12,8 @@ Quality gate coverage (gate_pr3_bounded_intelligence_injection):
 
 from __future__ import annotations
 
+import pytest
+
 import json
 import os
 import sqlite3
@@ -843,6 +845,7 @@ class TestBrokerIntelligenceIntegration(unittest.TestCase):
         self._dispatch_dir = str(self._base / "dispatches")
         Path(self._state_dir).mkdir()
         Path(self._dispatch_dir).mkdir()
+        (Path(self._state_dir) / ".vnx-project-id").write_text("vnx-dev\n")
         init_schema(self._state_dir)
 
         db = _setup_quality_db(self._quality_db_path)
@@ -1217,10 +1220,10 @@ class TestShadowModeQueryProvenPatterns(unittest.TestCase):
         """VNX_USE_CENTRAL_DB=1 → dispatcher returns central result."""
         import intelligence_selector as _is_module
         original_rcd = _is_module._resolve_central_data_dir
-        original_pid = _is_module.current_project_id
+        original_pid = _is_module.resolve_stamp_project_id
 
         _is_module._resolve_central_data_dir = lambda pid: self._base / "central" / pid
-        _is_module.current_project_id = lambda: self._project_id
+        _is_module.resolve_stamp_project_id = lambda *args: self._project_id
 
         os.environ["VNX_USE_CENTRAL_DB"] = "1"
         try:
@@ -1240,7 +1243,7 @@ class TestShadowModeQueryProvenPatterns(unittest.TestCase):
         finally:
             os.environ.pop("VNX_USE_CENTRAL_DB", None)
             _is_module._resolve_central_data_dir = original_rcd
-            _is_module.current_project_id = original_pid
+            _is_module.resolve_stamp_project_id = original_pid
 
 
 class TestShadowModeQueryFailurePrevention(unittest.TestCase):
@@ -1322,10 +1325,10 @@ class TestShadowModeQueryFailurePrevention(unittest.TestCase):
     def test__query_failure_prevention_authoritative_uses_central(self):
         import intelligence_selector as _is_module
         original_rcd = _is_module._resolve_central_data_dir
-        original_pid = _is_module.current_project_id
+        original_pid = _is_module.resolve_stamp_project_id
 
         _is_module._resolve_central_data_dir = lambda pid: self._base / "central" / pid
-        _is_module.current_project_id = lambda: self._project_id
+        _is_module.resolve_stamp_project_id = lambda *args: self._project_id
         os.environ["VNX_USE_CENTRAL_DB"] = "1"
         try:
             selector = self._make_selector()
@@ -1343,7 +1346,7 @@ class TestShadowModeQueryFailurePrevention(unittest.TestCase):
         finally:
             os.environ.pop("VNX_USE_CENTRAL_DB", None)
             _is_module._resolve_central_data_dir = original_rcd
-            _is_module.current_project_id = original_pid
+            _is_module.resolve_stamp_project_id = original_pid
 
 
 class TestShadowModeQueryRecentComparable(unittest.TestCase):
@@ -1423,10 +1426,10 @@ class TestShadowModeQueryRecentComparable(unittest.TestCase):
     def test__query_recent_comparable_authoritative_uses_central(self):
         import intelligence_selector as _is_module
         original_rcd = _is_module._resolve_central_data_dir
-        original_pid = _is_module.current_project_id
+        original_pid = _is_module.resolve_stamp_project_id
 
         _is_module._resolve_central_data_dir = lambda pid: self._base / "central" / pid
-        _is_module.current_project_id = lambda: self._project_id
+        _is_module.resolve_stamp_project_id = lambda *args: self._project_id
         os.environ["VNX_USE_CENTRAL_DB"] = "1"
         try:
             selector = self._make_selector()
@@ -1444,7 +1447,7 @@ class TestShadowModeQueryRecentComparable(unittest.TestCase):
         finally:
             os.environ.pop("VNX_USE_CENTRAL_DB", None)
             _is_module._resolve_central_data_dir = original_rcd
-            _is_module.current_project_id = original_pid
+            _is_module.resolve_stamp_project_id = original_pid
 
 
 class TestShadowModeSelectIntegration(unittest.TestCase):
@@ -2646,7 +2649,7 @@ class TestIntelligenceSelectorRefusesZeroTableDecoy(unittest.TestCase):
         decoy = self._make_decoy(state_dir / "quality_intelligence.db")
         selector = IntelligenceSelector()
         with patch("intelligence_selector._resolve_central_data_dir", return_value=self._base), \
-                patch("intelligence_selector.current_project_id", return_value="vnx-dev"):
+                patch("intelligence_selector.resolve_stamp_project_id", return_value="vnx-dev"):
             with self.assertLogs("intelligence_selector", level="ERROR") as cm:
                 conn = selector._get_central_qi_conn()
         self.assertIsNone(conn)
@@ -2659,3 +2662,8 @@ class TestIntelligenceSelectorRefusesZeroTableDecoy(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@pytest.fixture(autouse=True)
+def _explicit_intelligence_project(monkeypatch):
+    monkeypatch.setenv("VNX_PROJECT_ID", "vnx-dev")

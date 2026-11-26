@@ -28,27 +28,31 @@ CLAUDE_PROJECTS_DIR = Path(
 )
 ANALYZER_VERSION = "1.1.0"
 
-LLM_STRATEGY = os.environ.get("VNX_ANALYZER_LLM", "ollama-only")
-OLLAMA_MODEL = os.environ.get("VNX_OLLAMA_MODEL", "qwen2.5-coder:14b")
+def llm_strategy() -> str:
+    import config_runtime
+    return config_runtime.get("VNX_ANALYZER_LLM")
+
+
+def ollama_model() -> str:
+    import config_runtime
+    return config_runtime.get("VNX_OLLAMA_MODEL")
+
 # The claude-max lane passes no --model: the CLI runs its own configured default, which the
 # fabric cannot read. The cost-ledger line names the model the CLI reports in its JSON and
-# falls back to this label only when the child named none (a timeout, a crash), overridable
-# for a fleet that pins another model in the CLI.
-CLAUDE_MAX_MODEL = os.environ.get("VNX_ANALYZER_CLAUDE_MODEL", "sonnet")
-DEEPSEEK_HARNESS_MODEL = os.environ.get("VNX_ANALYZER_DEEPSEEK_MODEL", "deepseek-flash")
+# falls back to this label only when the child named none (a timeout, a crash).
+CLAUDE_MAX_MODEL = "sonnet"
+DEEPSEEK_HARNESS_MODEL = "deepseek-flash"
 # A run below this DeepSeek balance (USD) is skipped loudly before any session is sent.
-DEEPSEEK_MIN_BALANCE_USD = float(os.environ.get("VNX_ANALYZER_DEEPSEEK_MIN_BALANCE", "0.50"))
+DEEPSEEK_MIN_BALANCE_USD = 0.50
 # /user/balance may list only a CNY row while is_available is true. The minimum then
 # applies per currency: 3.50 CNY is 0.50 USD at roughly 7.1 CNY/USD, rounded down so the
 # CNY gate is never stricter than the USD one.
-DEEPSEEK_MIN_BALANCE_CNY = float(os.environ.get("VNX_ANALYZER_DEEPSEEK_MIN_BALANCE_CNY", "3.50"))
+DEEPSEEK_MIN_BALANCE_CNY = 3.50
 
 # When LLM_STRATEGY="auto", refuse the claude path when the unanalyzed session
 # backlog exceeds this threshold. Protects against metered-spend landmines on
 # large backfills.  An operator can override with VNX_ANALYZER_LLM=claude-only.
-AUTO_CLAUSE_MAX_SESSIONS = int(
-    os.environ.get("VNX_ANALYZER_AUTO_MAX_SESSIONS", "50")
-)
+AUTO_CLAUSE_MAX_SESSIONS = 50
 
 # Content-boundary lane (operator 03-10): deep analysis of client, personal and unknown sessions
 # runs on Claude only, at most this many calls per run. Over the cap the session is deferred to
@@ -57,7 +61,8 @@ RESTRICTED_CLAUDE_CAP_DEFAULT = 20
 
 
 def restricted_claude_cap() -> int:
-    raw = os.environ.get("VNX_ANALYZER_RESTRICTED_CLAUDE_CAP", "")
+    import config_runtime
+    raw = config_runtime.get("VNX_ANALYZER_RESTRICTED_CLAUDE_CAP")
     try:
         return max(0, int(raw)) if raw.strip() else RESTRICTED_CLAUDE_CAP_DEFAULT
     except ValueError:

@@ -315,6 +315,25 @@ def test_resolve_consumer_interpreter_non_python_binary_is_irrelevant(tmp_path) 
     assert outcome["relevant"] is False
 
 
+@pytest.mark.parametrize("kind", ["pinned", "venv", "resolver", "bare"])
+@pytest.mark.parametrize("invoke", [True, False])
+def test_commented_interpreters_are_not_executed(tmp_path, kind, invoke):
+    old, actual = tmp_path / "python3.12", tmp_path / "python3.11"
+    old.touch()
+    actual.touch()
+    venv = tmp_path / ".venv/bin/python"
+    venv.parent.mkdir(parents=True)
+    venv.touch()
+    comments = {"pinned": str(old), "venv": ".venv/bin/python",
+                "resolver": f"bash scripts/launchd/vnx_python.sh {tmp_path}", "bare": "python3"}
+    script = tmp_path / "nightly.sh"
+    command = f'"{actual}" -c pass' if invoke else "echo no interpreter"
+    script.write_text(f"  # formerly used {comments[kind]}\n{command}\n")
+    outcome = path_parity.resolve_consumer_interpreter(["/bin/bash", str(script)], tmp_path)
+    assert outcome["interpreter"] == (str(actual) if invoke else None)
+    assert outcome["relevant"] is invoke
+
+
 def test_resolve_consumer_interpreter_finds_repo_venv_script(tmp_path) -> None:
     (tmp_path / ".venv" / "bin").mkdir(parents=True)
     venv_python = tmp_path / ".venv" / "bin" / "python"
