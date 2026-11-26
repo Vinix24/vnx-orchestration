@@ -19,3 +19,12 @@ Background: [dispatch architecture](../core/DISPATCH_AND_INTELLIGENCE_ARCHITECTU
 ## Flag
 
 —
+
+D4 and the door share `_resolve_model`: an explicit builder model wins; otherwise
+`resolve_worker` selects the terminal env/config pair, project worker registry,
+then the packaged default. A provider-only request uses that pair when its
+provider matches, otherwise that provider's `wave7_models.yaml` `default_model`.
+A missing/unreadable model source blocks with slot, provider and registry key.
+Builder pins (`workers-kimi-pinned`, historical id retained) only warn on a
+mismatch; they never supply a model. T0's floor and the Claude override audit
+gate remain enforced. Broker pair propagation is a separate migration.

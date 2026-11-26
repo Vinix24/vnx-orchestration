@@ -315,7 +315,7 @@ class TestModelTierPin:
     # -- wpfc PR-3: D4 honours pin.semantics ---------------------------------
 
     def test_floor_pin_ignores_explicit_model(self, tmp_path: Path) -> None:
-        """floor semantics: the pin always wins, even against an explicit spec.model."""
+        """Builder pins only warn, including legacy floor pins."""
         vspec = _make_vspec(
             provider=Provider.CLAUDE, target_slot="T1", model="sonnet", tmp_path=tmp_path,
         )
@@ -324,8 +324,8 @@ class TestModelTierPin:
         )
         plan = compile_plan(vspec, snapshot)
         assert isinstance(plan, ExecutionPlan)
-        assert plan.model == "kimi-k3", "floor pin must ignore the explicit model request"
-        assert any("floor semantics" in w for w in plan.warnings)
+        assert plan.model == "sonnet", "builder pins must honour the explicit model request"
+        assert any("default semantics" in w for w in plan.warnings)
 
     def test_default_pin_honours_explicit_model(self, tmp_path: Path) -> None:
         """default semantics: spec.model wins when the caller set one."""
@@ -341,7 +341,7 @@ class TestModelTierPin:
         assert any("default semantics" in w for w in plan.warnings)
 
     def test_default_pin_falls_back_when_no_model_requested(self, tmp_path: Path) -> None:
-        """default semantics: when spec.model is absent, the pin is the fallback."""
+        """An absent model resolves through the registry, never the pin."""
         vspec = _make_vspec(
             provider=Provider.CLAUDE, target_slot="T1", tmp_path=tmp_path,
         )
@@ -350,8 +350,8 @@ class TestModelTierPin:
         )
         plan = compile_plan(vspec, snapshot)
         assert isinstance(plan, ExecutionPlan)
-        assert plan.model == "kimi-k3", "default pin must be the fallback when no model is requested"
-        assert not any("model-tier" in w for w in plan.warnings)
+        assert plan.model == "sonnet", "registry must supply the model when none is requested"
+        assert any("model-tier" in w for w in plan.warnings)
 
     def test_default_pin_silent_when_request_matches_pin(self, tmp_path: Path) -> None:
         """default semantics: no warning when the request matches the pinned model."""
