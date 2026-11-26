@@ -475,3 +475,7 @@ class TestConfidenceEventsAuditLogging:
         assert not schema_warnings, (
             f"schema-absent errors must NOT be logged at WARNING; got: {schema_warnings}"
         )
+
+@pytest.fixture(autouse=True)
+def _explicit_project_source(monkeypatch):
+    monkeypatch.setenv("VNX_PROJECT_ID", "vnx-dev")

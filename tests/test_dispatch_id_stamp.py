@@ -21,13 +21,12 @@ E. Pre-existing entries on source_dispatch_ids are preserved.
 
 from __future__ import annotations
 
-import pytest
-
 import json
 import sqlite3
 import sys
 import tempfile
 import unittest
+import pytest
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent.parent / "scripts"
@@ -271,5 +270,5 @@ if __name__ == "__main__":
 
 
 @pytest.fixture(autouse=True)
-def _explicit_intelligence_project(monkeypatch):
+def _explicit_project_source(monkeypatch):
     monkeypatch.setenv("VNX_PROJECT_ID", "vnx-dev")

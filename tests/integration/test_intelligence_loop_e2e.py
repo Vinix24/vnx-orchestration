@@ -697,5 +697,5 @@ class TestCaseIInjectionEventLogged:
 
 
 @pytest.fixture(autouse=True)
-def _explicit_intelligence_project(monkeypatch):
+def _explicit_project_source(monkeypatch):
     monkeypatch.setenv("VNX_PROJECT_ID", "vnx-dev")
