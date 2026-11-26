@@ -80,17 +80,21 @@ def test_non_mutable_column_change_is_missing(moved):
 
 
 def test_source_leftover_with_only_a_mutable_change_is_still_in_source(moved):
-    _insert_success_pattern(moved["src"], project_id="alpha", source_dispatch_ids=["d-1"], title="misrouted")
-    _sql(moved["src"], "UPDATE success_patterns SET confidence_score = 0.1, usage_count = 9")
+    leftover = _insert_success_pattern(moved["src"], project_id="alpha", source_dispatch_ids=["d-1"], title="misrouted")
+    # first_seen is stable identity; a fresh CURRENT_TIMESTAMP can fall in a later second.
+    _sql(moved["src"], "UPDATE success_patterns SET confidence_score = 0.1, usage_count = 9, "
+         "first_seen = ? WHERE id = ?", moved["move"]["pre_image"]["row"]["first_seen"], leftover)
     result = verify_plan([moved["move"]])
     assert result["ok"] is False and _reasons(result) == ["still_in_source"]
 
 
 def test_two_destination_rows_with_one_stable_identity_are_duplicates(moved):
     conn = sqlite3.connect(str(moved["dest"]))
+    # Preserve the pre-image's timestamp so only mutable columns differ.
     conn.execute("INSERT INTO success_patterns (pattern_type, category, title, description, pattern_data, "
-                 "confidence_score, usage_count, source_dispatch_ids, project_id) "
-                 "VALUES ('code', 'architect', 'misrouted', 'desc', '{}', 0.2, 7, '[\"d-1\"]', 'beta')")
+                 "confidence_score, usage_count, source_dispatch_ids, project_id, first_seen) "
+                 "VALUES ('code', 'architect', 'misrouted', 'desc', '{}', 0.2, 7, '[\"d-1\"]', 'beta', ?)",
+                 (moved["move"]["pre_image"]["row"]["first_seen"],))
     conn.commit()
     conn.close()
     result = verify_plan([moved["move"]])
