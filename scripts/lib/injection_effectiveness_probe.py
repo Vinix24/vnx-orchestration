@@ -550,7 +550,6 @@ def write_tuning_proposals(
     after the ``os.replace`` that persists the queue.
     """
     from project_scope import resolve_stamp_project_id
-
     output_path = Path(output_path)
     project_id = resolve_stamp_project_id(project_id, output_path)
     if generated_at is None:

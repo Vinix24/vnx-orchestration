@@ -582,8 +582,7 @@ def _projected_conf(
 
 def shadow_grounding_compare(
     db_path: Path,
-    dispatches: List[Dict[str, Any]],
-    project_id: str | None = None,
+    dispatches: List[Dict[str, Any]], project_id: str | None = None,
 ) -> Dict[str, Any]:
     """Read-only V1 vs V2 confidence divergence report.
 
