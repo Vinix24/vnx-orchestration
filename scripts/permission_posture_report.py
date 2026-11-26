@@ -31,6 +31,7 @@ sys.path.insert(0, str(_ROOT / "scripts" / "lib"))
 import permission_harness_map as phm
 import permission_policy as pp
 import worker_permissions as wp
+from project_scope import TenantUnresolved, resolve_stamp_project_id
 
 TRACK_ID = "provider-agnostic-permissions"
 DECISION_KEY = "flip_decision"  # track metadata_json: {"decision": "flip-approved", "decided_by", "decided_at"}
@@ -345,7 +346,7 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Read-only permission posture report and flip gate.")
     parser.add_argument("--state-dir", type=Path, help="store state dir (default: the resolved VNX_STATE_DIR)")
     parser.add_argument("--project-root", type=Path, default=_ROOT, help="root with .vnx/ and agents/")
-    parser.add_argument("--project-id", help="project of the track row (default: VNX_PROJECT_ID or vnx-dev)")
+    parser.add_argument("--project-id", help="project of the track row (default: VNX_PROJECT_ID or store marker/layout)")
     parser.add_argument("--min-consecutive", type=int, default=20, help="N for condition (d)")
     parser.add_argument("--json", action="store_true", help="JSON instead of text")
     parser.add_argument("--out", type=Path, help="write the report here as well as to stdout")
@@ -361,11 +362,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         if args.state_dir is None:
             from vnx_paths import resolve_paths
             args.state_dir = Path(resolve_paths()["VNX_STATE_DIR"])
-        if args.project_id is None:
-            from project_scope import current_project_id
-            args.project_id = current_project_id()
+        args.project_id = resolve_stamp_project_id(
+            args.project_id or os.environ.get("VNX_PROJECT_ID"), args.state_dir / "runtime_coordination.db")
         report = build_report(args.state_dir, args.project_root, args.project_id, args.min_consecutive)
-    except (InputError, ValueError, OSError) as exc:
+    except (TenantUnresolved, InputError, ValueError, OSError) as exc:
         text = json.dumps({"verdict": "unreadable", "error": str(exc)}) if args.json else f"unreadable: {exc}"
         print(text)
         return UNREADABLE

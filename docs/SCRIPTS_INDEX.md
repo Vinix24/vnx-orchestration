@@ -37,7 +37,7 @@ These files implement the main `bin/vnx` command surface:
 wrapper (see `docs/guides/AGENT_CREATION_GUIDE.md`).
 
 `planning_cli.py` (including `plan-gate sign`), `seed_tracks_from_roadmap.py`,
-`crash_recovery_sweep.py`, and `orphan_sweep.py`
+`crash_recovery_sweep.py`, `orphan_sweep.py`, and `permission_posture_report.py`
 resolve the project after parsing: `--project-id`, then `VNX_PROJECT_ID`, then
 AG-1a's store marker/layout resolver anchored on the selected state directory.
 Without a source they exit 2 and name `vnx init` and `VNX_PROJECT_ID`; invalid

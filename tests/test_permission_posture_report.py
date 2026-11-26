@@ -88,6 +88,77 @@ def status(report, key):
     return next(c["status"] for c in report["conditions"] if c["key"] == key)
 
 
+@pytest.mark.parametrize("source", ["marker", "layout", "env", "explicit", "default-state"])
+def test_project_source_selects_exact_track(tmp_path, monkeypatch, capsys, source):
+    store = tmp_path / ".vnx-data" / "other" if source == "layout" else tmp_path / "selected"
+    state, root = build(store, monkeypatch)
+    with sqlite3.connect(state / "runtime_coordination.db") as conn:
+        conn.executemany("INSERT INTO tracks VALUES (?, ?, ?)", [
+            (TRACK_ID, "other", "{}"),
+            (TRACK_ID, "other-more", json.dumps({DECISION_KEY: DECISION})),
+            (TRACK_ID + "-more", "other", json.dumps({DECISION_KEY: DECISION})),
+        ])
+    ambient = tmp_path / "ambient"
+    ambient.mkdir()
+    (ambient / ".vnx-project-id").write_text("different\n")
+    monkeypatch.chdir(ambient)
+    monkeypatch.delenv("VNX_PROJECT_ID", raising=False)
+    monkeypatch.setenv("VNX_STATE_DIR", str(ambient / "state"))
+    monkeypatch.setenv("VNX_DATA_DIR", str(ambient))
+    extra = ["--state-dir", str(state)]
+    if source in {"marker", "default-state", "env", "explicit"}:
+        (store / ".vnx-project-id").write_text("different\n" if source in {"env", "explicit"} else "other\n")
+    if source == "env":
+        monkeypatch.setenv("VNX_PROJECT_ID", "other")
+    if source == "explicit":
+        monkeypatch.setenv("VNX_PROJECT_ID", "../bad")
+        extra += ["--project-id", "other"]
+    if source == "default-state":
+        monkeypatch.setenv("VNX_STATE_DIR", str(state))
+        monkeypatch.setenv("VNX_DATA_DIR", str(store))
+        extra = []
+    code = _ppr().main(["--json", "--project-root", str(root), *extra])
+    report = json.loads(capsys.readouterr().out)
+    assert code == 1 and report["flip_ready"] is False
+    assert report["conditions"][-1]["evidence"] == "no decision recorded"
+    assert [status(report, k) for k in "abcde"] == ["pass"] * 4 + ["fail"]
+
+
+@pytest.mark.parametrize("as_json", [False, True])
+@pytest.mark.parametrize("source", ["missing", "empty", "invalid", "conflict", "unreadable"])
+def test_project_source_error_is_unreadable(tmp_path, monkeypatch, capsys, source, as_json):
+    store = tmp_path / ".vnx-data" / "other" if source == "conflict" else tmp_path
+    state = store / "state"
+    state.mkdir(parents=True)
+    marker = store / ".vnx-project-id"
+    if source != "missing":
+        marker.write_text({"empty": "", "invalid": "/bad", "conflict": "different"}.get(source, "other"))
+    if source == "unreadable":
+        read_text = Path.read_text
+
+        def read(path, *args, **kwargs):
+            if path == marker:
+                raise PermissionError("marker read denied")
+            return read_text(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_text", read)
+    monkeypatch.delenv("VNX_PROJECT_ID", raising=False)
+    out = tmp_path / "posture.json"
+    code = _ppr().main(["--state-dir", str(state), "--out", str(out), *(["--json"] if as_json else [])])
+    output = capsys.readouterr().out
+    assert code == 2 and not out.exists()
+    if as_json:
+        report = json.loads(output)
+        assert report["verdict"] == "unreadable" and "flip_ready" not in report
+        output = report["error"]
+    else:
+        assert output.startswith("unreadable:")
+    expected = {"invalid": "not a valid VNX id", "conflict": "project_id conflict"}.get(source, "vnx init")
+    assert expected in output
+    if source in {"missing", "empty", "unreadable"}:
+        assert "VNX_PROJECT_ID" in output
+
+
 def test_report_lists_all_six_lanes(tmp_path, monkeypatch):
     state, root = build(tmp_path, monkeypatch, table=dict(phm._TABLE))
     proc = subprocess.run([sys.executable, str(SCRIPT), "--json", "--state-dir", str(state),
