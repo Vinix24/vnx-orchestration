@@ -130,6 +130,7 @@ def _notify(path: Any, project_id: str, state_dir: Any) -> None:
     for event in proposal_ledger.read_events(path):
         if event.get("event") == proposal_ledger.VERDICT and event.get("project_id") == project_id:
             pid = event["proposal_id"]
+            # The proposal identity keeps answered points deduplicated if display wording changes.
             operator_queue_ask.ask(project_id, bron="vraag",
                 ref=operator_queue_ask.question_ref(f"proposal verdict {pid}"),
                 vraag=f"Proposal {pid}: {event['verdict']}. Observation: {event['window']['from']} to {event['window']['to']}.",
@@ -144,10 +145,9 @@ def run(args: Any) -> int:
         return EXIT_REFUSED
     path = proposal_ledger.ledger_path(store.root)
     try:
-        # Replay verdict notifications first, including recovery after an inbox failure.
-        _notify(path, project_id, getattr(args, "state_dir", None))
         result = _judge_due(path, proposal_ledger.read_events(path),
                           getattr(args, "proposal_id", None), project_id, now, store)
+        # Replay only after judgment so an old notification failure cannot block new verdicts.
         _notify(path, project_id, getattr(args, "state_dir", None))
         return result
     except proposal_ledger.LedgerUnreadable as exc:
@@ -156,6 +156,6 @@ def run(args: Any) -> int:
     except proposal_ledger.ApprovalRefused as exc:
         print(f"refused: {exc.reason}", file=sys.stderr)
         return EXIT_REFUSED
-    except (ValueError, OSError, KeyError) as exc:
+    except (ValueError, OSError, KeyError, TypeError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return EXIT_UNREADABLE

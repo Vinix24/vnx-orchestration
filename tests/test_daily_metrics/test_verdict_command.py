@@ -18,6 +18,9 @@ import sys
 from datetime import date, timedelta
 from pathlib import Path
 
+import pytest
+import operator_queue as queue
+
 from daily_metrics import proposal_ledger
 from daily_metrics.store import DayStore
 from .cli_boot import cli_command
@@ -197,3 +200,23 @@ def test_a_post_day_without_a_recorded_schema_is_written_as_schema_missing(tmp_p
     (event,) = [event for event in _events(tmp_path) if event["event"] == "verdict"]
     assert (event["verdict"], event["reason"]) == ("undetermined", "schema_missing")
     assert event["improvement"] is None
+
+
+@pytest.mark.parametrize("fault", ["inbox", "missing_window", "null_window", "refused_ask"])
+def test_failed_notification_replay_does_not_block_new_due_verdict(tmp_path, fault):
+    _seed_post(tmp_path)
+    _seed_ledger(tmp_path, _approved(), _approved(proposal_id=OTHER))
+    old = dict(event="verdict", proposal_id=PID, project_id="p", verdict="helped",
+               window={"from": "2026-11-02", "to": "2026-11-08"})
+    if fault == "missing_window":
+        old.pop("window")
+    if fault == "null_window":
+        old["window"] = None
+    if fault == "refused_ask":
+        old["window"]["from"] = "x" * 201
+    proposal_ledger._write(_ledger(tmp_path), [old])
+    if fault == "inbox":
+        (tmp_path / "state" / queue.LEDGER_FILENAME).mkdir(parents=True)
+    proc = _run(tmp_path, ["verdict", *_args(tmp_path)])
+    assert [e["proposal_id"] for e in _events(tmp_path) if e["event"] == "verdict"] == [PID, OTHER]
+    assert proc.returncode == 1 and "error:" in proc.stderr and "Traceback" not in proc.stderr

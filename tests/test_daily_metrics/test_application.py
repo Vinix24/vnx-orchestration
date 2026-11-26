@@ -6,7 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 import operator_queue as queue
 from daily_metrics import proposal_ledger as ledger
-from .test_verdict_command import (PID, _applied, _approved, _args, _doc, _events, _ledger, _run,
+from .test_verdict_command import (PID, OTHER, _applied, _approved, _args, _doc, _events, _ledger, _run,
                                    _seed_ledger, _seed_post)
 
 DID = "dlv-0123456789ab"
@@ -63,7 +63,7 @@ def test_merge_clock_once_and_one_inbox_point(tmp_path, value, outcome, dispatch
     assert len(queue.read_state("p", state_dir=state)["points"]) == 1
 
 
-@pytest.mark.parametrize("fault", ["unmerged", "missing", "corrupt", "torn", "object", "conflict", "timestamp", "merge_sha", "pr_number", "conclusion"])
+@pytest.mark.parametrize("fault", ["unmerged", "missing", "corrupt", "torn", "object", "unreadable", "conflict", "timestamp", "merge_sha", "pr_number", "conclusion"])
 @pytest.mark.parametrize("bad", [None, [], "unknown", "absent"])
 def test_merge_evidence_failure_stays_visible(tmp_path, fault, bad):
     records = [dict(MERGE, event_type="pr_merge_refused", conclusion="refused")] if fault == "unmerged" else [dict(MERGE, **{fault: bad})]
@@ -76,12 +76,58 @@ def test_merge_evidence_failure_stays_visible(tmp_path, fault, bad):
     if fault == "missing":
         evidence.rename(state / "saved.ndjson")
     if fault in ("corrupt", "torn", "object"):
-        evidence.write_text({"corrupt": "{broken}\n", "torn": json.dumps(MERGE), "object": "null\n"}[fault])
+        evidence.write_text({"corrupt": '{"event_type":"pr_merged",broken}\n', "torn": json.dumps(MERGE), "object": "null\n"}[fault])
+    if fault == "unreadable":
+        evidence.rename(state / "saved.ndjson")
+        evidence.mkdir()
     proc = _run(tmp_path, ["propose", *_args(tmp_path)])
-    assert proc.returncode == (0 if fault == "unmerged" else 1), proc.stderr
-    if fault != "unmerged":
-        assert "merge evidence" in proc.stderr
+    failed = fault not in ("unmerged", "missing", "torn", "object")
+    assert proc.returncode == int(failed), proc.stderr
+    if failed:
+        assert "merge evidence" in proc.stderr and PID in proc.stderr
     assert not any(e["event"] == "applied" for e in _events(tmp_path))
+
+
+@pytest.mark.parametrize("fault", ["merge_sha", "conflict", "not_approved"])
+def test_bad_proposal_does_not_block_application_proposals_or_inbox(tmp_path, fault):
+    incomplete = dict(MERGE)
+    incomplete.pop("merge_sha")
+    records = [incomplete] if fault == "merge_sha" else [MERGE, dict(MERGE, dispatch_id=DID + "-r1", pr_number=456)]
+    state = seed(tmp_path, [*records, dict(MERGE, dispatch_id="dlv-abcdef012345")])
+    _seed_ledger(tmp_path, *([] if fault == "not_approved" else [_approved()]), _approved(proposal_id=OTHER), applied=False)
+    ledger._write(_ledger(tmp_path), [dict(event="deliverable_created", project_id="p", proposal_id=pid, deliverable_id=did)
+                                    for pid, did in ((PID, DID), (OTHER, "dlv-abcdef012345"))])
+    _seed_post(tmp_path, {date(2026, 11, 1) + timedelta(days=i): _doc(50.0 if i == 7 else 10.0,
+                     metric="pr_open_to_merge_p75_hours") for i in range(8)})
+    proc = _run(tmp_path, ["propose", *_args(tmp_path)])
+    assert [e["proposal_id"] for e in _events(tmp_path) if e["event"] == "applied"] == [OTHER]
+    payload = next(p for p in map(json.loads, proc.stdout.splitlines()) if "proposed" in p)
+    assert len(payload["proposed"]) == 1
+    assert proc.returncode == 1 and PID in proc.stderr and "merge evidence" in proc.stderr
+    assert [p["ref"] for p in queue.read_state("p", state_dir=state)["points"].values()] == [f"proposal:{payload['proposed'][0]}"]
+
+
+@pytest.mark.parametrize("field", ["merge_sha", "timestamp", "conclusion", "pr_number"])
+@pytest.mark.parametrize("bad", [None, [], "unknown", "absent"])
+@pytest.mark.parametrize("complete_first", [False, True])
+def test_complete_receipt_wins_over_unusable_match(tmp_path, field, bad, complete_first):
+    incomplete = dict(MERGE, **{field: bad})
+    if bad == "absent":
+        incomplete.pop(field)
+    seed(tmp_path, [MERGE, incomplete] if complete_first else [incomplete, MERGE])
+    proc = _run(tmp_path, ["propose", *_args(tmp_path)])
+    assert proc.returncode == 0 and not proc.stderr, proc.stderr
+    (applied,) = [e for e in _events(tmp_path) if e["event"] == "applied"]
+    assert (applied["pr_number"], applied["merge_sha"], applied["application_day"]) == (123, "a" * 40, "2026-11-02")
+
+
+def test_receipt_noise_and_torn_last_line_do_not_block_application(tmp_path):
+    state = seed(tmp_path, [MERGE])
+    with (state / "t0_receipts.ndjson").open("a") as handle:
+        handle.write('null\n["pr_merged"]\n{broken unrelated}\n' + json.dumps(dict(MERGE, pr_number=456)))
+    proc = _run(tmp_path, ["propose", *_args(tmp_path)])
+    assert proc.returncode == 0 and not proc.stderr, proc.stderr
+    assert [e["pr_number"] for e in _events(tmp_path) if e["event"] == "applied"] == [123]
 
 
 def test_daily_applies_before_judging_and_inbox_failure_recovers(tmp_path):
@@ -90,6 +136,8 @@ def test_daily_applies_before_judging_and_inbox_failure_recovers(tmp_path):
     inbox.mkdir()
     proc = _run(tmp_path, ["daily", *_args(tmp_path, "2026-11-10T02:00:00Z")])
     assert proc.returncode == 1 and "error:" in proc.stderr
+    failures = [json.loads(line) for line in proc.stderr.splitlines() if line.startswith("{")]
+    assert failures == [{"command_failed": "verdict", "exit_code": 1}]
     assert [e["event"] for e in _events(tmp_path)][-2:] == ["applied", "verdict"]
     inbox.rename(state / "unreadable-inbox")
     for _ in range(2):

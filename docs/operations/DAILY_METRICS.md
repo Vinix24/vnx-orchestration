@@ -1,7 +1,7 @@
 # Daily Metrics
 
 **Status**: Active
-**Last Updated**: 2026-11-25
+**Last Updated**: 2026-11-26
 **Owner**: track `doorloop-en-effectiviteit-dagelijks`
 **Purpose**: Install, read and check the daily lead-time measurement of one project.
 
@@ -36,9 +36,11 @@ After expiry and before new proposals, `propose` creates one deliverable for eac
 
 Creation uses the planning layer in the named project/track with status `proposed`; it never promotes, fires or calls the door. The proposal lock covers the check, creation and single `deliverable_created` append (project id, proposal id, deliverable id, recorded_at). A deterministic project/proposal ID and planning metadata make a retry after a failed append recover the existing deliverable; conflicting metadata is refused. An unknown track or unreadable planning store exits nonzero with a named stderr error and no creation event, so a later run retries. `--state-dir` selects the planning store explicitly; otherwise the project's central state directory is used. A JSON `deliverables` line reports creations or missing specifications before the usual proposal summary.
 
-After deliverable creation, `propose` records `applied` once under the proposal lock from the project's native `t0_receipts.ndjson`: an exact deliverable dispatch (or its numbered rework round), `pr_merged` with `conclusion: merged`, PR number, merge SHA and UTC merge-receipt timestamp. Missing, corrupt, incomplete or conflicting merge evidence is a named error; no matching merge leaves the proposal unapplied. `--state-dir` selects this evidence store. No PR titles are matched.
+After deliverable creation, `propose` records `applied` once under the proposal lock from the project's native `t0_receipts.ndjson`: an exact deliverable dispatch (or its numbered rework round), `pr_merged` with `conclusion: merged`, PR number, merge SHA and UTC merge-receipt timestamp. An unusable match (missing SHA, invalid PR number, conclusion or timestamp) is skipped; a complete receipt wins over an incomplete one. Only disagreeing complete receipts conflict. With only unusable matches or a conflict, that proposal stays pending and its id and reason appear on stderr; other applications, new proposals and inbox notifications still run before exit 1. `--state-dir` selects this evidence store. No PR titles are matched.
 
-`daily` runs this application step before `verdict` and propagates nonzero command exits. Without application, `verdict` lists `{proposal_id, reason: not_applied}` under `waiting`. Application day `p` starts the observation window `p+1..p+7`; it waits until `p+7` settles (next day at 02:00 UTC). The approval's frozen baseline, sample sufficiency and schema checks still apply; unknown yields `undetermined`. Each verdict opens one acknowledgment point through `inbox ask` (`bron: vraag`, stable `antwoord:` ref derived from the proposal id). Reruns recover failed notifications without reopening answered points.
+A missing receipt file or no matching merge leaves proposals pending without error. Non-candidate lines, non-object lines and an unfinished last line are skipped, as in the predecessor reader. An unreadable file or corrupt complete `pr_merged` candidate remains a named error for pending proposals; the shared receipt log is never rewritten. The proposal ledger itself remains strict: damaged lines stop processing.
+
+`daily` runs this application step before `verdict` and continues all steps after a nonzero exit. It reports `{"command_failed": "<step>", "exit_code": 1}` separately from `{"command_import_failed": "<module>", "exception": "<class>"}`; either makes `daily` exit 1. Without application, `verdict` lists `{proposal_id, reason: not_applied}` under `waiting`. Application day `p` starts the observation window `p+1..p+7`; it waits until `p+7` settles (next day at 02:00 UTC). The approval's frozen baseline, sample sufficiency and schema checks still apply; unknown yields `undetermined`. Each verdict opens one acknowledgment point through `inbox ask` (`bron: vraag`, stable `antwoord:` ref derived from `proposal verdict <id>` so display wording changes cannot reopen answered points). Judgment runs before notification replay: an unreadable inbox, refused ask or malformed old notification reports an error and exits 1 without blocking new due verdicts. Reruns recover failed notifications without reopening answered points.
 
 ## What `report --check` checks
 

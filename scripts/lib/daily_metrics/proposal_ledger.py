@@ -323,8 +323,54 @@ def create_deliverables(path: Path, *, project_id: str, state_dir: Path | None, 
     return outcomes
 
 
-def append_applications(path: Path, *, project_id: str, state_dir: Path | None, now: datetime) -> None:
-    """Link native merge receipts once, holding the proposal lock from read through append."""
+def _merge_receipts(path: Path) -> list[dict[str, Any]]:
+    """Read complete candidate objects; missing means none, other read/parse errors raise."""
+    receipts = []
+    try:
+        with path.open("rb") as handle:
+            for raw in handle:
+                if b"pr_merged" not in raw or not raw.endswith(b"\n"):
+                    continue  # Unrelated line or a writer still appending, as in read_merged.
+                receipt = json.loads(raw)
+                if isinstance(receipt, dict) and receipt.get("event_type") == "pr_merged":
+                    receipts.append(receipt)
+    except FileNotFoundError:
+        return []  # No receipt file is no merge evidence; proposals remain pending.
+    return receipts
+
+
+def _application(event: Mapping[str, Any], receipts: Sequence[Mapping[str, Any]], now: datetime) -> dict[str, Any] | None:
+    """Return complete matching evidence, None for no match; unusable/conflicting matches raise."""
+    did = event["deliverable_id"]
+    applications, problems = [], []
+    for receipt in receipts:
+        if receipt.get("project_id") != event["project_id"] or not (
+                receipt.get("dispatch_id") == did or is_round_of(did, receipt.get("dispatch_id"))):
+            continue
+        stamp = parse_timestamp(receipt.get("timestamp"))
+        if receipt.get("conclusion") != "merged" or stamp is None or stamp > now:
+            problems.append("invalid merge conclusion/timestamp")
+            continue
+        applied = dict(event, event=APPLIED, pr_number=receipt.get("pr_number"),
+            merge_sha=receipt.get("merge_sha"), applied_at=stamp.isoformat(),
+            application_day=stamp.date().isoformat(), recorded_at=now.isoformat())
+        try:
+            _validate_deliverable(applied)
+        except LedgerUnreadable as exc:
+            problems.append(str(exc))
+            continue
+        applications.append(applied)
+    if len({(a["pr_number"], a["merge_sha"], a["application_day"]) for a in applications}) > 1:
+        raise LedgerUnreadable(f"{did}: conflicting merge receipts")
+    if applications:
+        return applications[0]
+    if problems:
+        raise LedgerUnreadable(f"{did}: no usable merge receipt: {'; '.join(sorted(set(problems)))}")
+    return None
+
+
+def append_applications(path: Path, *, project_id: str, state_dir: Path | None, now: datetime) -> list[tuple[str, str]]:
+    """Link receipts under the proposal lock; return per-proposal problems, raise on ledger I/O."""
     from .store import default_store_dir
     evidence = Path(state_dir or default_store_dir(project_id).parent.parent) / "t0_receipts.ndjson"
     with slot_lock(path):
@@ -332,42 +378,27 @@ def append_applications(path: Path, *, project_id: str, state_dir: Path | None, 
         pending = [e for e in events if e.get("event") == DELIVERABLE_CREATED
                    and not _has_event(events, APPLIED, e["proposal_id"])]
         if not pending:
-            return
+            return []
         try:
-            with evidence.open(encoding="utf-8") as handle:
-                receipts = []
-                for line in handle:
-                    if not line.endswith("\n"):
-                        raise ValueError("torn receipt")
-                    receipts.append(json.loads(line))
-            if any(not isinstance(r, dict) for r in receipts):
-                raise ValueError("receipt is not an object")
-            for event in pending:
-                pid, did = event["proposal_id"], event["deliverable_id"]
-                if _has_event(events, APPLIED, pid):
-                    continue
-                if not _has_event(events, APPROVED, pid):
-                    raise ValueError(f"{pid}: not approved")
-                matches = [r for r in receipts if r.get("project_id") == project_id
-                           and (r.get("dispatch_id") == did or is_round_of(did, r.get("dispatch_id")))
-                           and r.get("event_type") == "pr_merged"]
-                applications = []
-                for receipt in matches:
-                    stamp = parse_timestamp(receipt.get("timestamp"))
-                    if receipt.get("conclusion") != "merged" or stamp is None or stamp > now:
-                        raise ValueError(f"{did}: invalid merge conclusion/timestamp")
-                    applied = dict(event, event=APPLIED, pr_number=receipt.get("pr_number"),
-                        merge_sha=receipt.get("merge_sha"), applied_at=stamp.isoformat(),
-                        application_day=stamp.date().isoformat(), recorded_at=now.isoformat())
-                    _validate_deliverable(applied)
-                    applications.append(applied)
-                if len({(a["pr_number"], a["merge_sha"], a["application_day"]) for a in applications}) > 1:
-                    raise ValueError(f"{did}: conflicting merge receipts")
-                if applications:
-                    _write(path, applications[:1])
-                    events.extend(applications[:1])
+            receipts = _merge_receipts(evidence)
         except (OSError, ValueError) as exc:
-            raise LedgerUnreadable(f"merge evidence {evidence}: {exc}") from exc
+            return [(e["proposal_id"], f"merge evidence {evidence}: {exc}") for e in pending]
+        problems = []
+        for event in pending:
+            pid = event["proposal_id"]
+            if _has_event(events, APPLIED, pid):
+                continue
+            try:
+                if not _has_event(events, APPROVED, pid):
+                    raise LedgerUnreadable("not approved")
+                applied = _application(event, receipts, now)
+            except LedgerUnreadable as exc:
+                problems.append((pid, f"merge evidence {evidence}: {exc}"))
+                continue
+            if applied is not None:
+                _write(path, [applied])
+                events.append(applied)
+        return problems
 
 
 def approval_refusal(events: Sequence[Mapping[str, Any]], proposal_id_value: Any) -> str | None:
