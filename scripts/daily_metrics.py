@@ -269,7 +269,7 @@ def _run_daily_commands(args: argparse.Namespace, project_id: str, now: datetime
                         store: store_mod.DayStore) -> list[tuple[str, str]]:
     """Run every command module with an integer ``DAILY_STEP`` (decision 14).
 
-    Ordered by ``(DAILY_STEP, module __name__)``. Returns the import failures as
+    Ordered by ``(DAILY_STEP, module __name__)``. Returns import failures and nonzero exits as
     ``(stem, exception class name)`` pairs, so ``daily`` can report them and exit 1.
     """
     modules, failures = discover_commands(commands_dir())
@@ -280,7 +280,9 @@ def _run_daily_commands(args: argparse.Namespace, project_id: str, now: datetime
         state_dir=_state_dir(args, project_id),
     )
     for module in stepped:
-        module.run(context)
+        code = module.run(context)
+        if code is not None and code != EXIT_OK:
+            failures.append((module.__name__.rsplit(".", 1)[-1], f"exit_{code}"))
     return failures
 
 

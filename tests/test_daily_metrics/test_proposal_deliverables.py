@@ -15,6 +15,8 @@ SPEC = dict(track="ci-work", title="Reduce CI time", output_kind="pr", task_clas
 
 
 def seed(root, *, spec=SPEC, terminal="approved", project="p", pid=PID):
+    (root / "state").mkdir(exist_ok=True)
+    (root / "state" / "t0_receipts.ndjson").touch(exist_ok=True)
     path = _ledger(root)
     path.parent.mkdir(parents=True, exist_ok=True)
     events = [dict(event="proposed", proposal_id=pid, project_id=project, recorded_at=NOW)]

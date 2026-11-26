@@ -116,6 +116,8 @@ def run(args: Any) -> int:
         proposal_ledger.append_expiries(path, now=now)
         deliveries = proposal_ledger.create_deliverables(path, project_id=project_id,
             state_dir=getattr(args, "state_dir", None), now=now)
+        proposal_ledger.append_applications(path, project_id=project_id,
+            state_dir=getattr(args, "state_dir", None), now=now)
     except (proposal_ledger.LedgerUnreadable, OSError, ValueError, TypeError, sqlite3.Error) as exc:
         print(f"error: unreadable ledger {path}: {exc}", file=sys.stderr)
         return EXIT_FAILURE
