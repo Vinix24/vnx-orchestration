@@ -3,6 +3,10 @@ from pathlib import Path
 import subprocess
 import sys
 import pytest
+
+from operator_paths import operator_data_dir
+import project_scope
+
 @pytest.fixture(params=[True, False])
 def operator_project(tmp_path, monkeypatch, request):
     for key in tuple(os.environ):
@@ -34,3 +38,59 @@ def test_operator_store(operator_project, tool, read):
     else:
         assert result.returncode != 0
         assert "vnx init" in result.stderr and "VNX_PROJECT_ID" in result.stderr
+
+
+@pytest.mark.parametrize("legacy_kind", ["database", "symlink"])
+def test_operator_identity_ignores_legacy_database(operator_project, legacy_kind):
+    import sqlite3
+
+    project, data, resolved = operator_project
+    legacy = project / ".vnx-data" / "state" / "runtime_coordination.db"
+    legacy.parent.mkdir(parents=True)
+    target = legacy
+    if legacy_kind == "symlink":
+        target = data.parent / "foreign-project" / "state" / legacy.name
+        target.parent.mkdir(parents=True)
+    with sqlite3.connect(target) as connection:
+        connection.execute("CREATE TABLE project_config (project_id TEXT)")
+        connection.execute("INSERT INTO project_config VALUES ('foreign-project')")
+    if legacy_kind == "symlink":
+        legacy.symlink_to(target)
+
+    if resolved:
+        assert operator_data_dir() == data
+    else:
+        with pytest.raises(project_scope.TenantUnresolved) as error:
+            operator_data_dir()
+        assert "vnx init" in str(error.value)
+        assert "VNX_PROJECT_ID" in str(error.value)
+
+
+def test_operator_identity_uses_canonical_store_layout(operator_project, monkeypatch):
+    _, data, _ = operator_project
+    state = data / "state"
+    state.mkdir(parents=True)
+    monkeypatch.chdir(state)
+    assert operator_data_dir() == data
+
+
+def test_operator_explicit_identity_wins(operator_project, monkeypatch):
+    _, data, _ = operator_project
+    monkeypatch.setenv("VNX_PROJECT_ID", "env-project")
+    assert operator_data_dir("chosen-project") == data.parent / "chosen-project"
+
+
+@pytest.mark.parametrize("project_id", ["..", "/absolute", "Bad_ID"])
+def test_operator_invalid_identity_refuses(operator_project, project_id):
+    with pytest.raises(project_scope.TenantUnresolved, match="explicit project_id invalid"):
+        operator_data_dir(project_id)
+
+
+def test_operator_environment_identity_conflict_refuses(operator_project, monkeypatch):
+    _, data, resolved = operator_project
+    monkeypatch.setenv("VNX_PROJECT_ID", "env-project")
+    if resolved:
+        with pytest.raises(project_scope.TenantUnresolved, match="project_id conflict"):
+            operator_data_dir()
+    else:
+        assert operator_data_dir() == data.parent / "env-project"
