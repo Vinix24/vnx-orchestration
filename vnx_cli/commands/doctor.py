@@ -1580,8 +1580,9 @@ def _check_optional_features(project_dir: Path, data_root: Path | None = None) -
     try:
         project_id = _engine.derive_project_id(project_dir)
         state_dir = (data_root if data_root is not None else _engine.resolve_data_root(project_dir)) / "state"
-        if not (state_dir / "runtime_coordination.db").is_file():
-            raise optional_features.OptionalFeatureRefused("store_missing", str(state_dir))
+        store = state_dir / "runtime_coordination.db"
+        if not store.exists() and not store.is_symlink():
+            return [Check("optional_features", WARN, f"store_missing: {store} — run `vnx init`")]
         if config_runtime.autowire(state_dir, project_id) is not True:
             status = config_runtime.wire_status()
             raise optional_features.OptionalFeatureRefused("config_store_unreadable", f"{state_dir}: {status}")

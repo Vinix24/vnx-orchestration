@@ -220,18 +220,13 @@ _LEVEL_RE = re.compile(r"^    level:\s*([^\s#]*)\s*(?:#.*)?$")
 
 
 def enforcement_config_path(project_root: Optional[str] = None) -> Optional[Path]:
-    """Explicit root: its ``.vnx/`` then root config, never the ambient project's.
-
-    Without a root: ``$VNX_HOME/.vnx/``, ``$PROJECT_ROOT/.vnx/``, ``$VNX_HOME/``
-    (the order ``gate.sh`` searched). Absent configs return ``None``; with an explicit
-    root, unreadable entries reach the dial reader for refusal instead of reading as absent.
+    """One lookup: ``$VNX_HOME/.vnx/``, ``<project_root or $PROJECT_ROOT>/.vnx/``,
+    ``$VNX_HOME/`` (the order ``gate.sh`` searched). An explicit root replaces only
+    the middle candidate. Absent configs return ``None``; unreadable entries reach
+    the dial reader for refusal instead of reading as absent.
     """
-    if project_root is not None:
-        root = Path(project_root)
-        candidates = [root / ".vnx" / ENFORCEMENT_FILENAME, root / ENFORCEMENT_FILENAME]
-        return next((path for path in candidates if path.exists() or path.is_symlink()), None)
     home = os.environ.get("VNX_HOME", "")
-    root = os.environ.get("PROJECT_ROOT", "")
+    root = project_root if project_root is not None else os.environ.get("PROJECT_ROOT", "")
     candidates = []
     if home:
         candidates.append(Path(home) / ".vnx" / ENFORCEMENT_FILENAME)
@@ -239,7 +234,7 @@ def enforcement_config_path(project_root: Optional[str] = None) -> Optional[Path
         candidates.append(Path(root) / ".vnx" / ENFORCEMENT_FILENAME)
     if home:
         candidates.append(Path(home) / ENFORCEMENT_FILENAME)
-    return next((path for path in candidates if path.is_file()), None)
+    return next((path for path in candidates if path.exists() or path.is_symlink()), None)
 
 
 def _dial_level(raw: str, check: str, path: Path) -> int:
