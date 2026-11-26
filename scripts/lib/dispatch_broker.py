@@ -30,6 +30,9 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import sqlite3
+from contextlib import closing
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -38,6 +41,8 @@ from typing import Any, Dict, List, Optional
 from project_scope import resolve_stamp_project_id, TenantUnresolved
 from project_id_refusals import record_project_id_refusal
 from runtime_coordination import (
+    DISPATCH_STATES,
+    DISPATCH_TRANSITIONS,
     ACCEPTED_OR_BEYOND_STATES,
     TERMINAL_DISPATCH_STATES,
     DuplicateTransitionError,
@@ -643,6 +648,61 @@ class DispatchBroker:
             return payload if result.items_injected > 0 else None
         except Exception:
             return None
+
+    def claimable_bundle_pairs(self, project_id: str) -> list[dict]:
+        """Read broker rows and their immutable bundles; errors never count as absent.
+
+        Includes pending, claimed/delivering and recoverable deliveries, using the
+        same bundle path as get_bundle(), including missing files. No schema writes.
+        """
+        from vnx_paths import resolve_central_data_dir
+        resolve_central_data_dir(project_id)  # Validate identity before querying.
+        db = (self._state_dir / "runtime_coordination.db").resolve()
+        with closing(sqlite3.connect(db.as_uri() + "?mode=ro", uri=True)) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT dispatch_id, state, bundle_path FROM dispatches "
+                "WHERE project_id = ? ORDER BY dispatch_id",
+                (project_id,),
+            ).fetchall()
+        eligible = {"claimed", "delivering"} | {
+            state for state, successors in DISPATCH_TRANSITIONS.items()
+            if successors & {"queued", "claimed", "recovered"}}
+        result = []
+        for row in rows:
+            if row["state"] not in DISPATCH_STATES:
+                raise BrokerError(f"Unknown broker state: {dict(row)!r}")
+            if row["state"] not in eligible:
+                continue
+            item = dict(row, bundle_path=None)
+            try:
+                dispatch_id = row["dispatch_id"]
+                if not isinstance(dispatch_id, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", dispatch_id) or ".." in dispatch_id:
+                    raise ValueError(f"Unsafe dispatch id: {dispatch_id!r}")
+                path = self.get_bundle_path(dispatch_id) / "bundle.json"
+                item["bundle_path"] = str(path)
+                if path.is_symlink() or path.parent.is_symlink():
+                    raise ValueError(f"Unsafe bundle path: {path}")
+                path = path.resolve()
+                bundle = json.loads(path.read_text(encoding="utf-8"))
+                if (not isinstance(bundle, dict) or type(bundle.get("bundle_version")) is not int
+                        or bundle["bundle_version"] != 1
+                        or bundle.get("dispatch_id") != row["dispatch_id"]):
+                    raise ValueError("Bundle identity/version mismatch")
+                profile = bundle.get("target_profile")
+                if profile is None:
+                    profile = {}
+                if not isinstance(profile, dict):
+                    raise ValueError("target_profile must be an object")
+                fields = [profile.get(key) for key in ("provider", "model")]
+                if any(value is not None and not isinstance(value, str) for value in fields):
+                    raise ValueError("Pair fields must be strings or absent")
+                present = sum(bool(value) for value in fields)
+                item["pair_state"] = ("absent", "partial", "whole")[present]
+            except (OSError, ValueError) as exc:
+                item.update(pair_state="error", error=f"{type(exc).__name__}: {exc}")
+            result.append(item)
+        return result
 
     def get_bundle(self, dispatch_id: str) -> Optional[Dict[str, Any]]:
         """Return parsed bundle.json for dispatch_id, or None if not found.
