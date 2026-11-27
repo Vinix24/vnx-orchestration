@@ -72,7 +72,7 @@ constraints:
     pin_semantics: floor
 
   # NOTE: id intentionally retained as `workers-kimi-pinned`. The pin-loader
-  # uses this historical name; the current worker default is sonnet.
+  # uses this historical name; builders resolve via worker_registry, never this pin.
   # (_load_model_pins_from_yaml in scripts/lib/dispatch_cli.py) hard-keys on
   # this exact string (`elif cid == "workers-kimi-pinned"`) — renaming the id
   # drops the pin back to its default. Only `model` and `reason` change.

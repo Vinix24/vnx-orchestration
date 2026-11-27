@@ -48,7 +48,7 @@ def test_resolver_exists():
     ({"provider": "claude", "model": "kimi-k3"}, "worker_pair_conflict"),
     ({"model": "unknown-model"}, "worker_model_unknown"),
     ({"provider": "unknown-provider"}, "worker_model_unresolved"),
-    ({"provider": "claude"}, "worker_model_unresolved"),
+    ({"provider": "claude"}, ("claude", "sonnet")),
     ({"model": 7}, "worker_model_unknown"),
 ])
 def test_pair_table(tmp_path, monkeypatch, layer, pair, expected):

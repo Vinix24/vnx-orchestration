@@ -6,7 +6,7 @@ Loads the project's .vnx/vnx_workers.yaml (operator-edited), falling back to
 scripts/lib/defaults/vnx_workers.default.yaml from the installed package.
 
 Public API:
-- WORKER_REGISTRY: module-level instance loaded at import time
+- WORKER_REGISTRY: module-level instance loaded on first legacy access
 - list_workers() -> List[Worker]
 - by_id(terminal_id) -> Optional[Worker]
 - by_role(role) -> List[Worker]
@@ -29,6 +29,7 @@ import logging
 import re
 import subprocess
 import sys
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, FrozenSet, List, Optional
@@ -407,6 +408,8 @@ def _registry_pair(path, terminal_id, pool_id):
     data = yaml.safe_load(path.read_text(encoding="utf-8"))
     if not isinstance(data, dict) or data.get("schema_version") != 1:
         raise ValueError(f"Unsupported schema_version in {path}")
+    if not isinstance(data.get("workers"), list):
+        raise ValueError(f"workers must be a list in {path}")
     registry = _build_registry(data)
     if terminal_id is not None:
         worker = registry.by_id(terminal_id)
@@ -480,7 +483,19 @@ def resolve_worker(terminal_id=None, *, pool_id="default", spec=None, repo_root=
     raise ValueError(f"worker_model_unresolved: terminal={terminal_id!r} pool={pool_id!r}")
 
 
-WORKER_REGISTRY: WorkerRegistry = _load_registry()
+_REGISTRY_LOCK = threading.RLock()
+
+
+def __getattr__(name: str):
+    """Keep legacy access lazy so importing resolve_worker never reads a CWD registry."""
+    if name != "WORKER_REGISTRY":
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    with _REGISTRY_LOCK:
+        registry = globals().get(name)
+        if registry is None:
+            registry = _load_registry()
+            globals()[name] = registry
+        return registry
 
 
 # ---------------------------------------------------------------------------
@@ -488,24 +503,24 @@ WORKER_REGISTRY: WorkerRegistry = _load_registry()
 # ---------------------------------------------------------------------------
 
 def list_workers() -> List[Worker]:
-    return WORKER_REGISTRY.list_workers()
+    return __getattr__("WORKER_REGISTRY").list_workers()
 
 
 def by_id(terminal_id: str) -> Optional[Worker]:
-    return WORKER_REGISTRY.by_id(terminal_id)
+    return __getattr__("WORKER_REGISTRY").by_id(terminal_id)
 
 
 def by_role(role: str) -> List[Worker]:
-    return WORKER_REGISTRY.by_role(role)
+    return __getattr__("WORKER_REGISTRY").by_role(role)
 
 
 def aliases_for(terminal_id: str) -> List[str]:
-    return WORKER_REGISTRY.aliases_for(terminal_id)
+    return __getattr__("WORKER_REGISTRY").aliases_for(terminal_id)
 
 
 def by_pool(pool_id: str) -> List[Worker]:
-    return WORKER_REGISTRY.by_pool(pool_id)
+    return __getattr__("WORKER_REGISTRY").by_pool(pool_id)
 
 
 def resolve_alias(alias: str) -> Optional[Worker]:
-    return WORKER_REGISTRY.resolve_alias(alias)
+    return __getattr__("WORKER_REGISTRY").resolve_alias(alias)

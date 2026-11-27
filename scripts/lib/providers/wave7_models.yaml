@@ -2,6 +2,7 @@
 # Anthropic, OpenAI, Google entries added for cost tracking (P0-B).
 providers:
   anthropic:
+    default_model: sonnet
     enabled: true
     api_key_env: ANTHROPIC_API_KEY
     # dispatch_enum: the dispatch Provider enum value (dispatch_spec.Provider)
@@ -308,6 +309,7 @@ providers:
             output_per_mtok: 50.00
         task_classes: ["coding-premium", "review", "analysis"]
   google:
+    default_model: gemini-2.5-pro
     enabled: true
     api_key_env: GEMINI_API_KEY
     models:
@@ -328,6 +330,7 @@ providers:
             output_per_mtok: 5.00
         task_classes: ["coding", "review", "analysis"]
   deepseek:
+    default_model: deepseek-v4-pro
     enabled: true
     api_key_env: DEEPSEEK_API_KEY
     # OI-867: this is the litellm-proxy (:4141) route — DISABLED for dispatch
@@ -379,6 +382,7 @@ providers:
         task_classes: ["coding", "review", "analysis"]
         dispatch_allowed: false  # OI-867: litellm proxy has no DEEPSEEK_API_KEY
   deepseek_harness:
+    default_model: deepseek-v4-pro
     enabled: true
     api_key_env: DEEPSEEK_API_KEY
     dispatch_enum: deepseek-harness
@@ -477,6 +481,7 @@ providers:
         task_classes: ["coding", "review", "analysis"]
         dispatch_allowed: true
   moonshot:
+    default_model: kimi-k2-0905-default
     enabled: true
     api_key_env: MOONSHOT_API_KEY
     models:
@@ -513,6 +518,7 @@ providers:
         task_classes: ["coding-premium"]
         dispatch_allowed: false  # bare-baseline only; governed dispatch uses kimi_cli
   zai:
+    default_model: glm-5.2
     enabled: true
     api_key_env: OPENROUTER_API_KEY  # via OpenRouter, not direct Zhipu
     direct_provider_note: "Native Zhipu integration deferred; PR-7.3 uses OpenRouter fallback"
@@ -571,6 +577,7 @@ providers:
             output_per_mtok: 0.50
         task_classes: ["coding", "review"]
   local_gemma:
+    default_model: gemma-4b-local
     enabled: true
     api_key_env: ""  # no API key; runs entirely on-device via MLX or Ollama
     dispatch_enum: local-gemma

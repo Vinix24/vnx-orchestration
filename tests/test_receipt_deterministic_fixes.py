@@ -96,6 +96,19 @@ class TestResolveKimiModelLabel:
         assert result == "kimi-k3"
 
 
+@pytest.fixture
+def provider_project(tmp_path, monkeypatch):
+    """Keep actual dispatch worktrees out of the operator's project."""
+    repo = tmp_path / "consumer"
+    subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+    subprocess.run(["git", "-C", str(repo), "-c", "user.name=VNX Tests",
+                    "-c", "user.email=vnx-tests@example.test", "commit", "-q",
+                    "--allow-empty", "-m", "test base"], check=True)
+    subprocess.run(["git", "-C", str(repo), "update-ref", "refs/remotes/origin/main", "HEAD"], check=True)
+    monkeypatch.setenv("VNX_PROJECT_ROOT", str(repo))
+
+
+@pytest.mark.usefixtures("provider_project")
 class TestDispatchCodexModelNonEmpty:
     """_dispatch_codex() emits governance with a non-empty model field."""
 
@@ -145,6 +158,7 @@ class TestDispatchCodexModelNonEmpty:
         assert captured_model[0].strip() != "", "model_used must not be whitespace-only"
 
 
+@pytest.mark.usefixtures("provider_project")
 class TestDispatchKimiModelLabelNonEmpty:
     """_dispatch_kimi() emits governance with a non-generic model_label field."""
 
