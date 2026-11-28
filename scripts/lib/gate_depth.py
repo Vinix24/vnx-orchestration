@@ -96,7 +96,7 @@ class ExecutionDepth:
     ``mode`` distinguishes the TWO shapes this dataclass now carries (OI-1618):
     ``"agentic"`` (the tool-call stream above, measured by
     :func:`measure_execution_depth`) and ``"single_shot"`` (a one-shot API
-    lane — glm_gate/kimi_gate — measured by :func:`single_shot_depth`).
+    lane, or legacy prompt-only coverage, measured by :func:`single_shot_depth`).
     ``investigative_actions``/``shell_calls``/``files_read``/
     ``agent_messages``/``unrecognised_item_types`` only ever mean anything in
     agentic mode. One dataclass, not two, so
@@ -338,11 +338,12 @@ def single_shot_depth(
     diff_limit: int = 0,
     truncated_files: tuple = (),
 ) -> ExecutionDepth:
-    """Depth for a single-shot review lane (glm_gate/kimi_gate): one API call
-    against a diff, no agentic tool loop to count shell calls or file reads
-    from (OI-1618). The diff IS the investigation — there is nothing else the
-    run could have looked at — so the only question degeneracy can ask here is
-    whether the diff carried anything at all.
+    """Prompt-only depth (OI-1618), without a measurement of tool activity.
+
+    Kimi reviews only the diff. The standalone GLM entry point retains this
+    conservative coverage metric even with tools enabled (OI-3084): it cannot
+    claim that tool reads covered omitted files without measuring those reads.
+    Degeneracy here asks whether the prompt's diff carried anything at all.
 
     ``diff_chars`` is the caller's own post-strip length (``len(diff.strip())``),
     not the raw byte count — :func:`is_degenerate` trusts this value directly

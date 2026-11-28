@@ -158,9 +158,8 @@ def validate_rows(rows: Iterable[GateLaneRow]) -> Tuple[GateLaneRow, ...]:
 # kimi_gate runs kimi-k3 through the kimi CLI; deepseek_gate runs deepseek-v4-pro
 # (seat 2 since 2026-11-11; deepseek-flash before, OI-1939), never the phased-out alias
 # deepseek-v4-flash; claude_gate runs sonnet on the operator's subscription (R7,
-# operator decision 2026-10-22) through claude_gate_lane. glm_gate and kimi_gate
-# are the single-shot gates (R12): the diff in the prompt is what the run is held
-# to. deepseek_gate and claude_gate review with tools in a checkout of the PR head.
+# operator decision 2026-10-22) through claude_gate_lane. Only kimi_gate remains
+# single-shot; GLM, DeepSeek and Claude review the PR head with tools (OI-3084).
 GATE_LANE_ROWS: Tuple[GateLaneRow, ...] = validate_rows((
     GateLaneRow(
         gate="kimi_gate", lane="kimi", request_provider="kimi",
@@ -173,7 +172,7 @@ GATE_LANE_ROWS: Tuple[GateLaneRow, ...] = validate_rows((
         gate="glm_gate", lane="glm-harness", request_provider="glm",
         dispatcher="provider_dispatch", billing=BILLING_METERED,
         model_env="VNX_GLM_GATE_MODEL", model_default="glm-5.2",
-        single_shot=True,
+        single_shot=False,
         family="glm",
     ),
     GateLaneRow(

@@ -53,7 +53,9 @@ another chain's ``git branch -f work HEAD~1`` no longer book the seat, while
 
 from __future__ import annotations
 
+import importlib.util
 import json
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -110,6 +112,26 @@ def orchestrator_repo(tmp_path):
     return {"origin": origin, "checkout": checkout}
 
 
+@pytest.fixture
+def separate_vnx_install(tmp_path, monkeypatch):
+    """Load the real fetch code from a different git repo, as a central install does."""
+    install = tmp_path / "vnx-install"
+    _init_repo(install)
+    source = install / "scripts" / "lib" / "gate_worktree.py"
+    source.parent.mkdir(parents=True)
+    shutil.copyfile(SCRIPTS_DIR / "lib" / "gate_worktree.py", source)
+    _run_git(["add", "."], install)
+    _run_git(["commit", "-m", "central install"], install)
+    _run_git(["remote", "add", "origin", str(install)], install)
+    spec = importlib.util.spec_from_file_location("gate_worktree", source)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    monkeypatch.setitem(sys.modules, "gate_worktree", module)
+    assert module._resolve_project_root(None) == install.resolve()
+    assert _run_git(["branch", "--list", "feature/pr-1950"], install) == ""
+    return install
+
+
 def _gate_env(tmp_path):
     data_dir = tmp_path / ".vnx-data"
     state_dir = data_dir / "state"
@@ -159,7 +181,7 @@ class TestNormalRunIsolatesAndLeavesMainCheckoutUntouched:
         env = _gate_env(tmp_path)
 
         def factory(data_dir, timeout_seconds, *, role="plan-reviewer", base_ref=None,
-                total_deadline_seconds=None):
+                total_deadline_seconds=None, project_root=None):
             def dispatch(provider, model, instruction, dispatch_id):
                 return _pass_report_text()
             return dispatch
@@ -189,7 +211,7 @@ class TestNormalRunIsolatesAndLeavesMainCheckoutUntouched:
         calls = []
 
         def factory(data_dir, timeout_seconds, *, role="plan-reviewer", base_ref=None,
-                total_deadline_seconds=None):
+                total_deadline_seconds=None, project_root=None):
             calls.append({"base_ref": base_ref})
 
             def dispatch(provider, model, instruction, dispatch_id):
@@ -220,7 +242,7 @@ class TestAgentTouchingMainCheckoutIsCaught:
         calls = []
 
         def factory(data_dir, timeout_seconds, *, role="plan-reviewer", base_ref=None,
-                total_deadline_seconds=None):
+                total_deadline_seconds=None, project_root=None):
             def dispatch(provider, model, instruction, dispatch_id):
                 calls.append(1)
                 # Reproduces the measured 27-09 incident: the agent fetches
@@ -277,7 +299,7 @@ class TestDispatchBranchChurnIsExcludedFromTheVangnet:
         provider_worktree = tmp_path / "provider-worktree"
 
         def factory(data_dir, timeout_seconds, *, role="plan-reviewer", base_ref=None,
-                total_deadline_seconds=None):
+                total_deadline_seconds=None, project_root=None):
             def dispatch(provider, model, instruction, dispatch_id):
                 _run_git(
                     ["worktree", "add", str(provider_worktree), "-b",
@@ -309,7 +331,7 @@ class TestDispatchBranchChurnIsExcludedFromTheVangnet:
         env = _gate_env(tmp_path)
 
         def factory(data_dir, timeout_seconds, *, role="plan-reviewer", base_ref=None,
-                total_deadline_seconds=None):
+                total_deadline_seconds=None, project_root=None):
             def dispatch(provider, model, instruction, dispatch_id):
                 # Simulates a sibling dispatch's worktree branch appearing
                 # in the shared refs/heads while THIS gate run is in flight.
@@ -362,7 +384,7 @@ def _run_seat(orchestrator_repo, monkeypatch, tmp_path, during_seat):
     calls = []
 
     def factory(data_dir, timeout_seconds, *, role="plan-reviewer", base_ref=None,
-            total_deadline_seconds=None):
+            total_deadline_seconds=None, project_root=None):
         def dispatch(provider, model, instruction, dispatch_id):
             calls.append(1)
             during_seat()
@@ -455,7 +477,7 @@ class TestMissingBranchNeverDispatches:
         calls = []
 
         def factory(data_dir, timeout_seconds, *, role="plan-reviewer", base_ref=None,
-                total_deadline_seconds=None):
+                total_deadline_seconds=None, project_root=None):
             def dispatch(provider, model, instruction, dispatch_id):
                 calls.append(1)
                 return _pass_report_text()
@@ -474,3 +496,78 @@ class TestMissingBranchNeverDispatches:
         assert result["reason"] == "harness_lane_branch_unavailable"
         assert len(calls) == 0, "the dispatcher must never run against an unfetchable branch"
         assert _run_git(["rev-parse", "--abbrev-ref", "HEAD"], checkout).strip() == head_before
+
+
+@pytest.mark.parametrize("provider", ["glm", "kimi"])
+@pytest.mark.parametrize("branch", ["feature/pr-1950", "absent", "", None, "--upload-pack=bad", "../bad"])
+def test_standalone_fetches_consumer_head_before_dispatch(
+    orchestrator_repo, separate_vnx_install, tmp_path, monkeypatch, branch, provider,
+):
+    import importlib
+    import governed_lane
+    import plan_gate_panel
+    from types import SimpleNamespace
+
+    gate = importlib.import_module(f"{provider}_gate")
+    checkout = orchestrator_repo["checkout"]
+    seen = {}
+    original = gate._make_default_dispatcher
+    def factory(*args, **kwargs):
+        seen["base_ref"] = kwargs["base_ref"]
+        return original(*args, **kwargs)
+    def child(cmd, **kwargs):
+        seen["cmd"] = cmd
+        assert _run_git(["show", "origin/feature/pr-1950:marker.txt"], checkout) == "PR_BRANCH_CONTENT\n"
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+    monkeypatch.setattr(gate, "_make_default_dispatcher", factory)
+    monkeypatch.setattr(gate, "get_pr_head_branch", lambda n: branch)
+    monkeypatch.setattr(gate, "get_pr_head_sha", lambda n: "a" * 40)
+    monkeypatch.setattr(gate, "_get_diff", lambda *a: "diff --git a/marker.txt b/marker.txt\n+PR_BRANCH_CONTENT\n")
+    monkeypatch.setenv("VNX_PROJECT_ROOT", str(checkout))
+    monkeypatch.chdir(separate_vnx_install)
+    monkeypatch.setattr(plan_gate_panel, "_run_provider_lane_child", child)
+    monkeypatch.setattr(plan_gate_panel, "_read_report", lambda *a: _pass_report_text())
+    rc, state = governed_lane.run_gate_head(provider, ["--pr", "1950", "--data-dir", str(tmp_path / "data")], seams=gate._gate_seams())
+    assert rc is None
+    if branch == "feature/pr-1950":
+        assert state.dispatch_error == ""
+        assert seen["base_ref"] == "origin/feature/pr-1950"
+        assert seen["cmd"][seen["cmd"].index("--base-ref") + 1] == seen["base_ref"]
+    else:
+        assert state.dispatch_error
+        assert "cmd" not in seen
+    assert _run_git(["branch", "--show-current"], checkout).strip() == "main"
+    assert (checkout / "marker.txt").read_text() == "BASE\n"
+
+
+@pytest.mark.parametrize("gate,provider", [("glm_gate", "glm-harness"), ("kimi_gate", "kimi"), ("deepseek_gate", "deepseek")])
+def test_review_fetch_uses_runner_consumer_root(
+    orchestrator_repo, separate_vnx_install, tmp_path, monkeypatch, gate, provider,
+):
+    import gate_runner
+    import plan_gate_panel
+    from types import SimpleNamespace
+
+    checkout = orchestrator_repo["checkout"]
+    seen = []
+    # A threaded root must win even when cwd and the ambient pin name the install.
+    monkeypatch.chdir(separate_vnx_install)
+    monkeypatch.setenv("VNX_PROJECT_ROOT", str(separate_vnx_install))
+
+    def child(cmd, **kwargs):
+        seen.append(cmd)
+        assert _run_git(["show", "FETCH_HEAD:marker.txt"], checkout) == "PR_BRANCH_CONTENT\n"
+        assert _run_git(["show", "origin/feature/pr-1950:marker.txt"], checkout) == "PR_BRANCH_CONTENT\n"
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(plan_gate_panel, "_run_provider_lane_child", child)
+    monkeypatch.setattr(plan_gate_panel, "_read_report", lambda *a: _pass_report_text())
+    dispatch = gate_runner._build_harness_lane_dispatcher(
+        gate, tmp_path / "data", "origin/feature/pr-1950", {}, "Review the PR",
+        project_root=checkout,
+    )
+    assert dispatch(provider, "review-model", "Review the PR", "consumer-review") == _pass_report_text()
+    assert len(seen) == 1
+    assert not (separate_vnx_install / ".git" / "FETCH_HEAD").exists()
+    assert _run_git(["branch", "--show-current"], checkout).strip() == "main"
+    assert (checkout / "marker.txt").read_text() == "BASE\n"

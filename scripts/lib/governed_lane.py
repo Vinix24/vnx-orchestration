@@ -296,10 +296,26 @@ def read_report(base: Optional[Path], dispatch_id: str, stderr: str) -> Optional
     return None
 
 
+def _review_child_env(
+    base: Path, deadline: Optional[int], role: str, base_ref: Optional[str], dispatch_id: str,
+    *, project_root: Optional[Path] = None, test_run: bool = False,
+) -> dict:
+    """Fetch live review heads; only explicit offline test runs skip the fetch."""
+    if role == "review-gate" and test_run is not True:
+        from gate_worktree import fetch_branch
+        branch = base_ref[len("origin/"):] if isinstance(base_ref, str) and base_ref.startswith("origin/") else ""
+        # Let fetch_branch keep its empty-branch refusal before resolving a root.
+        if branch and project_root is None:
+            from dispatch_worktree_isolation import resolve_consumer_project_root
+            project_root = resolve_consumer_project_root()
+        fetch_branch(branch, gate="review-gate", identifier=dispatch_id, project_root=project_root)
+    return _panel()._seat_child_env(base, deadline)
+
+
 def _make_default_dispatcher(
     data_dir: Optional[str], timeout_seconds: int,
     *, role: str = "plan-reviewer", base_ref: Optional[str] = None,
-    total_deadline_seconds: Optional[int] = None,
+    total_deadline_seconds: Optional[int] = None, project_root: Optional[Path] = None, test_run: bool = False,
 ) -> DispatcherFn:
     """Real dispatcher: run a panelist through its governed lane, return the report text.
 
@@ -329,6 +345,10 @@ def _make_default_dispatcher(
     that lane isolates via ``dispatch_worktree_isolation`` on its own dispatch_id and has
     no PR branch to isolate on either.
 
+    ``project_root``: the consumer checkout used for the review-gate fetch.
+    The runner passes its own root; standalone callers resolve the consumer
+    through ``resolve_consumer_project_root``, never from the VNX code location.
+
     ``total_deadline_seconds``: OI-2066 — the lane's OWN deadline, set as
     ``VNX_TOTAL_DEADLINE`` in the provider_dispatch child's environment (the drainer and
     the claude-harness adapter read it there). ``timeout_seconds`` stays the outer
@@ -351,7 +371,7 @@ def _make_default_dispatcher(
         # never found. The claude branch pins the same two keys — see
         # _run_claude_headless_seat, which sets them on os.environ because on that
         # lane they must bind in this process as well as in the child.
-        env = _panel()._seat_child_env(base, total_deadline_seconds)
+        env = _review_child_env(base, total_deadline_seconds, role, base_ref, dispatch_id, project_root=project_root, test_run=test_run)
         _tmp_doc_path: Optional[str] = None
         try:
             if provider in _panel()._CLAUDE_PROVIDERS:
@@ -476,18 +496,20 @@ def get_diff(pr: str, diff_file: "Optional[str]") -> "Optional[str]":
         return None
 
 
-def build_prompt(provider: str, diff_text: str, pr: str, max_chars: int) -> str:
+def build_prompt(provider: str, diff_text: str, pr: str, max_chars: int, *, test_run: bool = False) -> str:
     """OI-1442's delimited-data prompt for *provider*'s gate; *max_chars* is resolved once by the caller (OI-1874 r3)."""
     gate = _row(provider).gate
-    return build_review_prompt(gate_name=gate, pr=pr, diff_text=diff_text, verdict_contract=VERDICT_CONTRACT, max_chars=max_chars, agentic=reviews_with_tools(gate))
+    prompt = build_review_prompt(gate_name=gate, pr=pr, diff_text=diff_text, verdict_contract=VERDICT_CONTRACT, max_chars=max_chars, agentic=reviews_with_tools(gate) and test_run is not True)
+    return prompt + ("\nOffline --diff-file review: no PR-head checkout is provided. Review the supplied diff; claims requiring that checkout remain unverified.\n" if test_run is True else "")
 
 
-def review_dispatcher(provider: str, base_data_dir: Path, branch: str, coverage: dict, explicit_timeout: "Optional[int]", *, dispatcher_factory: DispatcherFactory) -> DispatcherFn:
+def review_dispatcher(provider: str, base_data_dir: Path, branch: str, coverage: dict, explicit_timeout: "Optional[int]", *, dispatcher_factory: DispatcherFactory, test_run: bool = False) -> DispatcherFn:
     """OI-2066's per-run dispatcher. *dispatcher_factory* is INJECTED, never resolved here: each
     gate's tests patch ``<script>._make_default_dispatcher``, so the caller hands in that name."""
     gate = _row(provider).gate
     return dispatcher_factory(
         str(base_data_dir), role="review-gate", base_ref=(f"origin/{branch}" if branch else None),
+        **({"test_run": True} if test_run is True else {}),
         **harness_dispatcher_timeouts(gate, gate_depth.prompt_diff_chars(coverage), explicit=explicit_timeout),
     )
 
@@ -820,9 +842,9 @@ def _reprocess_inputs(
 
 def _live_inputs(
     provider: str, row: ProviderRow, args: argparse.Namespace, base_data_dir: Path, dispatch_id: str,
-    branch: str, seams: GateSeams,
+    branch: str, seams: GateSeams, *, test_run: bool = False,
 ) -> "Tuple[Optional[GateRunInputs], Optional[int]]":
-    """A live run: the diff, the single-shot investigation depth, the governed dispatch and its report.
+    """A live run: the diff, prompt coverage, the governed dispatch and its report.
 
     ``role="review-gate"`` (dispatch-20260823-beta2-j): the factory's default "plan-reviewer" carries
     agents/plan-reviewer/CLAUDE.md, written for a plan-gate PANEL SEAT, and gives the model three
@@ -843,6 +865,8 @@ def _live_inputs(
     # floor), the cap and the cut files are the depth.
     diff_cap = seams.max_diff_chars(row.gate)
     coverage = gate_depth.diff_coverage(diff, diff_cap)
+    # This legacy metric measures the prompt, not GLM's tool activity. Retain
+    # its empty/truncated-diff guards; never infer file reads from a verdict.
     execution_depth = gate_depth.single_shot_depth(
         coverage["diff_chars"], coverage["diff_truncated"],
         diff_limit=coverage["diff_limit"],
@@ -850,9 +874,9 @@ def _live_inputs(
     )
     dispatcher = review_dispatcher(
         provider, base_data_dir, branch, coverage, args.timeout,
-        dispatcher_factory=seams.make_default_dispatcher,
+        dispatcher_factory=seams.make_default_dispatcher, test_run=test_run,
     )
-    prompt = build_prompt(provider, diff, args.pr, diff_cap)
+    prompt = build_prompt(provider, diff, args.pr, diff_cap, test_run=test_run)
     # OI-1442: the deterministic half. The prompt asks the model to report instruction-shaped text
     # in the diff as a finding; this scan does not depend on it having done so. Both land in the record.
     scan_findings = scan_diff_for_instructions(diff)
@@ -923,8 +947,10 @@ def run_gate_head(
     )
     if rc is not None:
         return rc, None
-    build = _reprocess_inputs if args.reprocess else _live_inputs
-    inputs, rc = build(provider, row, args, base_data_dir, dispatch_id, branch, seams)
+    if args.reprocess:
+        inputs, rc = _reprocess_inputs(provider, row, args, base_data_dir, dispatch_id, branch, seams)
+    else:
+        inputs, rc = _live_inputs(provider, row, args, base_data_dir, dispatch_id, branch, seams, test_run=test_run)
     if inputs is None:
         return rc, None
     return None, GateRunState(

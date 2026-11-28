@@ -148,6 +148,7 @@ def test_default_factories_pass_the_documented_arguments(monkeypatch, tmp_path):
     assert table.build_dispatcher("g", "kimi", tmp_path, "origin/b", timeouts) == "governed"
     assert seen["g"] == (str(tmp_path), 11, {
         "role": "review-gate", "base_ref": "origin/b", "total_deadline_seconds": 7,
+        "project_root": None,
     })
     assert table.build_dispatcher("g", "claude", tmp_path, "origin/b", timeouts, tmp_path) == "claude"
     assert seen["c"] == (tmp_path, {

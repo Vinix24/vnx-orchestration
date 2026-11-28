@@ -29,7 +29,7 @@ class TestHarnessScrubKeys:
 class TestFinalPopenEnvScrub:
     """Verify both credential forms are absent from the final child env reaching the OS process."""
 
-    def _run_spawn(self, env_overrides: dict) -> dict:
+    def _run_spawn(self, env_overrides: dict, *, lane=gh, role=None) -> dict:
         import subprocess_adapter as sa
 
         captured = {}
@@ -49,6 +49,7 @@ class TestFinalPopenEnvScrub:
             if cmd and cmd[0] == "git":  # config-dir path resolution shells out to git
                 return _real_popen(cmd, **kwargs)
             captured["env"] = kwargs.get("env")
+            self.argv = list(cmd)
             proc = _FakeProc()
             proc.stdout = MagicMock()
             proc.stderr = MagicMock()
@@ -62,11 +63,13 @@ class TestFinalPopenEnvScrub:
                 patch.object(sa.subprocess, "Popen", _fake_popen), \
                 patch("subprocess_adapter.os.setsid", lambda: None), \
                 patch.object(sa.SubprocessAdapter, "read_events_with_timeout", _empty_events):
-            spawn_glm_harness(
+            spawn = getattr(lane, "spawn_glm_harness", None) or lane.spawn_deepseek_harness
+            spawn(
                 prompt="Reply OK.",
                 model=None,
                 dispatch_id="d-glm-scrub-test",
                 terminal_id="T1",
+                role=role, extra_env=env_overrides,
             )
         return captured.get("env")
 
@@ -81,6 +84,31 @@ class TestFinalPopenEnvScrub:
         assert env is not None, "Popen must receive an explicit env dict"
         assert "CLAUDE_CODE_OAUTH_TOKEN" not in env
         assert env.get("ANTHROPIC_AUTH_TOKEN") == gh._proxy_key()
+
+
+@pytest.mark.parametrize("lane_name", ["glm", "deepseek"])
+@pytest.mark.parametrize("role", ["review-gate", "backend-developer"])
+@pytest.mark.parametrize("role_source", ["argument", "environment"])
+def test_gate_tools_are_read_only_and_build_scope_is_unchanged(lane_name, role, role_source, monkeypatch):
+    from provider_spawns import deepseek_harness_spawn as deepseek
+    from claude_gate_lane import seat_scope_args
+    from subprocess_adapter import _build_worker_scope_args
+    from worker_permissions import MCP_NAMESPACE_DENY
+
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
+    lane = gh if lane_name == "glm" else deepseek
+    capture = TestFinalPopenEnvScrub()
+    env = {"VNX_WORKER_ROLE": role} if role_source == "environment" else {}
+    capture._run_spawn(env, lane=lane, role=role if role_source == "argument" else None)
+    scope = capture.argv[capture.argv.index("Reply OK.") + 1:]
+    if role == "review-gate":
+        assert scope == seat_scope_args()
+        for flag in ("--tools", "--allowedTools"):
+            assert scope[scope.index(flag) + 1].split(",") == ["Read", "Grep", "Glob"]
+        assert scope[scope.index("--disallowedTools") + 1] == MCP_NAMESPACE_DENY
+        assert "--dangerously-skip-permissions" not in capture.argv
+    else:
+        assert scope == _build_worker_scope_args(role if role_source == "argument" else None)
 
 
 if __name__ == "__main__":

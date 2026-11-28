@@ -247,7 +247,7 @@ def _run_gate(gate_dirs, monkeypatch, lane, *, commit_sha=HEAD, pr_number=2066):
     calls = []
 
     def factory(data_dir, timeout_seconds, *, role="plan-reviewer", base_ref=None,
-                total_deadline_seconds=None):
+                total_deadline_seconds=None, project_root=None):
         def dispatch(provider, model, instruction, dispatch_id):
             calls.append(dispatch_id)
             return lane(Path(data_dir), dispatch_id)
@@ -652,15 +652,21 @@ class TestBinding:
         (tmp_path / "unified_reports").mkdir()
         (tmp_path / "unified_reports" / f"{dispatch_id}.md").write_text(LANE_REPORT, encoding="utf-8")
         seen = {}
+        # Keep the review's fetch offline, as in test_governed_lane's command test.
+        monkeypatch.setattr("gate_worktree.fetch_branch", lambda branch, **kw: seen.update(branch=branch))
 
         def fake_run(cmd, **kwargs):
             seen["cmd"] = cmd
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
         monkeypatch.setattr(pgp.subprocess, "run", fake_run)
-        dispatch = pgp._make_default_dispatcher(str(tmp_path), 60, role="review-gate")
+        dispatch = pgp._make_default_dispatcher(
+            str(tmp_path), 60, role="review-gate", base_ref="origin/feature/pr-2066",
+        )
         dispatch("deepseek", "deepseek-flash", "instruction", dispatch_id)
         cmd = seen["cmd"]
+        assert seen["branch"] == "feature/pr-2066"
+        assert cmd[cmd.index("--base-ref") + 1] == "origin/feature/pr-2066"
         assert cmd[cmd.index("--terminal-id") + 1] == fav.HARNESS_SEAT_TERMINAL
 
 

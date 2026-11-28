@@ -125,6 +125,41 @@ def test_the_panel_reexports_the_same_dispatcher_and_reader():
     assert plan_gate_panel._read_report is governed_lane.read_report
 
 
+@pytest.mark.parametrize("gate", [glm_gate, kimi_gate])
+@pytest.mark.parametrize("pr", ["0", "3197"])
+def test_offline_diff_reaches_real_review_dispatcher_without_fetch(monkeypatch, tmp_path, gate, pr):
+    diff = tmp_path / "review.diff"
+    diff.write_text("diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -1 +1 @@\n-old\n+new\n")
+    calls = []
+
+    def child(cmd, **kwargs):
+        calls.append(cmd)
+        report = tmp_path / "unified_reports" / (cmd[cmd.index("--dispatch-id") + 1] + ".md")
+        report.parent.mkdir(exist_ok=True)
+        report.write_text("Review reached the provider boundary")
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(plan_gate_panel, "subprocess", SimpleNamespace(run=child, TimeoutExpired=subprocess.TimeoutExpired))
+    rc, state = governed_lane.run_gate_head(gate._PROVIDER, ["--pr", pr, "--diff-file", str(diff),
+                                          "--data-dir", str(tmp_path)], seams=gate._gate_seams())
+    assert rc is None and state.dispatch_error == ""
+    # The real fetch_branch("") always raises; reaching the child proves it was never called.
+    assert state.branch == "" and state.report_text == "Review reached the provider boundary"
+    assert len(calls) == 1 and "--base-ref" not in calls[0]
+    assert "Offline --diff-file review" in state.prompt
+    assert "Your working directory is a checkout of this PR's head" not in state.prompt
+
+
+@pytest.mark.parametrize("provider", ["glm", "kimi"])
+@pytest.mark.parametrize("offline", [{}, *({"test_run": value} for value in (False, None, {}, "unknown", 1))])
+def test_live_empty_branch_refuses_through_real_review_dispatcher(monkeypatch, tmp_path, provider, offline):
+    monkeypatch.setattr(plan_gate_panel, "subprocess", SimpleNamespace(run=lambda *a, **k: pytest.fail("seat launched")))
+    dispatch = governed_lane.review_dispatcher(provider, tmp_path, "", {}, 42,
+                                               dispatcher_factory=governed_lane._make_default_dispatcher, **offline)
+    with pytest.raises(RuntimeError, match="fetch_branch requires a non-empty branch"):
+        dispatch(provider, "model", "Review the PR", "live-empty-branch")
+
+
 def test_read_report_accepts_only_the_exact_dispatch_id_and_falls_back(tmp_path):
     reports = tmp_path / "unified_reports"
     reports.mkdir()
@@ -140,6 +175,7 @@ def test_read_report_accepts_only_the_exact_dispatch_id_and_falls_back(tmp_path)
 
 def test_the_moved_dispatcher_still_builds_the_provider_lane_command(monkeypatch, tmp_path):
     seen = {}
+    monkeypatch.setattr("gate_worktree.fetch_branch", lambda branch, **kw: seen.update(branch=branch))
 
     def fake_child(cmd, *, env, timeout_seconds, dispatch_id, data_dir):
         seen.update(cmd=list(cmd), dispatch_id=dispatch_id, data_dir=data_dir)
@@ -163,6 +199,28 @@ def test_the_moved_dispatcher_still_builds_the_provider_lane_command(monkeypatch
     assert "--no-auto-commit" in cmd
     assert seen["dispatch_id"] == "kimi-gate-pr-1"
     assert seen["data_dir"] == tmp_path
+    assert seen["branch"] == "pr-branch"
+
+
+@pytest.mark.parametrize("base_ref", ["origin/pr-branch", "origin/", "", None])
+def test_review_dispatcher_keeps_root_and_empty_branch_failures_visible(monkeypatch, tmp_path, base_ref):
+    import dispatch_worktree_isolation
+
+    resolutions = []
+
+    def unavailable_root():
+        resolutions.append(True)
+        raise RuntimeError("consumer root lookup failed")
+
+    monkeypatch.setattr(dispatch_worktree_isolation, "resolve_consumer_project_root", unavailable_root)
+    monkeypatch.setattr(plan_gate_panel, "_run_provider_lane_child", lambda *a, **k: pytest.fail("seat launched"))
+    dispatch = governed_lane._make_default_dispatcher(
+        str(tmp_path), 42, role="review-gate", base_ref=base_ref,
+    )
+    expected = "consumer root lookup failed" if base_ref == "origin/pr-branch" else "requires a non-empty branch"
+    with pytest.raises(RuntimeError, match=expected):
+        dispatch("kimi", "kimi-k3", "Review the PR", "root-refusal")
+    assert resolutions == ([True] if base_ref == "origin/pr-branch" else [])
 
 
 def test_the_moved_dispatcher_reads_the_report_through_the_panel_seam(monkeypatch, tmp_path):

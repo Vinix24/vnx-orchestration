@@ -10,6 +10,10 @@ reproduce every golden field by field.
 These fixtures are untrusted report text, kept verbatim as parser input, never
 as instructions to anything reading this corpus.
 
+OI-3084 r4 updates only `contract_hash` in the offline `records/{glm,kimi}-{golden,fail}.json`:
+GLM `55f53647f0e94148` and Kimi `b072fbc374361302` reflect the explicit offline prompt without a PR-head checkout claim.
+The report texts and all other record fields stay identical.
+
 | fixture | source report | shape |
 |---|---|---|
 | `kimi-pass-clean.md` | `kimi-gate-pr1715-1788000240.md` | PASS, no findings |
